@@ -535,10 +535,16 @@ type appConfig struct {
 	// AsyncApiTimeoutSeconds caps the time allowed for asynchronous API requests.
 	AsyncApiTimeoutSeconds int `mapstructure:"llm_server_async_api_timeout_seconds"`
 	// AsyncOperationTimeoutSeconds caps the time allowed for individual asynchronous background operations.
-	AsyncOperationTimeoutSeconds  int  `mapstructure:"llm_server_async_operation_timeout_seconds"`
-	AsyncPlanExecutionWorkerCount int  `mapstructure:"llm_server_async_plan_execution_worker_count"`
-	AsyncRefWorkerCount           int  `mapstructure:"llm_server_async_ref_worker_count"`
-	PlannerParallelExecEnabled    bool `mapstructure:"llm_server_planner_parallel_exec_enabled"`
+	AsyncOperationTimeoutSeconds int `mapstructure:"llm_server_async_operation_timeout_seconds"`
+	// AnswerConfidenceTaskTimeoutSeconds bounds the answer-confidence grading
+	// task body (manifest read, grading LLM call, metadata write). Separate from
+	// AsyncOperationTimeoutSeconds, which stays the worker-pool admission budget
+	// and is far too short for a task containing an LLM call. Values <= 0 fall
+	// back to the default.
+	AnswerConfidenceTaskTimeoutSeconds int  `mapstructure:"llm_server_answer_confidence_task_timeout_seconds"`
+	AsyncPlanExecutionWorkerCount      int  `mapstructure:"llm_server_async_plan_execution_worker_count"`
+	AsyncRefWorkerCount                int  `mapstructure:"llm_server_async_ref_worker_count"`
+	PlannerParallelExecEnabled         bool `mapstructure:"llm_server_planner_parallel_exec_enabled"`
 	// PlannerWorkerPoolSubmitTimeoutSeconds bounds how long a parallel action
 	// waits to be accepted onto ExecutePlannerWorkerPool's queue (#36378).
 	PlannerWorkerPoolSubmitTimeoutSeconds int `mapstructure:"llm_server_planner_worker_pool_submit_timeout_seconds"`
@@ -1381,6 +1387,7 @@ func init() {
 
 	viper.SetDefault("llm_server_async_api_timeout_seconds", 15)
 	viper.SetDefault("llm_server_async_operation_timeout_seconds", 5)
+	viper.SetDefault("llm_server_answer_confidence_task_timeout_seconds", 120)
 	viper.SetDefault("llm_server_agent_codeagent_namespace", "nudgebee")
 	viper.SetDefault("llm_server_agent_codeagent_secret", "nudgebee")
 	viper.SetDefault("llm_server_agent_codeagent_image", "ghcr.io/nudgebee/code-analysis-agent:latest")

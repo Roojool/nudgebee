@@ -306,6 +306,32 @@ const FeatureAnswerConfidence = "AI_ANSWER_CONFIDENCE"
 // newLLMModel; safe only while the tests that swap it stay non-t.Parallel().
 var answerConfidenceFeatureCheck = common.IsFeatureEnabled
 
+// Test seam for the graded work itself, same rule as the var above. Lets the
+// async wiring (gate → flag → submit → deadline → arguments) be asserted
+// without a live LLM or metastore.
+var scoreAnswerConfidenceFn = ScoreAnswerConfidence
+
+// answerConfidenceDefaultTaskTimeoutSeconds bounds the grading task body —
+// manifest read, grading LLM call, metadata write — when
+// AnswerConfidenceTaskTimeoutSeconds is unset or <= 0.
+//
+// This is NOT AsyncOperationTimeoutSeconds, which stays the worker-pool
+// admission budget and is too short for a task containing an LLM call. The
+// provider's own per-call timeouts are the real backstop; this deadline exists
+// only to stop a stuck task occupying a worker indefinitely, so it is kept to
+// a couple of minutes rather than several — the pool is shared with every
+// other async conversation task.
+const answerConfidenceDefaultTaskTimeoutSeconds = 120
+
+// answerConfidenceTaskTimeout resolves the configured grading deadline.
+func answerConfidenceTaskTimeout() time.Duration {
+	secs := config.Config.AnswerConfidenceTaskTimeoutSeconds
+	if secs <= 0 {
+		secs = answerConfidenceDefaultTaskTimeoutSeconds
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // AnswerConfidenceEnabledForTenant reports whether the grader is active for tenantId.
 // Fail-closed — uncertainty must not spend an LLM call. ctx is logger-only and may be
 // nil (GetLogger tolerates a nil receiver).
@@ -358,8 +384,10 @@ func ScoreAnswerConfidenceAsync(ctx *security.RequestContext, request NBAgentReq
 	tracer := ctx.GetTracer()
 	meter := ctx.GetMeter()
 
-	timeout := time.Duration(config.Config.AsyncOperationTimeoutSeconds) * time.Second
-	submissionCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Admission only — how long this submission may wait for a free worker.
+	// The task body gets its own, much larger budget below.
+	submissionCtx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(config.Config.AsyncOperationTimeoutSeconds)*time.Second)
 	defer cancel()
 
 	err := conversationAsyncTaskWorkerPool.Submit(submissionCtx, func() {
@@ -367,12 +395,14 @@ func ScoreAnswerConfidenceAsync(ctx *security.RequestContext, request NBAgentReq
 		// queue wait and is cancelled by the deferred cancel above as soon as
 		// Submit returns. Without this, a hung provider would pin a pool worker
 		// indefinitely — the LLM client's per-call timeout is the backstop, but
-		// this task also does DB work either side of it.
-		taskCtx, taskCancel := context.WithTimeout(context.Background(), timeout)
+		// this task also does DB work either side of it. See
+		// answerConfidenceDefaultTaskTimeoutSeconds for why this is not the
+		// admission budget.
+		taskCtx, taskCancel := context.WithTimeout(context.Background(), answerConfidenceTaskTimeout())
 		defer taskCancel()
 
 		bgCtx := security.NewRequestContext(taskCtx, secCtx, logger, tracer, meter)
-		if err := ScoreAnswerConfidence(bgCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, question, answer); err != nil {
+		if err := scoreAnswerConfidenceFn(bgCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, question, answer); err != nil {
 			bgCtx.GetLogger().Error("confidence: failed to score answer", "message_id", request.MessageId, "error", err)
 		}
 	})

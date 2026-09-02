@@ -3,6 +3,10 @@ package core
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"nudgebee/llm/config"
+	"nudgebee/llm/security"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -267,4 +271,233 @@ func TestAnswerConfidenceEnabledForTenant(t *testing.T) {
 		}
 		assert.False(t, AnswerConfidenceEnabledForTenant(nil, ""))
 	})
+}
+
+// The tests below cover the async path itself rather than its helpers: which
+// turns reach the grader, what it is handed, and how long it may take. They
+// swap package-level seams and config, so they must not run in parallel.
+
+// recordedGrade captures one grader invocation, including the deadline the
+// task body was given.
+type recordedGrade struct {
+	messageID   string
+	question    string
+	answer      string
+	remaining   time.Duration
+	hasDeadline bool
+	alreadyDone bool
+}
+
+// stubGraderAndFlag swaps the grader + tenant-flag seams for the test and
+// returns the channel each invocation is reported on. Buffered so a duplicate
+// invocation is recorded (and therefore detectable) rather than deadlocking.
+func stubGraderAndFlag(t *testing.T, tenantEnabled bool) <-chan recordedGrade {
+	t.Helper()
+	origGrader, origFlag := scoreAnswerConfidenceFn, answerConfidenceFeatureCheck
+	t.Cleanup(func() {
+		scoreAnswerConfidenceFn, answerConfidenceFeatureCheck = origGrader, origFlag
+	})
+
+	answerConfidenceFeatureCheck = func(string, string) (bool, error) { return tenantEnabled, nil }
+
+	calls := make(chan recordedGrade, 8)
+	scoreAnswerConfidenceFn = func(ctx *security.RequestContext, _, _, _, messageId, question, answer string) error {
+		deadline, ok := ctx.GetContext().Deadline()
+		done := false
+		select {
+		case <-ctx.GetContext().Done():
+			done = true
+		default:
+		}
+		calls <- recordedGrade{
+			messageID:   messageId,
+			question:    question,
+			answer:      answer,
+			remaining:   time.Until(deadline),
+			hasDeadline: ok,
+			alreadyDone: done,
+		}
+		return nil
+	}
+	return calls
+}
+
+// eligibleConfidenceRequest is an investigation turn that has already been
+// through a followup: OriginalQuery holds the real question, Query holds the
+// user's answer to the confirmation prompt.
+func eligibleConfidenceRequest() NBAgentRequest {
+	return NBAgentRequest{
+		MessageId:      "msg-under-test",
+		AccountId:      "acct-under-test",
+		ConversationId: "conv-under-test",
+		OriginalQuery:  "why is the checkout pod crashing?",
+		Query:          "yes",
+	}
+}
+
+func tenantRequestContext() *security.RequestContext {
+	return security.NewRequestContextForTenantAccountAdmin(
+		"22222222-2222-2222-2222-222222222222", "user-under-test", []string{"acct-under-test"})
+}
+
+// The grading task contains an LLM round-trip, so its deadline must come from
+// the confidence knob and never from AsyncOperationTimeoutSeconds — the
+// worker-pool admission budget, which is 5s by default and is shared by every
+// other async caller. Reverting the task body to
+// context.WithTimeout(..., AsyncOperationTimeoutSeconds ...) fails this test.
+//
+// Deterministic: it reads the deadline the grader was actually handed and
+// compares it against the configured value, with no sleeping.
+func TestScoreAnswerConfidenceAsync_TaskDeadlineComesFromConfidenceKnob(t *testing.T) {
+	origAdmission := config.Config.AsyncOperationTimeoutSeconds
+	origTask := config.Config.AnswerConfidenceTaskTimeoutSeconds
+	t.Cleanup(func() {
+		config.Config.AsyncOperationTimeoutSeconds = origAdmission
+		config.Config.AnswerConfidenceTaskTimeoutSeconds = origTask
+	})
+
+	// Distinctive, mutually unrelated values: the observed deadline can only
+	// match one of them, so which knob is in force is unambiguous.
+	cases := []struct{ admission, task int }{
+		{admission: 1, task: 137},
+		{admission: 1, task: 43},
+		{admission: 90, task: 137}, // admission moved, deadline must not follow
+	}
+
+	for _, tc := range cases {
+		config.Config.AsyncOperationTimeoutSeconds = tc.admission
+		config.Config.AnswerConfidenceTaskTimeoutSeconds = tc.task
+		calls := stubGraderAndFlag(t, true)
+
+		ScoreAnswerConfidenceAsync(tenantRequestContext(), eligibleConfidenceRequest(), "root cause found")
+
+		select {
+		case got := <-calls:
+			require.True(t, got.hasDeadline, "the task body must stay bounded")
+			require.False(t, got.alreadyDone, "the task must not start already cancelled")
+			// Tight on purpose: only goroutine scheduling separates creating the
+			// deadline from reading it, so anything approaching a second means
+			// the deadline is not the one we think it is.
+			assert.InDelta(t, float64(tc.task), got.remaining.Seconds(), 1,
+				"deadline must track AnswerConfidenceTaskTimeoutSeconds (%ds)", tc.task)
+			assert.Greater(t, got.remaining.Seconds(), float64(tc.admission),
+				"deadline must not be the admission budget (%ds)", tc.admission)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("grader was never invoked (admission=%ds task=%ds)", tc.admission, tc.task)
+		}
+	}
+}
+
+// An unset or nonsensical knob must fall back to the documented default rather
+// than produce a zero/immediately-expired deadline.
+func TestScoreAnswerConfidenceAsync_TaskDeadlineFallsBackToDefault(t *testing.T) {
+	origTask := config.Config.AnswerConfidenceTaskTimeoutSeconds
+	t.Cleanup(func() { config.Config.AnswerConfidenceTaskTimeoutSeconds = origTask })
+
+	for _, unset := range []int{0, -1} {
+		config.Config.AnswerConfidenceTaskTimeoutSeconds = unset
+		calls := stubGraderAndFlag(t, true)
+
+		ScoreAnswerConfidenceAsync(tenantRequestContext(), eligibleConfidenceRequest(), "root cause found")
+
+		select {
+		case got := <-calls:
+			require.True(t, got.hasDeadline)
+			require.False(t, got.alreadyDone, "a <=0 knob must not yield an expired context")
+			assert.InDelta(t, float64(answerConfidenceDefaultTaskTimeoutSeconds), got.remaining.Seconds(), 1)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("grader was never invoked for knob value %d", unset)
+		}
+	}
+}
+
+// The grader must be handed the user's real question. On a followup resume
+// request.Query is the confirmation answer, so grading on it would both
+// misclassify the turn and ask the model to grade an answer against "yes".
+func TestScoreAnswerConfidenceAsync_GradesOriginalQuestionNotFollowupAnswer(t *testing.T) {
+	calls := stubGraderAndFlag(t, true)
+	req := eligibleConfidenceRequest()
+
+	ScoreAnswerConfidenceAsync(tenantRequestContext(), req, "root cause found")
+
+	select {
+	case got := <-calls:
+		assert.Equal(t, req.OriginalQuery, got.question)
+		assert.NotEqual(t, req.Query, got.question, `must not grade against the followup answer ("yes")`)
+		assert.Equal(t, req.MessageId, got.messageID, "the grade must land on the generation message")
+		assert.Equal(t, "root cause found", got.answer)
+	case <-time.After(10 * time.Second):
+		t.Fatal("grader was never invoked")
+	}
+
+	// Exactly once — a second submission would double-bill the tenant and
+	// race two writers onto the same metadata key.
+	select {
+	case extra := <-calls:
+		t.Fatalf("grader invoked more than once (second call on %s)", extra.messageID)
+	case <-time.After(750 * time.Millisecond):
+	}
+}
+
+// Ineligible turns must never reach the grader: each of these would otherwise
+// spend an LLM call on something with nothing to grade.
+func TestScoreAnswerConfidenceAsync_SkipsIneligibleTurns(t *testing.T) {
+	cases := []struct {
+		name          string
+		tenantEnabled bool
+		ctx           *security.RequestContext
+		mutate        func(*NBAgentRequest)
+		answer        string
+	}{
+		{
+			name:          "tenant has not enabled the feature",
+			tenantEnabled: false,
+			ctx:           tenantRequestContext(),
+			answer:        "root cause found",
+		},
+		{
+			name:          "plain retrieval, not an investigation",
+			tenantEnabled: true,
+			ctx:           tenantRequestContext(),
+			mutate:        func(r *NBAgentRequest) { r.OriginalQuery = "list all pods in the prod namespace" },
+			answer:        "here are your pods",
+		},
+		{
+			name:          "empty answer has nothing to grade",
+			tenantEnabled: true,
+			ctx:           tenantRequestContext(),
+			answer:        "   ",
+		},
+		{
+			name:          "missing message id leaves nowhere to write the grade",
+			tenantEnabled: true,
+			ctx:           tenantRequestContext(),
+			mutate:        func(r *NBAgentRequest) { r.MessageId = "" },
+			answer:        "root cause found",
+		},
+		{
+			name:          "background flow carries no tenant",
+			tenantEnabled: true,
+			ctx:           security.NewRequestContextForSuperAdmin(), // empty tenant id
+			answer:        "root cause found",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := stubGraderAndFlag(t, tc.tenantEnabled)
+			req := eligibleConfidenceRequest()
+			if tc.mutate != nil {
+				tc.mutate(&req)
+			}
+
+			ScoreAnswerConfidenceAsync(tc.ctx, req, tc.answer)
+
+			select {
+			case got := <-calls:
+				t.Fatalf("grader ran for an ineligible turn (question %q)", got.question)
+			case <-time.After(750 * time.Millisecond):
+			}
+		})
+	}
 }
