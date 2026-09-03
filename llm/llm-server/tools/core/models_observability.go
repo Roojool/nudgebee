@@ -218,6 +218,11 @@ type ObservabilityTracesV3Request struct {
 	// list. Mirrors observability.TracesV3Request.ValidateRequest and the log path's
 	// LogQueryRequest.ValidateRequest.
 	ValidateRequest bool `json:"validate_request,omitempty" mapstructure:"validate_request"`
+	// IncludeExecutedQuery asks services-server to resolve the provider query it actually ran and
+	// return it on the envelope (query + provider), on the empty result as much as the successful
+	// one. Without it an answer of "no traces found" cannot say what was asked or which backend
+	// answered it. Mirrors observability.TracesV3Request.IncludeExecutedQuery.
+	IncludeExecutedQuery bool `json:"include_executed_query,omitempty" mapstructure:"include_executed_query"`
 }
 
 type SortField struct {

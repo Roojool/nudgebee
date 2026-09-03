@@ -68,4 +68,42 @@ func TestDecodeTraceQueryBody(t *testing.T) {
 		require.Len(t, resp.Traces, 1)
 		assert.Equal(t, "checkout", resp.Traces[0].ServiceName)
 	})
+
+	// The executed query and provider must survive the decode on an empty result, otherwise the
+	// agent can only report "no traces found" with nothing to attribute it to (#37406). The
+	// canonical path sends both request fields empty, so the wire values are the only real ones.
+	t.Run("envelope carries the executed query and provider on an empty result", func(t *testing.T) {
+		body := []byte(`{"traces":[],"query":"SELECT * FROM otel_traces WHERE ServiceName = 'checkout'","provider":"clickhouse"}`)
+		resp := core.ObservabilityTraceResponse{
+			Metadata: core.ObservabilityTraceMetadata{Query: "", Provider: ""},
+		}
+		require.NoError(t, decodeTraceQueryBody(body, &resp))
+
+		assert.Empty(t, resp.Traces)
+		assert.Equal(t, "SELECT * FROM otel_traces WHERE ServiceName = 'checkout'", resp.Metadata.Query)
+		assert.Equal(t, "clickhouse", resp.Metadata.Provider)
+	})
+
+	t.Run("envelope with spans also carries the executed query and provider", func(t *testing.T) {
+		body := []byte(`{"traces":[{"service_name":"checkout"}],"query":"{service=\"checkout\"}","provider":"jaeger"}`)
+		var resp core.ObservabilityTraceResponse
+		require.NoError(t, decodeTraceQueryBody(body, &resp))
+
+		require.Len(t, resp.Traces, 1)
+		assert.Equal(t, `{service="checkout"}`, resp.Metadata.Query)
+		assert.Equal(t, "jaeger", resp.Metadata.Provider)
+	})
+
+	t.Run("a body without query or provider keeps the request-seeded metadata", func(t *testing.T) {
+		// Version skew: an older services-server omits both fields, so the values QueryTraces
+		// seeded from the request (the requested provider) must not be blanked out.
+		body := []byte(`{"traces":[],"suggestion":"no traces matched"}`)
+		resp := core.ObservabilityTraceResponse{
+			Metadata: core.ObservabilityTraceMetadata{Query: "seeded-query", Provider: "jaeger"},
+		}
+		require.NoError(t, decodeTraceQueryBody(body, &resp))
+
+		assert.Equal(t, "seeded-query", resp.Metadata.Query)
+		assert.Equal(t, "jaeger", resp.Metadata.Provider)
+	})
 }
