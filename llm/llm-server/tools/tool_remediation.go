@@ -450,6 +450,72 @@ func ValidateCommandSafety(command string) error {
 		}
 	}
 
+	if err := validateCloudCommandSafety(lowerCmd); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// irreversibleCloudOperations are cloud operations that destroy state no rollback can restore.
+//
+// The k8s list above is deliberately permissive because its worst cases are recoverable: a deleted
+// pod is rescheduled, a deleted deployment is redeployed from git. Cloud is not symmetric. A
+// terminated instance takes its instance-store data and its identity with it, a deleted RDS
+// instance without a final snapshot is unrecoverable, and neither has a rollback_command that
+// means anything — the plan would offer one and it would be a lie.
+//
+// So these are blocked outright rather than left to the approval workflow. An operator who
+// genuinely needs to terminate an instance can do it in the AWS console, where the consequence is
+// unambiguous and the audit trail is theirs. That is a deliberately worse workflow for a
+// deliberately rare action.
+var irreversibleCloudOperations = []string{
+	"terminate-instances",
+	"delete-db-instance",
+	"delete-db-cluster",
+	"delete-cluster",
+	"delete-bucket",
+	"delete-vpc",
+	"delete-nat-gateway",
+	"delete-volume",
+	"delete-snapshot",
+	"deregister-image",
+	"delete-key-pair",
+	"delete-load-balancer",
+	"delete-auto-scaling-group",
+	"delete-stack",
+	"delete-secret",
+	"schedule-key-deletion",
+	// Azure and GCP equivalents: the same command can arrive through CloudCliToolFor.
+	"vm delete",
+	"group delete",
+	"instances delete",
+	"clusters delete",
+	"sql instances delete",
+}
+
+// validateCloudCommandSafety blocks irreversible cloud operations. Only applied to cloud CLI
+// invocations so a kubectl or shell command containing a similar word is unaffected.
+func validateCloudCommandSafety(lowerCmd string) error {
+	fields := strings.Fields(lowerCmd)
+	if len(fields) == 0 {
+		return nil
+	}
+	switch fields[0] {
+	case "aws", "az", "gcloud", "gsutil":
+	default:
+		return nil
+	}
+
+	for _, op := range irreversibleCloudOperations {
+		if strings.Contains(lowerCmd, op) {
+			return fmt.Errorf(
+				"blocked irreversible cloud operation %q: this destroys state that no rollback can "+
+					"restore, so it is not available as an automated remediation - run it from the "+
+					"cloud console if it is genuinely required", op)
+		}
+	}
+
 	return nil
 }
 
