@@ -21,10 +21,31 @@ func TestValidateCommandSafetyBlocksIrreversibleCloudOperations(t *testing.T) {
 		{"schedule kms deletion", "aws kms schedule-key-deletion --key-id abc --pending-window-in-days 7"},
 		{"azure vm delete", "az vm delete --name prod-vm --resource-group rg"},
 		{"gcloud instance delete", "gcloud compute instances delete prod-vm --zone us-central1-a"},
+		{"s3 rb shorthand", "aws s3 rb s3://customer-backups --force"},
+		{"efs", "aws efs delete-file-system --file-system-id fs-abc"},
+		{"dynamodb", "aws dynamodb delete-table --table-name orders"},
+		{"azure storage", "az storage account delete --name prodstore --resource-group rg"},
+		{"azure aks", "az aks delete --name prod --resource-group rg"},
+		{"gcp disks", "gcloud compute disks delete data-1 --zone us-central1-a"},
+		{"gcp buckets", "gcloud storage buckets delete gs://customer-backups"},
+		{"gsutil recursive", "gsutil rm -r gs://customer-backups"},
+		{"gsutil single object", "gsutil rm gs://customer-backups/key"},
 		// Spacing variation must not defeat the check - the caller normalises whitespace first.
 		{"extra spacing", "aws  ec2   terminate-instances  --instance-ids i-abc"},
 		// Case must not defeat it either.
 		{"uppercase", "AWS EC2 TERMINATE-INSTANCES --instance-ids i-abc"},
+		// Prefixes that do not change what actually runs. Each of these bypassed the guard when it
+		// keyed on fields[0]: an assignment, a wrapper program and an absolute path are all still
+		// the same aws invocation. They currently fail for an unrelated reason - the credential
+		// router keys on fields[0] too, so they run unauthenticated - and relying on two functions
+		// coincidentally agreeing is not a safety property.
+		{"env assignment prefix", "AWS_PROFILE=prod aws ec2 terminate-instances --instance-ids i-abc"},
+		{"two env assignments", "AWS_PROFILE=prod AWS_REGION=us-east-1 aws ec2 terminate-instances --instance-ids i-abc"},
+		{"sudo prefix", "sudo aws ec2 terminate-instances --instance-ids i-abc"},
+		{"absolute path", "/usr/local/bin/aws ec2 terminate-instances --instance-ids i-abc"},
+		{"time wrapper", "time aws ec2 terminate-instances --instance-ids i-abc"},
+		{"env wrapper", "env aws ec2 terminate-instances --instance-ids i-abc"},
+		{"combined", "sudo AWS_PROFILE=prod /usr/bin/aws ec2 terminate-instances --instance-ids i-abc"},
 	}
 
 	for _, tc := range blocked {
@@ -48,6 +69,15 @@ func TestValidateCommandSafetyAllowsReversibleCloudOperations(t *testing.T) {
 		"aws ec2 modify-volume --volume-id vol-abc --size 100 --region us-east-1",
 		"aws ec2 describe-instances --instance-ids i-abc --region us-east-1",
 		"aws rds describe-db-instances --db-instance-identifier prod-db",
+		// A resource NAMED like a blocked operation is not that operation. Blocking a read because
+		// a tag value contains "delete-volume" teaches people the guard is noise and to route
+		// around it, which costs more than it protects.
+		"aws ec2 describe-instances --filters Name=tag:Name,Values=delete-volume --region us-east-1",
+		"aws s3api list-objects --bucket delete-bucket-archive",
+		"aws ec2 describe-volumes --filters Name=tag:Purpose,Values=terminate-instances-test",
+		"aws cloudformation describe-stacks --stack-name delete-stack-runner",
+		"gsutil ls gs://customer-backups",
+		"gsutil cp report.csv gs://customer-backups/",
 	}
 
 	for _, cmd := range allowed {

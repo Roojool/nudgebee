@@ -486,29 +486,108 @@ var irreversibleCloudOperations = []string{
 	"delete-stack",
 	"delete-secret",
 	"schedule-key-deletion",
-	// Azure and GCP equivalents: the same command can arrive through CloudCliToolFor.
+	"delete-file-system",
+	"delete-table",
+	// `aws s3 rb` is the same destruction as s3api delete-bucket under a shorter name.
+	"s3 rb",
+	// Azure equivalents.
 	"vm delete",
 	"group delete",
+	"sql server delete",
+	"sql db delete",
+	"storage account delete",
+	"aks delete",
+	"disk delete",
+	"snapshot delete",
+	"keyvault delete",
+	// GCP equivalents.
 	"instances delete",
 	"clusters delete",
 	"sql instances delete",
+	"disks delete",
+	"snapshots delete",
+	"buckets delete",
+	// Any gsutil rm is an object delete with no rollback. Scoped to the subcommand path, so the
+	// recursive flag that makes it a bucket wipe is not needed to catch it - and object deletion is
+	// not a remediation for an infrastructure alarm in the first place.
+	"gsutil rm",
+}
+
+// leadingCommandNoise are tokens that can precede the real executable without changing what runs.
+// Stripped before deciding whether this is a cloud CLI invocation.
+var leadingCommandNoise = map[string]bool{
+	"sudo": true, "env": true, "time": true, "command": true, "nohup": true, "exec": true,
+}
+
+// cloudCommandTokens returns the command's tokens with leading environment assignments and wrapper
+// programs removed, and the executable reduced to its base name. Returns nil when what remains is
+// not a cloud CLI invocation.
+//
+// This is deliberately more permissive about what counts as a cloud command than CloudCliToolFor,
+// which matches fields[0] exactly. The asymmetry is the safe direction and is intentional: the
+// router decides whether to inject credentials, and being strict there means an odd invocation
+// simply fails; this guard decides whether to refuse, and being strict here would let
+// "sudo aws ec2 terminate-instances" past. Today those two agreeing is what stops the prefixed form
+// doing damage - it is not routed, so it runs without credentials and fails. That is a coincidence
+// between two functions, not an invariant, and it stops holding the moment the execution
+// environment gains ambient credentials (an instance profile on the workspace pod, for one). So the
+// guard does not rely on it.
+func cloudCommandTokens(lowerCmd string) []string {
+	fields := strings.Fields(lowerCmd)
+	for len(fields) > 0 {
+		head := fields[0]
+		// FOO=bar prefixes: an assignment cannot be the program being run.
+		if i := strings.Index(head, "="); i > 0 && !strings.ContainsAny(head[:i], "/-.") {
+			fields = fields[1:]
+			continue
+		}
+		if leadingCommandNoise[head] {
+			fields = fields[1:]
+			continue
+		}
+		break
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	// /usr/local/bin/aws and aws are the same program.
+	exe := fields[0]
+	if i := strings.LastIndex(exe, "/"); i >= 0 {
+		exe = exe[i+1:]
+	}
+	switch exe {
+	case "aws", "az", "gcloud", "gsutil":
+	default:
+		return nil
+	}
+	out := append([]string{exe}, fields[1:]...)
+	return out
 }
 
 // validateCloudCommandSafety blocks irreversible cloud operations. Only applied to cloud CLI
 // invocations so a kubectl or shell command containing a similar word is unaffected.
 func validateCloudCommandSafety(lowerCmd string) error {
-	fields := strings.Fields(lowerCmd)
-	if len(fields) == 0 {
-		return nil
-	}
-	switch fields[0] {
-	case "aws", "az", "gcloud", "gsutil":
-	default:
+	tokens := cloudCommandTokens(lowerCmd)
+	if tokens == nil {
 		return nil
 	}
 
+	// Match against the subcommand path only - the tokens before the first flag. A provider CLI
+	// puts service and operation there ("aws ec2 terminate-instances"), so this still catches every
+	// real invocation while a resource that merely happens to be NAMED like one stops being a false
+	// positive: `aws ec2 describe-instances --filters Name=tag:Name,Values=delete-volume` is a
+	// read, and blocking it would train people to route around the guard.
+	path := tokens
+	for i, tok := range tokens {
+		if strings.HasPrefix(tok, "-") {
+			path = tokens[:i]
+			break
+		}
+	}
+	joined := strings.Join(path, " ")
+
 	for _, op := range irreversibleCloudOperations {
-		if strings.Contains(lowerCmd, op) {
+		if strings.Contains(joined, op) {
 			return fmt.Errorf(
 				"blocked irreversible cloud operation %q: this destroys state that no rollback can "+
 					"restore, so it is not available as an automated remediation - run it from the "+
