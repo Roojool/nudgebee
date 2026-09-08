@@ -2009,6 +2009,18 @@ func lookupToolForPlanner(nameToTool map[string]toolcore.NBTool, accountId, tool
 	return nil, false
 }
 
+// confirmationQuestionForAction returns the tool's approval text ("" for the
+// default card), built from the repaired input that Call() will receive. The
+// confirmation key stays on the original input; see the coercion in doAction.
+func confirmationQuestionForAction(tool toolcore.NBTool, action NBAgentPlannerToolAction) string {
+	prompter, ok := tool.(toolcore.ToolConfirmationPrompt)
+	if !ok {
+		return ""
+	}
+	input, _ := toolcore.CoerceScalarArrays(tool, action.ToolInput)
+	return strings.TrimSpace(prompter.ConfirmationQuestion(input))
+}
+
 // confirmationApprovedForAction mirrors isToolConfirmationApproved but resolves
 // the per-action confirmation key when the tool is available, so resume paths
 // agree with the doAction gate about which entry an approval lives under.
@@ -2302,10 +2314,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 			// Operator-readable card text, when the tool can provide it — the
 			// default rendering shows the raw tool input, which for id-driven
 			// tools describes nothing the approver can judge.
-			confirmationQuestion := ""
-			if prompter, ok := tool.(toolcore.ToolConfirmationPrompt); ok {
-				confirmationQuestion = strings.TrimSpace(prompter.ConfirmationQuestion(action.ToolInput))
-			}
+			confirmationQuestion := confirmationQuestionForAction(tool, action)
 			isFollowupFound := false
 			if e.agentRequest.QueryConfig.ToolConfirmations != nil {
 				if previousData, exists := e.agentRequest.QueryConfig.ToolConfirmations[confirmationKey]; exists {
@@ -2378,6 +2387,16 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 			}
 
 		}
+	}
+
+	// Repair {"f":"x"} → {"f":["x"]} for string-array fields, for every tool
+	// (not only the validation allowlist below). Must stay AFTER the
+	// confirmation block: a resume re-derives the approval key from the
+	// un-repaired input, so repairing earlier would re-prompt approved writes.
+	if repaired, fields := toolcore.CoerceScalarArrays(tool, action.ToolInput); len(fields) > 0 {
+		e.ctx.GetLogger().Warn("plannerexecutor: coerced scalar tool input to array",
+			"tool", action.Tool, "toolId", action.ToolID, "fields", fields)
+		action.ToolInput = repaired
 	}
 
 	// Allowlisted pre-exec schema validation: reject malformed input with a

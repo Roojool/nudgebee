@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -300,4 +301,111 @@ func formatSchemaErrorMessage(toolName string, schema ToolSchema, errs []string)
 		}
 	}
 	return b.String()
+}
+
+// CoerceScalarArrays wraps a bare string into a one-element array for each
+// top-level field the schema declares as an array of strings (models often send
+// {"node_types":"Workload"}). It returns the repaired input and the changed
+// fields (nil when unchanged).
+//
+//   - Blank strings become [], not [""] (kg_traverse treats [] as "no exclusions").
+//   - Strings are never split on commas: CLI commands contain them.
+//   - Untouched values keep their exact bytes, and keys are sorted so the
+//     output (and the confirmation/cache keys derived from it) is deterministic.
+func CoerceScalarArrays(tool NBTool, input string) (string, []string) {
+	if tool == nil {
+		return input, nil
+	}
+	// Custom container tool schemas are customer-authored; leave their input alone.
+	if _, isCustomContainer := tool.(nbCustomContainerTool); isCustomContainer {
+		return input, nil
+	}
+	schema := tool.InputSchema()
+	if len(schema.Properties) == 0 {
+		return input, nil
+	}
+	trimmed := strings.TrimSpace(input)
+	if !strings.HasPrefix(trimmed, "{") {
+		return input, nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		return input, nil
+	}
+
+	var coerced []string
+	for key, val := range raw {
+		prop, declared := schema.Properties[key]
+		if !declared || prop.Type != ToolSchemaTypeArray || !declaresStringItems(prop) || !coercibleArrayField(key) {
+			continue
+		}
+		widened, ok := widenStringToArray(val)
+		if !ok {
+			continue
+		}
+		raw[key] = widened
+		coerced = append(coerced, key)
+	}
+	if len(coerced) == 0 {
+		return input, nil
+	}
+	sort.Strings(coerced)
+
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		name, err := json.Marshal(k)
+		if err != nil {
+			return input, nil
+		}
+		b.Write(name)
+		b.WriteByte(':')
+		b.Write(raw[k])
+	}
+	b.WriteByte('}')
+	return b.String(), coerced
+}
+
+// argvArrayFields hold argv words: wrapping "ls -la" into ["ls -la"] would exec
+// a binary named "ls -la", so these keep their type error instead.
+var argvArrayFields = map[string]bool{"command": true, "args": true}
+
+func coercibleArrayField(key string) bool { return !argvArrayFields[key] }
+
+// declaresStringItems reports whether an array property declares Items type "string".
+func declaresStringItems(prop ToolSchemaProperty) bool {
+	t, _ := prop.Items["type"].(string)
+	return t == "string"
+}
+
+// widenStringToArray returns a JSON string as a one-element array; any other
+// value (including null) returns ok=false and is left untouched.
+func widenStringToArray(val json.RawMessage) (json.RawMessage, bool) {
+	v := bytes.TrimSpace(val)
+	if len(v) == 0 || v[0] != '"' {
+		return nil, false
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(s) == "" {
+		return json.RawMessage("[]"), true
+	}
+
+	out := make([]byte, 0, len(v)+2)
+	out = append(out, '[')
+	out = append(out, v...)
+	out = append(out, ']')
+	return out, true
 }

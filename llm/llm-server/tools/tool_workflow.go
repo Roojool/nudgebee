@@ -680,6 +680,7 @@ func (t WorkflowExamplesTool) InputSchema() core.ToolSchema {
 		Properties: map[string]core.ToolSchemaProperty{
 			"task_types": {
 				Type:        core.ToolSchemaTypeArray,
+				Items:       map[string]any{"type": "string"},
 				Description: "Task types to filter examples by (e.g., ['k8s.cli', 'notifications.im'])",
 			},
 		},

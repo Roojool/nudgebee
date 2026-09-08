@@ -75,6 +75,7 @@ func (m RecommendationCliTool) InputSchema() core.ToolSchema {
 		Properties: map[string]core.ToolSchemaProperty{
 			"commands": {
 				Type:        core.ToolSchemaTypeArray,
+				Items:       map[string]any{"type": "string"},
 				Description: "Full cloud CLI commands to run in order, e.g. [\"aws cloudwatch put-metric-alarm --alarm-name ...\"]. Execution stops at the first failure.",
 			},
 			"recommendation_id": {

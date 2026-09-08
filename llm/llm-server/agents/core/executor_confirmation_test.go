@@ -125,3 +125,27 @@ func TestConfirmationApprovedForAction(t *testing.T) {
 	unknown := NBAgentPlannerToolAction{Tool: "other_tool", ToolInput: "x"}
 	assert.True(t, confirmationApprovedForAction(map[string]string{"other_tool": "yes"}, nameToTool, unknown))
 }
+
+// A bare-string `commands` must still produce the full card, DESTRUCTIVE warning included.
+func TestConfirmationQuestionForAction_UsesRepairedInput(t *testing.T) {
+	tool := tools.RecommendationCliTool{}
+	cmd := "aws ec2 terminate-instances --instance-ids i-aaa"
+
+	asString := NBAgentPlannerToolAction{Tool: tools.ToolRecommendationExecuteCli, ToolInput: `{"commands":"` + cmd + `"}`}
+	asArray := NBAgentPlannerToolAction{Tool: tools.ToolRecommendationExecuteCli, ToolInput: `{"commands":["` + cmd + `"]}`}
+
+	assert.Empty(t, tool.ConfirmationQuestion(asString.ToolInput),
+		"precondition: the tool cannot read a bare string, which is what made the card empty")
+
+	got := confirmationQuestionForAction(tool, asString)
+	assert.Contains(t, got, cmd)
+	assert.Contains(t, got, "DESTRUCTIVE")
+	assert.Equal(t, confirmationQuestionForAction(tool, asArray), got,
+		"a bare string and the array the model should have sent must produce the same card")
+
+	// The approval key stays on the original input (resume re-derives it from that).
+	assert.Equal(t, tool.ConfirmationKey(asString.ToolInput), confirmationKeyForAction(tool, asString))
+
+	// Tools without a custom question keep the default rendering.
+	assert.Empty(t, confirmationQuestionForAction(confirmStubTool{name: "plain_tool"}, asString))
+}

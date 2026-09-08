@@ -141,3 +141,66 @@ func TestValidateKGSearchInput(t *testing.T) {
 		assert.NotNil(t, reject, "whitespace-only query is functionally empty and must not sneak past validation")
 	})
 }
+
+// Reproduces `field "node_types" expected array, got string` against the real schema and parser.
+func TestKGSearchNodes_ScalarArrayInputIsRepairedEndToEnd(t *testing.T) {
+	tool := KGSearchNodesTool{}
+
+	t.Run("node_types as a bare string is rejected before the fix", func(t *testing.T) {
+		raw := `{"query":"redis%","node_types":"Workload"}`
+
+		assert.NotNil(t, core.ValidateToolInput(tool, raw),
+			"this is the exact pre-execution rejection seen in production")
+
+		_, err := parseKGSearchInput(core.NBToolCallRequest{Command: raw})
+		assert.Error(t, err,
+			"and with validation disabled the same input dies in the tool's own parser instead")
+	})
+
+	t.Run("after coercion it both validates and parses", func(t *testing.T) {
+		repaired, fields := core.CoerceScalarArrays(tool, `{"query":"redis%","node_types":"Workload"}`)
+		assert.Equal(t, []string{"node_types"}, fields)
+
+		assert.Nil(t, core.ValidateToolInput(tool, repaired))
+
+		parsed, err := parseKGSearchInput(core.NBToolCallRequest{Command: repaired})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"Workload"}, parsed.NodeTypes)
+		assert.Equal(t, "redis%", parsed.Query, "coercion must not disturb the other fields")
+	})
+
+	t.Run("account_ids as a bare string is repaired the same way", func(t *testing.T) {
+		repaired, fields := core.CoerceScalarArrays(tool, `{"query":"redis%","account_ids":"aws-prod"}`)
+		assert.Equal(t, []string{"account_ids"}, fields)
+		assert.Nil(t, core.ValidateToolInput(tool, repaired))
+
+		parsed, err := parseKGSearchInput(core.NBToolCallRequest{Command: repaired})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"aws-prod"}, parsed.AccountIDs)
+	})
+}
+
+// A blank exclude_node_types must become [] (drop default exclusions), never [""].
+func TestKGTraverse_ScalarArrayInputIsRepairedEndToEnd(t *testing.T) {
+	tool := KGTraverseTool{}
+
+	t.Run("node_types as a bare string is repaired", func(t *testing.T) {
+		repaired, fields := core.CoerceScalarArrays(tool,
+			`{"node_id":"`+testKGNodeID+`","direction":"both","node_types":"LoadBalancer"}`)
+		assert.Equal(t, []string{"node_types"}, fields)
+		assert.Nil(t, core.ValidateToolInput(tool, repaired))
+
+		parsed, err := parseKGTraverseInput(core.NBToolCallRequest{Command: repaired})
+		assert.NoError(t, err)
+		assert.Equal(t, []string{"LoadBalancer"}, parsed.NodeTypes)
+	})
+
+	t.Run("a blank exclude_node_types becomes an explicit empty list, not a junk entry", func(t *testing.T) {
+		repaired, fields := core.CoerceScalarArrays(tool,
+			`{"node_id":"`+testKGNodeID+`","direction":"both","exclude_node_types":""}`)
+		assert.Equal(t, []string{"exclude_node_types"}, fields)
+		assert.Contains(t, repaired, `"exclude_node_types":[]`,
+			`[""] would both disable the LoadBalancer defaults and exclude a node type named ""`)
+		assert.Nil(t, core.ValidateToolInput(tool, repaired))
+	})
+}
