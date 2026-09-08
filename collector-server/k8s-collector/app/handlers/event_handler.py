@@ -8,7 +8,7 @@ import re
 import threading
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import List, Dict, Any, Union, Optional
 
@@ -1038,7 +1038,12 @@ def handle_krr_report(content: dict, tenant: str, cloud_account_id: str, account
                 logging.warning(f"Failed to parse container data for workload {resource[0]}: {e}")
                 continue
 
-        recommendations = generate_krr_recommendation(cloud_account_id, report, resource_map, tenant)
+        try:
+            replica_stats = get_workload_replica_stats(cloud_account_id, tenant)
+        except Exception:
+            logging.exception(f"Replica window lookup failed for account {cloud_account_id}, using live counts")
+            replica_stats = {}
+        recommendations = generate_krr_recommendation(cloud_account_id, report, resource_map, tenant, replica_stats)
         try:
             handle_notification(
                 account_name,
@@ -1378,7 +1383,76 @@ def is_value_no_change_workload(merged_content):
     return saw_entry
 
 
-def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
+POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS = 24 * 14
+
+
+def replica_stats_from_pod_rows(rows, now, window_hours=POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS):
+    """Time-weighted replica count per workload from pod lifetimes in the metastore.
+
+    Twin of replica_stats_from_running_series in ml-k8s-server
+    (vertical_rightsizing/models/replicas.py), which folds Prometheus samples;
+    this side only has k8s_pods rows, so each pod counts as running from its
+    creation_time until last_seen (or now while it is active). The span is
+    sampled hourly like the Prometheus path, and a sample where the workload
+    had no pod at all is not part of the average — the denominator is the
+    workload's observed lifetime inside the window, so a one-day-old
+    Deployment averages its real replica count.
+
+    rows: iterables of (workload_type, workload_name, namespace, creation_time,
+    last_seen, is_active). Returns {"kind/namespace/name": {avg, min, max,
+    window_hours}} for workloads that had at least one running pod in the window.
+    """
+    window_start = now - timedelta(hours=window_hours)
+    intervals = {}
+    for workload_type, workload_name, namespace, creation_time, last_seen, is_active in rows:
+        if creation_time is None:
+            continue
+        end = now if is_active else last_seen
+        if end is None:
+            continue
+        start = max(creation_time, window_start)
+        if end <= start:
+            continue
+        intervals.setdefault(f"{workload_type}/{namespace}/{workload_name}", []).append((start, min(end, now)))
+    stats = {}
+    for key, spans in intervals.items():
+        first = min(start for start, _ in spans)
+        counts = []
+        sample = first
+        while sample <= now:
+            alive = sum(1 for start, end in spans if start <= sample < end)
+            if alive > 0:
+                counts.append(alive)
+            sample += timedelta(hours=1)
+        if not counts:
+            continue
+        stats[key] = {
+            "avg": round(sum(counts) / len(counts), 2),
+            "min": min(counts),
+            "max": max(counts),
+            "window_hours": window_hours,
+        }
+    return stats
+
+
+def get_workload_replica_stats(cloud_account_id, tenant, window_hours=POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS):
+    now = datetime.utcnow()
+    rows = database.run_query(
+        """
+        select workload_type, workload_name, namespace, creation_time, last_seen, is_active
+        from k8s_pods
+        where cloud_account_id = %s
+          and tenant_id = %s
+          and last_seen >= %s
+          and status not in ('Succeeded', 'Failed')
+        """,
+        [cloud_account_id, tenant, now - timedelta(hours=window_hours)],
+    )
+    return replica_stats_from_pod_rows(rows, now, window_hours)
+
+
+def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant, replica_stats=None):
+    replica_stats = replica_stats or {}
     recommendations = {}
     settings = get_recommendation_settings(cloud_account_id, "pod_right_sizing")
     for r in report["data"]:
@@ -1387,7 +1461,12 @@ def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
             continue
         resource_id = resource_map[f"{r['kind']}/{r['namespace']}/{r['name']}/{r['container']}"]
         ignore_recommendation, r_content, recommendation, saving = generate_container_recommendation(
-            cloud_account_id, r, resource_id, settings, tenant
+            cloud_account_id,
+            r,
+            resource_id,
+            settings,
+            tenant,
+            replica_stats.get(f"{r['kind']}/{r['namespace']}/{r['name']}"),
         )
         if ignore_recommendation:
             logging.info(f"Ignoring recommendation for {r['kind']}/{r['namespace']}/{r['name']}/{r['container']}")
@@ -1419,7 +1498,7 @@ def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
     return recommendations
 
 
-def generate_container_recommendation(cloud_account_id, r, resource_id, settings, tenant):
+def generate_container_recommendation(cloud_account_id, r, resource_id, settings, tenant, replicas=None):
     r_content = r["content"]
     cpu_cost_per_hour = DEFAULT_COST.get("CPU")
     memory_cost_per_hour = DEFAULT_COST.get("RAM")
@@ -1438,9 +1517,20 @@ def generate_container_recommendation(cloud_account_id, r, resource_id, settings
         cpu_cost_per_hour = resource_id[6]
         memory_cost_per_hour = resource_id[7]
 
+    # Windowed average when the metastore had pod history for the workload,
+    # otherwise the live count from the workload lookup.
+    pods_count = replicas["avg"] if replicas else (resource_id[18] if len(resource_id) > 18 else 1)
     saving, ignore_recommendation = process_resource_recommendation(
-        cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id[0]
+        cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id[0], pods_count
     )
+    if replicas:
+        for rec in r_content:
+            if isinstance(rec, dict) and "info" not in rec:
+                add_info = rec.get("add_info")
+                if not isinstance(add_info, dict):
+                    add_info = {}
+                    rec["add_info"] = add_info
+                add_info["replicas"] = replicas
     content = {r["container"]: r_content}
     rightsize = json.dumps(content)
     recommendation = {
@@ -1459,20 +1549,37 @@ def generate_container_recommendation(cloud_account_id, r, resource_id, settings
     return ignore_recommendation, r_content, recommendation, saving
 
 
-def process_resource_recommendation(cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id):
+def process_resource_recommendation(
+    cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id, pods_count=1
+):
+    """Monthly saving for one container plus whether the container should be dropped.
+
+    Keep in sync with calculate_container_savings in ml-k8s-server
+    vertical_rightsizing/__init__.py: requests are per pod, so the per-pod
+    delta is scaled by the live replica count, and a resource entry without
+    usable numbers contributes nothing rather than discarding the container
+    (a sidecar with no memory series must not erase the app container's
+    cpu saving). A container with no usable entry at all is still dropped:
+    there is nothing to show for it.
+    """
     saving = 0
     new_cpu = 0
     original_cpu = 0
     new_memory = 0
     original_memory = 0
     ignore_recommendation = False
+    usable_entries = 0
+    try:
+        replicas = max(float(pods_count or 0), 1.0)
+    except (TypeError, ValueError):
+        replicas = 1.0
     for rec in r_content:
         new_hourly_cost = 0
         original_hourly_cost = 0
         if "info" in rec and (rec["info"] == "Not enough data" or rec["info"] == "No data"):
-            logging.info(f"Not enough data Ignoring recommendation {resource_id}")
-            ignore_recommendation = True
+            logging.info(f"Not enough data for {rec.get('resource')} on {resource_id}, skipping the entry")
             continue
+        usable_entries += 1
         if rec["recommended"]["request"] == "?":
             rec["recommended"]["request"] = rec["allocated"]["request"]
         if rec["resource"] == "cpu" and rec["allocated"]["request"]:
@@ -1484,7 +1591,10 @@ def process_resource_recommendation(cpu_cost_per_hour, memory_cost_per_hour, r_c
                 memory_cost_per_hour, rec, settings
             )
         if new_hourly_cost != 0 and original_hourly_cost != 0:
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30
+            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas
+    if r_content and usable_entries == 0:
+        logging.info(f"No usable data for any resource on {resource_id}, ignoring the container")
+        ignore_recommendation = True
     if (
         new_cpu
         and original_cpu
@@ -1727,7 +1837,19 @@ def get_existing_resource(cloud_account_id, report, tenant):
                AND kp.namespace = kw.namespace
                AND kp.is_active = true
              LIMIT 1
-            ) AS memory_gb
+            ) AS memory_gb,
+            -- Live replica count, the collector-side twin of ml-k8s-server's
+            -- current_pods_count. Requests are per pod, so the per-pod saving is
+            -- scaled by this; appended last so the positional reads above hold.
+            (SELECT count(*)
+             FROM k8s_pods kp
+             WHERE kp.cloud_account_id = kw.cloud_account_id
+               AND kp.tenant_id = kw.tenant_id
+               AND kp.workload_name = kw.name
+               AND kp.workload_type = kw.kind
+               AND kp.namespace = kw.namespace
+               AND kp.is_active = true
+            ) AS active_pods
         from k8s_workloads as kw
         where kw.cloud_account_id = %s
           and kw.tenant_id = %s

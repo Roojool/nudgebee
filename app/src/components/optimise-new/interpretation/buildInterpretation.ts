@@ -137,6 +137,18 @@ const DIRECTION_VERB: Record<RightSizingSummary['direction'], string> = {
   none: 'Right-size',
 };
 
+// " at an average of 3.2 replicas over 14 days (2–10)"; the range is dropped
+// when the count never moved.
+export function formatReplicaWindow(r: RightSizingSummary['replicas']): string {
+  if (!r) return '';
+  const avg = Number.isInteger(r.avg) ? String(r.avg) : r.avg.toFixed(1);
+  const noun = r.avg === 1 ? 'replica' : 'replicas';
+  const days = r.windowHours != null ? r.windowHours / 24 : null;
+  const over = days != null ? ` over ${Number.isInteger(days) ? days : days.toFixed(1)} days` : '';
+  const range = r.min !== r.max ? ` (${r.min}–${r.max})` : '';
+  return ` at an average of ${avg} ${noun}${over}${range}`;
+}
+
 function podRightSizing(
   summary: RightSizingSummary,
   savings: number
@@ -149,15 +161,18 @@ function podRightSizing(
   let impact: string;
   let impactIsCost = false;
   const monthlyIncrease = Math.round(savings < 0 ? -savings : 0);
+  // The dollar figure is per pod times replicas; say which replica count it
+  // assumed so a swing on an autoscaled workload reads as a range, not a bug.
+  const atReplicas = formatReplicaWindow(summary.replicas);
   if (Math.round(savings) >= 1) {
-    impact = `~$${Math.round(savings)}/mo savings${summary.reclaimText ? ` · reclaims ${summary.reclaimText}` : ''}.`;
+    impact = `~$${Math.round(savings)}/mo savings${atReplicas}${summary.reclaimText ? ` · reclaims ${summary.reclaimText}` : ''}.`;
     impactIsCost = true;
   } else if (monthlyIncrease >= 1) {
     // Raising requests buys reliability at a monthly price, and that price is
     // the whole basis for the trade-off, so name it rather than reporting
     // "no direct cost change" for a workload whose bill goes up.
     const reason = summary.direction === 'increase' ? 'prevents CPU throttling and OOM kills' : 'matches requests to observed usage';
-    impact = `Costs ~$${monthlyIncrease}/mo more · ${reason}.`;
+    impact = `Costs ~$${monthlyIncrease}/mo more${atReplicas} · ${reason}.`;
   } else if (summary.reclaimText) {
     impact = `Reclaims ~${summary.reclaimText} of guaranteed allocation. No direct cost change.`;
   } else if (summary.direction === 'increase') {

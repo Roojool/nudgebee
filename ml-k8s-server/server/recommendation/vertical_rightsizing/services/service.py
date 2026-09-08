@@ -168,6 +168,15 @@ class RecommendationService:
             else:
                 logger.warning(f"No pods found for {object} in both Prometheus and database")
 
+        if object.pods:
+            try:
+                object.replica_stats = await self._metrics_service_loaders.load_replica_stats(
+                    object, self._strategy.settings.history_timedelta
+                )
+            except Exception as e:  # the multiplier falls back to the live count
+                logger.warning(f"Replica window lookup failed for {object}: {e}")
+                object.replica_stats = None
+
         metrics = await self._metrics_service_loaders.gather_data(
             object,
             self._strategy,

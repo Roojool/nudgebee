@@ -5,6 +5,7 @@ from typing import Literal, Optional
 import pydantic as pd
 
 from server.recommendation.vertical_rightsizing.models.allocations import ResourceAllocations
+from server.recommendation.vertical_rightsizing.models.replicas import ReplicaStats
 from server.recommendation.vertical_rightsizing.services.batched import batched
 
 KindLiteral = Literal["Deployment", "DaemonSet", "StatefulSet", "Job", "CronJob", "Rollout", "DeploymentConfig"]
@@ -46,6 +47,9 @@ class K8sObjectData(pd.BaseModel):
     allocations: ResourceAllocations
     warnings: set[PodWarning] = set()
     selector: Optional[dict] = None
+    # Time-weighted replica count over the observation window; None when the
+    # metrics backend cannot supply it, in which case current_pods_count is used.
+    replica_stats: Optional[ReplicaStats] = None
 
     _api_resource = pd.PrivateAttr(None)
 

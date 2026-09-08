@@ -85,7 +85,32 @@ export interface RightSizingSummary {
   observedWindow: string | null;
   /** Robustness of the call, derived from the lookback length. */
   confidence: 'High' | 'Medium' | 'Low' | null;
+  /**
+   * Replica count the savings were scaled by: the time-weighted average over
+   * the observation window, with the range seen. Absent on rows written before
+   * the producers recorded it, in which case the saving used the live count.
+   */
+  replicas: ReplicaWindow | null;
 }
+
+export interface ReplicaWindow {
+  avg: number;
+  min: number;
+  max: number;
+  windowHours: number | null;
+}
+
+// Both producers stamp the same summary on every resource entry's add_info;
+// read it off whichever entry the primary container has.
+export const replicaWindowOf = (entries: any[]): ReplicaWindow | null => {
+  for (const entry of entries) {
+    const r = entry?.add_info?.replicas;
+    if (r && typeof r.avg === 'number' && typeof r.min === 'number' && typeof r.max === 'number') {
+      return { avg: r.avg, min: r.min, max: r.max, windowHours: typeof r.window_hours === 'number' ? r.window_hours : null };
+    }
+  }
+  return null;
+};
 
 // "336" (hours) + "1.25" (minutes) → "14 days · 1.25-min step".
 const formatWindow = (hours: number | null, stepMin: number | null): string | null => {
@@ -209,6 +234,7 @@ export function summarizeRightSizing(recData: any): RightSizingSummary | null {
     evidence,
     observedWindow,
     confidence,
+    replicas: replicaWindowOf([primary.cpu, primary.memory]),
   };
 }
 

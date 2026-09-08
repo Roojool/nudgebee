@@ -4,11 +4,12 @@ import logging
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from server.recommendation.vertical_rightsizing.models.config import Config
 from server.recommendation.vertical_rightsizing.models.objects import K8sObjectData, PodData
+from server.recommendation.vertical_rightsizing.models.replicas import ReplicaStats, replica_stats_from_running_series
 from server.recommendation.vertical_rightsizing.strategy.strategies import BaseStrategy
 
 from server.recommendation.vertical_rightsizing.models.result import PodsTimeData
@@ -394,3 +395,39 @@ class PrometheusMetricsService(MetricsService):
                 current_pods_set |= batch_pods
 
         return list({PodData(name=pod, deleted=pod not in current_pods_set) for pod in related_pods})
+
+    async def load_replica_stats(self, object: K8sObjectData, period: timedelta) -> Optional[ReplicaStats]:
+        """Time-weighted replica count over the window, from the pods load_pods discovered.
+
+        Hourly samples of the Running phase per pod; a timestamp with no running
+        pod carries no sample, so a workload younger than the window averages
+        over its own lifetime. Returns None on an empty result so the caller
+        falls back to the instant count.
+        """
+        pods = [pod.name for pod in object.pods]
+        if not pods:
+            return None
+        cluster_label = self.get_prometheus_cluster_label()
+        now = datetime.now()
+
+        async def range_batch(pod_group: Iterable[str]) -> Any:
+            # query_range is annotated dict but yields the list of series the
+            # liveness check above iterates the same way.
+            return await self.query_range(
+                f"""
+                    kube_pod_status_phase{{
+                        phase="Running",
+                        pod=~"{'|'.join(pod_group)}",
+                        namespace="{object.namespace}",
+                        {cluster_label}
+                    }} == 1
+                """,
+                start=now - period,
+                end=now,
+                step=timedelta(hours=1),
+            )
+
+        series: list = []
+        for batch in await asyncio.gather(*(range_batch(g) for g in batched(pods, 100))):
+            series.extend(batch)
+        return replica_stats_from_running_series(series, period)

@@ -42,7 +42,9 @@ class RecommendationData:
     container: str
     priority: int
     content: List[Dict[str, Any]]
-    pods_count: int = 1
+    # Windowed average replica count when the metrics backend supplied one,
+    # otherwise the live count; either way the per-pod saving is scaled by it.
+    pods_count: float = 1
 
 
 @dataclass
@@ -355,13 +357,15 @@ def calculate_container_savings(
     content: List[Dict[str, Any]],
     cpu_cost_per_hour: float,
     memory_cost_per_hour: float,
-    pods_count: int = 1,
+    pods_count: float = 1,
 ) -> float:
     """Calculate estimated monthly savings for a container based on CPU and memory recommendations.
 
-    Requests are per pod, so the per-pod delta is multiplied by the number of running
-    pods to get what the workload actually saves. Without it a 20-replica Deployment
-    reports a twentieth of its real saving.
+    Requests are per pod, so the per-pod delta is multiplied by the replica count
+    to get what the workload actually saves. Without it a 20-replica Deployment
+    reports a twentieth of its real saving. The count is the time-weighted
+    average over the observation window when available (see models/replicas.py),
+    so an autoscaled workload reports the same figure scan after scan.
 
     Args:
         content: List of resource recommendations (CPU and memory)
@@ -1069,8 +1073,11 @@ def build_recommendation_data_from_scans(rightsizing_recommendations, ctx_logger
         for scan in rightsizing_recommendations.scans:
             try:
                 content = []
+                replica_stats = scan.object.replica_stats
                 for resource in rightsizing_recommendations.resources:
-                    add_info = scan.recommended.config.get(resource, {})
+                    add_info = dict(scan.recommended.config.get(resource, {}) or {})
+                    if replica_stats is not None:
+                        add_info["replicas"] = replica_stats.as_payload()
 
                     # Get raw values
                     raw_recommended_request = scan.recommended.requests[resource].value
@@ -1113,7 +1120,7 @@ def build_recommendation_data_from_scans(rightsizing_recommendations, ctx_logger
                     container=scan.object.container,
                     priority=scan.priority,
                     content=content,
-                    pods_count=scan.object.current_pods_count,
+                    pods_count=replica_stats.avg if replica_stats is not None else scan.object.current_pods_count,
                 )
                 recommendations.append(recommendation)
 
