@@ -18,37 +18,6 @@ type ListActionsRequest struct {
 	AlertType      string `json:"alert_type"`
 }
 
-// PrometheusMetric represents key-value labels for a Prometheus series
-type PrometheusMetric map[string]string
-
-// PrometheusSeries represents a time-series data structure
-type PrometheusSeries struct {
-	Metric     PrometheusMetric `json:"metric"`
-	Timestamps []float64        `json:"timestamps"`
-	Values     []string         `json:"values"`
-}
-
-// PrometheusVector represents a single vector result
-type PrometheusVector struct {
-	Metric PrometheusMetric      `json:"metric"`
-	Value  PrometheusScalarValue `json:"value"` // Usually [timestamp, value]
-}
-
-// PrometheusScalarValue represents a scalar value in Prometheus
-type PrometheusScalarValue struct {
-	Timestamp float64 `json:"timestamp"`
-	Value     string  `json:"value"`
-}
-
-// PrometheusQueryResult represents the result from a Prometheus query
-type PrometheusQueryResult struct {
-	ResultType       string                 `json:"result_type"`
-	VectorResult     []PrometheusVector     `json:"vector_result,omitempty"`
-	SeriesListResult []PrometheusSeries     `json:"series_list_result,omitempty"`
-	ScalarResult     *PrometheusScalarValue `json:"scalar_result,omitempty"`
-	StringResult     *string                `json:"string_result,omitempty"`
-}
-
 var PrometheusLabelCategoryMapping = map[string]string{
 	"Deployment":  "deployment",
 	"DaemonSet":   "daemonset",

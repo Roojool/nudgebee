@@ -158,7 +158,7 @@ func handleEventRuleAction(actionPayload *ActionRequest, c *gin.Context, tracer 
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return
 		}
-		actions, err := eventrule.ListAction(ctx, relayAPIRequest)
+		actions, err := eventrule.ListAction(ctx, relayAPIRequest, promQLLabelNames)
 		if err != nil {
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			auditEvent.EventStatus = audit.EventStatusFailure

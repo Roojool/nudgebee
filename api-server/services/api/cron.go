@@ -641,7 +641,7 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 					}
 				}()
 				ctx.GetLogger().Info("cron: analyzing noisy alerts for threshold suggestions")
-				if err := triage.AnalyzeNoisyAlerts(ctx); err != nil {
+				if err := triage.AnalyzeNoisyAlerts(ctx, promQLRangeSeries); err != nil {
 					ctx.GetLogger().Error("cron: failed to analyze noisy alerts", "error", err)
 				}
 			}()

@@ -36,7 +36,7 @@ type noisyAlert struct {
 
 // AnalyzeNoisyAlerts scans for frequently-firing alerts and pre-computes threshold suggestions.
 // Called by the "Threshold Suggestion Refresh" cron job.
-func AnalyzeNoisyAlerts(ctx *security.RequestContext) error {
+func AnalyzeNoisyAlerts(ctx *security.RequestContext, fetchSeries PromQLRangeSeries) error {
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		return err
@@ -138,7 +138,7 @@ func AnalyzeNoisyAlerts(ctx *security.RequestContext) error {
 			defer wg.Done()
 			defer func() { <-sem }()
 			for _, na := range entries {
-				processNoisyAlert(ctx, db, na, &processed, &stored, &skipped, &errCount)
+				processNoisyAlert(ctx, db, na, fetchSeries, &processed, &stored, &skipped, &errCount)
 			}
 		}(entries)
 	}
@@ -151,7 +151,7 @@ func AnalyzeNoisyAlerts(ctx *security.RequestContext) error {
 	return nil
 }
 
-func processNoisyAlert(ctx *security.RequestContext, db *sqlx.DB, na noisyAlert,
+func processNoisyAlert(ctx *security.RequestContext, db *sqlx.DB, na noisyAlert, fetchSeries PromQLRangeSeries,
 	processed, stored, skipped, errCount *atomic.Int64) {
 
 	// Find a representative event by alert_rule_key.
@@ -194,7 +194,7 @@ func processNoisyAlert(ctx *security.RequestContext, db *sqlx.DB, na noisyAlert,
 
 	processed.Add(1)
 
-	response := GetThresholdSuggestion(ctx.GetContext(), db, ev, na.TenantID)
+	response := GetThresholdSuggestion(ctx.GetContext(), db, ev, na.TenantID, fetchSeries)
 
 	if !response.Available || response.Suggestion == nil {
 		skipped.Add(1)

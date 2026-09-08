@@ -43,7 +43,7 @@ func TestGetThresholdSuggestion_AWSCloudWatch(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID, "Event missing tenant")
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== AWS CloudWatch Threshold Suggestion ===\n%s", string(resultJSON))
@@ -113,7 +113,7 @@ func TestGetThresholdSuggestion_AWSCloudWatch_StandardNamespace(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID)
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== AWS SQS Threshold Suggestion ===\n%s", string(resultJSON))
@@ -154,7 +154,7 @@ func TestGetThresholdSuggestion_AzureMonitor(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID)
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== Azure Monitor Threshold Suggestion ===\n%s", string(resultJSON))
@@ -203,7 +203,7 @@ func TestGetThresholdSuggestion_UnsupportedSource(t *testing.T) {
 		tenantID = *ev.Tenant
 	}
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	t.Logf("Source: %s, Available: %v, Error: %s", response.Source, response.Available, response.Error)
 
@@ -308,7 +308,7 @@ func TestGetThresholdSuggestion_AWSCloudWatch_CustomNamespace(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID)
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== AWS CloudWatch Custom Namespace Threshold Suggestion ===\n%s", string(resultJSON))
@@ -364,7 +364,7 @@ func TestGetThresholdSuggestion_Prometheus(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID)
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== Prometheus Threshold Suggestion ===\n%s", string(resultJSON))
@@ -420,7 +420,7 @@ func TestGetThresholdSuggestion_Prometheus_MultiCondition(t *testing.T) {
 	}
 	require.NotEmpty(t, tenantID)
 
-	response := GetThresholdSuggestion(ctx, db, ev, tenantID)
+	response := GetThresholdSuggestion(ctx, db, ev, tenantID, nil)
 
 	resultJSON, _ := json.MarshalIndent(response, "", "  ")
 	t.Logf("=== Prometheus Multi-Condition Threshold Suggestion ===\n%s", string(resultJSON))
