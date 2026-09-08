@@ -87,9 +87,9 @@ test.describe("Admin AI & Tools RCA Format", () => {
       await expect(page.getByText(RCA_SUBHEADER, { exact: true }).first()).toBeVisible({ timeout: 30000 });
       await expect(locators.emptyState).toHaveCount(0, { timeout: 30000 });
 
-      // The editor is seeded from getRcaFormat, falling back to the component's
-      // DEFAULT_RCA_FORMAT when the account has none saved — either way it is
-      // never blank, so an empty body means the fetch never painted.
+      // getRcaFormat always resolves to a non-empty template — the account's
+      // saved one, or the backend's built-in default when it has none — so an
+      // empty body means the fetch never painted.
       await expect(locators.editor).not.toBeEmpty({ timeout: 30000 });
 
       // isDirty compares against the baseline set by the load, so a just-loaded
