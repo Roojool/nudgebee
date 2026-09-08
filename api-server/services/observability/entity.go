@@ -251,6 +251,12 @@ type GetUtilisationTrendRequest struct {
 	StartTime            int64          `json:"start_time"`
 	EndTime              int64          `json:"end_time"`
 	Request              map[string]any `json:"request"`
+
+	// StepInterval is the resolution in seconds. Zero leaves the choice to
+	// getStepDuration, which spreads ~60 points across the range with a 60s floor
+	// — right for a picker-driven chart, too coarse for an evidence card drawn
+	// over a ten-minute incident window, where it halves the points.
+	StepInterval int `json:"step_interval,omitempty"`
 }
 
 // OutputMetricQuery represents the response structure for metric and log group queries.

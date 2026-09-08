@@ -82,3 +82,16 @@ type PlaybookAutoAction interface {
 type PlaybookActionVariant interface {
 	VariantKey() string
 }
+
+// PlaybookActionAgentOptional is implemented by a k8s_*-prefixed action that no
+// longer needs a connected agent.
+//
+// Auto-discovery skips every k8s_* action when the account has no agent, because
+// those actions used to reach the cluster through relay-server and would only
+// produce "agent not connected" errors. An action that now reads from the
+// account's own metrics provider — which may be a Prometheus connected directly,
+// with no agent anywhere — is no longer in that category, and says so here.
+// Implement it only after the action has genuinely stopped calling the relay.
+type PlaybookActionAgentOptional interface {
+	AgentOptional() bool
+}

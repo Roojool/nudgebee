@@ -1,24 +1,48 @@
-package playbooks
+package observability
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"nudgebee/services/common"
+	"nudgebee/services/eventrule/playbooks"
 	"nudgebee/services/internal/database"
-	"nudgebee/services/relay"
+	"nudgebee/services/security"
+
+	"github.com/lib/pq"
 	"strings"
-	"time"
 )
+
+// The action lives in observability rather than in playbooks because the
+// metrics-provider lookup is here, and playbooks cannot import this package
+// (this package imports playbooks in order to register actions). Same move as
+// eventrule_action_noisy_neighbours.go. The three registrations and their
+// configuration are carried over verbatim from playbooks/factory.go: the names
+// are referenced by stored playbooks and by the auto-discovery allow-list in
+// eventrule/service.go, so they must not change.
+func init() {
+	playbooks.RegisterAction("k8s_pod_metric_enricher", &podMetricAction{})
+	playbooks.RegisterAction("k8s_pod_cpu_metric_enricher", &podMetricAction{
+		autodetectResource: "cpu",
+	})
+	playbooks.RegisterAction("k8s_pod_memory_metric_enricher", &podMetricAction{
+		autodetectResource: "memory",
+	})
+}
 
 type podMetricAction struct {
 	autodetectResource string
-	// workloadResourceSpec resolves the authoritative container resource spec
-	// (which of memory-request / memory-limit / cpu-request are set) for the
-	// workload backing a pod, from the collected k8s_workloads.meta. Overridable
-	// in tests; nil means use the real DB-backed resourcePresenceFromWorkloadSpec.
-	workloadResourceSpec func(ctx PlaybookActionContext, podName, namespace string) (found, hasMemReq, hasMemLim, hasCpuReq bool)
+	// workloadResourceSpec resolves the authoritative container spec for the
+	// workload backing a pod, from the collected k8s_workloads.meta: the container
+	// NAMES, and which of memory-request / memory-limit / cpu-request are set.
+	//
+	// The names are what lets the metrics query stay per-container. Every
+	// provider's utilisation query aggregates a pod to one series and scopes to a
+	// single container only when asked by name, so the names have to be known
+	// before querying rather than discovered from the result.
+	//
+	// Overridable in tests; nil means use the real DB-backed
+	// resourcePresenceFromWorkloadSpec.
+	workloadResourceSpec func(ctx playbooks.PlaybookActionContext, podName, namespace string) (found bool, containers []string, hasMemReq, hasMemLim, hasCpuReq bool)
 }
 
 type podMetricData struct {
@@ -37,11 +61,18 @@ type podMetricEntry struct {
 // are the same type and so would otherwise collapse into one run under
 // auto-discovery's per-implementation dedup — leaving OOM events with CPU
 // evidence only.
+// AgentOptional opts this action out of auto-discovery's "no agent, skip every
+// k8s_* action" pre-flight. Its PromQL now goes through the metrics layer, which
+// serves an account whose Prometheus is connected directly just as well as one
+// with a cluster agent; without this the card stays invisible on exactly the
+// accounts this migration was for.
+func (a *podMetricAction) AgentOptional() bool { return true }
+
 func (a *podMetricAction) VariantKey() string {
 	return a.autodetectResource
 }
 
-func (a *podMetricAction) CanAutoExecute(ctx PlaybookActionContext) bool {
+func (a *podMetricAction) CanAutoExecute(ctx playbooks.PlaybookActionContext) bool {
 	if a.autodetectResource == "" {
 		return false
 	}
@@ -66,7 +97,7 @@ func (a *podMetricAction) CanAutoExecute(ctx PlaybookActionContext) bool {
 	return strings.EqualFold(event.SubjectType, "pod") && (event.SubjectOwner != "" || event.SubjectName != "")
 }
 
-func (a *podMetricAction) AutoExecute(ctx PlaybookActionContext) (PlaybookActionResponse, error) {
+func (a *podMetricAction) AutoExecute(ctx playbooks.PlaybookActionContext) (playbooks.PlaybookActionResponse, error) {
 	if a.autodetectResource == "" {
 		return nil, errors.New("autodetect_resource is required")
 	}
@@ -125,7 +156,7 @@ type podMetricEnricherParams struct {
 	ClusterLabel string `json:"cluster_label,omitempty"`
 }
 
-func (a *podMetricAction) Execute(ctx PlaybookActionContext, rawParams map[string]any) (PlaybookActionResponse, error) {
+func (a *podMetricAction) Execute(ctx playbooks.PlaybookActionContext, rawParams map[string]any) (playbooks.PlaybookActionResponse, error) {
 	var params podMetricEnricherParams
 	err := common.UnmarshalMapToStruct(rawParams, &params)
 	if err != nil {
@@ -145,23 +176,10 @@ func (a *podMetricAction) Execute(ctx PlaybookActionContext, rawParams map[strin
 		params.ResourceType = "CPU"
 	}
 
-	// Build prometheus queries for the pod metrics
-	promqlQueries := []NamedQuery{}
-
-	clusterLabel := "cluster"
-	if params.ClusterLabel != "" {
-		clusterLabel = params.ClusterLabel
-	}
-	replacement := ""
-	if params.Cluster != "" {
-		replacement = fmt.Sprintf(`%s="%s",`, clusterLabel, params.Cluster)
-	}
-
-	// Helper function to handle cluster label replacement
-	replaceClusterLabel := func(query string) string {
-		// Replace __CLUSTER__ with the actual cluster label
-		return strings.ReplaceAll(query, "__CLUSTER__", replacement)
-	}
+	// The container spec is resolved once and used twice: for the container names
+	// the metrics query needs, and for the authoritative request/limit presence the
+	// insights need.
+	spec := a.resolveWorkloadSpec(ctx, params)
 
 	// Use regex match for workload names (Deployment, StatefulSet, DaemonSet,
 	// ReplicaSet, Job, ReplicationController) since their pod names have a
@@ -175,7 +193,6 @@ func (a *podMetricAction) Execute(ctx PlaybookActionContext, rawParams map[strin
 	// per-workload labels (deployment / statefulset / daemonset / job) which
 	// are present on alerts like KubeDeploymentRolloutStuck where the "kind"
 	// label is unset.
-	podSelector := fmt.Sprintf(`pod="%s"`, params.PodName)
 	kind := ""
 	if ctx.GetEvent().Labels != nil {
 		kind = ctx.GetEvent().Labels["kind"]
@@ -208,55 +225,24 @@ func (a *podMetricAction) Execute(ctx PlaybookActionContext, rawParams map[strin
 		strings.HasPrefix(ctx.GetEvent().SubjectName, params.PodName+"-") {
 		useRegex = true
 	}
+
+	// The utilisation builders distinguish only "pod" (an exact pod= match) from a
+	// workload kind (pod=~"<name>-.*"), so the regex decision collapses to which of
+	// the two we ask for. params.Cluster / ClusterLabel are no longer consumed
+	// here: the metrics layer owns cluster scoping now, expanding __CLUSTER__ for
+	// the agent and pinning the integration's own labels for a direct connection.
+	metricKind := "pod"
 	if useRegex {
-		podSelector = fmt.Sprintf(`pod=~"%s-.*"`, params.PodName)
+		metricKind = workloadKindForUtilisation(kind)
 	}
 
-	// Main metric query (CPU or Memory usage).
-	//
-	// cAdvisor emits three flavours of `container_*` series per pod:
-	//   (a) per-container: container=<name>  — the actual app series
-	//   (b) the sandbox / pause container: container="POD"
-	//   (c) the pod-level aggregate (sum of containers): container=""
-	// (b) and (c) end up as extra noise rows that the UI's
-	// MemoryAllocationCard renders as separate panels — producing the
-	// "two Pod memory charts where one is empty" symptom on the
-	// investigate page. Match Robusta's enricher and the noisy_neighbours
-	// fix by requiring a non-empty, non-POD container label.
-	containerFilter := `container!="", container!="POD"`
-	var metricQuery string
-	if strings.ToUpper(params.ResourceType) == "CPU" {
-		metricQuery = replaceClusterLabel(fmt.Sprintf(`rate(container_cpu_usage_seconds_total{__CLUSTER__ %s, %s, namespace="%s"}[5m])`, podSelector, containerFilter, params.Namespace))
-	} else {
-		metricQuery = replaceClusterLabel(fmt.Sprintf(`container_memory_rss{__CLUSTER__ %s, %s, namespace="%s"}`, podSelector, containerFilter, params.Namespace))
-	}
-
-	promqlQueries = append(promqlQueries, NamedQuery{
-		Key:   "metrics",
-		Query: metricQuery,
-	})
-
-	// Query for pod requests and limits (instant queries) - always fetch both CPU and memory
-	requestsQuery := replaceClusterLabel(fmt.Sprintf(`kube_pod_container_resource_requests{__CLUSTER__ %s, namespace="%s"}`, podSelector, params.Namespace))
-	promqlQueries = append(promqlQueries, NamedQuery{
-		Key:   "requests",
-		Query: requestsQuery,
-	})
-
-	limitsQuery := replaceClusterLabel(fmt.Sprintf(`kube_pod_container_resource_limits{__CLUSTER__ %s, namespace="%s"}`, podSelector, params.Namespace))
-	promqlQueries = append(promqlQueries, NamedQuery{
-		Key:   "limits",
-		Query: limitsQuery,
-	})
-
-	// Execute prometheus queries using the existing prometheus enricher
-	prometheusData, err := a.executePrometheusQueries(ctx, promqlQueries, params.Duration)
+	metricEntries, requestsMap, limitsMap, err := a.fetchContainerMetrics(ctx, params, metricKind, spec.containers)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build the pod metric response structure
-	podMetric, insights := a.buildPodMetricResponse(ctx, prometheusData, params, userResourceType)
+	podMetric, insights := a.buildPodMetricResponse(ctx, metricEntries, requestsMap, limitsMap, spec, params, userResourceType)
 
 	additionalInfo := map[string]any{
 		"title":              "pod_metric_enricher",
@@ -274,101 +260,217 @@ func (a *podMetricAction) Execute(ctx PlaybookActionContext, rawParams map[strin
 		"query":                rawParams,
 	}
 
-	return NewPlaybookActionResponseJson(podMetric, additionalInfo, insights, metadata), nil
+	return playbooks.NewPlaybookActionResponseJson(podMetric, additionalInfo, insights, metadata), nil
 }
 
-func (a *podMetricAction) executePrometheusQueries(ctx PlaybookActionContext, promqlQueries []NamedQuery, durationMinutes int) (map[string]any, error) {
-	// Anchor on the event, floored at durationMinutes. Taking StartedAt/EndedAt raw made
-	// the range a few seconds wide for a still-firing alert, which yields one sample per
-	// series — a flat line where the card should show the run-up to the alert. (It is not
-	// what leaves 28.7% of these evidences with an empty series array: those are pods that
-	// never ran, or namespaces cAdvisor is not scraping.)
-	startTime, endTime := ctx.GetEvent().ResolveQueryWindow(durationMinutes)
-
-	// Separate queries into range queries (metrics) and instant queries (requests/limits)
-	rangeQueries := []NamedQuery{}
-	instantQueries := []NamedQuery{}
-
-	for _, query := range promqlQueries {
-		if query.Key == "requests" || query.Key == "limits" || query.Key == "requests_alt" || query.Key == "limits_alt" {
-			instantQueries = append(instantQueries, query)
-		} else {
-			rangeQueries = append(rangeQueries, query)
-		}
-	}
-
-	// Execute queries
-	data := map[string]any{}
-
-	if len(rangeQueries) > 0 {
-		rangeData, err := a.executePrometheusQueryBatch(ctx, rangeQueries, startTime, endTime, false)
-		if err != nil {
-			return nil, err
-		}
-		maps.Copy(data, rangeData)
-	}
-
-	if len(instantQueries) > 0 {
-		instantData, err := a.executePrometheusQueryBatch(ctx, instantQueries, endTime, endTime, true)
-		if err != nil {
-			return nil, err
-		}
-		maps.Copy(data, instantData)
-	}
-
-	return data, nil
+// podWorkloadSpec is the collected container spec for the workload backing a pod:
+// the container names, and which resources the spec sets. Resolved once per
+// invocation because both the metrics query and the insights need it.
+type podWorkloadSpec struct {
+	found      bool
+	containers []string
+	hasMemReq  bool
+	hasMemLim  bool
+	hasCpuReq  bool
 }
 
-func (a *podMetricAction) executePrometheusQueryBatch(ctx PlaybookActionContext, queries []NamedQuery, startTime, endTime time.Time, instant bool) (map[string]any, error) {
-	actionParams := map[string]any{
-		"duration": map[string]any{
-			"ends_at":   endTime.UTC().Format("2006-01-02 15:04:05 UTC"),
-			"starts_at": startTime.UTC().Format("2006-01-02 15:04:05 UTC"),
-		},
-		"instant":        instant,
-		"promql_queries": queries,
+func (a *podMetricAction) resolveWorkloadSpec(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams) podWorkloadSpec {
+	lookup := a.workloadResourceSpec
+	if lookup == nil {
+		lookup = a.resourcePresenceFromWorkloadSpec
+	}
+	found, containers, hasMemReq, hasMemLim, hasCpuReq := lookup(ctx, params.PodName, params.Namespace)
+	return podWorkloadSpec{found: found, containers: containers, hasMemReq: hasMemReq, hasMemLim: hasMemLim, hasCpuReq: hasCpuReq}
+}
+
+// workloadKindForUtilisation maps the event's workload kind onto the vocabulary
+// the utilisation builders understand. They only branch on "pod" vs everything
+// else, so an unrecognised kind is safely reported as a deployment.
+func workloadKindForUtilisation(kind string) string {
+	switch strings.ToLower(kind) {
+	case "statefulset", "daemonset", "pod":
+		return strings.ToLower(kind)
+	default:
+		return "deployment"
+	}
+}
+
+// podMetricUsageKey is the abstract utilisation metric for the resource this
+// invocation collects. Every provider's builder implements both.
+func podMetricUsageKey(resourceType string) string {
+	if strings.EqualFold(resourceType, "CPU") {
+		return "cpu_usage"
+	}
+	return "memory_usage"
+}
+
+// podMetricSpecKeys are always fetched for both resources: the card renders the
+// request and limit lines for cpu and memory regardless of which usage series it
+// is drawing, and the allocation insights need all of them.
+var podMetricSpecKeys = []string{"cpu_request", "cpu_limit", "memory_request", "memory_limit"}
+
+// podMetricUtilisationRequest builds the request the utilisation layer reads. An
+// empty container asks for the pod as a whole; `kind` decides whether the pod
+// name is matched exactly or as a workload prefix.
+func podMetricUtilisationRequest(params podMetricEnricherParams, kind, container, usageKey string) map[string]any {
+	request := map[string]any{
+		"workload_namespace": params.Namespace,
+		"workload_name":      params.PodName,
+		"kind":               kind,
+		"metrics":            append([]string{usageKey}, podMetricSpecKeys...),
+	}
+	if container != "" {
+		request["container_name"] = container
+	}
+	return request
+}
+
+// fetchContainerMetrics reads the pod's usage, requests and limits from whichever
+// metrics backend the account has configured, one container at a time.
+//
+// One call per container is what keeps this card per-container. Every provider's
+// utilisation query aggregates a pod to a single series -- the Prometheus builder
+// wraps everything in sum() with no `by (container)` -- and scopes to one
+// container only when asked for it by name. The names come from the collected
+// workload spec, because an aggregated result carries no labels to recover them
+// from.
+//
+// Everything is a range query, including requests and limits: the agent's instant
+// batch comes back empty at event-processing time while the range path populates
+// (the same finding recorded on the noisy-neighbours action), so the spec values
+// are read as the last sample of their series.
+func (a *podMetricAction) fetchContainerMetrics(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams, kind string, containers []string) ([]podMetricEntry, map[string]map[string]float64, map[string]map[string]float64, error) {
+	tenantID, accountID := ctx.GetTenantId(), ctx.GetAccountId()
+	if tenantID == "" || accountID == "" {
+		return nil, nil, nil, errors.New("k8s_pod_metric_enricher: tenant ID and account ID required")
+	}
+	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
+
+	startTime, endTime := ctx.GetEvent().ResolveQueryWindow(params.Duration)
+	usageKey := podMetricUsageKey(params.ResourceType)
+
+	entries := []podMetricEntry{}
+	requestsMap := map[string]map[string]float64{}
+	limitsMap := map[string]map[string]float64{}
+
+	// No collected spec means no container names. Ask for the pod as a whole and
+	// render the one aggregated series rather than nothing -- but do NOT record
+	// requests/limits from it: those queries sum across containers, so the total
+	// would be presented as a per-container value and would drive false "missing
+	// resource" insights. An absent value is correctly read as "unknown".
+	scopes := containers
+	aggregated := len(scopes) == 0
+	if aggregated {
+		scopes = []string{""}
 	}
 
-	// Add step parameter for range queries
-	if !instant {
-		actionParams["step"] = "30s"
-	}
+	for _, container := range scopes {
+		output, err := FetchMetricUtilisation(requestCtx, GetUtilisationTrendRequest{
+			AccountId: accountID,
+			StartTime: startTime.UnixMilli(),
+			EndTime:   endTime.UnixMilli(),
+			// The card is drawn over a ten-minute incident window; the layer's
+			// default would spread ~60 points across it with a 60s floor.
+			StepInterval: podMetricStepSeconds,
+			Request:      podMetricUtilisationRequest(params, kind, container, usageKey),
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("k8s_pod_metric_enricher: metrics: %w", err)
+		}
 
-	relayRequest := relay.RelayExecuteRequest{
-		Body: relay.ActionExecuteBody{
-			AccountID:    ctx.GetAccountId(),
-			ActionName:   "prometheus_queries_enricher",
-			ActionParams: actionParams,
-			Origin:       "services-server",
-		},
-		NoSinks: true,
-		Cache:   false,
-	}
-
-	relayResponse, _, err := relay.ExecuteAndExtractResponse(relayRequest)
-	if err != nil {
-		return nil, err
-	}
-
-	result := map[string]any{}
-	if relayResponse["data"] != nil {
-		switch d := relayResponse["data"].(type) {
-		case map[string]any:
-			result = d
-		case string:
-			err := common.UnmarshalJson([]byte(d), &result)
-			if err != nil {
-				queryType := "range"
-				if instant {
-					queryType = "instant"
+		for _, result := range output.Results {
+			if result.Error != nil {
+				// The metrics layer reports a failed query per key rather than as an
+				// error, so without this a backend outage is indistinguishable from
+				// "this pod has no data" — an empty card and nothing to explain it.
+				ctx.GetLogger().Warn("pod_metrics_enricher: metrics query failed",
+					"query_key", result.QueryKey, "container", container,
+					"pod", params.PodName, "namespace", params.Namespace, "error", *result.Error)
+				continue
+			}
+			switch result.QueryKey {
+			case usageKey:
+				entries = append(entries, podUsageEntries(result, container, params)...)
+			case "cpu_request", "memory_request":
+				if !aggregated {
+					recordSpecValue(requestsMap, container, result)
 				}
-				ctx.GetLogger().Error("prometheus: unable to parse response", "error", err, "response", d, "query_type", queryType)
-				return nil, err
+			case "cpu_limit", "memory_limit":
+				if !aggregated {
+					recordSpecValue(limitsMap, container, result)
+				}
 			}
 		}
 	}
 
-	return result, nil
+	return entries, requestsMap, limitsMap, nil
+}
+
+// podMetricStepSeconds matches the resolution the relay facade was asked for
+// before this card moved onto the metrics layer.
+const podMetricStepSeconds = 30
+
+// podUsageEntries converts one query result into card entries, stamping the
+// labels the card renders. They have to be synthesized from what was asked for:
+// the provider queries aggregate, so the series come back with no labels at all
+// (the Elasticsearch path stamps its own labels for the same reason). The `job`
+// label the relay used to carry is not recoverable and is dropped -- nothing
+// reads it.
+func podUsageEntries(result QueryResult, container string, params podMetricEnricherParams) []podMetricEntry {
+	entries := []podMetricEntry{}
+	for _, series := range result.Payload {
+		if len(series.Values) == 0 {
+			// A series with no samples renders as nothing; leaving it out lets the
+			// requests/limits seeding below produce the entry instead.
+			continue
+		}
+		// Float seconds and value strings, matching promQLTimestamp / promQLValue —
+		// the same encoding every persisted Prometheus card carries.
+		timestamps := make([]float64, 0, len(series.Timestamps))
+		for i := range series.Timestamps {
+			timestamps = append(timestamps, promQLTimestamp(series, i))
+		}
+		values := make([]string, 0, len(series.Values))
+		for _, value := range series.Values {
+			values = append(values, promQLValue(value))
+		}
+		entries = append(entries, podMetricEntry{
+			Metric:     podSeriesLabels(container, params),
+			Timestamps: timestamps,
+			Values:     values,
+		})
+	}
+	return entries
+}
+
+func podSeriesLabels(container string, params podMetricEnricherParams) map[string]any {
+	labels := map[string]any{
+		"pod":       params.PodName,
+		"namespace": params.Namespace,
+	}
+	if container != "" {
+		labels["container"] = container
+	}
+	return labels
+}
+
+// recordSpecValue stores the latest sample of a request/limit series under
+// {container: {cpu|memory: value}} -- the shape the card and the insights join on.
+func recordSpecValue(into map[string]map[string]float64, container string, result QueryResult) {
+	resource := "cpu"
+	if strings.HasPrefix(result.QueryKey, "memory") {
+		resource = "memory"
+	}
+	for _, series := range result.Payload {
+		if len(series.Values) == 0 {
+			continue
+		}
+		if into[container] == nil {
+			into[container] = map[string]float64{}
+		}
+		into[container][resource] = series.Values[len(series.Values)-1]
+		break
+	}
 }
 
 // buildPodMetricResponse builds the response payload and generates
@@ -376,27 +478,8 @@ func (a *podMetricAction) executePrometheusQueryBatch(ctx PlaybookActionContext,
 // — see generateInsights for the semantics. The caller passes the user's
 // ORIGINAL resource_type (pre-default), which preserves "emit all three"
 // for callers that didn't ask for per-resource scoping.
-func (a *podMetricAction) buildPodMetricResponse(ctx PlaybookActionContext, prometheusData map[string]any, params podMetricEnricherParams, insightResourceType string) (podMetricData, []PlaybookActionResponseInsight) {
-	insights := []PlaybookActionResponseInsight{}
-	metricEntries := []podMetricEntry{}
-
-	// Process main metric data (CPU or Memory usage)
-	if prometheusData["metrics"] != nil {
-		entries := a.extractMetricEntries(prometheusData["metrics"])
-		metricEntries = append(metricEntries, entries...)
-	}
-
-	// Process requests and limits to populate metric entries and generate insights
-	requestsMap := a.extractResourceValues(prometheusData["requests"])
-	limitsMap := a.extractResourceValues(prometheusData["limits"])
-
-	// Try alternative queries if the main ones didn't return data
-	if len(requestsMap) == 0 && prometheusData["requests_alt"] != nil {
-		requestsMap = a.extractResourceValues(prometheusData["requests_alt"])
-	}
-	if len(limitsMap) == 0 && prometheusData["limits_alt"] != nil {
-		limitsMap = a.extractResourceValues(prometheusData["limits_alt"])
-	}
+func (a *podMetricAction) buildPodMetricResponse(ctx playbooks.PlaybookActionContext, metricEntries []podMetricEntry, requestsMap, limitsMap map[string]map[string]float64, spec podWorkloadSpec, params podMetricEnricherParams, insightResourceType string) (podMetricData, []playbooks.PlaybookActionResponseInsight) {
+	insights := []playbooks.PlaybookActionResponseInsight{}
 
 	// Debug: check if we got any requests/limits data
 	ctx.GetLogger().Debug("pod_metrics_enricher: processing requests and limits",
@@ -405,24 +488,12 @@ func (a *podMetricAction) buildPodMetricResponse(ctx PlaybookActionContext, prom
 		"pod", params.PodName,
 		"namespace", params.Namespace)
 
-	// Update metric entries with requests and limits
+	// Attach requests and limits. The producer already stamped the label set the
+	// card renders (container / pod / namespace), so there is nothing to filter
+	// down any more.
 	for i := range metricEntries {
-		// Filter metric to only include essential labels
-		filteredMetric := map[string]any{}
-
-		// Include only essential labels
-		essentialLabels := []string{"container", "job", "pod", "namespace"}
-		for _, label := range essentialLabels {
-			if value, exists := metricEntries[i].Metric[label]; exists {
-				filteredMetric[label] = value
-			}
-		}
-
-		// Add requests and limits
-		filteredMetric["requests"] = a.getResourceValues(requestsMap, metricEntries[i].Metric)
-		filteredMetric["limits"] = a.getResourceValues(limitsMap, metricEntries[i].Metric)
-
-		metricEntries[i].Metric = filteredMetric
+		metricEntries[i].Metric["requests"] = a.getResourceValues(requestsMap, metricEntries[i].Metric)
+		metricEntries[i].Metric["limits"] = a.getResourceValues(limitsMap, metricEntries[i].Metric)
 	}
 
 	// When the main metric query returned no series — typical for an
@@ -476,34 +547,38 @@ func (a *podMetricAction) buildPodMetricResponse(ctx PlaybookActionContext, prom
 	// result is otherwise ambiguous ("unset" vs "pod not found") and was
 	// previously misread as "unset", fabricating false High/Critical "missing
 	// resource" findings that poison downstream RCA.
-	specLookup := a.workloadResourceSpec
-	if specLookup == nil {
-		specLookup = a.resourcePresenceFromWorkloadSpec
-	}
-	if specFound, hasMemReq, hasMemLim, hasCpuReq := specLookup(ctx, params.PodName, params.Namespace); specFound {
+	if spec.found {
 		// Reuse generateInsights by encoding the spec's presence as a synthetic
 		// single-container map (value is a sentinel — only key presence matters).
 		const specContainer = "workload-spec"
 		specReq := map[string]float64{}
-		if hasMemReq {
+		if spec.hasMemReq {
 			specReq["memory"] = 1
 		}
-		if hasCpuReq {
+		if spec.hasCpuReq {
 			specReq["cpu"] = 1
 		}
 		specLim := map[string]float64{}
-		if hasMemLim {
+		if spec.hasMemLim {
 			specLim["memory"] = 1
 		}
 		a.generateInsights(
 			map[string]map[string]float64{specContainer: specReq},
 			map[string]map[string]float64{specContainer: specLim},
 			params.PodName, insightResourceType, &insights)
-	} else if len(metricEntries) > 0 || len(requestsMap) > 0 || len(limitsMap) > 0 {
+	} else if len(spec.containers) > 0 && (len(metricEntries) > 0 || len(requestsMap) > 0 || len(limitsMap) > 0) {
+		// Reading an empty requests/limits map as "unset" is only sound when those
+		// values were actually collected per container. They are not on the
+		// aggregated path (no container names to scope by), where the maps are
+		// empty by construction -- so this branch is gated on having had container
+		// names at all. Without them the resources are UNKNOWN, not absent, and
+		// asserting otherwise is what fabricated the High/Critical "missing
+		// resource" findings this whole spec lookup exists to prevent.
 		a.generateInsights(requestsMap, limitsMap, params.PodName, insightResourceType, &insights)
 	} else {
-		ctx.GetLogger().Debug("pod_metrics_enricher: no workload spec and pod not observed in metrics; skipping resource-allocation insights to avoid false 'missing resource' findings",
-			"pod", params.PodName, "namespace", params.Namespace)
+		ctx.GetLogger().Debug("pod_metrics_enricher: no per-container resource spec available; skipping resource-allocation insights to avoid false 'missing resource' findings",
+			"pod", params.PodName, "namespace", params.Namespace,
+			"spec_found", spec.found, "containers", len(spec.containers))
 	}
 
 	podMetric := podMetricData{
@@ -513,178 +588,6 @@ func (a *podMetricAction) buildPodMetricResponse(ctx PlaybookActionContext, prom
 	}
 
 	return podMetric, insights
-}
-
-func (a *podMetricAction) extractMetricEntries(metricsData any) []podMetricEntry {
-	entries := []podMetricEntry{}
-
-	// Try to unmarshal to PrometheusQueryResult
-	var prometheusResult PrometheusQueryResult
-	if dataBytes, err := json.Marshal(metricsData); err == nil {
-		if err := json.Unmarshal(dataBytes, &prometheusResult); err == nil {
-			// Process SeriesListResult (for range queries)
-			for _, series := range prometheusResult.SeriesListResult {
-				entry := podMetricEntry(series)
-				entries = append(entries, entry)
-			}
-		}
-	}
-
-	// Fallback to old parsing method if PrometheusQueryResult parsing fails
-	if len(entries) == 0 {
-		entries = a.extractMetricEntriesFromLegacyFormat(metricsData)
-	}
-
-	return entries
-}
-
-func (a *podMetricAction) extractMetricEntriesFromLegacyFormat(metricsData any) []podMetricEntry {
-	entries := []podMetricEntry{}
-
-	seriesData, ok := metricsData.(map[string]any)
-	if !ok {
-		return entries
-	}
-
-	seriesList, ok := seriesData["series_list_result"].([]any)
-	if !ok {
-		return entries
-	}
-
-	for _, series := range seriesList {
-		if entry := a.parseSeriesEntry(series); entry != nil {
-			entries = append(entries, *entry)
-		}
-	}
-
-	return entries
-}
-
-func (a *podMetricAction) parseSeriesEntry(series any) *podMetricEntry {
-	seriesMap, ok := series.(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	entry := &podMetricEntry{
-		Metric:     map[string]any{},
-		Timestamps: []float64{},
-		Values:     []string{},
-	}
-
-	// Extract metric labels
-	if metric, ok := seriesMap["metric"].(map[string]any); ok {
-		entry.Metric = metric
-	}
-
-	// Extract timestamps and values using helper functions
-	entry.Timestamps = a.extractTimestamps(seriesMap["timestamps"])
-	entry.Values = a.extractValues(seriesMap["values"])
-
-	return entry
-}
-
-func (a *podMetricAction) extractTimestamps(timestampsData any) []float64 {
-	timestamps := []float64{}
-
-	timestampsArray, ok := timestampsData.([]any)
-	if !ok {
-		return timestamps
-	}
-
-	for _, ts := range timestampsArray {
-		if timestamp, ok := ts.(float64); ok {
-			timestamps = append(timestamps, timestamp)
-		}
-	}
-
-	return timestamps
-}
-
-func (a *podMetricAction) extractValues(valuesData any) []string {
-	values := []string{}
-
-	valuesArray, ok := valuesData.([]any)
-	if !ok {
-		return values
-	}
-
-	for _, val := range valuesArray {
-		if value, ok := val.(string); ok {
-			values = append(values, value)
-		}
-	}
-
-	return values
-}
-
-func (a *podMetricAction) extractResourceValues(resourceData any) map[string]map[string]float64 {
-	resourceMap := make(map[string]map[string]float64)
-
-	// Relay's prometheus_queries_enricher wraps instant results as
-	// `{result_type, vector_result: [{metric, value}, ...]}`. The
-	// older code path here asserted `resourceData.([]any)` and silently
-	// returned an empty map for every Stage-2.2 invocation, so
-	// requestsMap / limitsMap were always empty and the
-	// "X pods does not have a memory limit" insights never fired.
-	// vectorResultEntries already handles the wrapping + both value
-	// shapes (Robusta-coerced object and standard Prometheus tuple).
-	for _, entry := range vectorResultEntries(resourceData) {
-		container, _ := entry.Metric["container"].(string)
-		resourceType, _ := entry.Metric["resource"].(string)
-		if container == "" || resourceType == "" {
-			continue
-		}
-		if resourceMap[container] == nil {
-			resourceMap[container] = make(map[string]float64)
-		}
-		resourceMap[container][resourceType] = entry.Value
-	}
-	return resourceMap
-}
-
-type resourceItem struct {
-	Container    string
-	ResourceType string
-	Value        float64
-}
-
-func (a *podMetricAction) parseResourceItem(item any) *resourceItem {
-	itemMap, ok := item.(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	// Extract metric labels
-	metric, ok := itemMap["metric"].(map[string]any)
-	if !ok {
-		return nil
-	}
-
-	container, ok := metric["container"].(string)
-	if !ok {
-		return nil
-	}
-
-	resourceType, ok := metric["resource"].(string)
-	if !ok {
-		return nil
-	}
-
-	// The relay's prometheus_queries_enricher emits the Robusta-coerced
-	// shape `{"timestamp": <float>, "value": "<str>"}`; older code paths
-	// may still emit the standard `[ts, "v"]` tuple. parseInstantValue
-	// accepts both — see action_noisy_neighbours.go.
-	value, ok := parseInstantValue(itemMap["value"])
-	if !ok {
-		return nil
-	}
-
-	return &resourceItem{
-		Container:    container,
-		ResourceType: resourceType,
-		Value:        value,
-	}
 }
 
 func (a *podMetricAction) getResourceValues(resourceMap map[string]map[string]float64, metric map[string]any) map[string]any {
@@ -725,19 +628,21 @@ func (a *podMetricAction) getResourceValues(resourceMap map[string]map[string]fl
 //
 // found is false when no active workload row matches (or it has no containers in
 // meta); the caller then falls back to the Prometheus-observable heuristic.
-func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx PlaybookActionContext, podName, namespace string) (found, hasMemReq, hasMemLim, hasCpuReq bool) {
+func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx playbooks.PlaybookActionContext, podName, namespace string) (found bool, containers []string, hasMemReq, hasMemLim, hasCpuReq bool) {
 	if podName == "" || namespace == "" {
-		return false, false, false, false
+		return false, nil, false, false, false
 	}
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		ctx.GetLogger().Warn("pod_metrics_enricher: workload spec lookup unavailable; falling back to metric-presence heuristic", "error", err)
-		return false, false, false, false
+		return false, nil, false, false, false
 	}
 
 	// Resolve the workload by longest-prefix match on its name (pod/RS names are
 	// "<workload>-<hash>[-<suffix>]"), then OR the resource presence across its
 	// containers — mirroring the cross-container OR the Prometheus path uses.
+	// The container names come back alongside the presence flags: the metrics
+	// query needs them to stay per-container, and this is the same row.
 	const query = `
 		WITH w AS (
 			SELECT name, meta
@@ -750,24 +655,30 @@ func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx PlaybookActionCon
 			LIMIT 1
 		)
 		SELECT
-			count(c) AS containers,
+			count(c) > 0 AS found,
+			coalesce(array_agg(c->>'name') FILTER (WHERE c->>'name' IS NOT NULL), '{}') AS container_names,
 			coalesce(bool_or(coalesce((c->'resources'->'requests') ? 'memory', false)), false) AS has_mem_req,
 			coalesce(bool_or(coalesce((c->'resources'->'limits')   ? 'memory', false)), false) AS has_mem_lim,
 			coalesce(bool_or(coalesce((c->'resources'->'requests') ? 'cpu', false)),    false) AS has_cpu_req
 		FROM w CROSS JOIN LATERAL jsonb_array_elements(coalesce(w.meta->'config'->'containers', '[]'::jsonb)) c`
 
-	var containers int
-	if err := dbms.Db.QueryRowx(query, ctx.GetAccountId(), namespace, podName).Scan(&containers, &hasMemReq, &hasMemLim, &hasCpuReq); err != nil {
+	var names pq.StringArray
+	var hasSpec bool
+	if err := dbms.Db.QueryRowx(query, ctx.GetAccountId(), namespace, podName).Scan(&hasSpec, &names, &hasMemReq, &hasMemLim, &hasCpuReq); err != nil {
 		ctx.GetLogger().Warn("pod_metrics_enricher: workload spec lookup failed; falling back to metric-presence heuristic",
 			"error", err, "pod", podName, "namespace", namespace)
-		return false, false, false, false
+		return false, nil, false, false, false
 	}
-	if containers == 0 {
+	if !hasSpec {
 		// No matching workload, or it carries no container spec — no authoritative
 		// answer; let the caller fall back rather than assert "unset".
-		return false, false, false, false
+		return false, nil, false, false, false
 	}
-	return true, hasMemReq, hasMemLim, hasCpuReq
+	// `found` deliberately tracks whether the spec exists, NOT whether names came
+	// back. A container without a name would only cost us the per-container split;
+	// treating that as "no spec" would hand the insights back to the metric-presence
+	// heuristic, which is what fabricated false "missing resource" findings.
+	return true, []string(names), hasMemReq, hasMemLim, hasCpuReq
 }
 
 // generateInsights emits resource-allocation insights scoped by resourceType
@@ -782,7 +693,7 @@ func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx PlaybookActionCon
 // "Up to" because each insight only fires when the corresponding resource is
 // unset on the pod; a fully-specified pod emits zero insights regardless of
 // resourceType.
-func (a *podMetricAction) generateInsights(requestsMap, limitsMap map[string]map[string]float64, podName, resourceType string, insights *[]PlaybookActionResponseInsight) {
+func (a *podMetricAction) generateInsights(requestsMap, limitsMap map[string]map[string]float64, podName, resourceType string, insights *[]playbooks.PlaybookActionResponseInsight) {
 	// Track if we found any requests or limits
 	hasMemoryRequest := false
 	hasMemoryLimit := false
@@ -816,19 +727,19 @@ func (a *podMetricAction) generateInsights(requestsMap, limitsMap map[string]map
 
 	// Generate insights based on missing requests and limits
 	if emitMemory && !hasMemoryLimit {
-		*insights = append(*insights, PlaybookActionResponseInsight{
+		*insights = append(*insights, playbooks.PlaybookActionResponseInsight{
 			Message:  fmt.Sprintf("Pod %s does not have memory limit specified", podName),
 			Severity: "High",
 		})
 	}
 	if emitMemory && !hasMemoryRequest {
-		*insights = append(*insights, PlaybookActionResponseInsight{
+		*insights = append(*insights, playbooks.PlaybookActionResponseInsight{
 			Message:  fmt.Sprintf("Pod %s does not have memory request specified", podName),
 			Severity: "Critical",
 		})
 	}
 	if emitCPU && !hasCpuRequest {
-		*insights = append(*insights, PlaybookActionResponseInsight{
+		*insights = append(*insights, playbooks.PlaybookActionResponseInsight{
 			Message:  fmt.Sprintf("Pod %s does not have CPU request specified", podName),
 			Severity: "High",
 		})

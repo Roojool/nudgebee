@@ -1,6 +1,7 @@
-package eventrule
+package observability
 
 import (
+	"nudgebee/services/eventrule"
 	"nudgebee/services/eventrule/playbooks"
 	"testing"
 
@@ -19,12 +20,12 @@ func TestPodMetricEnricherVariantsDedupSeparately(t *testing.T) {
 	mem, found := playbooks.GetAction("k8s_pod_memory_metric_enricher")
 	require.True(t, found)
 
-	assert.NotEqual(t, implKeyOf(cpu), implKeyOf(mem),
+	assert.NotEqual(t, eventrule.ImplKeyOf(cpu), eventrule.ImplKeyOf(mem),
 		"cpu and memory pod metric enrichers must dedup separately, or one suppresses the other")
-	assert.Equal(t, implKeyOf(cpu), implKeyOf(cpu), "dedup key must be stable")
+	assert.Equal(t, eventrule.ImplKeyOf(cpu), eventrule.ImplKeyOf(cpu), "dedup key must be stable")
 }
 
-// Guards the general case: any action name registered by the playbooks package
+// Guards the general case: any registered action name
 // that shares a dedup key with another name will only ever run once. That is
 // correct for a pure alias (same type, same config) and a bug for a configured
 // variant, so a new collision has to be a deliberate decision recorded here.
@@ -36,20 +37,20 @@ func TestNoUnintendedActionDedupCollisions(t *testing.T) {
 		"cloud_metrics": "cloud_list_metrics",
 	}
 
-	seen := map[actionImplKey]string{}
+	seen := map[eventrule.ActionImplKey]string{}
 	for _, name := range playbooks.ListActions() {
 		action, found := playbooks.GetAction(name)
 		if !found {
 			continue
 		}
-		key := implKeyOf(action)
+		key := eventrule.ImplKeyOf(action)
 		if other, dup := seen[key]; dup {
 			if knownAliases[name] == other || knownAliases[other] == name {
 				continue
 			}
 			t.Errorf("actions %q and %q share a dedup key (%v) — only one will ever auto-run. "+
 				"If they are configured variants, implement playbooks.PlaybookActionVariant; "+
-				"if they are deliberate aliases, add them to knownAliases.", name, other, key.typ)
+				"if they are deliberate aliases, add them to knownAliases.", name, other, key.Typ)
 			continue
 		}
 		seen[key] = name

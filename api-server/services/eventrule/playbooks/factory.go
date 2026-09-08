@@ -9,13 +9,6 @@ import (
 func init() {
 	RegisterAction("k8s_pod_log_enricher", &podLogAction{})
 	RegisterAction("k8s_resource", &k8sResourceAction{})
-	RegisterAction("k8s_pod_metric_enricher", &podMetricAction{})
-	RegisterAction("k8s_pod_cpu_metric_enricher", &podMetricAction{
-		autodetectResource: "cpu",
-	})
-	RegisterAction("k8s_pod_memory_metric_enricher", &podMetricAction{
-		autodetectResource: "memory",
-	})
 	RegisterAction("k8s_kubectl", &k8sKubectlAction{})
 	RegisterAction("notification_channel_join", &notificationChannelJoinAction{})
 	RegisterAction("notification_channel_message", &notificationChannelMessageAction{})
