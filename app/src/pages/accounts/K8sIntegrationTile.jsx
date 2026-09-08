@@ -73,6 +73,9 @@ const K8sIntegrationTile = () => {
   const [certificateExpiry, setCertificateExpiry] = useState(0);
   const [networkThreshold, setNetworkThreshold] = useState(0);
   const [observationDays, setObservationDays] = useState(0);
+  // Image scanning is on for every account until someone turns it off here.
+  const [imageScanEnabled, setImageScanEnabled] = useState(true);
+  const [imageScanExcludedNamespaces, setImageScanExcludedNamespaces] = useState('');
   const [updateAccountStatus, setUpdateAccountStatus] = useState({});
   const [isStatusUpdating, setIsStatusUpdating] = useState(false);
   const [k8sCurlCommand, setK8sCurlCommand] = useState('');
@@ -306,6 +309,12 @@ const K8sIntegrationTile = () => {
       // so that path yields the all-empty shape.
       const accountAttrs = cloudAccountAttributes[selectedAccountId] || [];
       setTraceSettings(traceLabelsToSettings(safeJSONParse(accountAttrs.find((l) => l.name === 'trace_labels')?.value)));
+      // Assigned unconditionally, for the same reason as trace_labels above: an
+      // account with no image_scan attribute must fall back to the defaults
+      // rather than show the previously opened account's values.
+      const imageScan = safeJSONParse(accountAttrs.find((l) => l.name === 'image_scan')?.value) || {};
+      setImageScanEnabled(imageScan.enabled !== false);
+      setImageScanExcludedNamespaces((imageScan.excluded_namespaces || []).join(', '));
       if (
         selectedAccountId in cloudAccountAttributes &&
         cloudAccountAttributes[selectedAccountId] &&
@@ -455,6 +464,20 @@ const K8sIntegrationTile = () => {
       {
         name: 'trace_labels',
         value: traceSettingsToLabelsValue(traceSettings),
+        cloud_account_id: selectedAccountId,
+      },
+      // Also unconditional: re-enabling scanning or clearing the excluded list has
+      // to overwrite the stored value, which a "only write when non-empty" guard
+      // would skip.
+      {
+        name: 'image_scan',
+        value: JSON.stringify({
+          enabled: imageScanEnabled,
+          excluded_namespaces: imageScanExcludedNamespaces
+            .split(',')
+            .map((ns) => ns.trim())
+            .filter(Boolean),
+        }),
         cloud_account_id: selectedAccountId,
       },
     ];
@@ -759,6 +782,29 @@ const K8sIntegrationTile = () => {
                     e.preventDefault();
                   }
                 }}
+              />
+            </Box>
+          </Box>
+
+          <Divider color={ds.background[200]} sx={{ marginTop: ds.space[5], marginBottom: ds.space[5] }} />
+
+          <Heading value='Image Vulnerability Scanning' borderWidth='md' />
+          <Box display='flex' flexDirection='column' gap={ds.space[3]} sx={{ mt: ds.space[3] }}>
+            <Checkbox
+              size='sm'
+              checked={imageScanEnabled}
+              label='Scan running container images for vulnerabilities'
+              onChange={(next) => setImageScanEnabled(next)}
+              disabled={!hasWriteAccess()}
+            />
+            <Box display='flex' flexDirection='column'>
+              <Input
+                value={imageScanExcludedNamespaces}
+                label='Excluded Namespaces'
+                help='Comma-separated. Images running only in these namespaces are never scanned. kube-system and nudgebee-agent are always excluded.'
+                placeholder='e.g. staging, sandbox'
+                onChange={(value) => setImageScanExcludedNamespaces(value)}
+                disabled={!imageScanEnabled || !hasWriteAccess()}
               />
             </Box>
           </Box>
