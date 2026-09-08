@@ -91,6 +91,25 @@ function componentReducer(state, action) {
 // per window) while still picking up rows written after the run settled.
 const TOKEN_USAGE_TTL_MS = 30_000;
 
+// The event-investigation pipeline (llm-server `api/event_analyzer.go`) runs its
+// phases — summary, root cause, log analysis, synthesis — as SEPARATE turns on a
+// single `event-<fingerprint>` conversation. Between phases the conversation row
+// legitimately reads COMPLETED for a stretch before the next phase flips it back
+// to IN_PROGRESS, so the normal poll (which stops on the first terminal status)
+// leaves a follow-up drawer opened mid-investigation frozen on phase 1 until it
+// is closed and reopened. The final synthesis turn is worse still: it writes a
+// message straight to COMPLETED and never flips the conversation status at all,
+// so there is no status transition to observe — only new message content.
+//
+// While such a drawer stays open on an investigation session we have seen
+// running, keep re-polling across a terminal status. The window is re-armed both
+// on a status flip back to non-terminal AND on any new message arriving, so it
+// tracks real pipeline activity rather than a fixed span from one phase edge; it
+// finally lapses this long after the last new content. Generous because a phase
+// can be re-dispatched via MQ rather than chained in-process.
+const INVESTIGATION_PHASE_GAP_GRACE_MS = 120_000;
+const INVESTIGATION_TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'KILLED', 'TERMINATED'];
+
 const getInitials = (name) => {
   if (!name?.trim()) {
     return '?';
@@ -335,6 +354,83 @@ const KubernetesLLMResponseGenerator = ({
   );
 
   const [optimisticFollowupAnswer, setOptimisticFollowupAnswer] = useState(null);
+
+  // ── Investigation follow-up drawer: bridge the gaps between pipeline phases ──
+  // See INVESTIGATION_PHASE_GAP_GRACE_MS. Only a `event-<fingerprint>` session
+  // opened in the drawer needs this; every other chat is a single conversation
+  // that ends when it ends.
+  const isInvestigationFollowupSession = useMemo(
+    () => popup && !selectedConversationId && selectedSessionId.startsWith('event-'),
+    [popup, selectedConversationId, selectedSessionId]
+  );
+
+  // Latch: has this investigation been observed running while the drawer was
+  // open? Guards against re-polling an investigation that already finished and
+  // that the user merely reopened to read. Reset whenever the session changes so
+  // a stale latch from a previous event's drawer doesn't carry over.
+  const sawInvestigationActiveRef = useRef(false);
+  const investigationLatchSessionRef = useRef('');
+  const investigationPhaseWatchDeadlineRef = useRef(0);
+  const lastInvestigationMsgCountRef = useRef(0);
+  useEffect(() => {
+    if (!isInvestigationFollowupSession) {
+      sawInvestigationActiveRef.current = false;
+      investigationLatchSessionRef.current = '';
+      investigationPhaseWatchDeadlineRef.current = 0;
+      lastInvestigationMsgCountRef.current = 0;
+      return;
+    }
+    if (investigationLatchSessionRef.current !== selectedSessionId) {
+      investigationLatchSessionRef.current = selectedSessionId;
+      sawInvestigationActiveRef.current = false;
+      investigationPhaseWatchDeadlineRef.current = 0;
+      lastInvestigationMsgCountRef.current = messages.length;
+    }
+    if (isConversationActivelyExecuting(conversationStatus) || conversationStatus === 'WAITING' || currentlyProcessingQuestion) {
+      sawInvestigationActiveRef.current = true;
+    }
+    // A later phase's turn — the synthesis turn especially, which writes straight
+    // to COMPLETED and never flips the conversation status — surfaces only as new
+    // message content. Treat that as fresh activity so the bridge keeps polling
+    // past it, and only lets the window lapse once the pipeline goes quiet.
+    if (messages.length > lastInvestigationMsgCountRef.current) {
+      lastInvestigationMsgCountRef.current = messages.length;
+      if (sawInvestigationActiveRef.current) {
+        investigationPhaseWatchDeadlineRef.current = Date.now() + INVESTIGATION_PHASE_GAP_GRACE_MS;
+      }
+    }
+  }, [isInvestigationFollowupSession, selectedSessionId, conversationStatus, currentlyProcessingQuestion, messages.length]);
+
+  // Keep re-polling the session across a phase's terminal status until the next
+  // phase turn appears (status flips off-terminal and the main poll effect
+  // re-arms itself, or a new message lands) or the grace window elapses with no
+  // new turn.
+  useEffect(() => {
+    if (!isInvestigationFollowupSession || !drawerIsOpen || !sawInvestigationActiveRef.current) {
+      return;
+    }
+    if (!INVESTIGATION_TERMINAL_STATUSES.includes(conversationStatus)) {
+      // Mid-phase: the main poll owns the loop — just keep the window fresh for
+      // the next between-phase gap.
+      investigationPhaseWatchDeadlineRef.current = Date.now() + INVESTIGATION_PHASE_GAP_GRACE_MS;
+      return;
+    }
+    if (investigationPhaseWatchDeadlineRef.current === 0 || Date.now() >= investigationPhaseWatchDeadlineRef.current) {
+      // No window armed (0 = sentinel), or it elapsed with no new turn — the
+      // investigation is done; nothing to bridge.
+      return;
+    }
+    const id = setInterval(() => {
+      if (Date.now() >= investigationPhaseWatchDeadlineRef.current) {
+        clearInterval(id);
+        return;
+      }
+      fetchConversation(selectedSessionId, '', 'poll', false);
+    }, 5000);
+    return () => clearInterval(id);
+    // messages.length: re-evaluate when content lands so a re-armed window can
+    // restart a loop that had already stopped at the previous deadline.
+  }, [isInvestigationFollowupSession, drawerIsOpen, conversationStatus, selectedSessionId, fetchConversation, messages.length]);
 
   // Derive the latest follow-up that's waiting for the user — this is what the bottom-anchored
   // FollowupSheet renders. The followup message itself is saved as IN_PROGRESS while it sits
