@@ -39,7 +39,6 @@ func init() {
 	RegisterAction("oom_killer_enricher", &oomKillerAction{})
 	RegisterAction("pod_enricher", &podEnricherAction{})
 	RegisterAction("resource_events_enricher", &resourceEventsAction{})
-	RegisterAction("impacted_services_enricher", &impactedServicesAction{})
 	RegisterAction("job_info_enricher", &jobInfoAction{})
 	RegisterAction("job_events_enricher", &jobEventsAction{})
 	RegisterAction("job_pod_enricher", &jobPodAction{})
