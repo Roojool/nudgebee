@@ -155,7 +155,7 @@ func (s *networkSecurityGroupService) GetRecommendations(ctx providers.CloudProv
 			nics, _ := props["networkInterfaces"].([]interface{})
 			if len(subnets) == 0 && len(nics) == 0 {
 				recommendations = append(recommendations, providers.Recommendation{
-					CategoryName: providers.RecommendationCategoryRightSizing,
+					CategoryName: providers.RecommendationCategoryConfiguration,
 					RuleName:     "azure_nsg_unassociated",
 					Severity:     providers.RecommendationSeverityLow,
 					Savings:      0,

@@ -2549,6 +2549,15 @@ gsutil logging set on -b gs://LOG_BUCKET gs://BUCKET_NAME
       references: ['https://cloud.google.com/storage/docs/access-logs'],
     },
     // --- Azure Configuration ---
+    azure_nsg_unassociated: {
+      title: 'NSG Not Associated With Any Subnet Or NIC',
+      description:
+        'A Network Security Group is not attached to any subnet or network interface. It filters no traffic, so it provides no protection and only adds clutter to the network configuration.',
+      serviceName: 'AzureNSG',
+      recommendations: ['Attach the NSG to the subnets or network interfaces it was created for, or delete it if it is no longer needed.'],
+      mitigations: ['Associate the NSG with a subnet or network interface, or delete the unused NSG.'],
+      references: ['https://learn.microsoft.com/en-us/azure/virtual-network/network-security-groups-overview'],
+    },
     azure_missing_tags: {
       title: 'Azure Resource Missing Tags',
       description: 'The Azure resource does not have tags for organization, cost tracking, and management.',
