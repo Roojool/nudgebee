@@ -10,10 +10,14 @@ import (
 
 func TestKnowledgeToolsPlannerAuthorizationParity(t *testing.T) {
 	for _, name := range []string{"logs", "traces_clickhouse"} {
-		for _, policy := range []KnowledgePolicy{KnowledgeAuto, KnowledgeAlways, KnowledgeLLMOnly, KnowledgeDisabled} {
+		for _, policy := range []KnowledgePolicy{"", KnowledgeAuto, KnowledgeAlways, KnowledgeLLMOnly, KnowledgeDisabled} {
 			for _, tool := range []string{"search_skills", "load_skills"} {
 				for _, mode := range []string{"unrestricted", "denied", "allow-listed", "excluded", "query-denied"} {
-					t.Run(name+"/"+string(policy)+"/"+tool+"/"+mode, func(t *testing.T) {
+					policyLabel := string(policy)
+					if policyLabel == "" {
+						policyLabel = "unset"
+					}
+					t.Run(name+"/"+policyLabel+"/"+tool+"/"+mode, func(t *testing.T) {
 						agent := mockPlainAgent{name: name}
 						request := NBAgentRequest{AccountId: "account", KnowledgePolicy: policy, KnowledgePolicyResolved: true}
 						switch mode {
@@ -106,4 +110,21 @@ func TestAuthAgentNilToolResilience(t *testing.T) {
 		tools := FilterAndInjectDefaultTools("account", agent, "", []toolcore.NBTool{nil}, toolcore.AgentCapabilities{}, KnowledgeAuto)
 		require.NotNil(t, tools)
 	})
+}
+
+func TestKnowledgeToolsAuthorizedWhenPolicyUnset(t *testing.T) {
+	agent := mockPlainAgent{name: "recommendations"}
+	request := NBAgentRequest{AccountId: "account"} // KnowledgePolicy is unset ("")
+	for _, tool := range []string{"search_skills", "load_skills"} {
+		t.Run(tool, func(t *testing.T) {
+			finish, _, err := IsAgentToolAuthorizedToProcessRequest(
+				security.NewRequestContextForSuperAdmin(),
+				agent,
+				request,
+				NBAgentPlannerToolAction{Tool: tool, ToolInput: `{"query":"recommendation","skill_name":"guide"}`},
+			)
+			require.NoError(t, err)
+			require.Nil(t, finish)
+		})
+	}
 }

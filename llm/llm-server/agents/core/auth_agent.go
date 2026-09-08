@@ -49,9 +49,15 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 	}
 
 	if !found {
-		// check if it's a builtin tool like load_skills or shell_execute
-		if strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, toolcore.ToolExecuteShellCommand) {
-			if request.AccountId != "" {
+		// check if it's a builtin tool like load_skills, search_skills or shell_execute
+		if strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, "search_skills") || strings.EqualFold(toolName, toolcore.ToolExecuteShellCommand) {
+			policy := request.KnowledgePolicy
+			if policy == "" {
+				policy = KnowledgeAuto
+			}
+			if (strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, "search_skills")) && policy == KnowledgeDisabled {
+				// rejected when knowledge policy is disabled
+			} else if request.AccountId != "" {
 				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
 					found = true
 					tool = t
