@@ -24,6 +24,8 @@ import TicketLink from '@shared/links/TicketLink';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { toast as snackbar } from '@ui/Toast';
 import CisRulePanel from './security/CisRulePanel';
+import { AskNubiIconButton, useAskNubiAboutSecurityFinding } from './security/askNubi';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 
 const CIS_HEADER = [
   { name: 'Rule', width: '25%' },
@@ -70,6 +72,24 @@ const KubernetesCisSecurity = (props) => {
   // The rule whose detail panel is open. Rules used to expand into an accordion;
   // a rule is the unit you act on, so it opens the side panel instead.
   const [panelRule, setPanelRule] = useState(null);
+  const { assistantName } = useTenantBranding();
+  const askNubi = useAskNubiAboutSecurityFinding();
+  const askAboutRule = (item) => {
+    const accountId = accountIdForRow(item);
+    askNubi({
+      accountId,
+      sessionKey: `cis_${accountId}_${item.rule_id}`,
+      context: {
+        kind: 'CIS benchmark rule',
+        id: item.rule_id,
+        title: item.rule_name,
+        severity: item.severity || 'Unknown',
+        description: item.rule_description,
+        failingCount: item.count,
+        accountName: props?.accountsById?.[accountId],
+      },
+    });
+  };
 
   const closeTicketCreateForm = () => {
     setIsTicketCreateFormOpen(false);
@@ -138,7 +158,12 @@ const KubernetesCisSecurity = (props) => {
     data.push({ component: <Datetime value={item.updated_at} /> });
     data.push({
       component: (
-        <Box display={'flex'} flexDirection={'row'} alignItems={'space-between'} justifyContent={'flex-end'}>
+        <Box display={'flex'} flexDirection={'row'} alignItems={'center'} justifyContent={'flex-end'} gap={'var(--ds-space-1)'}>
+          <AskNubiIconButton
+            id={`cis-ask-nubi-${item.account_id}-${item.rule_id}`}
+            assistantName={assistantName}
+            onClick={() => askAboutRule(item)}
+          />
           <ThreeDotsMenu sx={{ ...action.primary }} menuItems={menuItems} data={item} onMenuClick={onMenuClick} />
         </Box>
       ),
@@ -242,6 +267,7 @@ const KubernetesCisSecurity = (props) => {
           setTicketData(rule);
           setIsTicketCreateFormOpen(true);
         }}
+        onAskNubi={askAboutRule}
       />
       {!props?.disableInfographic && (
         <Box sx={{ display: 'flex', gap: 'var(--ds-space-3)' }} mt={2} mb={2}>

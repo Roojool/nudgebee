@@ -11,6 +11,8 @@ import CustomTable from '@shared/tables/CustomTable';
 import Text from '@shared/format/Text';
 import { Label, type LabelTone } from '@ui/Label';
 import { Button } from '@ui/Button';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import { Link } from '@ui/Link';
 import { Skeleton } from '@ui/Skeleton';
 import { ds } from '@utils/colors';
@@ -61,6 +63,7 @@ interface CisRulePanelProps {
   /** Accounts the cross-cluster lookup may span — the current view's scope. */
   scopeAccountId?: string | string[];
   onCreateTicket?: (rule: CisRule) => void;
+  onAskNubi?: (rule: CisRule) => void;
 }
 
 /**
@@ -76,8 +79,9 @@ interface CisRulePanelProps {
  * Hence tabs that differ from the CVE panel's: the rule and its remediation,
  * the resources failing it here, and the same rule on other clusters.
  */
-const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAccountId, onCreateTicket }: CisRulePanelProps) => {
+const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAccountId, onCreateTicket, onAskNubi }: CisRulePanelProps) => {
   const [activeTab, setActiveTab] = useState(0);
+  const { assistantName } = useTenantBranding();
 
   const [resolution, setResolution] = useState('');
   const [references, setReferences] = useState<string[]>([]);
@@ -364,18 +368,32 @@ const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAcc
           )}
         </Box>
 
-        {onCreateTicket && (
+        {(onCreateTicket || onAskNubi) && (
           <PanelActions testId='cis-rule-actions'>
-            <Button
-              id='cis-rule-create-ticket'
-              tone='primary'
-              size='sm'
-              disabled={Boolean(rule.ticket?.ticket_id)}
-              tooltip={rule.ticket?.ticket_id ? `Ticket ${rule.ticket.ticket_id} already exists` : undefined}
-              onClick={() => onCreateTicket(rule)}
-            >
-              Create ticket
-            </Button>
+            {onCreateTicket && (
+              <Button
+                id='cis-rule-create-ticket'
+                tone='primary'
+                size='sm'
+                disabled={Boolean(rule.ticket?.ticket_id)}
+                tooltip={rule.ticket?.ticket_id ? `Ticket ${rule.ticket.ticket_id} already exists` : undefined}
+                onClick={() => onCreateTicket(rule)}
+              >
+                Create ticket
+              </Button>
+            )}
+            {onAskNubi && (
+              <Button
+                id='cis-rule-ask-nubi'
+                tone='secondary'
+                size='sm'
+                icon={<SafeIcon src={getNubiIconUrl()} alt='' width={14} height={14} />}
+                iconPlacement='start'
+                onClick={() => onAskNubi(rule)}
+              >
+                Ask {assistantName}
+              </Button>
+            )}
           </PanelActions>
         )}
       </Box>

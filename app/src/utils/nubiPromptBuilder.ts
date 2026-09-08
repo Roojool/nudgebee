@@ -223,3 +223,88 @@ export function buildNubiOptimizePrompt(ctx: OptimizationRecommendationContext):
 
   return lines.join('\n');
 }
+
+export interface SecurityFindingPromptContext {
+  /** What kind of finding this is, as the reader would name it. */
+  kind: 'CVE' | 'CIS benchmark rule' | 'Cloud posture check';
+  /** CVE id, CIS rule id, or check name. */
+  id: string;
+  title?: string;
+  severity: string;
+  /** Image, workload, VM, or cloud resource the finding sits on. */
+  resource?: string;
+  namespace?: string;
+  packageName?: string;
+  installedVersion?: string;
+  fixedVersion?: string;
+  /** Why there is no fixed version, when the scanner says so. */
+  fixState?: string;
+  cvssScore?: number;
+  /** In CISA's Known Exploited Vulnerabilities catalogue. */
+  kev?: boolean;
+  accountName?: string;
+  provider?: string;
+  /** How many resources fail the rule, for grouped findings. */
+  failingCount?: number;
+  description?: string;
+  /** Scanner-supplied reason for a cloud posture failure. */
+  reason?: string;
+}
+
+export function buildNubiSecurityPrompt(ctx: SecurityFindingPromptContext): string {
+  const lines: string[] = [];
+
+  lines.push('## Analyze Security Finding');
+  lines.push('');
+  lines.push(`**${ctx.kind}:** ${ctx.id}`);
+  if (ctx.title) {
+    lines.push(`**Title:** ${ctx.title}`);
+  }
+  lines.push(`**Severity:** ${ctx.severity}`);
+  if (ctx.resource) {
+    lines.push(`**Resource:** ${ctx.resource}`);
+  }
+  if (ctx.namespace) {
+    lines.push(`**Namespace:** \`${ctx.namespace}\``);
+  }
+  if (ctx.packageName) {
+    const version = ctx.installedVersion ? ` ${ctx.installedVersion}` : '';
+    lines.push(`**Package:** ${ctx.packageName}${version}`);
+  }
+  if (ctx.fixedVersion) {
+    lines.push(`**Fixed in:** ${ctx.fixedVersion}`);
+  } else if (ctx.fixState) {
+    lines.push(`**Fix status:** ${ctx.fixState}`);
+  }
+  if (ctx.cvssScore != null) {
+    lines.push(`**CVSS:** ${ctx.cvssScore}`);
+  }
+  if (ctx.kev) {
+    lines.push('**Known exploited:** yes (CISA KEV)');
+  }
+  if (ctx.provider) {
+    lines.push(`**Provider:** ${ctx.provider}`);
+  }
+  if (ctx.accountName) {
+    lines.push(`**Account:** ${ctx.accountName}`);
+  }
+  if (ctx.failingCount != null) {
+    lines.push(`**Failing resources:** ${ctx.failingCount}`);
+  }
+
+  if (ctx.description || ctx.reason) {
+    lines.push('');
+    lines.push('### Summary');
+    if (ctx.description) {
+      lines.push(ctx.description);
+    }
+    if (ctx.reason) {
+      lines.push(`Reason: ${ctx.reason}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('Please explain the risk this finding poses here, whether it is likely exploitable in this setup, and the safest way to remediate it.');
+
+  return lines.join('\n');
+}

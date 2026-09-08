@@ -12,6 +12,8 @@ import recommendationApi from '@api1/recommendation';
 import { useLatestRequest } from '@components/vm/common';
 import { action } from '@utils/actionStyles';
 import { normalizeSeverity } from './securityFinding';
+import { AskNubiIconButton } from './askNubi';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 import { type CloudPostureRule } from './cloudPosture';
 
 const PAGE_SIZE = 5;
@@ -28,6 +30,7 @@ const HEADERS = [
 
 export interface CloudResourceRowActions {
   onCreateTicket: (rule: CloudPostureRule, resource: any) => void;
+  onAskNubi: (rule: CloudPostureRule, resource: any) => void;
 }
 
 /**
@@ -88,6 +91,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const beginRequest = useLatestRequest();
+  const { assistantName } = useTenantBranding();
 
   const catalog: any = useMemo(
     () => (rule?.ruleName ? recommendationApi.getRecommendationDetails('Security', rule.ruleName) || {} : {}),
@@ -165,7 +169,12 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
           { component: <Datetime value={row.updated_at} />, data: row.updated_at },
           {
             component: rowActions ? (
-              <Box display='flex' justifyContent='flex-end'>
+              <Box display='flex' justifyContent='flex-end' alignItems='center' gap={ds.space[1]}>
+                <AskNubiIconButton
+                  id={`cloud-posture-ask-nubi-${row.id}`}
+                  assistantName={assistantName}
+                  onClick={() => rowActions.onAskNubi(rule, row)}
+                />
                 <ThreeDotsMenu
                   sx={{ ...action.primary }}
                   menuItems={[{ id: 'create-ticket', label: 'Create ticket' }]}
@@ -177,7 +186,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
           },
         ];
       }),
-    [rows, accountsById, rowActions, rule]
+    [rows, accountsById, rowActions, rule, assistantName]
   );
 
   return (

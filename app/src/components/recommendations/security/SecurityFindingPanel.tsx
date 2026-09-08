@@ -11,6 +11,8 @@ import { Label, type LabelTone } from '@ui/Label';
 import { Button } from '@ui/Button';
 import { Link } from '@ui/Link';
 import { Skeleton } from '@ui/Skeleton';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import PRLink, { resolutionsDeepLink } from '@shared/links/PRLink';
 import { ds } from '@utils/colors';
 import recommendationApi from '@api1/recommendation';
@@ -51,6 +53,7 @@ interface SecurityFindingPanelProps {
   onCreatePR?: (finding: SecurityFinding) => void;
   /** Disables Create Pull Request, with the reason as a tooltip. */
   createPRDisabledReason?: string;
+  onAskNubi?: (finding: SecurityFinding) => void;
 }
 
 /**
@@ -75,8 +78,10 @@ const SecurityFindingPanel = ({
   onCreateTicket,
   onCreatePR,
   createPRDisabledReason,
+  onAskNubi,
 }: SecurityFindingPanelProps) => {
   const [activeTab, setActiveTab] = useState(0);
+  const { assistantName } = useTenantBranding();
   const [affected, setAffected] = useState<AffectedRow[] | null>(null);
   const [affectedLoading, setAffectedLoading] = useState(false);
   // Switching findings while a lookup is in flight must not let the older
@@ -476,7 +481,7 @@ const SecurityFindingPanel = ({
         </Box>
 
         {/* Actions — pinned to the bottom, matching the cost panel's action bar */}
-        {(onCreatePR || onCreateTicket) && (
+        {(onCreatePR || onCreateTicket || onAskNubi) && (
           <PanelActions testId='security-finding-actions'>
             {onCreatePR && (
               <Button
@@ -500,6 +505,18 @@ const SecurityFindingPanel = ({
                 onClick={() => onCreateTicket(finding)}
               >
                 Create ticket
+              </Button>
+            )}
+            {onAskNubi && (
+              <Button
+                id='security-finding-ask-nubi'
+                tone='secondary'
+                size='sm'
+                icon={<SafeIcon src={getNubiIconUrl()} alt='' width={14} height={14} />}
+                iconPlacement='start'
+                onClick={() => onAskNubi(finding)}
+              >
+                Ask {assistantName}
               </Button>
             )}
           </PanelActions>

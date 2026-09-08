@@ -14,6 +14,7 @@ import { useLatestRequest } from '@components/vm/common';
 import { normalizeSeverity } from './securityFinding';
 import { type CloudPostureRule, cloudRuleTitle, foldCloudPostureRules } from './cloudPosture';
 import CloudRuleResources from './CloudRuleResources';
+import { useAskNubiAboutSecurityFinding } from './askNubi';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { toast as snackbar } from '@ui/Toast';
 
@@ -72,6 +73,7 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
   const beginRequest = useLatestRequest();
 
   const closeTicketForm = useCallback(() => setIsTicketFormOpen(false), []);
+  const askNubi = useAskNubiAboutSecurityFinding();
 
   // Memoised: CloudRuleResources lists this in a dependency array, so an inline
   // object would rebuild every resource table on each render of the rollup.
@@ -81,8 +83,27 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
         setTicketTarget({ rule, resource });
         setIsTicketFormOpen(true);
       },
+      onAskNubi: (rule: CloudPostureRule, resource: any) => {
+        const payload = typeof resource?.recommendation === 'string' ? safeJSONParse(resource.recommendation) || {} : resource?.recommendation || {};
+        const catalog: any = recommendationApi.getRecommendationDetails('Security', rule.ruleName) || {};
+        askNubi({
+          accountId: resource?.account_id,
+          sessionKey: resource?.id,
+          context: {
+            kind: 'Cloud posture check',
+            id: rule.ruleName,
+            title: cloudRuleTitle(rule.ruleName, catalog),
+            severity: normalizeSeverity(resource?.severity),
+            resource: resource?.resource_name || payload.repository_name || resource?.resource_id,
+            provider: rule.provider,
+            accountName: accountsById?.[resource?.account_id],
+            description: catalog?.description,
+            reason: payload?.reason,
+          },
+        });
+      },
     }),
-    []
+    [askNubi, accountsById]
   );
 
   const providerOf = useCallback((id: string) => providerById?.[id], [providerById]);

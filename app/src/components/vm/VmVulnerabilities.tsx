@@ -10,9 +10,7 @@ import { Label } from '@ui/Label';
 import Datetime from '@shared/format/Datetime';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import DownloadButton from '@shared/buttons/DownloadButton';
-import { Button as DsButton } from '@ui/Button';
-import SafeIcon from '@shared/icons/SafeIcon';
-import { getNubiIconCircleUrl, useTenantBranding } from '@hooks/useTenantBranding';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { toast as snackbar } from '@ui/Toast';
 import { usePagination } from '@hooks/usePagination';
@@ -21,6 +19,7 @@ import { hasPermission, hasWriteAccess } from '@lib/auth';
 import apiVm, { SEVERITY_ORDER, VmVulnerability, VmVulnerabilityGroup, VmVulnerabilityGrouping } from '@api1/vm';
 import SecurityFindingPanel from '@components/recommendations/security/SecurityFindingPanel';
 import { fromVmRow } from '@components/recommendations/security/securityFinding';
+import { AskNubiIconButton, findingPromptContext, useAskNubiAboutSecurityFinding } from '@components/recommendations/security/askNubi';
 import { CellText, joinVmNames, useLatestRequest } from './common';
 import { ds } from '@utils/colors';
 
@@ -218,6 +217,16 @@ const VmVulnerabilities = ({
   const { page, rowsPerPage, changePage, setPage } = usePagination(embedded ? 5 : 10);
   const beginRequest = useLatestRequest();
   const { assistantName } = useTenantBranding();
+  const askNubi = useAskNubiAboutSecurityFinding();
+  const askAboutFinding = useCallback(
+    (finding: VmVulnerability) =>
+      askNubi({
+        accountId: finding.account_id,
+        sessionKey: finding.id,
+        context: findingPromptContext(fromVmRow(finding), accountsById?.[finding.account_id]),
+      }),
+    [askNubi, accountsById]
+  );
 
   // With a multi-account scope the check falls back to tenant-level write; the
   // ticket itself is always created against the finding's own account.
@@ -345,17 +354,10 @@ const VmVulnerabilities = ({
           {
             component: (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
-                {/* Asking the assistant about a CVE finding isn't wired up yet — the
-                    icon holds its place, disabled, and says so on hover. */}
-                <DsButton
-                  tone='ghost'
-                  size='xs'
-                  composition='icon-only'
-                  disabled
-                  tooltip={`Ask ${assistantName} · Coming Soon`}
-                  aria-label={`Ask ${assistantName} · Coming Soon`}
+                <AskNubiIconButton
                   id={`vm-vulnerability-ask-nubi-${finding.id}`}
-                  icon={<SafeIcon src={getNubiIconCircleUrl()} alt='' width={18} height={18} />}
+                  assistantName={assistantName}
+                  onClick={() => askAboutFinding(finding)}
                 />
                 <ThreeDotsMenu
                   id={`vm-vulnerability-actions-${finding.id}`}
@@ -369,7 +371,7 @@ const VmVulnerabilities = ({
           },
         ];
       }),
-    [rows, accountsById, showVm, vmUnderVulnerability, assistantName, canCreateTicket, onMenuClick]
+    [rows, accountsById, showVm, vmUnderVulnerability, assistantName, canCreateTicket, onMenuClick, askAboutFinding]
   );
 
   // Which filter the drill-down applies is the only thing that differs per
@@ -438,6 +440,9 @@ const VmVulnerabilities = ({
       scopeAccountId={accountId}
       onCreateTicket={() => {
         if (panelFinding) setTicketFinding(panelFinding);
+      }}
+      onAskNubi={() => {
+        if (panelFinding) askAboutFinding(panelFinding);
       }}
     />
   );
