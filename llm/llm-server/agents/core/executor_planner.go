@@ -2007,13 +2007,24 @@ func resumeConfirmationKey(nameToTool map[string]toolcore.NBTool, action NBAgent
 
 // writeConfirmationRequired reports whether a write (create/update/delete) tool needs user confirmation.
 // watch_resource is exempt: it's Create only for the access gate and mutates nothing (source is read-only).
-func writeConfirmationRequired(requestType *toolcore.ToolRequestType, toolName string) bool {
+//
+// A tool may also exempt a specific invocation via toolcore.ToolConfirmationExempt
+// — today only an automation whose author ticked ai_auto_approve. The exemption
+// is confirmation-only: this function runs after the RBAC check, never instead
+// of it, so an exempt tool is still refused to a user who may not run it.
+func writeConfirmationRequired(tool toolcore.NBTool, requestType *toolcore.ToolRequestType, action NBAgentPlannerToolAction) bool {
 	if requestType == nil {
 		return false
 	}
 	switch *requestType {
 	case toolcore.ToolRequestTypeCreate, toolcore.ToolRequestTypeUpdate, toolcore.ToolRequestTypeDelete:
-		return !strings.EqualFold(toolName, tools.ToolWatchResource)
+		if strings.EqualFold(action.Tool, tools.ToolWatchResource) {
+			return false
+		}
+		if exempt, ok := tool.(toolcore.ToolConfirmationExempt); ok && exempt.SkipWriteConfirmation(action.ToolInput) {
+			return false
+		}
+		return true
 	default:
 		return false
 	}
@@ -2262,7 +2273,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 
 	// confirmation if tehre is write operation
 	if tool.GetType() == toolcore.NBToolTypeTool {
-		if writeConfirmationRequired(requestType, action.Tool) {
+		if writeConfirmationRequired(tool, requestType, action) {
 			confirmationKey := confirmationKeyForAction(tool, action)
 			// Operator-readable card text, when the tool can provide it — the
 			// default rendering shows the raw tool input, which for id-driven

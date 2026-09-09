@@ -521,6 +521,10 @@ func (s *Service) CreateWorkflow(ctx *security.RequestContext, accountId string,
 	// after reading what the automation does.
 	if ctx.IsAITriggered() {
 		wf.AIInvocable = false
+		// And with the grant gone, the modifier on it goes too — otherwise the
+		// saved row carries an unattended-run opt-in waiting for the moment a
+		// human ticks ai_invocable, which is not what that human agreed to.
+		wf.AIAutoApprove = false
 	}
 
 	validStatuses := []model.WorkflowStatus{model.WorkflowStatusActive, model.WorkflowStatusPaused, model.WorkflowStatusInactive}
@@ -2241,6 +2245,10 @@ func (s *Service) updateWorkflowInternal(ctx *security.RequestContext, accountId
 	// does when those preconditions stop holding.
 	if ctx.IsAITriggered() {
 		workflow.AIInvocable = existingWf.AIInvocable && workflow.Definition.SupportsAIInvocation()
+		// ai_auto_approve is the same kind of grant and moves with it: preserved
+		// from the existing row on an AI edit, and cleared whenever the
+		// invocation grant it modifies is cleared.
+		workflow.AIAutoApprove = existingWf.AIAutoApprove && workflow.AIInvocable
 	}
 
 	if workflow.Definition.Version == "" {
@@ -5072,6 +5080,7 @@ func (s *Service) RestoreWorkflowVersion(ctx *security.RequestContext, accountId
 	// describable to the assistant, so the grant cannot stand.
 	if toApply.AIInvocable && !toApply.Definition.SupportsAIInvocation() {
 		toApply.AIInvocable = false
+		toApply.AIAutoApprove = false
 		ctx.GetLogger().Info("restore dropped AI invocation: restored version cannot support it",
 			"workflow_id", id, "account_id", accountId, "version_number", versionNumber)
 	}

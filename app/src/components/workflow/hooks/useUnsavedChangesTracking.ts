@@ -171,6 +171,7 @@ export function useUnsavedChangesTracking({
         // dirty, so the grant and the description were silently dropped on the
         // Apply Settings -> Publish path.
         aiInvocable: workflowSettings.aiInvocable,
+        aiAutoApprove: workflowSettings.aiAutoApprove,
         llmDescription: workflowSettings.llmDescription,
       },
     };

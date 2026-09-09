@@ -107,6 +107,7 @@ func (s *Service) SearchAIInvocableWorkflows(ctx *security.RequestContext, accou
 			Description:    c.Description,
 			LLMDescription: c.Definition.LLMDescription,
 			Inputs:         c.Definition.Inputs,
+			AutoApprove:    c.AutoApprove,
 		})
 	}
 

@@ -128,6 +128,7 @@ query GetWorkflowById($accountId:String!, $workflowId:String!) {
     updated_by
     created_from_session_id
     ai_invocable
+    ai_auto_approve
     description
   }
 }

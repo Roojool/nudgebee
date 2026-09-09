@@ -180,6 +180,39 @@ func TestAutomationToolIsClassifiedAsAWrite(t *testing.T) {
 	assert.Equal(t, core.ToolRequestTypeCreate, requestType)
 }
 
+// Auto-approve suppresses the confirmation card, and nothing else. The
+// classification stays a write so the RBAC check in the executor is untouched,
+// and an automation nobody opted in still confirms.
+func TestAutomationToolAutoApproveOnlySkipsTheConfirmation(t *testing.T) {
+	auto := automationCandidateFixture("wf-1", "Restart Pods", "Use when pods crashloop.")
+	auto.AutoApprove = true
+	manual := automationCandidateFixture("wf-2", "Drain Queue", "Use when the queue is stuck.")
+
+	built := buildAutomationTools("acct", []automationCandidate{auto, manual})
+	require.Len(t, built, 2)
+
+	exemptTool, ok := built[0].(core.ToolConfirmationExempt)
+	require.True(t, ok, "automation tools must implement ToolConfirmationExempt")
+	assert.True(t, exemptTool.SkipWriteConfirmation(""))
+
+	confirmingTool, ok := built[1].(core.ToolConfirmationExempt)
+	require.True(t, ok)
+	assert.False(t, confirmingTool.SkipWriteConfirmation(""), "an automation nobody opted in must still confirm")
+
+	// Both are still writes: the exemption never touches authorization.
+	for _, tool := range built {
+		classifier, ok := tool.(core.ToolRequestInference)
+		require.True(t, ok)
+		requestType, err := classifier.InferToolRequestType(nil, tool.Name(), "")
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeCreate, requestType)
+	}
+
+	// And the model is told, so it can say what it is about to run unprompted.
+	assert.Contains(t, built[0].Description(), "WITHOUT asking the user to confirm")
+	assert.Contains(t, built[1].Description(), "after they confirm")
+}
+
 // The description is what drives selection, so it has to carry the author's
 // words — and the automation's name, which is how the assistant names it back
 // to the user.

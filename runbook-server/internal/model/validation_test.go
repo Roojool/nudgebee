@@ -859,6 +859,24 @@ func TestValidateWorkflowAIInvocable(t *testing.T) {
 		assert.NoError(t, model.ValidateWorkflow(wf))
 	})
 
+	t.Run("auto-approve rides on the invocation grant", func(t *testing.T) {
+		wf := aiInvocableWorkflow()
+		wf.AIAutoApprove = true
+		assert.NoError(t, model.ValidateWorkflow(wf))
+	})
+
+	t.Run("auto-approve without ai_invocable is rejected", func(t *testing.T) {
+		// Rejected rather than silently ignored: a caller that sets only this
+		// one has asked for unattended runs of an automation the assistant may
+		// not invoke at all, and needs to hear that it got neither.
+		wf := aiInvocableWorkflow()
+		wf.AIInvocable = false
+		wf.AIAutoApprove = true
+		err := model.ValidateWorkflow(wf)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ai_auto_approve")
+	})
+
 	t.Run("preconditions do not apply when the flag is off", func(t *testing.T) {
 		// A scheduled automation with no AI description is perfectly valid — it
 		// just cannot be invoked by the AI.

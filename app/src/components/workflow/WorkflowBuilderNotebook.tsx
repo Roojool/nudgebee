@@ -156,6 +156,7 @@ interface WorkflowData {
   tags: Record<string, any>;
   description?: string;
   ai_invocable?: boolean;
+  ai_auto_approve?: boolean;
   created_from_session_id?: string | null;
   live_version_id?: string | null;
   live_version_number?: number | null;
@@ -390,6 +391,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
     status: 'ACTIVE',
     description: '',
     aiInvocable: false,
+    aiAutoApprove: false,
     llmDescription: '',
   });
   const workflowSettingsRef = useRef(workflowSettings);
@@ -432,6 +434,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
           // ai_invocable is a workflow field; the AI description/keywords live in
           // the definition alongside the rest of the settings above.
           aiInvocable: workflowData.ai_invocable ?? prev.aiInvocable,
+          aiAutoApprove: workflowData.ai_auto_approve ?? prev.aiAutoApprove,
           llmDescription: workflowData.definition.llm_description ?? prev.llmDescription,
         };
       });

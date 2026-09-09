@@ -162,6 +162,15 @@ export interface WorkflowSettings {
    */
   aiInvocable: boolean;
   /**
+   * Let the AI assistant run this automation without asking the user to confirm
+   * first. Off by default, and meaningless on its own: the server rejects it
+   * unless aiInvocable is also on, and clears it whenever that is cleared.
+   *
+   * Also workflow-level, for the same reason aiInvocable is — withdrawing
+   * consent to unattended runs must not wait for a publish.
+   */
+  aiAutoApprove: boolean;
+  /**
    * What the AI needs to know: what this automation does and, more importantly,
    * WHEN to reach for it. Required before aiInvocable can be turned on.
    *

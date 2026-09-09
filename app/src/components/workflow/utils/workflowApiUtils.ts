@@ -93,6 +93,7 @@ export const createWorkflowRequest = (
     // Always sent, including false: this is how the toggle is turned OFF, and
     // omitting it would leave a previously-enabled automation enabled.
     ai_invocable: Boolean(workflowSettings.aiInvocable),
+    ai_auto_approve: Boolean(workflowSettings.aiInvocable) && Boolean(workflowSettings.aiAutoApprove),
     ...(aiSessionId ? { created_from_session_id: aiSessionId } : {}),
   };
 };
