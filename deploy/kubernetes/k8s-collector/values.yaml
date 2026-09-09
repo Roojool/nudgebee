@@ -132,31 +132,29 @@ secretName: 'nudgebee'
 
 annotations: {}
 
-# -- Metrics configuration
-metrics:
-  # -- Enable Prometheus metrics collection
-  enabled: false
+# -- OpenTelemetry configuration
+#
+# Metrics are pushed over OTLP instead of being scraped from a /metrics endpoint.
+# The previous ServiceMonitor required the Prometheus Operator to be installed in
+# the target cluster, and even then the samples stayed in that cluster's
+# Prometheus -- nothing forwarded them to Nudgebee.
+otel:
+  # -- Metric export destination. "otlp" pushes to `endpoint`, "console" logs to
+  # stdout (local debugging), "" (default) disables metric export entirely.
+  exporter: ""
 
-  # -- ServiceMonitor configuration (requires Prometheus Operator)
-  serviceMonitor:
-    # -- Enable ServiceMonitor resource creation
-    enabled: true
+  # -- OTLP collector endpoint, e.g. http://otel-collector:4317. Required when
+  # exporter is "otlp".
+  endpoint: "" 
 
-    # -- Metrics scrape interval
-    interval: 30s
+  # -- OTLP wire protocol: grpc or http/protobuf
+  protocol: grpc
 
-    # -- Metrics scrape timeout
-    scrapeTimeout: 10s
+  # -- Metric export interval in milliseconds
+  exportIntervalMillis: 60000
 
-    # -- Additional labels for ServiceMonitor
-    labels: {}
-
-    # -- Additional annotations for ServiceMonitor
-    annotations: {}
-
-    # -- RelabelConfigs to apply to samples before scraping
-    # https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/api.md#relabelconfig
-    relabelings: []
+  # -- Value reported as service.name on exported telemetry
+  serviceName: k8s-collector
 
 # -- Dual mode configuration for separate server and worker deployments
 # Only applied when dualMode.enabled is true. When false, runs in traditional combined mode.

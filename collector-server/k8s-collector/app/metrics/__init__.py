@@ -1,3 +1,3 @@
-"""Prometheus metrics module for K8s Collector"""
+"""OpenTelemetry metrics module for K8s Collector"""
 
-from metrics.prometheus_metrics import *  # noqa: F401, F403
+from metrics.otel_metrics import *  # noqa: F401, F403

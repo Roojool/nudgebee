@@ -12,7 +12,7 @@ from handlers.account_status import is_account_disabled
 from handlers.discovery_handler import run_async_discovery_handler
 from handlers.event_handler import run_event_handler_async
 from handlers.spend_handler import process_spend
-from metrics import prometheus_metrics
+from metrics import otel_metrics
 from rabbitmq.rabbitmq_client import consume_message
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ def _is_from_disabled_account(data: Any, queue_name: str) -> bool:
         cloud_account_id,
         data.get("tenant"),
     )
-    prometheus_metrics.record_message_dropped_disabled(queue_name, cloud_account_id)
+    otel_metrics.record_message_dropped_disabled(queue_name, cloud_account_id)
     return True
 
 

@@ -57,11 +57,12 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: {{ include "imageName" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.dualMode.enabled }}
           env:
+            {{- if .Values.dualMode.enabled }}
             - name: COLLECTOR_MODE
               value: "server"
-          {{- end }}
+            {{- end }}
+            {{- include "k8s_collector.otelEnv" . | nindent 12 }}
           envFrom:
             - secretRef:
                 name: {{ include "nudgebee.secretName" . | quote }}

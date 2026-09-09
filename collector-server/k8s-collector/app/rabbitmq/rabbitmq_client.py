@@ -12,7 +12,7 @@ from opentelemetry import trace
 from opentelemetry.propagate import extract
 
 from config import Configs
-from metrics import prometheus_metrics
+from metrics import otel_metrics
 
 logger = logging.getLogger(__name__)
 LARGE_MESSAGE_THRESHOLD_BYTES = 100 * 1024 * 1024
@@ -169,8 +169,8 @@ class RabbitConsumer(ConsumerMixin):
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"rmq-worker-{queue_name}")
 
         # Initialize worker thread metrics
-        self._active_tasks_gauge = prometheus_metrics.get_consumer_active_tasks_gauge(self.queue_name)
-        prometheus_metrics.set_worker_threads(self.queue_name, 0, self.max_workers)
+        self._active_tasks_gauge = otel_metrics.get_consumer_active_tasks_gauge(self.queue_name)
+        otel_metrics.set_worker_threads(self.queue_name, 0, self.max_workers)
 
         # Create dedicated connection for this consumer
         # Consumers need separate connections from producers
@@ -295,7 +295,7 @@ class RabbitConsumer(ConsumerMixin):
                         pass
 
                 logger.info("Topology declared successfully")
-                prometheus_metrics.record_topology_declaration(self.queue_name, success=True)
+                otel_metrics.record_topology_declaration(self.queue_name, success=True)
                 return
 
             except PreconditionFailed as e:
@@ -321,12 +321,12 @@ class RabbitConsumer(ConsumerMixin):
                     self.queue_name,
                     e,
                 )
-                prometheus_metrics.record_topology_declaration(self.queue_name, success=False)
+                otel_metrics.record_topology_declaration(self.queue_name, success=False)
                 return
 
             except Exception as e:
                 logger.warning("Failed to declare topology (attempt %d): %s", attempt, e)
-                prometheus_metrics.record_topology_declaration(self.queue_name, success=False)
+                otel_metrics.record_topology_declaration(self.queue_name, success=False)
                 # Retrying the SAME connection object is what turned a broker
                 # restart into a permanently dead consumer. See _replace_dead_connection.
                 self._replace_dead_connection()
@@ -480,7 +480,7 @@ class RabbitConsumer(ConsumerMixin):
         retry_count = 0
 
         # Track in-flight messages
-        prometheus_metrics.set_messages_in_flight(
+        otel_metrics.set_messages_in_flight(
             self.queue_name,
             self._active_tasks_gauge.get(),  # Use the gauge's current value
         )
@@ -501,7 +501,7 @@ class RabbitConsumer(ConsumerMixin):
                 except Exception:
                     retry_count += 1
                     logger.exception("Message processing failed (attempt %d/%d)", retry_count, self.message_max_retries)
-                    prometheus_metrics.record_message_failed(self.queue_name, "processing_error")
+                    otel_metrics.record_message_failed(self.queue_name, "processing_error")
 
                     if retry_count < self.message_max_retries:
                         time.sleep(self.retry_delay)
@@ -509,8 +509,8 @@ class RabbitConsumer(ConsumerMixin):
                         logger.error("Max message processing retries exceeded (rejecting message)")
                         try:
                             if self._settle(message, epoch, reject=True):
-                                prometheus_metrics.record_message_dlq(self.queue_name)
-                                prometheus_metrics.record_nack(self.queue_name, requeue=False)
+                                otel_metrics.record_message_dlq(self.queue_name)
+                                otel_metrics.record_nack(self.queue_name, requeue=False)
                         except Exception:
                             logger.warning(
                                 "Reject failed (connection closed), forcing reconnect to free prefetch slots"
@@ -523,9 +523,9 @@ class RabbitConsumer(ConsumerMixin):
                 duration = time.time() - start_time
                 try:
                     if not self._settle(message, epoch):
-                        prometheus_metrics.record_message_processed(self.queue_name, duration)
+                        otel_metrics.record_message_processed(self.queue_name, duration)
                         return
-                    prometheus_metrics.record_ack(self.queue_name, success=True)
+                    otel_metrics.record_ack(self.queue_name, success=True)
                 except Exception:
                     logger.warning(
                         "ACK failed (connection closed) after successful processing. "
@@ -533,12 +533,12 @@ class RabbitConsumer(ConsumerMixin):
                         "Message will be redelivered and handled idempotently.",
                         duration,
                     )
-                    prometheus_metrics.record_ack(self.queue_name, success=False)
-                    prometheus_metrics.record_message_processed(self.queue_name, duration)
+                    otel_metrics.record_ack(self.queue_name, success=False)
+                    otel_metrics.record_message_processed(self.queue_name, duration)
                     self._force_reconnect()
                     return
 
-                prometheus_metrics.record_message_processed(self.queue_name, duration)
+                otel_metrics.record_message_processed(self.queue_name, duration)
                 logger.debug("Message processed successfully and acked (%.2fs)", duration)
                 return
         finally:
@@ -553,7 +553,7 @@ class RabbitConsumer(ConsumerMixin):
         try:
             # Get the size of the raw payload in bytes
             message_size_bytes = len(message.body)
-            prometheus_metrics.record_message_received(self.queue_name, message_size_bytes)
+            otel_metrics.record_message_received(self.queue_name, message_size_bytes)
 
             # Check if the message exceeds the 100 MB threshold
             if message_size_bytes > LARGE_MESSAGE_THRESHOLD_BYTES:
@@ -565,7 +565,7 @@ class RabbitConsumer(ConsumerMixin):
 
         # Track worker thread pool status
         self._active_tasks_gauge.inc()  # Increment gauge for new task
-        prometheus_metrics.set_worker_threads(
+        otel_metrics.set_worker_threads(
             self.queue_name,
             self._active_tasks_gauge.get(),  # Use the gauge's current value
             self.max_workers,
@@ -588,7 +588,7 @@ class RabbitConsumer(ConsumerMixin):
             # one go, and nothing more is pulled.
             logger.warning("Executor unavailable (%s); stopping consumer and releasing unacked messages", e)
             self._active_tasks_gauge.dec()
-            prometheus_metrics.set_worker_threads(
+            otel_metrics.set_worker_threads(
                 self.queue_name,
                 self._active_tasks_gauge.get(),
                 self.max_workers,
@@ -601,17 +601,17 @@ class RabbitConsumer(ConsumerMixin):
         """Handle connection errors - will retry indefinitely"""
         logger.warning("Connection error, retrying in %.1fs: %s", interval, exc)
         logger.info("Consumer will keep retrying until RabbitMQ is available...")
-        prometheus_metrics.record_connection_error(self.queue_name, type(exc).__name__)
-        prometheus_metrics.record_reconnection(self.queue_name, success=False)
+        otel_metrics.record_connection_error(self.queue_name, type(exc).__name__)
+        otel_metrics.record_reconnection(self.queue_name, success=False)
 
     def on_connection_revived(self):
         """Called when connection is restored"""
         # New channel => every delivery tag issued on the old one is now invalid.
         self._bump_epoch()
         logger.info("Connection restored successfully, resuming consumption")
-        prometheus_metrics.record_reconnection(self.queue_name, success=True)
-        prometheus_metrics.record_connection_established(self.queue_name, "consumer")
-        prometheus_metrics.set_consumer_health(self.queue_name, healthy=True)
+        otel_metrics.record_reconnection(self.queue_name, success=True)
+        otel_metrics.record_connection_established(self.queue_name, "consumer")
+        otel_metrics.set_consumer_health(self.queue_name, healthy=True)
 
     def stop(self, timeout: float = 10.0):
         """Gracefully stop the consumer.
@@ -660,7 +660,7 @@ class RabbitConsumer(ConsumerMixin):
                     if self._stop_requested():
                         return
                     logger.exception("Consumer error on %s, restarting in %.1fs: %s", self.queue_name, backoff, e)
-                    prometheus_metrics.set_consumer_health(self.queue_name, healthy=False)
+                    otel_metrics.set_consumer_health(self.queue_name, healthy=False)
                     # Wait on the stop event, not time.sleep: a pod terminating
                     # mid-backoff would otherwise hold shutdown for up to
                     # MAX_CONSUMER_RESTART_BACKOFF and get SIGKILLed.
