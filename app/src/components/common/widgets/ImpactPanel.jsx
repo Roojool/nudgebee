@@ -355,8 +355,12 @@ const ImpactPanel = ({ eventId, prefetched }) => {
     return (
       <Box sx={{ p: 1 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 0.5 }}>
-          <Chip size='small' label='ROOT' sx={{ bgcolor: 'var(--ds-red-500)', color: '#fff', fontWeight: 700, height: 20, letterSpacing: 0.5 }} />
-          <Typography sx={{ fontWeight: 700 }}>{seed.name}</Typography>
+          <Chip
+            size='small'
+            label='ROOT'
+            sx={{ bgcolor: 'var(--ds-pink-200)', color: 'var(--ds-red-700)', fontWeight: 700, height: 18, fontSize: 11, letterSpacing: 0.5 }}
+          />
+          <Typography sx={{ fontWeight: 620, fontSize: 14 }}>{seed.name}</Typography>
           <Typography sx={{ color: 'var(--ds-gray-500)', fontSize: 13 }}>
             · {seed.namespace} · {seed.type}
           </Typography>
@@ -524,8 +528,12 @@ const ImpactPanel = ({ eventId, prefetched }) => {
     <Box sx={{ p: 1 }}>
       {/* Root + one-line summary */}
       <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 0.5 }}>
-        <Chip size='small' label='ROOT' sx={{ bgcolor: 'var(--ds-red-500)', color: '#fff', fontWeight: 700, height: 20, letterSpacing: 0.5 }} />
-        <Typography sx={{ fontWeight: 700 }}>{seed.name}</Typography>
+        <Chip
+          size='small'
+          label='ROOT'
+          sx={{ bgcolor: 'var(--ds-pink-200)', color: 'var(--ds-red-700)', fontWeight: 700, height: 18, fontSize: 11, letterSpacing: 0.5 }}
+        />
+        <Typography sx={{ fontWeight: 620, fontSize: 14 }}>{seed.name}</Typography>
         <Typography sx={{ color: 'var(--ds-gray-500)', fontSize: 13 }}>
           · {seed.namespace} · {seed.type}
         </Typography>
