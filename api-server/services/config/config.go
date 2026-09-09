@@ -290,6 +290,25 @@ type appConfig struct {
 	RabbitMqEventPostProcessQueue       string `mapstructure:"rabbit_mq_event_post_process_queue"`
 	RabbitMqEventPostProcessConcurrency int    `mapstructure:"rabbit_mq_event_post_process_concurrency"`
 
+	// Event enrichment queue configuration.
+	//
+	// When FeatureEventAsyncEnrichmentEnabled is true, InvestigateEvent commits the event
+	// row and returns immediately, and the playbook (evidence collection) runs on this
+	// queue instead of inside the caller's HTTP request. Measured on Rackspace: a single
+	// trigger_investigation call carrying 408 events held cloud-collector's only MQ worker
+	// for 4h24m, which is how a 10-minute cron builds a 3,000-job backlog overnight.
+	//
+	// Default off: flipping it is a deliberate per-environment rollout.
+	FeatureEventAsyncEnrichmentEnabled bool   `mapstructure:"feature_event_async_enrichment_enabled"`
+	RabbitMqEventEnrichExchange        string `mapstructure:"rabbit_mq_event_enrich_exchange"`
+	RabbitMqEventEnrichQueue           string `mapstructure:"rabbit_mq_event_enrich_queue"`
+	RabbitMqEventEnrichConcurrency     int    `mapstructure:"rabbit_mq_event_enrich_concurrency"`
+	RabbitMqEventEnrichMaxAttempts     int    `mapstructure:"rabbit_mq_event_enrich_max_attempts"`
+	// EventEnrichBudgetSeconds bounds one event's playbook run. It must stay well under the
+	// broker's consumer_timeout (3600s on our installs): a message that outlives that gets
+	// its channel force-closed and is redelivered, which would loop forever.
+	EventEnrichBudgetSeconds int `mapstructure:"event_enrich_budget_seconds"`
+
 	// VM discovery/vulnerability scan queue configuration
 	RabbitMqVMScanExchange    string `mapstructure:"rabbit_mq_vm_scan_exchange"`
 	RabbitMqVMScanQueue       string `mapstructure:"rabbit_mq_vm_scan_queue"`
@@ -507,6 +526,14 @@ func init() {
 	viper.SetDefault("rabbit_mq_event_post_process_exchange", "event_post_process_exchange")
 	viper.SetDefault("rabbit_mq_event_post_process_queue", "event_post_process")
 	viper.SetDefault("rabbit_mq_event_post_process_concurrency", 5)
+
+	// Event enrichment queue configuration
+	viper.SetDefault("feature_event_async_enrichment_enabled", false)
+	viper.SetDefault("rabbit_mq_event_enrich_exchange", "event_enrich_exchange")
+	viper.SetDefault("rabbit_mq_event_enrich_queue", "event_enrich")
+	viper.SetDefault("rabbit_mq_event_enrich_concurrency", 4)
+	viper.SetDefault("rabbit_mq_event_enrich_max_attempts", 3)
+	viper.SetDefault("event_enrich_budget_seconds", 900)
 
 	// VM discovery/vulnerability scan queue configuration
 	viper.SetDefault("rabbit_mq_vm_scan_exchange", "vm_scan_exchange")

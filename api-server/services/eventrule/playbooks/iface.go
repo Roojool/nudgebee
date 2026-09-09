@@ -37,6 +37,17 @@ type PlaybookEvent struct {
 	AggregationKey          string          `json:"aggregation_key"`
 	Fingerprint             string          `json:"fingerprint"`
 	ExistingEvidenceActions map[string]bool `json:"existing_evidence_actions,omitempty"`
+	// Deadline, when non-zero, bounds the whole playbook run. ExecutePlaybook checks
+	// it before starting each action and stops early, returning the results it has
+	// so far rather than abandoning them. Actions themselves are not cancellable
+	// (PlaybookActionContext carries no context.Context), so the real overrun is
+	// bounded by this deadline plus one action's own HTTP timeout — worst case the
+	// 180s cloud_service_map call.
+	//
+	// Set by the async enrichment consumer so one event cannot outlive the broker's
+	// consumer_timeout and get its message redelivered forever. Zero means no bound,
+	// which is the inline request path's behaviour.
+	Deadline time.Time `json:"deadline,omitempty"`
 }
 
 type PlaybookActionContext interface {

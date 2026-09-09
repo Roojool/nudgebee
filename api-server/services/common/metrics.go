@@ -62,6 +62,8 @@ var (
 	metricsEventProcessingDuration  metric.Float64Histogram
 	metricsEventProcessingTotal     metric.Int64Counter
 	metricsEventProcessingFailed    metric.Int64Counter
+	metricsEventEnrichmentDuration  metric.Float64Histogram
+	metricsPlaybookBudgetExhausted  metric.Int64Counter
 	metricsPlaybookActionDuration   metric.Float64Histogram
 	metricsPlaybookActionTotal      metric.Int64Counter
 	metricsPlaybookActionFailed     metric.Int64Counter
@@ -141,6 +143,24 @@ func InitMetrics() {
 		meter,
 		"nb_services_event_processing",
 		"Total number of events processed",
+	)
+
+	// With async enrichment on, nb_services_event_processing_duration only covers the
+	// synchronous phase, so on its own it would show a healthy few milliseconds while
+	// the expensive playbook work merely moved elsewhere. This is where that work is
+	// now visible.
+	metricsEventEnrichmentDuration = mustCreateFloat64Histogram(
+		meter,
+		"nb_services_event_enrichment_duration",
+		"Duration of asynchronous event playbook enrichment",
+		"s",
+		eventProcessingBuckets,
+	)
+
+	metricsPlaybookBudgetExhausted = mustCreateInt64Counter(
+		meter,
+		"nb_services_playbook_budget_exhausted",
+		"Playbook runs that hit their deadline and returned partial evidence",
 	)
 
 	metricsEventProcessingFailed = mustCreateInt64Counter(
@@ -396,6 +416,29 @@ func MetricsEventProcessingDuration(ctx context.Context, duration float64, event
 		attribute.String(MetricKeyAccountID, accountId),
 		attribute.String(MetricKeyAggregationKey, aggregationKey),
 	))
+}
+
+// MetricsEventEnrichmentDuration records how long asynchronous playbook enrichment
+// took for one event. outcome is "success", "partial" (deadline hit) or "error".
+func MetricsEventEnrichmentDuration(ctx context.Context, duration float64, eventSource, tenantId, accountId, outcome string) {
+	if metricsEventEnrichmentDuration == nil {
+		return
+	}
+	metricsEventEnrichmentDuration.Record(ctx, duration, metric.WithAttributes(
+		attribute.String(MetricKeyEventSource, eventSource),
+		attribute.String(MetricKeyTenantID, tenantId),
+		attribute.String(MetricKeyAccountID, accountId),
+		attribute.String("outcome", outcome),
+	))
+}
+
+// MetricsPlaybookBudgetExhausted counts playbook runs stopped by their deadline.
+// A rising rate means the enrichment budget is too small for the playbooks in use.
+func MetricsPlaybookBudgetExhausted(ctx context.Context) {
+	if metricsPlaybookBudgetExhausted == nil {
+		return
+	}
+	metricsPlaybookBudgetExhausted.Add(ctx, 1)
 }
 
 func MetricsEventProcessingTotal(ctx context.Context, eventSource, tenantId, accountId, status string) {

@@ -940,6 +940,14 @@ func IsK8sAgentConnected(accountId string) bool {
 }
 
 // Action defines the interface that all playbook actions must implement.
+// playbookBudgetExpired reports whether the caller's deadline for this playbook
+// run has passed. A zero deadline means unbounded, which is what the inline
+// request path uses — only the asynchronous enrichment consumer sets one, so that
+// a single event cannot outlive the broker's consumer_timeout.
+func playbookBudgetExpired(event playbooks.PlaybookEvent) bool {
+	return !event.Deadline.IsZero() && time.Now().After(event.Deadline)
+}
+
 func ExecutePlaybook(context *security.RequestContext, accountId string, event playbooks.PlaybookEvent) ([]PlaybookActionExecutionResponse, error) {
 	context.GetLogger().Info("eventrule: executing playbook", "event_id", event.EventId, "account_id", accountId, "event_name", event.Name)
 
@@ -985,6 +993,20 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 
 	for i, actionMap := range playbooksData {
 		for actionName, rawParams := range actionMap {
+			// Stop before starting another action once the caller's budget is spent.
+			// Returning what we have beats abandoning the run: the caller writes the
+			// partial evidence and moves on, instead of a goroutine continuing to
+			// hammer cloud-collector and landing results after the event has already
+			// been handed to triage.
+			if playbookBudgetExpired(event) {
+				context.GetLogger().Warn("eventrule: playbook budget exhausted, returning partial results",
+					"event_id", event.EventId, "actions_executed", len(executedAction),
+					"actions_total", len(playbooksData), "next_action", actionName,
+					"deadline", event.Deadline.Format(time.RFC3339))
+				common.MetricsPlaybookBudgetExhausted(context.GetContext())
+				return executionResults, nil
+			}
+
 			action, found := playbooks.GetAction(actionName)
 			if !found {
 				context.GetLogger().Warn("eventrule: action not found in registry", "actionName", actionName)

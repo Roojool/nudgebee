@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/event/lifecycle"
+	eventtypes "nudgebee/services/event/types"
 	"nudgebee/services/eventrule"
 	"nudgebee/services/eventrule/playbooks"
 	integrationcore "nudgebee/services/integrations/core"
@@ -1838,6 +1839,7 @@ func truncateStringToMaxBytes(s string, maxBytes int) string {
 type insertConfig struct {
 	skipWorkflowRefire bool
 	publishCtx         context.Context
+	deferPostProcess   func(eventId string)
 }
 
 // InsertOption configures InsertEvent.
@@ -1861,6 +1863,19 @@ func WithPublishContext(ctx context.Context) InsertOption {
 // pass this, so repeat firings keep matching workflows (issue #25251).
 func WithoutWorkflowRefire() InsertOption {
 	return func(c *insertConfig) { c.skipWorkflowRefire = true }
+}
+
+// WithDeferredPostProcess redirects the post-process enqueue that InsertEvent
+// performs on a genuine insert. The caller becomes responsible for getting the
+// event to event_post_process eventually — used by asynchronous enrichment,
+// which must land the playbook's evidence on the row first, because triage reads
+// evidence content (getEvidenceBonus, parseServiceMapFromEvent) rather than a
+// mere has-evidence flag.
+//
+// The ON CONFLICT branches are deliberately not redirected: those rows have
+// already been through the pipeline once.
+func WithDeferredPostProcess(fn func(eventId string)) InsertOption {
+	return func(c *insertConfig) { c.deferPostProcess = fn }
 }
 
 // legacyEventSources maps event source values that were renamed in the
@@ -2040,14 +2055,23 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	// worker logs at ERROR and increments common.MqBackgroundRetryDroppedTotal on terminal
 	// failure, so drops aren't invisible.
 	if isInsert {
-		_ = common.MqPublish(
-			config.Config.RabbitMqEventPostProcessExchange,
-			config.Config.RabbitMqEventPostProcessQueue,
-			map[string]any{"event_id": id},
-			common.MqPublishWithExpiration(1*time.Hour),
-			common.MqPublishWithBackgroundRetry(),
-			common.MqPublishWithContext(cfg.publishCtx),
-		)
+		// The deferral hook takes over only for a genuine insert. It must be decided
+		// here rather than by the caller: only this function knows whether the upsert
+		// inserted or updated (RETURNING xmax = 0). A caller that guessed would, on
+		// losing a race to a concurrent insert of the same finding_id, enqueue
+		// enrichment for a row that has already been through the whole pipeline.
+		if cfg.deferPostProcess != nil {
+			cfg.deferPostProcess(id)
+		} else {
+			_ = common.MqPublish(
+				config.Config.RabbitMqEventPostProcessExchange,
+				config.Config.RabbitMqEventPostProcessQueue,
+				map[string]any{"event_id": id},
+				common.MqPublishWithExpiration(1*time.Hour),
+				common.MqPublishWithBackgroundRetry(),
+				common.MqPublishWithContext(cfg.publishCtx),
+			)
+		}
 	} else if !cfg.skipWorkflowRefire &&
 		(strings.EqualFold(string(event.Status), string(EventStatusFiring)) || isPointInTimeEvent) {
 		// Re-fire of an existing event: ON CONFLICT updated an already-present row.
@@ -2300,7 +2324,8 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 	var existingSubjectName sql.NullString
 	err = dbms.Db.QueryRowx("SELECT id, subject_name FROM events WHERE tenant = $1 AND cloud_account_id = $2 AND finding_id = $3", tenantId, accountId, webhookEvent.FindingId).Scan(&existingEventId, &existingSubjectName)
 
-	if err == nil { // event exists
+	switch err {
+	case nil: // event exists
 		sc.GetLogger().Info("event: already processed, updating event details", "event_id", existingEventId, "finding_id", webhookEvent.FindingId)
 		labels, err1 := common.MarshalJson(webhookEvent.Labels)
 		if err1 != nil {
@@ -2333,131 +2358,35 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		}
 
 		return existingEventId, nil
-	} else if err == sql.ErrNoRows { // event does not exist, so process it
-		var evidenceResponse []eventrule.PlaybookActionExecutionResponse
-
-		// Snapshot original label keys so the subject/namespace/cluster fallback
-		// only considers labels from the webhook payload, not labels injected by
-		// playbook actions (e.g. prometheus_enricher metric labels like "pod", "job").
-		// Action-extracted labels still flow into webhookEvent.Labels for persistence.
-		originalLabelKeys := make(map[string]bool, len(webhookEvent.Labels))
-		for k := range webhookEvent.Labels {
-			originalLabelKeys[k] = true
-		}
-
-		// Skip playbook execution for configuration change events
-		if webhookEvent.FindingType == "configuration_change" {
-			sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", id, "aggregation_key", webhookEvent.AggregationKey)
-		} else {
-			eventruleStart, eventruleEnd := getPlaybookStartEndTime(webhookEvent)
-
-			// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
-			// nb_alert_name is set during webhook enrichment and contains the correct alert name.
-			playbookName := webhookEvent.AggregationKey
-			if alertName, ok := webhookEvent.Labels["nb_alert_name"]; ok && alertName != "" {
-				playbookName = alertName
-			} else if alertName, ok := webhookEvent.Labels["alertname"]; ok && alertName != "" {
-				playbookName = alertName
-			}
-
-			existingEvidenceActions := extractEvidenceActionNames(webhookEvent.Evidences)
-
-			evidenceResponse, err = eventrule.ExecutePlaybook(sc, webhookEvent.AccountId, playbooks.PlaybookEvent{
-				EventId:     id,
-				Name:        playbookName,
-				Labels:      webhookEvent.Labels,
-				Annotations: map[string]string{},
-				StartedAt:   &eventruleStart,
-				EndedAt:     &eventruleEnd,
-				IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
-					webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
-				Source:                  webhookEvent.Source,
-				SubjectName:             webhookEvent.SubjectName,
-				SubjectType:             webhookEvent.SubjectType,
-				SubjectOwner:            webhookEvent.SubjectOwner,
-				SubjectOwnerKind:        webhookEvent.SubjectOwnerKind,
-				SubjectNamespace:        webhookEvent.SubjectNamespace,
-				SubjectNode:             webhookEvent.SubjectNode,
-				AggregationKey:          webhookEvent.AggregationKey,
-				ExistingEvidenceActions: existingEvidenceActions,
-			})
-			if err != nil {
-				sc.GetLogger().Error("event: unable to process playbook for event", "error", err, "aggregation_key", webhookEvent.AggregationKey, "account_id", webhookEvent.AccountId, "event_id", webhookEvent.Fingerprint)
-			}
-
-			for _, e := range evidenceResponse {
-				if e.Error != nil {
-					common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonActionExecutionError)
-				} else {
-					common.MetricsPlaybookActionTotal(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricStatusCompleted)
-				}
-				// Record individual action duration
-				common.MetricsPlaybookActionDuration(sc.GetContext(), e.DurationSeconds, e.ActionName, eventSource, tenantId, accountId)
-
-				if e.Response == nil {
-					continue
-				}
-				structResponse, err := common.MarshalStructToMap(e.Response)
-				if err != nil {
-					common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonEvidenceMarshalFailed)
-					webhookEvent.Evidences = append(webhookEvent.Evidences, e.Response)
-					continue
-				}
-				structResponse["type"] = e.Response.GetFormatName()
-				additionalInfo, ok := structResponse["additional_info"].(map[string]any)
-				if !ok {
-					additionalInfo = map[string]any{}
-					structResponse["additional_info"] = additionalInfo
-				}
-				if e.ActionTitle != "" {
-					additionalInfo["title"] = e.ActionTitle
-				}
-				// Only set action_name if not already set by the action response
-				if _, exists := additionalInfo["action_name"]; !exists {
-					additionalInfo["action_name"] = e.ActionName
-				}
-
-				playbooks.ShapeEvidenceForFrontend(structResponse)
-				webhookEvent.Evidences = append(webhookEvent.Evidences, structResponse)
-			}
-		}
-
-		mergeAggregatedAlertLabels(webhookEvent.Labels, aggregationKey, evidenceResponse)
-		linkCloudResourceId(&webhookEvent, evidenceResponse)
-
-		if webhookEvent.Labels == nil {
-			webhookEvent.Labels = map[string]string{}
-		}
-
-		if webhookEvent.Cluster == "" {
-			for _, key := range clusterKeys {
-				if cluster, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.Cluster = cluster
-					break
-				}
-			}
-		}
-
-		if webhookEvent.SubjectNamespace == "" {
-			for _, key := range namespaceKeys {
-				if namespace, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.SubjectNamespace = namespace
-					break
-				}
-			}
-		}
-
-		if webhookEvent.SubjectName == "" {
-			for _, key := range subjectKeys {
-				if subject, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.SubjectName = subject
-					break
-				}
-			}
-		}
+	case sql.ErrNoRows: // event does not exist, so process it
+		// Resolve subject/namespace/cluster from the webhook's own labels before
+		// anything else. These fallbacks only ever consult labels that arrived in
+		// the payload, so they need nothing the playbook produces, and running them
+		// first means the row commits with subject_name already filled — which is
+		// what k8s-collector's RESOLVED lookup and the duplicate branch above read
+		// while asynchronous enrichment is still in flight.
+		//
+		// Behaviour note: the playbook (and mergeAggregatedAlertLabels) may
+		// overwrite the value of a payload label. Previously the fallback ran
+		// afterwards and would have picked up that overwritten value; now it takes
+		// the pre-playbook one. That only differs when the field arrived empty AND
+		// the label it resolves from is both present in the payload and later
+		// rewritten by an enricher.
+		applySubjectFallbacks(&webhookEvent)
 
 		if webhookEvent.CreatedAt == nil {
 			webhookEvent.CreatedAt = &start
+		}
+
+		// With the flag on, the playbook runs on the event_enrich queue instead of
+		// here. configuration_change never defers: the inline path already skips the
+		// playbook for it below, and its point-in-time CLOSED handling has to fire at
+		// insert time.
+		asyncEnrichment := config.Config.FeatureEventAsyncEnrichmentEnabled &&
+			webhookEvent.FindingType != "configuration_change"
+
+		if !asyncEnrichment {
+			runPlaybookEnrichment(sc, &webhookEvent, id, time.Time{})
 		}
 
 		sc.GetLogger().Info("InvestigateEvent: calling InsertEvent",
@@ -2465,9 +2394,17 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			"finding_id", webhookEvent.FindingId,
 			"source", eventSource,
 			"tenant", tenantId,
-			"account_id", accountId)
+			"account_id", accountId,
+			"async_enrichment", asyncEnrichment)
 
-		id, err := InsertEvent(webhookEvent, id, WithPublishContext(sc.GetContext()))
+		insertOpts := []InsertOption{WithPublishContext(sc.GetContext())}
+		if asyncEnrichment {
+			insertOpts = append(insertOpts, WithDeferredPostProcess(func(eventId string) {
+				publishEventEnrichment(sc, eventId, tenantId, webhookEvent.AccountId)
+			}))
+		}
+
+		id, err := InsertEvent(webhookEvent, id, insertOpts...)
 
 		if err != nil {
 			sc.GetLogger().Error("InvestigateEvent: InsertEvent failed",
@@ -2488,10 +2425,197 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			"account_id", accountId)
 		common.MetricsEventProcessingTotal(sc.GetContext(), eventSource, tenantId, accountId, common.MetricStatusCompleted)
 		return id, err
-	} else { // some other db error
+	default: // some other db error
 		sc.GetLogger().Error("event: failed to check for existing event", "error", err, "source", eventSource, "finding_id", webhookEvent.FindingId)
 		return "", err
 	}
+}
+
+// publishEventEnrichment hands a freshly inserted event to the event_enrich queue.
+//
+// Persistent delivery on a durable queue: unlike event_post_process, losing one of
+// these on a broker restart would leave the event both unenriched and never
+// post-processed, since the post-process publish is the consumer's job. For the
+// same reason there is deliberately no expiration — a backlog longer than an hour
+// must survive rather than silently evaporate, and there is no DLX to catch it.
+func publishEventEnrichment(sc *security.RequestContext, eventId, tenantId, accountId string) {
+	err := common.MqPublish(
+		config.Config.RabbitMqEventEnrichExchange,
+		config.Config.RabbitMqEventEnrichQueue,
+		eventtypes.EventEnrichmentMessage{
+			EventID:   eventId,
+			TenantID:  tenantId,
+			AccountID: accountId,
+		},
+		common.MqPublishWithPersistentDelivery(),
+		common.MqPublishWithBackgroundRetry(),
+		common.MqPublishWithContext(sc.GetContext()),
+	)
+	if err != nil {
+		sc.GetLogger().Error("event: failed to enqueue enrichment", "error", err, "event_id", eventId)
+	}
+}
+
+// applySubjectFallbacks fills Cluster, SubjectNamespace and SubjectName from the
+// event's own labels when they arrived empty. Only labels already on the event are
+// consulted, which is what keeps playbook-injected labels (prometheus_enricher's
+// "pod"/"job", say) from being mistaken for the real subject.
+func applySubjectFallbacks(webhookEvent *Event) {
+	if webhookEvent.Labels == nil {
+		webhookEvent.Labels = map[string]string{}
+	}
+
+	if webhookEvent.Cluster == "" {
+		for _, key := range clusterKeys {
+			if cluster, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.Cluster = cluster
+				break
+			}
+		}
+	}
+
+	if webhookEvent.SubjectNamespace == "" {
+		for _, key := range namespaceKeys {
+			if namespace, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.SubjectNamespace = namespace
+				break
+			}
+		}
+	}
+
+	if webhookEvent.SubjectName == "" {
+		for _, key := range subjectKeys {
+			if subject, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.SubjectName = subject
+				break
+			}
+		}
+	}
+}
+
+// runPlaybookEnrichment executes the event's playbook and applies every
+// post-playbook mutation to webhookEvent in place: it appends evidence cards,
+// merges aggregated-alert labels and links the cloud resource.
+//
+// deadline, when non-zero, bounds the run — ExecutePlaybook stops before starting
+// an action once it passes and returns what it has, so partial evidence is real
+// evidence rather than an abandoned goroutine's.
+//
+// Returns the evidence cards appended and the labels added or changed, which the
+// asynchronous path needs in order to merge them into an already-persisted row.
+// The inline path mutates webhookEvent and ignores both.
+func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eventId string, deadline time.Time) (addedEvidences []any, labelDelta map[string]string) {
+	eventSource := webhookEvent.Source
+	tenantId := sc.GetSecurityContext().GetTenantId()
+	accountId := webhookEvent.AccountId
+	aggregationKey := webhookEvent.AggregationKey
+
+	labelsBefore := make(map[string]string, len(webhookEvent.Labels))
+	for k, v := range webhookEvent.Labels {
+		labelsBefore[k] = v
+	}
+	evidenceCountBefore := len(webhookEvent.Evidences)
+
+	var evidenceResponse []eventrule.PlaybookActionExecutionResponse
+
+	// Skip playbook execution for configuration change events
+	if webhookEvent.FindingType == "configuration_change" {
+		sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", eventId, "aggregation_key", webhookEvent.AggregationKey)
+	} else {
+		eventruleStart, eventruleEnd := getPlaybookStartEndTime(*webhookEvent)
+
+		// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
+		// nb_alert_name is set during webhook enrichment and contains the correct alert name.
+		playbookName := webhookEvent.AggregationKey
+		if alertName, ok := webhookEvent.Labels["nb_alert_name"]; ok && alertName != "" {
+			playbookName = alertName
+		} else if alertName, ok := webhookEvent.Labels["alertname"]; ok && alertName != "" {
+			playbookName = alertName
+		}
+
+		existingEvidenceActions := extractEvidenceActionNames(webhookEvent.Evidences)
+
+		var err error
+		evidenceResponse, err = eventrule.ExecutePlaybook(sc, webhookEvent.AccountId, playbooks.PlaybookEvent{
+			EventId:     eventId,
+			Deadline:    deadline,
+			Name:        playbookName,
+			Labels:      webhookEvent.Labels,
+			Annotations: map[string]string{},
+			StartedAt:   &eventruleStart,
+			EndedAt:     &eventruleEnd,
+			IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
+				webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
+			Source:                  webhookEvent.Source,
+			SubjectName:             webhookEvent.SubjectName,
+			SubjectType:             webhookEvent.SubjectType,
+			SubjectOwner:            webhookEvent.SubjectOwner,
+			SubjectOwnerKind:        webhookEvent.SubjectOwnerKind,
+			SubjectNamespace:        webhookEvent.SubjectNamespace,
+			SubjectNode:             webhookEvent.SubjectNode,
+			AggregationKey:          webhookEvent.AggregationKey,
+			ExistingEvidenceActions: existingEvidenceActions,
+		})
+		if err != nil {
+			sc.GetLogger().Error("event: unable to process playbook for event", "error", err, "aggregation_key", webhookEvent.AggregationKey, "account_id", webhookEvent.AccountId, "event_id", webhookEvent.Fingerprint)
+		}
+
+		for _, e := range evidenceResponse {
+			if e.Error != nil {
+				common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonActionExecutionError)
+			} else {
+				common.MetricsPlaybookActionTotal(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricStatusCompleted)
+			}
+			// Record individual action duration
+			common.MetricsPlaybookActionDuration(sc.GetContext(), e.DurationSeconds, e.ActionName, eventSource, tenantId, accountId)
+
+			if e.Response == nil {
+				continue
+			}
+			structResponse, err := common.MarshalStructToMap(e.Response)
+			if err != nil {
+				common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonEvidenceMarshalFailed)
+				webhookEvent.Evidences = append(webhookEvent.Evidences, e.Response)
+				continue
+			}
+			structResponse["type"] = e.Response.GetFormatName()
+			additionalInfo, ok := structResponse["additional_info"].(map[string]any)
+			if !ok {
+				additionalInfo = map[string]any{}
+				structResponse["additional_info"] = additionalInfo
+			}
+			if e.ActionTitle != "" {
+				additionalInfo["title"] = e.ActionTitle
+			}
+			// Only set action_name if not already set by the action response
+			if _, exists := additionalInfo["action_name"]; !exists {
+				additionalInfo["action_name"] = e.ActionName
+			}
+
+			playbooks.ShapeEvidenceForFrontend(structResponse)
+			webhookEvent.Evidences = append(webhookEvent.Evidences, structResponse)
+		}
+	}
+
+	mergeAggregatedAlertLabels(webhookEvent.Labels, aggregationKey, evidenceResponse)
+	linkCloudResourceId(webhookEvent, evidenceResponse)
+
+	if len(webhookEvent.Evidences) > evidenceCountBefore {
+		addedEvidences = webhookEvent.Evidences[evidenceCountBefore:]
+	}
+
+	// Both the playbook itself (it writes back into the same Labels map) and
+	// mergeAggregatedAlertLabels can add or rewrite labels. The async path needs
+	// just those, so it can merge them into the persisted row rather than
+	// overwriting a labels map another writer may have touched meanwhile.
+	labelDelta = map[string]string{}
+	for k, v := range webhookEvent.Labels {
+		if before, existed := labelsBefore[k]; !existed || before != v {
+			labelDelta[k] = v
+		}
+	}
+
+	return addedEvidences, labelDelta
 }
 
 // resolveIncidentAt returns when the subject container actually terminated, for
