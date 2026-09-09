@@ -2574,6 +2574,123 @@ var table_metadata = map[string]TableDefinition{
 			},
 		},
 	},
+	// The account / EC2 cost-summary cards need this-month, last-month and
+	// year-to-date spend, each split into net / gross / credits. The frontend
+	// used to ask for that as 8 near-identical spend_groupings_v2 calls per page
+	// (CloudAccountSummary, CloudAccEC2Summary and ~3 sibling blocks) -- 8 round
+	// trips, 8 connection holds and 8 scans of the same account's spend rows. On
+	// a busy page those queue behind each other and the whole summary stalls.
+	//
+	// This is one query: a short (this-month + last-month) scan CROSS JOINed to
+	// the year scan, each figure a sum(amount) FILTER (WHERE <kind>). Splitting
+	// recent from the year keeps the small windows on the (cloud_account, date,
+	// exclude_aggregate) index instead of dragging every figure through the
+	// full-year scan. Windows come from now() server-side: spend is
+	// daily-granularity and the callers already compute these boundaries in UTC,
+	// so month-to-now and month-to-month-end sum identically. net = not-excluded;
+	// gross = not-excluded and amount >= 0; credits = excluded and amount < 0 --
+	// the exact predicates the old *SpendsWhere variables carried. A 1-row
+	// anchor + LEFT JOINs keep exactly one row even when an account has spend in
+	// only one of the two ranges. resource_service_name (EC2 summary) optional.
+	"spend_summary_windows_v2": {
+		PermissionModule:    "spend",
+		Type:                Derived,
+		Source:              database.Metastore,
+		Name:                "spend_summary_windows_v2",
+		TenantIdColumnName:  "tenant_id",
+		AccountIdColumnName: "account_id",
+		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			// pushed into both inner scans and removed from request.Where so the
+			// outer query never re-applies them against columns that only exist
+			// on spends.
+			scope := extractFilterSQL(&request, "account_id", "cloud_account") +
+				extractFilterSQL(&request, "resource_service_name", "(tags -> 'nb_service_name' ->> 0)")
+
+			const (
+				net     = "exclude_aggregate = false"
+				gross   = "exclude_aggregate = false AND amount >= 0"
+				credits = "exclude_aggregate = true AND amount < 0"
+				cm      = "date >= date_trunc('month', now()) AND date < date_trunc('month', now()) + interval '1 month'"
+				lm      = "date >= date_trunc('month', now()) - interval '1 month' AND date < date_trunc('month', now())"
+			)
+			f := func(window, kind string) string {
+				if window == "" {
+					return fmt.Sprintf("COALESCE(sum(amount) FILTER (WHERE %s), 0)::float", kind)
+				}
+				return fmt.Sprintf("COALESCE(sum(amount) FILTER (WHERE %s AND %s), 0)::float", window, kind)
+			}
+
+			q := fmt.Sprintf(`(
+				SELECT
+					joined.tenant_id, joined.account_id, joined.currency_type,
+					COALESCE(joined.cm_net, 0)     AS cm_net,
+					COALESCE(joined.cm_gross, 0)   AS cm_gross,
+					COALESCE(joined.cm_credits, 0) AS cm_credits,
+					COALESCE(joined.lm_net, 0)     AS lm_net,
+					COALESCE(joined.lm_gross, 0)   AS lm_gross,
+					COALESCE(joined.lm_credits, 0) AS lm_credits,
+					COALESCE(joined.yr_net, 0)     AS yr_net,
+					COALESCE(joined.yr_gross, 0)   AS yr_gross,
+					COALESCE(joined.yr_credits, 0) AS yr_credits
+				FROM (SELECT 1) anchor
+				LEFT JOIN (
+					-- one row per currency (recent + year figures side by side),
+					-- then the dominant currency. The join is ON currency_type so
+					-- a multi-currency account can't get this-month figures in one
+					-- currency next to yearly figures in another.
+					SELECT
+						COALESCE(rec.tenant_id, yr.tenant_id)         AS tenant_id,
+						COALESCE(rec.account_id, yr.account_id)       AS account_id,
+						COALESCE(rec.currency_type, yr.currency_type) AS currency_type,
+						rec.cm_net, rec.cm_gross, rec.cm_credits,
+						rec.lm_net, rec.lm_gross, rec.lm_credits,
+						yr.yr_net, yr.yr_gross, yr.yr_credits
+					FROM (
+						SELECT cast(tenant as text) AS tenant_id, cast(cloud_account as text) AS account_id, unit AS currency_type,
+							%s AS cm_net, %s AS cm_gross, %s AS cm_credits,
+							%s AS lm_net, %s AS lm_gross, %s AS lm_credits
+						FROM spends
+						WHERE 1 = 1%s
+							AND date >= date_trunc('month', now()) - interval '1 month'
+							AND date < date_trunc('month', now()) + interval '1 month'
+						GROUP BY tenant, cloud_account, unit
+					) rec
+					FULL OUTER JOIN (
+						SELECT cast(tenant as text) AS tenant_id, cast(cloud_account as text) AS account_id, unit AS currency_type,
+							%s AS yr_net, %s AS yr_gross, %s AS yr_credits
+						FROM spends
+						WHERE 1 = 1%s
+							AND date >= date_trunc('year', now())
+							AND date < date_trunc('year', now()) + interval '1 year'
+						GROUP BY tenant, cloud_account, unit
+					) yr ON rec.tenant_id = yr.tenant_id AND rec.account_id = yr.account_id AND rec.currency_type = yr.currency_type
+					ORDER BY COALESCE(rec.cm_net, yr.yr_net) DESC NULLS LAST
+					LIMIT 1
+				) joined ON true
+			) AS spend_summary_windows_v2`,
+				f(cm, net), f(cm, gross), f(cm, credits),
+				f(lm, net), f(lm, gross), f(lm, credits), scope,
+				f("", net), f("", gross), f("", credits), scope)
+			return q, request, nil
+		},
+		Columns: map[string]ColumnDefinition{
+			"tenant_id":     {Type: ColumnDefinitionTypeString},
+			"account_id":    {Type: ColumnDefinitionTypeString},
+			"currency_type": {Type: ColumnDefinitionTypeString},
+			// accepted in the where clause only; the DefGenerator pushes it into
+			// the aggregate and strips it before the outer query runs.
+			"resource_service_name": {Type: ColumnDefinitionTypeString, Def: "tags -> 'nb_service_name' ->> 0"},
+			"cm_net":                {Type: ColumnDefinitionTypeFloat},
+			"cm_gross":              {Type: ColumnDefinitionTypeFloat},
+			"cm_credits":            {Type: ColumnDefinitionTypeFloat},
+			"lm_net":                {Type: ColumnDefinitionTypeFloat},
+			"lm_gross":              {Type: ColumnDefinitionTypeFloat},
+			"lm_credits":            {Type: ColumnDefinitionTypeFloat},
+			"yr_net":                {Type: ColumnDefinitionTypeFloat},
+			"yr_gross":              {Type: ColumnDefinitionTypeFloat},
+			"yr_credits":            {Type: ColumnDefinitionTypeFloat},
+		},
+	},
 	"audits_v2": {
 		Type:                Normal,
 		Source:              getSource("audits_v2"),

@@ -1930,6 +1930,13 @@ type Query {
   ): SpendGroupingsResponse
 }
 
+type Query {
+  spend_summary_windows_v2(
+    where: SpendGroupingsWhereRequest
+    columns: [String]
+  ): SpendSummaryWindowsResponse
+}
+
 type Mutation {
   tenant_attribute_delete(
     names: [String!]!
@@ -6625,6 +6632,25 @@ type SpendsRowResponse {
 
 type SpendGroupingsResponse {
   rows: [SpendGroupingsRowResponse]
+}
+
+type SpendSummaryWindowsResponse {
+  rows: [SpendSummaryWindowsRowResponse]
+}
+
+type SpendSummaryWindowsRowResponse {
+  tenant_id: String
+  account_id: String
+  currency_type: String
+  cm_net: Float
+  cm_gross: Float
+  cm_credits: Float
+  lm_net: Float
+  lm_gross: Float
+  lm_credits: Float
+  yr_net: Float
+  yr_gross: Float
+  yr_credits: Float
 }
 
 type SpendGroupingsRowResponse {
