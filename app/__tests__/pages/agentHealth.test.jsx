@@ -263,6 +263,41 @@ describe('Observability tab on an agent-served cluster', () => {
     expect(traces).toHaveTextContent('Not configured');
     expect(traces).not.toHaveTextContent('otel_clickhouse');
   });
+
+  // Without this the row reads "Connected" with nothing to say how old that is, which is
+  // how a cluster whose telemetry died hours ago still looked current.
+  it('dates an agent-served signal with the time the agent reported it', async () => {
+    k8sApi.getLatestVersions.mockResolvedValue({ data: { nudgebee_list_versions: {} } });
+    k8sApi.getAgentHealth.mockResolvedValue({
+      data: [
+        {
+          type: 'k8s',
+          status: 'CONNECTED',
+          connection_status: { ...agentOnlyStatus, traceProvider: 'otel_clickhouse', healthCheckedAt: '2026-09-08T15:12:04Z' },
+        },
+      ],
+    });
+    render(<AgentHealth />);
+    await waitFor(() => expect(screen.getByText('Observability')).toBeInTheDocument());
+
+    const rowFor = (signal) => screen.getAllByTestId('row').find((r) => r.textContent.startsWith(signal));
+    expect(rowFor('Traces')).toHaveTextContent('2026-09-08T15:12:04Z');
+    expect(rowFor('Logs')).toHaveTextContent('2026-09-08T15:12:04Z');
+  });
+
+  it('leaves Last Checked empty when the agent has never reported a time', async () => {
+    k8sApi.getLatestVersions.mockResolvedValue({ data: { nudgebee_list_versions: {} } });
+    k8sApi.getAgentHealth.mockResolvedValue({
+      data: [{ type: 'k8s', status: 'CONNECTED', connection_status: { ...agentOnlyStatus, traceProvider: 'otel_clickhouse' } }],
+    });
+    render(<AgentHealth />);
+    await waitFor(() => expect(screen.getByText('Observability')).toBeInTheDocument());
+
+    // '-', not the string 'undefined' — the cell keeps its own empty fallback.
+    const traces = screen.getAllByTestId('row').find((r) => r.textContent.startsWith('Traces'));
+    expect(traces).not.toHaveTextContent('undefined');
+    expect(traces).toHaveTextContent('-');
+  });
 });
 
 describe('integrationServed', () => {

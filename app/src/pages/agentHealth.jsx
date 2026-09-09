@@ -112,6 +112,11 @@ const AgentHealth = () => {
     nodeAgentCount: 0,
     namespace: '',
     prometheusRetentionTime: 0,
+    // When the agent last reported the flags above, stamped by the collector on the
+    // telemetry post that carried them. Deliberately NOT gated on the agent being
+    // connected, unlike every boolean here: a stale `true` is a lie, but a stale
+    // timestamp states its own age, which is the whole point of showing it.
+    healthCheckedAt: '',
 
     // per-feature failure reasons reported by the agent's health checks
     prometheusError: '',
@@ -258,6 +263,7 @@ const AgentHealth = () => {
               opencostError: acc.connection_status?.opencostConnectionError ?? '',
               nodeAgentError: acc.connection_status?.nodeAgentConnectionError ?? '',
               agentUrl: acc.connection_status?.agentUrl,
+              healthCheckedAt: acc.connection_status?.healthCheckedAt ?? '',
               prometheusAdditionalLabels: acc.connection_status?.prometheusAdditionalLabels
                 ? JSON.stringify(acc.connection_status?.prometheusAdditionalLabels)
                 : '',
@@ -557,6 +563,10 @@ const AgentHealth = () => {
       const viaIntegration = integrationServed(providerStatus, key);
       const connected = viaIntegration?.connected;
       const provider = entry?.provider || agentReportedProvider(key);
+      // Both sources of "as of when", picked by whoever answered the Status column: the
+      // cron's probe time for an integration, the agent's own report time for a signal it
+      // serves. A row with no provider at all reports neither — nothing was checked.
+      const lastChecked = viaIntegration ? providerStatus?.checkedAt : provider ? agentFeatures.healthCheckedAt : '';
       return [
         { text: label },
         { text: provider || '-' },
@@ -564,8 +574,8 @@ const AgentHealth = () => {
         {
           // A probed integration reports its probe; an agent-served signal reports the
           // agent's own flag for it. Both are a real Connected/Disconnected — the Source
-          // column is what says which of the two answered, and Last Checked is set only
-          // for the probed one.
+          // column is what says which of the two answered, and Last Checked dates
+          // whichever of the two it was.
           component: !provider ? (
             <Text value='Not configured' />
           ) : (
@@ -578,7 +588,7 @@ const AgentHealth = () => {
             </Typography>
           ),
         },
-        { component: providerStatus?.checkedAt && viaIntegration ? <Datetime value={providerStatus.checkedAt} /> : <Text value='-' /> },
+        { component: lastChecked ? <Datetime value={lastChecked} /> : <Text value='-' /> },
         {
           component: (
             <Typography component='span' variant='body2' color={entry?.error ? 'error' : undefined}>
@@ -990,7 +1000,8 @@ const AgentHealth = () => {
           <ListingLayout.Body>
             <Typography sx={{ fontSize: ds.text.body, color: ds.gray[600], mb: 2 }}>
               Where this cluster&apos;s logs, metrics and traces actually come from. A signal served by an integration is checked directly against
-              that backend, so its status is independent of the agent.
+              that backend, so its status is independent of the agent. Last Checked is when that check ran &mdash; for a signal the agent serves, when
+              the agent last reported it.
             </Typography>
             <CustomTable headers={HEADERS_OBSERVABILITY} tableData={buildObservabilityTableData()} loading={loading} />
           </ListingLayout.Body>
