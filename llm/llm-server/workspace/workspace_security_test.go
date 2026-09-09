@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,7 +40,8 @@ func TestApplyWorkspaceSecurityDefaults(t *testing.T) {
 	require.False(t, *securityContext.Privileged)
 	require.False(t, *securityContext.AllowPrivilegeEscalation)
 	require.Equal(t, []corev1.Capability{"ALL"}, securityContext.Capabilities.Drop)
-	require.Nil(t, securityContext.ReadOnlyRootFilesystem, "read-only rootfs requires a separate writable-mount rollout")
+	require.NotNil(t, securityContext.ReadOnlyRootFilesystem)
+	require.True(t, *securityContext.ReadOnlyRootFilesystem)
 
 	require.Len(t, pod.Spec.InitContainers, 1)
 	initSecurityContext := pod.Spec.InitContainers[0].SecurityContext
@@ -48,6 +50,27 @@ func TestApplyWorkspaceSecurityDefaults(t *testing.T) {
 	require.False(t, *initSecurityContext.Privileged)
 	require.False(t, *initSecurityContext.AllowPrivilegeEscalation)
 	require.Equal(t, []corev1.Capability{"ALL"}, initSecurityContext.Capabilities.Drop)
+	require.NotNil(t, initSecurityContext.ReadOnlyRootFilesystem)
+	require.True(t, *initSecurityContext.ReadOnlyRootFilesystem)
+}
+
+func TestWorkspaceWritableLayout(t *testing.T) {
+	t.Parallel()
+
+	limit := resource.MustParse("5Gi")
+	volumes, mounts := workspaceWritableLayout(&limit)
+
+	require.Len(t, volumes, 3)
+	for _, volume := range volumes {
+		require.NotNil(t, volume.EmptyDir)
+		require.NotNil(t, volume.EmptyDir.SizeLimit)
+		require.Zero(t, volume.EmptyDir.SizeLimit.Cmp(limit))
+	}
+	require.Equal(t, []corev1.VolumeMount{
+		{Name: "runtime-tmp", MountPath: "/tmp"},
+		{Name: "runtime-home", MountPath: "/home/appuser"},
+		{Name: "workspace-storage", MountPath: "/tmp/code-analysis"},
+	}, mounts)
 }
 
 func TestApplyWorkspaceSecurityDefaultsPreservesUnrelatedContainerSettings(t *testing.T) {

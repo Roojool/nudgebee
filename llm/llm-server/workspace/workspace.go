@@ -39,7 +39,7 @@ const workspaceSpecAnnotationKey = "nudgebee.com/workspace-spec-version"
 // workspaceSpecVersion is bumped whenever an existing healthy workspace pod
 // must be recreated to pick up a pod-spec-only change. CreateWorkspace checks
 // it during recovery, while the leader sweep upgrades a bounded batch at a time.
-const workspaceSpecVersion = "workspace-storage-v2"
+const workspaceSpecVersion = "workspace-readonly-rootfs-v3"
 
 const workspaceSpecUpgradeBatchSize = 5
 
@@ -453,6 +453,7 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 	// Command to start server (no arguments usually starts server, based on main.go)
 	args := []string{"/app/code-analysis-agent", "--server"}
 
+	volumes, volumeMounts := workspaceWritableLayout(storageLimit)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -467,14 +468,7 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 			},
 		},
 		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{
-					Name: "workspace-storage",
-					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-						SizeLimit: storageLimit,
-					}},
-				},
-			},
+			Volumes: volumes,
 			// GKE resolves metadata.google.internal to the real metadata IP
 			// (169.254.169.254) inside pods, but the NetworkPolicy blackholes
 			// that IP to prevent IMDS credential theft — silently dropping
@@ -505,10 +499,8 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 							Name:          "http",
 						},
 					},
-					Resources: buildWorkspaceResources(),
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace-storage", MountPath: "/tmp/code-analysis"},
-					},
+					Resources:    buildWorkspaceResources(),
+					VolumeMounts: volumeMounts,
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
@@ -598,9 +590,8 @@ func hasCurrentWorkspaceSpec(pod *corev1.Pod) bool {
 }
 
 // applyWorkspaceSecurityDefaults establishes the portable baseline for every
-// workspace container. ReadOnlyRootFilesystem is deliberately deferred: the
-// code-analysis image still needs explicit writable mounts for its workspace,
-// HOME, temporary files, and provider CLI state before that can be enabled.
+// workspace container. Runtime writes are confined to the explicit emptyDir
+// mounts returned by workspaceWritableLayout.
 func applyWorkspaceSecurityDefaults(pod *corev1.Pod) {
 	runAsUser := int64(1000)
 	runAsGroup := int64(3000)
@@ -628,6 +619,7 @@ func applyContainerSecurityDefaults(containers []corev1.Container) {
 		containerRunAsNonRoot := true
 		privileged := false
 		allowPrivilegeEscalation := false
+		readOnlyRootFilesystem := true
 		if containers[i].SecurityContext == nil {
 			containers[i].SecurityContext = &corev1.SecurityContext{}
 		}
@@ -635,10 +627,38 @@ func applyContainerSecurityDefaults(containers []corev1.Container) {
 		securityContext.RunAsNonRoot = &containerRunAsNonRoot
 		securityContext.Privileged = &privileged
 		securityContext.AllowPrivilegeEscalation = &allowPrivilegeEscalation
+		securityContext.ReadOnlyRootFilesystem = &readOnlyRootFilesystem
 		securityContext.Capabilities = &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 		}
 	}
+}
+
+// workspaceWritableLayout keeps runtime state writable without leaving the
+// image layer mutable. /tmp is required by os.TempDir users and provider CLIs;
+// HOME carries user-level Git/SSH/tool state. The nested workspace mount keeps
+// repositories and shared build caches on their existing independently
+// size-limited volume.
+func workspaceWritableLayout(storageLimit *resource.Quantity) ([]corev1.Volume, []corev1.VolumeMount) {
+	emptyDir := func() *corev1.EmptyDirVolumeSource {
+		volume := &corev1.EmptyDirVolumeSource{}
+		if storageLimit != nil {
+			limit := storageLimit.DeepCopy()
+			volume.SizeLimit = &limit
+		}
+		return volume
+	}
+	volumes := []corev1.Volume{
+		{Name: "runtime-tmp", VolumeSource: corev1.VolumeSource{EmptyDir: emptyDir()}},
+		{Name: "runtime-home", VolumeSource: corev1.VolumeSource{EmptyDir: emptyDir()}},
+		{Name: "workspace-storage", VolumeSource: corev1.VolumeSource{EmptyDir: emptyDir()}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "runtime-tmp", MountPath: "/tmp"},
+		{Name: "runtime-home", MountPath: "/home/appuser"},
+		{Name: "workspace-storage", MountPath: "/tmp/code-analysis"},
+	}
+	return volumes, mounts
 }
 
 // extraEnvKeyRe matches valid env var names. Anything else is skipped: an

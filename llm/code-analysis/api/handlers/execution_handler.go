@@ -247,7 +247,7 @@ func (h *ExecutionHandler) HandleExecute(c *gin.Context) {
 	// server's, not the caller's. Note PATH is also reserved; the request
 	// can append extra variables but not redefine where files land.
 	cmd.Env = []string{
-		"PATH=/home/appuser/.local/bin:/home/appuser/bin:/app/google-cloud-sdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=/usr/local/go/bin:/app/google-cloud-sdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		fmt.Sprintf("HOME=%s", workDir),
 		fmt.Sprintf("PWD=%s", workDir),
 		fmt.Sprintf("TMPDIR=%s", workDir),
