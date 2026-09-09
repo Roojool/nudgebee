@@ -48,11 +48,15 @@ func TestImpactedServicesCanAutoExecute(t *testing.T) {
 }
 
 func TestImpactedServicesExecuteRendersTheCallerTable(t *testing.T) {
+	// Label names copied from a real coroot-node-agent series, not invented: the
+	// caller side is `src_workload_*`. An earlier fixture spelled it
+	// `source_workload_*` and so agreed with a query that grouped by labels no
+	// series carries -- green here, one blank row in production.
 	recorder := stubUserPrometheus(t, `cluster="prod"`, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[
-			{"metric":{"source_workload_name":"checkout","source_workload_namespace":"shop"},
+			{"metric":{"src_workload_name":"checkout","src_workload_namespace":"shop"},
 			 "values":[[1700000000,"0.5"],[1700000060,"1.25"]]},
-			{"metric":{"source_workload_name":"web","source_workload_namespace":"shop"},
+			{"metric":{"src_workload_name":"web","src_workload_namespace":"shop"},
 			 "values":[[1700000000,"2"],[1700000060,"3.5"]]}]}}`))
 	})
 
@@ -76,6 +80,12 @@ func TestImpactedServicesExecuteRendersTheCallerTable(t *testing.T) {
 	query := recorder.all()[0].URL.Query().Get("query")
 	assert.Contains(t, query, `cluster="prod"`)
 	assert.Contains(t, query, `destination_workload_name="cart-0"`)
+
+	// The rows above only prove the parser; they cannot catch a `by` clause naming
+	// a label the metric does not carry, because PromQL drops it silently and the
+	// stub answers whatever it is asked. Assert the grouping literally.
+	assert.Contains(t, query, `sum by (src_workload_name, src_workload_namespace)`)
+	assert.NotContains(t, query, "source_workload_", "the caller side is src_workload_*, not source_workload_*")
 }
 
 func TestImpactedServicesExecuteRequiresPodAndTenant(t *testing.T) {

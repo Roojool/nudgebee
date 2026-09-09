@@ -49,11 +49,20 @@ func (a *impactedServicesAction) Execute(ctx playbooks.PlaybookActionContext, ra
 	}
 	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
 
-	// coroot-node-agent emits container_http_requests_total with source/destination
-	// workload labels. Aggregating by source_workload gives the upstream caller
+	// coroot-node-agent emits container_http_requests_total with src/destination
+	// workload labels. Aggregating by src_workload gives the upstream caller
 	// fan-in across the last 30 minutes.
+	//
+	// The caller side is `src_workload_*`, NOT `source_workload_*` -- the two are
+	// not interchangeable and only the destination side spells the word out. This
+	// card grouped by the long form until #37930: PromQL silently drops a `by`
+	// label that does not exist, so every series collapsed into one unlabelled
+	// group and the card rendered a single row with a blank Service and Namespace
+	// against the summed rate of every caller. Alert payloads (see
+	// integrations/core/subject_resolution.go) and BigQuery span attributes do use
+	// `source_workload_*` -- those are different producers and stay as they are.
 	query := fmt.Sprintf(
-		`sum by (source_workload_name, source_workload_namespace) (`+
+		`sum by (src_workload_name, src_workload_namespace) (`+
 			`rate(container_http_requests_total{__CLUSTER__ destination_workload_name="%s", destination_workload_namespace="%s"}[30m])`+
 			`)`,
 		podName, namespace,
@@ -80,8 +89,8 @@ func (a *impactedServicesAction) Execute(ctx playbooks.PlaybookActionContext, ra
 	headers := []string{"Service", "Namespace", "Requests/sec (avg 30m)"}
 	for _, series := range latestValuesByKey(output)["impacted"] {
 		rows = append(rows, []any{
-			series.Metric["source_workload_name"],
-			series.Metric["source_workload_namespace"],
+			series.Metric["src_workload_name"],
+			series.Metric["src_workload_namespace"],
 			fmt.Sprintf("%.3f", series.Value),
 		})
 	}
