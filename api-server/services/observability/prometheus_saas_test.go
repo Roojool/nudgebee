@@ -429,3 +429,56 @@ func TestGetMetricsSource_PrometheusBySource(t *testing.T) {
 	require.NoError(t, err)
 	assert.IsType(t, &PrometheusMetricSource{}, agentSource)
 }
+
+func TestPrometheusSaasStepSeconds(t *testing.T) {
+	const hourMs = int64(3600 * 1000)
+
+	tests := []struct {
+		name      string
+		requested int
+		rangeMs   int64
+		want      int
+	}{
+		{name: "explicit step wins", requested: 30, rangeMs: 30 * 24 * hourMs, want: 30},
+		{name: "empty range falls back to 60s", rangeMs: 0, want: 60},
+		{name: "1h window keeps a fine resolution", rangeMs: hourMs, want: 14},
+		{name: "24h window stays at 1m", rangeMs: 24 * hourMs, want: 60},
+		{name: "7d window steps to 5m", rangeMs: 7 * 24 * hourMs, want: 300},
+		// The window that used to fail: 43201 points at 60s, 3000 at 864s.
+		{name: "30d window stays under the point cap", rangeMs: 30 * 24 * hourMs, want: 864},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := prometheusSaasStepSeconds(tt.requested, 1700000000000, 1700000000000+tt.rangeMs)
+			assert.Equal(t, tt.want, got)
+			if tt.requested == 0 && tt.rangeMs > 0 {
+				assert.LessOrEqual(t, tt.rangeMs/1000/int64(got), int64(30000),
+					"step must keep the series under -search.maxPointsPerTimeseries")
+			}
+		})
+	}
+}
+
+// A long window must not be sent at the flat 60s default: VictoriaMetrics
+// answers HTTP 422 once the series passes 30000 points.
+func TestPrometheusSaas_FetchMetricsQuery_LongRangeWidensStep(t *testing.T) {
+	recorder := newPrometheusSaasServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	})
+
+	start := int64(1700000000000)
+	end := start + 30*24*3600*1000
+
+	_, err := (&PrometheusSaasMetricSource{}).FetchMetricsQuery(testRequestContext(), FetchMetricsRequest{
+		AccountId: "acc",
+		Queries:   map[string]string{"pvc_usage": "up"},
+		StartTime: start,
+		EndTime:   end,
+	})
+	require.NoError(t, err)
+
+	got := recorder.first(t)
+	assert.Equal(t, "/api/v1/query_range", got.URL.Path)
+	assert.Equal(t, "864", got.URL.Query().Get("step"))
+}
