@@ -193,6 +193,7 @@ query list_k8_recommendation($limit:Int, $offset:Int) {
       id
       namespace
       workload_name
+      workload_type
       package_id
     }
   }

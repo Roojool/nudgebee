@@ -53,8 +53,11 @@ export interface SecurityFinding {
   layer?: string;
   namespace?: string;
   workloadName?: string;
+  /** Workload kind (Deployment, StatefulSet, …). image_scan only. */
+  workloadType?: string;
   /** VM display name. vm findings only. */
   resourceName?: string;
+  /** The VM's cloud resource id. vm findings only. */
   resourceId?: string;
 
   createdAt?: string;
@@ -140,6 +143,7 @@ export const fromImageScanRow = (row: any): SecurityFinding => {
     layer: payload.Layer?.DiffID || payload.Layer?.Digest,
     namespace: row?.namespace,
     workloadName: row?.workload_name,
+    workloadType: row?.workload_type,
 
     createdAt: row?.created_at,
     updatedAt: row?.updated_at,

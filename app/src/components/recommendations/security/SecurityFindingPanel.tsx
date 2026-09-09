@@ -18,7 +18,9 @@ import { ds } from '@utils/colors';
 import recommendationApi from '@api1/recommendation';
 import apiVm from '@api1/vm';
 import { useLatestRequest } from '@components/vm/common';
+import OwnershipSection from '@components/optimise-new/OwnershipSection';
 import { type SecurityFinding, findingHeadline, findingLocation, normalizeSeverity } from './securityFinding';
+import { useFindingOwnerTarget } from './findingOwnership';
 import { EmptyNote, Field, FieldList, Mono, PanelActions, Section, SectionHeading } from './panelPrimitives';
 
 const SEVERITY_TONE: Record<string, LabelTone> = {
@@ -91,6 +93,8 @@ const SecurityFindingPanel = ({
   // response land on the newer finding — it would sit in `affected` and be
   // reused, since the tab only fetches when that state is still null.
   const beginRequest = useLatestRequest();
+  // The workload or VM this occurrence sits on, for the ownership card.
+  const ownerTarget = useFindingOwnerTarget(finding);
 
   // Reset to the first tab whenever a different finding is opened, so the panel
   // never starts on a tab the reader did not choose for this row.
@@ -379,6 +383,16 @@ const SecurityFindingPanel = ({
                   )}
                 </FieldList>
               </Section>
+
+              {/* Ownership — the same card as the Cost drawer, so who owns the
+                  workload or VM behind this finding is answerable and settable
+                  here. Keyed by finding so the card resets when the drawer swaps
+                  to another row rather than remounting. */}
+              {ownerTarget && (
+                <Box sx={{ mb: ds.space[5] }}>
+                  <OwnershipSection key={`ownership-${finding.id}`} rec={ownerTarget} />
+                </Box>
+              )}
 
               <Section title='Package'>
                 <FieldList>

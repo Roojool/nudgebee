@@ -14,7 +14,8 @@ import { action } from '@utils/actionStyles';
 import { normalizeSeverity } from './securityFinding';
 import { AskNubiIconButton } from './askNubi';
 import { dismissMenuEntry } from './dismissal';
-import { hasWriteAccess } from '@lib/auth';
+import AssignOwnerModal from '@components/ownership/AssignOwnerModal';
+import { hasWriteAccess, isTenantAdmin } from '@lib/auth';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 import { type CloudPostureRule } from './cloudPosture';
 
@@ -98,6 +99,9 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, st
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
+  // The row whose owner is being set; ownership writes are tenant-admin only.
+  const [ownerRow, setOwnerRow] = useState<any | null>(null);
+  const canAssignOwner = isTenantAdmin();
   const beginRequest = useLatestRequest();
   const { assistantName } = useTenantBranding();
 
@@ -189,6 +193,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, st
                   sx={{ ...action.primary }}
                   menuItems={[
                     { id: 'create-ticket', label: 'Create ticket' },
+                    ...(canAssignOwner && row.resource_id ? [{ id: 'assign-owner', label: 'Assign owner' }] : []),
                     ...(() => {
                       const entry = dismissMenuEntry(row.status, hasWriteAccess(row.account_id));
                       return entry ? [{ id: entry.id, label: entry.label }] : [];
@@ -197,6 +202,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, st
                   data={row}
                   onMenuClick={(item: { id: string }) => {
                     if (item.id === 'create-ticket') rowActions.onCreateTicket(rule, row);
+                    else if (item.id === 'assign-owner') setOwnerRow(row);
                     else if (item.id === 'dismiss' || item.id === 'reactivate') rowActions.onDismiss(rule, row);
                   }}
                 />
@@ -205,7 +211,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, st
           },
         ];
       }),
-    [rows, accountsById, rowActions, rule, assistantName]
+    [rows, accountsById, rowActions, rule, assistantName, canAssignOwner]
   );
 
   return (
@@ -258,6 +264,16 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, st
         emptyHeading='No failing resources'
         emptySubHeading='Nothing currently fails this check in the accounts in view.'
       />
+      {ownerRow && (
+        <AssignOwnerModal
+          open
+          onClose={() => setOwnerRow(null)}
+          resourceType='cloud_resource'
+          resourceKey={ownerRow.resource_id}
+          cloudAccountId={ownerRow.account_id}
+          resourceLabel={ownerRow.resource_name || ownerRow.resource_id}
+        />
+      )}
     </Box>
   );
 };
