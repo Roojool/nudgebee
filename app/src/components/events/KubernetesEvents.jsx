@@ -1091,9 +1091,19 @@ const KubernetesEventsTable = ({
       query = { ...query, ...defaultQuery };
     }
     if (isK8sFilterVisible) {
+      // Clearing a filter must drop the key from the query (#34105) — but only for keys
+      // that the filter state actually owns. defaultQuery is mirrored into that state
+      // under camelCase aliases only (namespace / workloadName / subjectName /
+      // aggregation_key), so a caller passing the raw snake_case subject_name /
+      // subject_namespace scope (Pod Details, drill-down tables) left the selections
+      // empty and had its scope deleted here — showing every account event instead.
+      const scopedByCaller = (key) => {
+        const scope = defaultQuery?.[key];
+        return Array.isArray(scope) ? scope.length > 0 : Boolean(scope);
+      };
       if (selectedNamespace) {
         query.subject_namespace = selectedNamespace;
-      } else {
+      } else if (!scopedByCaller('subject_namespace')) {
         delete query.subject_namespace;
       }
       if (selectedAggregationKey?.length > 0) {
@@ -1103,7 +1113,7 @@ const KubernetesEventsTable = ({
       }
       if (selectedWorkload) {
         query.subject_name = selectedWorkload;
-      } else {
+      } else if (!scopedByCaller('subject_name')) {
         delete query.subject_name;
       }
     }
