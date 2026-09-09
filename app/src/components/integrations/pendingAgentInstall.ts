@@ -8,9 +8,18 @@ import { getCurrentTenant } from '@lib/auth';
  * Held per tenant in localStorage so the reminder banner survives navigation
  * and reloads, and a re-login as another tenant reads a different key entirely.
  */
+/**
+ * What the user still has to do. 'k8s' means run the install command from the
+ * add-cluster modal; 'vm' means add a VM Agent integration, which is where a
+ * self-hosted account's install command actually comes from. Different next
+ * step, so the reminder has to say something different.
+ */
+export type PendingAgentKind = 'k8s' | 'vm';
+
 export interface PendingAgentInstall {
   id: string;
   name: string;
+  kind: PendingAgentKind;
   /** Unix ms the entry was recorded. Entries expire, so a deleted account can't strand the banner forever. */
   at: number;
 }
@@ -53,7 +62,13 @@ export const readPendingAgentInstalls = (): PendingAgentInstall[] => {
       return [];
     }
     const now = Date.now();
-    return list.filter((entry: PendingAgentInstall) => entry?.id && now - (entry.at || 0) < TTL_MS);
+    return (
+      list
+        .filter((entry: PendingAgentInstall) => entry?.id && now - (entry.at || 0) < TTL_MS)
+        // Entries written before VM accounts were tracked carry no kind; they are
+        // all clusters.
+        .map((entry: PendingAgentInstall) => ({ ...entry, kind: entry.kind || 'k8s' }))
+    );
   } catch {
     return [];
   }
@@ -68,12 +83,12 @@ const write = (list: PendingAgentInstall[]): void => {
   }
 };
 
-export const addPendingAgentInstall = (id: string, name: string): void => {
+export const addPendingAgentInstall = (id: string, name: string, kind: PendingAgentKind = 'k8s'): void => {
   if (typeof window === 'undefined' || !id) {
     return;
   }
   const list = readPendingAgentInstalls().filter((entry) => entry.id !== id);
-  write([...list, { id, name, at: Date.now() }]);
+  write([...list, { id, name, kind, at: Date.now() }]);
 };
 
 /** Drops the given accounts. Called once their agent shows up in the agent table. */

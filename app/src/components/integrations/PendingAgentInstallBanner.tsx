@@ -67,7 +67,10 @@ const PendingAgentInstallBanner = () => {
       if (document.visibilityState !== 'visible') {
         return;
       }
-      apiKubernetes1.listK8sAccAgentHealth(pendingIdsKey.split(',')).then((res: any) => {
+      // No agent-type filter: this list mixes clusters (type k8s) with self-hosted
+      // VM accounts (type proxy), and each account only carries agents of its own
+      // kind, so filtering by id alone is exact.
+      apiKubernetes1.listK8sAccAgentHealth(pendingIdsKey.split(','), null).then((res: any) => {
         if (cancelled) {
           return;
         }
@@ -101,9 +104,15 @@ const PendingAgentInstallBanner = () => {
     return null;
   }
 
-  const names = pending.map((entry) => entry.name).filter(Boolean);
-  const label = names.length > 0 ? names.map((name) => `"${name}"`).join(', ') : `${pending.length} Kubernetes account(s)`;
-  const clusterWord = pending.length > 1 ? 'those clusters' : 'that cluster';
+  // One banner, not one per kind — the DS allows a single banner per surface, and
+  // the next step differs by kind, so each kind gets its own line inside it.
+  const clusters = pending.filter((entry) => entry.kind !== 'vm');
+  const fleets = pending.filter((entry) => entry.kind === 'vm');
+
+  const nameList = (entries: PendingAgentInstall[], fallbackNoun: string) => {
+    const names = entries.map((entry) => entry.name).filter(Boolean);
+    return names.length > 0 ? names.map((name) => `"${name}"`).join(', ') : `${entries.length} ${fallbackNoun}`;
+  };
 
   return (
     <Box data-testid='pending-agent-install-banner' sx={{ mt: 'var(--ds-space-3)' }}>
@@ -111,7 +120,26 @@ const PendingAgentInstallBanner = () => {
         tone='warning'
         surface='page'
         title='Finish installing the agent'
-        message={`The agent hasn't connected for ${label} yet, so nothing is being collected from ${clusterWord}. Run the install command on your cluster — this message clears itself as soon as the agent connects.`}
+        message={
+          <>
+            {clusters.length > 0 && (
+              <Box component='div' data-testid='pending-agent-install-k8s'>
+                {`No agent has connected for ${nameList(clusters, 'Kubernetes account(s)')} yet, so nothing is being collected from ${
+                  clusters.length > 1 ? 'those clusters' : 'that cluster'
+                }. Run the install command on your cluster.`}
+              </Box>
+            )}
+            {fleets.length > 0 && (
+              <Box component='div' data-testid='pending-agent-install-vm' sx={{ mt: clusters.length > 0 ? 'var(--ds-space-1)' : 0 }}>
+                {`No agent has connected for ${nameList(fleets, 'self-hosted account(s)')} yet, so no machines are being discovered. Add a VM Agent
+                  integration for each network segment — that is where the install command comes from.`.replace(/\s+/g, ' ')}
+              </Box>
+            )}
+            <Box component='div' sx={{ mt: 'var(--ds-space-1)' }}>
+              This message clears itself as soon as the agent connects.
+            </Box>
+          </>
+        }
       />
     </Box>
   );

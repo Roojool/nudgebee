@@ -656,9 +656,15 @@ const apiKubernetes1 = {
       return error;
     }
   },
-  async listK8sAccAgentHealth(cloudAccountId?: string | string[]) {
+  /**
+   * `agentType` filters the agent rows: 'k8s' for cluster agents, 'proxy' for the
+   * foragers behind a self-hosted VM account. Pass null to take whatever agent an
+   * account has — a caller holding a mixed set of account ids can't name one type,
+   * and each account only ever carries agents of its own kind anyway.
+   */
+  async listK8sAccAgentHealth(cloudAccountId?: string | string[], agentType: string | null = 'k8s') {
     try {
-      const where: Record<string, unknown> = { type: { _eq: 'k8s' } };
+      const where: Record<string, unknown> = agentType ? { type: { _eq: agentType } } : {};
       if (Array.isArray(cloudAccountId) && cloudAccountId.length > 0) {
         where.cloud_account_id = { _in: cloudAccountId };
       } else if (cloudAccountId) {
