@@ -36,7 +36,7 @@ import SectionHeader from '../components/Section';
 import CostTreemap from '../components/CostTreemap';
 import ToolReliabilityBars from '../components/ToolReliabilityBars';
 import ToolDurationBars from '../components/ToolDurationBars';
-import ToolCallsModal from '../components/ToolCallsModal';
+import ToolCallsModal, { type ToolCallCounts } from '../components/ToolCallsModal';
 import { makeSeverity, SeverityCell, type Severity } from '../components/severity';
 import { listToolUsage, TOOL_TYPE_LABEL, type ToolUsageRow, type ToolSortBy, type ToolStatusGroup } from '@api1/ai-cost';
 import type { CostFilters } from '../types';
@@ -53,6 +53,8 @@ interface ToolDrill {
   tool: string;
   type: string;
   status: ToolStatusGroup;
+  /** The row's true aggregate counts, so the modal's captions don't rely on its own truncated row fetch. */
+  counts: ToolCallCounts;
 }
 
 const SORT_OPTIONS: { value: ToolSortBy; label: string; icon: React.ReactNode }[] = [
@@ -284,7 +286,16 @@ export function ToolsView({ accountId, filters, onSelectRun }: ToolsViewProps) {
   const errSev = React.useMemo(() => makeSeverity(sortedRows.map((r) => r.error_rate_pct)), [sortedRows]);
   const durSev = React.useMemo(() => makeSeverity(sortedRows.map((r) => r.p90_duration_seconds)), [sortedRows]);
   const costSev = React.useMemo(() => makeSeverity(sortedRows.map((r) => r.downstream_cost_usd)), [sortedRows]);
-  const openDrill = React.useCallback((r: ToolUsageRow, status: ToolStatusGroup) => setDrill({ tool: r.tool_name, type: r.tool_type, status }), []);
+  const openDrill = React.useCallback(
+    (r: ToolUsageRow, status: ToolStatusGroup) =>
+      setDrill({
+        tool: r.tool_name,
+        type: r.tool_type,
+        status,
+        counts: { calls: r.calls, successCount: r.success_count, errorCount: r.error_count, inProgressCount: r.in_progress_count },
+      }),
+    []
+  );
   const tableData = React.useMemo(
     () => sortedRows.map((r) => toRow(r, errSev, durSev, costSev, openDrill)),
     [sortedRows, errSev, durSev, costSev, openDrill]
@@ -394,6 +405,7 @@ export function ToolsView({ accountId, filters, onSelectRun }: ToolsViewProps) {
         accountId={accountId}
         filters={filters}
         initialStatus={drill?.status ?? 'all'}
+        counts={drill?.counts}
         onClose={() => setDrill(null)}
         onSelectRun={onSelectRun}
       />
