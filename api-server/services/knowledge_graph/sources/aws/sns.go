@@ -51,12 +51,27 @@ func (s *AWSSource) extractTopicMetadata(properties map[string]interface{}, meta
 func (s *AWSSource) createSNSEdges(reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
 	edges := make([]*core.DbEdge, 0)
 
-	// Fetch ALL SNS subscriptions at once (much more efficient than per-topic calls)
-	allSubscriptionsMap, err := s.fetchAllSNSSubscriptions(reqCtx, req, req.CloudAccountID)
-	if err != nil {
-		s.logger.Warn("failed to fetch all SNS subscriptions from AWS, falling back to metadata for all topics",
-			"error", err)
-		// Continue with metadata fallback for each topic below
+	// list-subscriptions is region-scoped and returns only the calling region's
+	// subscriptions, so it runs once per region the topics live in. A region-less
+	// call would silently cover only the collector's default region (#36573).
+	// Topic ARNs are region-qualified, so no two regions can produce the same key.
+	allSubscriptionsMap := make(map[string][]interface{})
+	regions := nodeRegions(nodes)
+	if len(regions) == 0 && len(nodes) > 0 {
+		s.logger.Warn("no SNS topic carries a region, falling back to metadata for all topics",
+			"topic_count", len(nodes))
+	}
+	for _, region := range regions {
+		regionSubscriptions, err := s.fetchSNSSubscriptionsForRegion(reqCtx, req.CloudAccountID, region)
+		if err != nil {
+			s.logger.Warn("failed to fetch SNS subscriptions from AWS, falling back to metadata for that region's topics",
+				"region", region,
+				"error", err)
+			continue
+		}
+		for topicArn, subs := range regionSubscriptions {
+			allSubscriptionsMap[topicArn] = append(allSubscriptionsMap[topicArn], subs...)
+		}
 	}
 
 	for _, node := range nodes {
@@ -70,13 +85,11 @@ func (s *AWSSource) createSNSEdges(reqCtx *security.RequestContext, nodes []*cor
 
 		// Get subscriptions for this topic from the batch fetch
 		var subscriptions []interface{}
-		if allSubscriptionsMap != nil {
-			if topicSubs, exists := allSubscriptionsMap[topicArn]; exists {
-				subscriptions = topicSubs
-				s.logger.Debug("Using batch-fetched subscriptions for SNS topic",
-					"topic_name", node.Properties["name"],
-					"subscription_count", len(subscriptions))
-			}
+		if topicSubs, exists := allSubscriptionsMap[topicArn]; exists {
+			subscriptions = topicSubs
+			s.logger.Debug("Using batch-fetched subscriptions for SNS topic",
+				"topic_name", node.Properties["name"],
+				"subscription_count", len(subscriptions))
 		}
 
 		// Fallback to metadata if no subscriptions found from AWS.
@@ -176,20 +189,30 @@ func (s *AWSSource) createSNSEdges(reqCtx *security.RequestContext, nodes []*cor
 	return edges
 }
 
-// fetchAllSNSSubscriptions fetches ALL SNS subscriptions at once and returns them grouped by topic ARN
-// This is much more efficient than calling fetchSNSSubscriptions for each topic individually
-func (s *AWSSource) fetchAllSNSSubscriptions(reqCtx *security.RequestContext, req *core.SourceBuildRequest, accountID string) (map[string][]interface{}, error) {
-	// Build AWS CLI command to list ALL subscriptions (no topic filter)
-	cmd := "aws sns list-subscriptions --output json"
+// buildSNSListSubscriptionsCommand returns the CLI command listing every SNS
+// subscription in one region. --region is always present: list-subscriptions only ever
+// returns the calling region's subscriptions, so a region-less call silently covers
+// just the collector's AWS_DEFAULT_REGION (#36573).
+func buildSNSListSubscriptionsCommand(region string) string {
+	return fmt.Sprintf("aws sns list-subscriptions --region %s --output json", region)
+}
 
-	// Add region filter if specified
-	if req.Region != "" {
-		cmd = fmt.Sprintf("aws sns list-subscriptions --region %s --output json", req.Region)
+// fetchSNSSubscriptionsForRegion fetches one region's SNS subscriptions in a single
+// call and returns them grouped by topic ARN — far cheaper than a call per topic.
+func (s *AWSSource) fetchSNSSubscriptionsForRegion(reqCtx *security.RequestContext, accountID string, region string) (map[string][]interface{}, error) {
+	// Validate the region before interpolating it into the CLI command.
+	if region == "" {
+		return nil, fmt.Errorf("region is required to list SNS subscriptions")
 	}
+	if err := validateAWSRegion(region); err != nil {
+		return nil, fmt.Errorf("invalid region: %w", err)
+	}
+
+	cmd := buildSNSListSubscriptionsCommand(region)
 
 	s.logger.Debug("Fetching all SNS subscriptions",
 		"account_id", accountID,
-		"region", req.Region)
+		"region", region)
 
 	// Execute AWS CLI command via cloud collector
 	resp, err := cloud.ExecuteCli(reqCtx, cloud.CloudExecuteCliCommandRequest{

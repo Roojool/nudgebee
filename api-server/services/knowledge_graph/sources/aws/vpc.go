@@ -14,15 +14,8 @@ import (
 // whose BOTH VPCs are present in this account's graph are linked; cross-account peers
 // (accepter in another account) resolve via the cross-account rules engine.
 func (s *AWSSource) createVPCPeeringEdges(reqCtx *security.RequestContext, vpcNodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
-	regions := make(map[string]struct{})
-	for _, n := range vpcNodes {
-		if r, ok := n.Properties["region"].(string); ok && r != "" {
-			regions[r] = struct{}{}
-		}
-	}
-
 	var peerings [][]string
-	for region := range regions {
+	for _, region := range nodeRegions(vpcNodes) {
 		peerings = append(peerings, s.fetchVPCPeeringConnections(reqCtx, req.CloudAccountID, region)...)
 	}
 	return s.buildVPCPeeringEdges(peerings, lookup, req)

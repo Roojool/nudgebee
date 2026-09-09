@@ -1,11 +1,13 @@
 package aws
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"testing"
 
 	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/knowledge_graph/sources"
 )
 
 // TestExtractENIMetadata pins the primary createNodeFromResource extraction
@@ -132,5 +134,55 @@ func TestCreateENINodeFromAWSData_NoSecondaries(t *testing.T) {
 
 	if _, exists := node.Properties["private_ips"]; exists {
 		t.Errorf("private_ips should be absent when PrivateIpAddresses is empty")
+	}
+}
+
+// TestCreateENINodeFromAWSDataRegion pins #36573 for the ENI fallback path, which
+// used to stamp SourceBuildRequest.Region — a field nothing ever assigns.
+func TestCreateENINodeFromAWSDataRegion(t *testing.T) {
+	src, err := NewAWSSource(AWSSourceConfig{}, nil)
+	if err != nil {
+		t.Fatalf("NewAWSSource: %v", err)
+	}
+
+	req := &core.SourceBuildRequest{TenantID: "t1", CloudAccountID: "a1"}
+
+	eni := &ENINetworkInterface{NetworkInterfaceId: "eni-1", Region: "eu-central-1"}
+	node := src.createENINodeFromAWSData(eni, req)
+	if got, _ := core.GetNodePropertyString(node, "region"); got != "eu-central-1" {
+		t.Errorf("region property = %q, want %q", got, "eu-central-1")
+	}
+}
+
+// TestFetchENIDataFromAWSRegionFallback covers the other half of the ENI fix: the
+// parsed CLI shape carries only an AZ, so when cloud_resourses.region is empty the
+// region has to be derived from it.
+func TestFetchENIDataFromAWSRegionFallback(t *testing.T) {
+	src, err := NewAWSSource(AWSSourceConfig{}, nil)
+	if err != nil {
+		t.Fatalf("NewAWSSource: %v", err)
+	}
+
+	meta, err := json.Marshal(map[string]interface{}{
+		"NetworkInterfaceId": "eni-1",
+		"AvailabilityZone":   "ap-south-1b",
+	})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+
+	src.metaByType = map[string][]sources.CloudResourceRow{
+		"network-interface": {{ResourceID: "eni-1", Type: "network-interface", Meta: meta}},
+	}
+
+	enis, err := src.fetchENIDataFromAWS(nil, nil, "")
+	if err != nil {
+		t.Fatalf("fetchENIDataFromAWS: %v", err)
+	}
+	if len(enis) != 1 {
+		t.Fatalf("expected 1 ENI, got %d", len(enis))
+	}
+	if enis[0].Region != "ap-south-1" {
+		t.Errorf("region = %q, want %q (derived from AZ)", enis[0].Region, "ap-south-1")
 	}
 }
