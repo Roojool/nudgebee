@@ -129,6 +129,12 @@ jobs:
       # its request/limit lines, with no error. It can only be asserted against a
       # real planner, so it runs here.
       #
+      # event carries the enrichment merge, a hand-written statement over jsonb
+      # and NOT NULL columns. Each defect it has had was invisible to Go tests and
+      # only surfaced against a real Postgres: a uuid column compared with text, a
+      # NULL array silently emptying the evidence column, and a NOT NULL violation
+      # for any event that arrived without a cluster.
+      #
       # recommendation carries the finops score recompute walk. Which Open rows
       # it still visits once their recency boost has decayed, and whether its
       # unchanged-row guard lets an unmoved score through, are both decided in
@@ -141,4 +147,4 @@ jobs:
           # Turns an unreachable database into a failure in THIS job only, so the
           # suite cannot quietly stop running here.
           REQUIRE_DB_TESTS: "true"
-        run: go test ./account/adapter/ ./observability/ ./recommendation/ -run '_DB$' -v
+        run: go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ -run '_DB$' -v

@@ -129,6 +129,30 @@ func eventForEnrichment(eventObj models.Event) (Event, error) {
 	}, nil
 }
 
+// enrichmentMergeSQL merges one enrichment run into an event row. Hoisted to a
+// const so the database-backed test can exercise the statement itself; the
+// NOT NULL fallbacks below are the kind of thing only real Postgres catches.
+const enrichmentMergeSQL = `UPDATE events
+		    SET evidences = (
+		            SELECT coalesce(jsonb_agg(elem), '[]'::jsonb)
+		              FROM jsonb_array_elements(
+		                     CASE WHEN jsonb_typeof(evidences) = 'array'
+		                          THEN evidences ELSE '[]'::jsonb
+		                     END) AS elem
+		             WHERE coalesce(elem->'additional_info'->>'action_name', '') <> ALL(coalesce($1::text[], '{}'::text[]))
+		               AND coalesce(elem->'additional_info'->>'actual_action_name', '') <> ALL(coalesce($1::text[], '{}'::text[]))
+		        ) || $2::jsonb,
+		        labels = CASE
+		                WHEN jsonb_typeof(labels) = 'object' THEN labels
+		                ELSE '{}'::jsonb
+		            END || $3::jsonb,
+		        cloud_resource_id = COALESCE(cloud_resource_id, NULLIF($4, '')::uuid),
+		        cluster           = COALESCE(NULLIF(cluster, ''), NULLIF($5, ''), cluster),
+		        subject_namespace = COALESCE(NULLIF(subject_namespace, ''), NULLIF($6, ''), subject_namespace),
+		        subject_name      = COALESCE(NULLIF(subject_name, ''), NULLIF($7, ''), subject_name),
+		        updated_at        = $8
+		  WHERE id = $9`
+
 // applyEnrichment merges one enrichment run into the event row.
 //
 // It is a single statement on purpose. Four other writers touch this row while
@@ -175,27 +199,13 @@ func applyEnrichment(sc *security.RequestContext, eventId string, webhookEvent *
 	//     coalesces the parameter anyway, because the failure is silent and total.
 	regenerated := regeneratedActionNames(addedEvidences)
 
+	// The scalar columns each fall back to their own current value last. Without
+	// that, an event whose cluster is already the empty string and whose enrichment
+	// resolved nothing better produced COALESCE(NULL, NULL) = NULL, and cluster and
+	// subject_name are NOT NULL — so the whole update failed and the event kept no
+	// evidence at all. Empty subjects are the common case, not the exotic one.
 	res, err := dbms.Db.Exec(
-		`UPDATE events
-		    SET evidences = (
-		            SELECT coalesce(jsonb_agg(elem), '[]'::jsonb)
-		              FROM jsonb_array_elements(
-		                     CASE WHEN jsonb_typeof(evidences) = 'array'
-		                          THEN evidences ELSE '[]'::jsonb
-		                     END) AS elem
-		             WHERE coalesce(elem->'additional_info'->>'action_name', '') <> ALL(coalesce($1::text[], '{}'::text[]))
-		               AND coalesce(elem->'additional_info'->>'actual_action_name', '') <> ALL(coalesce($1::text[], '{}'::text[]))
-		        ) || $2::jsonb,
-		        labels = CASE
-		                WHEN jsonb_typeof(labels) = 'object' THEN labels
-		                ELSE '{}'::jsonb
-		            END || $3::jsonb,
-		        cloud_resource_id = COALESCE(cloud_resource_id, NULLIF($4, '')::uuid),
-		        cluster           = COALESCE(NULLIF(cluster, ''), NULLIF($5, '')),
-		        subject_namespace = COALESCE(NULLIF(subject_namespace, ''), NULLIF($6, '')),
-		        subject_name      = COALESCE(NULLIF(subject_name, ''), NULLIF($7, '')),
-		        updated_at        = $8
-		  WHERE id = $9`,
+		enrichmentMergeSQL,
 		pq.Array(regenerated),
 		string(evidencesJson),
 		string(labelsJson),
