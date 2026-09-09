@@ -123,6 +123,12 @@ jobs:
       # These tests create and drop their own throwaway tables, so an empty
       # database is all they need — no migrations, no fixtures.
       #
+      # observability carries the workload-name resolution predicate, which is a
+      # difference in SQL semantics rather than in Go: the wrong form resolves no
+      # workload and the evidence card silently drops its per-container split and
+      # its request/limit lines, with no error. It can only be asserted against a
+      # real planner, so it runs here.
+      #
       # recommendation carries the finops score recompute walk. Which Open rows
       # it still visits once their recency boost has decayed, and whether its
       # unchanged-row guard lets an unmoved score through, are both decided in
@@ -135,4 +141,4 @@ jobs:
           # Turns an unreachable database into a failure in THIS job only, so the
           # suite cannot quietly stop running here.
           REQUIRE_DB_TESTS: "true"
-        run: go test ./account/adapter/ ./recommendation/ -run '_DB$' -v
+        run: go test ./account/adapter/ ./observability/ ./recommendation/ -run '_DB$' -v

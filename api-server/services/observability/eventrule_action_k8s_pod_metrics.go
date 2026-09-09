@@ -181,60 +181,9 @@ func (a *podMetricAction) Execute(ctx playbooks.PlaybookActionContext, rawParams
 	// insights need.
 	spec := a.resolveWorkloadSpec(ctx, params)
 
-	// Use regex match for workload names (Deployment, StatefulSet, DaemonSet,
-	// ReplicaSet, Job, ReplicationController) since their pod names have a
-	// random suffix appended by the workload controller. StatefulSet was
-	// previously missing here and broke OOMKilled investigations for any
-	// StatefulSet-owned pod (e.g. vmsingle-*): the workload-name exact match
-	// `pod="vmsingle-victoria-..."` finds zero series and the action returns
-	// false-negative "Pod X does not have memory limit specified" insights.
-	//
-	// We check both the "kind" label (set by matchWorkloadAndEnrich) and the
-	// per-workload labels (deployment / statefulset / daemonset / job) which
-	// are present on alerts like KubeDeploymentRolloutStuck where the "kind"
-	// label is unset.
-	kind := ""
-	if ctx.GetEvent().Labels != nil {
-		kind = ctx.GetEvent().Labels["kind"]
-	}
-	if kind == "" {
-		kind = ctx.GetEvent().SubjectType
-	}
-	useRegex := strings.EqualFold(kind, "deployment") ||
-		strings.EqualFold(kind, "daemonset") ||
-		strings.EqualFold(kind, "replicaset") ||
-		strings.EqualFold(kind, "statefulset") ||
-		strings.EqualFold(kind, "job") ||
-		strings.EqualFold(kind, "replicationcontroller")
-	if !useRegex && ctx.GetEvent().Labels != nil {
-		useRegex = ctx.GetEvent().Labels["deployment"] != "" ||
-			ctx.GetEvent().Labels["statefulset"] != "" ||
-			ctx.GetEvent().Labels["daemonset"] != "" ||
-			ctx.GetEvent().Labels["job"] != "" ||
-			ctx.GetEvent().Labels["replicaset"] != ""
-	}
-	// Implicit workload-name signal: AutoExecute resolves `pod_name` to
-	// `SubjectOwner` (the owner workload, e.g. the StatefulSet name) when
-	// no per-workload label is present on the event. Go-agent findings for
-	// `pod_oom_killer_enricher` follow this path. SubjectName then holds
-	// the actual pod (`<workload>-<hash>-<suffix>`), so a divergence
-	// between params.PodName and SubjectName is a reliable signal that we
-	// need regex matching, regardless of how SubjectOwnerKind is labelled.
-	if !useRegex && params.PodName != "" && ctx.GetEvent().SubjectName != "" &&
-		params.PodName != ctx.GetEvent().SubjectName &&
-		strings.HasPrefix(ctx.GetEvent().SubjectName, params.PodName+"-") {
-		useRegex = true
-	}
-
-	// The utilisation builders distinguish only "pod" (an exact pod= match) from a
-	// workload kind (pod=~"<name>-.*"), so the regex decision collapses to which of
-	// the two we ask for. params.Cluster / ClusterLabel are no longer consumed
-	// here: the metrics layer owns cluster scoping now, expanding __CLUSTER__ for
-	// the agent and pinning the integration's own labels for a direct connection.
-	metricKind := "pod"
-	if useRegex {
-		metricKind = workloadKindForUtilisation(kind)
-	}
+	// Whether this invocation matches one pod exactly or a workload's pods by
+	// prefix, expressed as the kind the utilisation builders understand.
+	metricKind := podMetricKind(ctx, params)
 
 	metricEntries, requestsMap, limitsMap, err := a.fetchContainerMetrics(ctx, params, metricKind, spec.containers)
 	if err != nil {
@@ -293,6 +242,120 @@ func workloadKindForUtilisation(kind string) string {
 	default:
 		return "deployment"
 	}
+}
+
+// podMetricKind decides whether this invocation matches a single pod exactly or
+// a workload's pods by name prefix, and returns that decision in the vocabulary
+// the utilisation builders consume: "pod" is an exact pod= match, anything else
+// is pod=~"<name>-.*".
+//
+// Extracted from Execute so the decision can be asserted directly: an exact
+// match on a workload name and a workload that genuinely has no data produce
+// byte-identical output, which is how the empty-card bug survived review.
+func podMetricKind(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams) string {
+	// Use regex match for workload names (Deployment, StatefulSet, DaemonSet,
+	// ReplicaSet, Job, ReplicationController) since their pod names have a
+	// random suffix appended by the workload controller. StatefulSet was
+	// previously missing here and broke OOMKilled investigations for any
+	// StatefulSet-owned pod (e.g. vmsingle-*): the workload-name exact match
+	// `pod="vmsingle-victoria-..."` finds zero series and the action returns
+	// false-negative "Pod X does not have memory limit specified" insights.
+	//
+	// We check both the "kind" label (set by matchWorkloadAndEnrich) and the
+	// per-workload labels (deployment / statefulset / daemonset / job) which
+	// are present on alerts like KubeDeploymentRolloutStuck where the "kind"
+	// label is unset.
+	kind := ""
+	if ctx.GetEvent().Labels != nil {
+		kind = ctx.GetEvent().Labels["kind"]
+	}
+	if kind == "" {
+		kind = ctx.GetEvent().SubjectType
+	}
+	useRegex := strings.EqualFold(kind, "deployment") ||
+		strings.EqualFold(kind, "daemonset") ||
+		strings.EqualFold(kind, "replicaset") ||
+		strings.EqualFold(kind, "statefulset") ||
+		strings.EqualFold(kind, "job") ||
+		strings.EqualFold(kind, "replicationcontroller")
+	if !useRegex && ctx.GetEvent().Labels != nil {
+		useRegex = ctx.GetEvent().Labels["deployment"] != "" ||
+			ctx.GetEvent().Labels["statefulset"] != "" ||
+			ctx.GetEvent().Labels["daemonset"] != "" ||
+			ctx.GetEvent().Labels["job"] != "" ||
+			ctx.GetEvent().Labels["replicaset"] != ""
+	}
+	// Implicit workload-name signal: AutoExecute resolves `pod_name` to
+	// `SubjectOwner` (the owner workload, e.g. the StatefulSet name) when
+	// no per-workload label is present on the event. Go-agent findings for
+	// `pod_oom_killer_enricher` follow this path. SubjectName then holds
+	// the actual pod (`<workload>-<hash>-<suffix>`), so a divergence
+	// between params.PodName and SubjectName is a reliable signal that we
+	// need regex matching, regardless of how SubjectOwnerKind is labelled.
+	if !useRegex && params.PodName != "" && ctx.GetEvent().SubjectName != "" &&
+		params.PodName != ctx.GetEvent().SubjectName &&
+		strings.HasPrefix(ctx.GetEvent().SubjectName, params.PodName+"-") {
+		useRegex = true
+	}
+
+	// The utilisation builders distinguish only "pod" (an exact pod= match) from a
+	// workload kind (pod=~"<name>-.*"), so the regex decision collapses to which of
+	// the two we ask for. params.Cluster / ClusterLabel are no longer consumed
+	// here: the metrics layer owns cluster scoping now, expanding __CLUSTER__ for
+	// the agent and pinning the integration's own labels for a direct connection.
+	//
+	// `kind` above falls back to SubjectType, which is "pod" on every agent-sourced
+	// pod event -- and "pod" is the one value that makes the builder emit an exact
+	// pod= match, silently undoing the regex decision we just made. On a
+	// pod_oom_killer_enricher event params.PodName is the WORKLOAD name (AutoExecute
+	// resolves it from SubjectOwner), so an exact pod="<workload>" match finds zero
+	// series and the card renders empty. Ask the workload's own kind instead.
+	metricKind := "pod"
+	if useRegex {
+		metricKind = workloadKindForUtilisation(regexWorkloadKind(ctx, kind))
+	}
+
+	return metricKind
+}
+
+// workloadNameMatch resolves a k8s_workloads row from the name the action was
+// handed ($3), which is a POD name on alert-driven events and the WORKLOAD name
+// itself on agent-driven ones (AutoExecute takes it from SubjectOwner).
+//
+// Both arms are load-bearing. Prefix-only was the original form and silently
+// failed the agent case, because "report-worker" does not satisfy
+// `LIKE 'report-worker-%'`; equality-only would fail every pod name. Paired with
+// ORDER BY length(name) DESC the ambiguous case resolves correctly: for pod
+// "foo-bar" against workloads "foo" and "foo-bar", both arms match and the exact
+// row wins, since an exact match is always at least as long as a prefix match.
+//
+// Kept as a named constant so TestWorkloadNameMatch_DB can execute this exact
+// text against a throwaway table. The semantics are the whole fix and there is no
+// way to assert them without a real query planner.
+const workloadNameMatch = `($3 = name OR $3 LIKE name || '-%')`
+
+// regexWorkloadKind resolves the kind of the WORKLOAD whose pods are about to be
+// matched by name prefix. It is only consulted once the caller has decided on a
+// prefix match, which makes "pod" the one answer that is never right: it is the
+// value that turns the builder's matcher back into an exact pod= comparison.
+//
+// `kind` arrives as labels["kind"] falling back to SubjectType. Alert-driven
+// events set the label to a real workload kind and are returned unchanged.
+// Agent-driven pod events (pod_oom_killer_enricher, crash loop) set neither, so
+// SubjectType supplies "pod" -- for those, SubjectOwnerKind holds the controller
+// kind and is the authoritative answer.
+//
+// Falling back to "" rather than "pod" is deliberate: workloadKindForUtilisation
+// maps it to "deployment", the generic <name>-.* prefix form, which is what the
+// prefix decision asked for. Returning "pod" would silently cancel it.
+func regexWorkloadKind(ctx playbooks.PlaybookActionContext, kind string) string {
+	if kind != "" && !strings.EqualFold(kind, "pod") {
+		return kind
+	}
+	if ownerKind := ctx.GetEvent().SubjectOwnerKind; ownerKind != "" {
+		return ownerKind
+	}
+	return ""
 }
 
 // podMetricUsageKey is the abstract utilisation metric for the resource this
@@ -643,13 +706,24 @@ func (a *podMetricAction) resourcePresenceFromWorkloadSpec(ctx playbooks.Playboo
 	// containers — mirroring the cross-container OR the Prometheus path uses.
 	// The container names come back alongside the presence flags: the metrics
 	// query needs them to stay per-container, and this is the same row.
+	//
+	// The exact-equality arm matters as much as the prefix one: podName is not
+	// always a pod name. AutoExecute resolves it from SubjectOwner — the workload
+	// name itself — for every agent-sourced pod event, and "report-worker" does not
+	// satisfy `LIKE 'report-worker-%'`. Prefix-only meant those events found no
+	// spec, so the card lost its per-container split, discarded the requests and
+	// limits it had already fetched, and emitted no allocation insights.
+	//
+	// ORDER BY length(name) DESC still resolves the ambiguous case correctly: for
+	// pod "foo-bar" against workloads "foo" and "foo-bar", both arms match and the
+	// longer, exact one wins.
 	const query = `
 		WITH w AS (
 			SELECT name, meta
 			FROM k8s_workloads
 			WHERE cloud_account_id = $1
 			  AND namespace = $2
-			  AND $3 LIKE name || '-%'
+			  AND ` + workloadNameMatch + `
 			  AND is_active IS NOT FALSE
 			ORDER BY length(name) DESC
 			LIMIT 1

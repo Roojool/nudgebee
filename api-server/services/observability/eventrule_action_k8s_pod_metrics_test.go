@@ -464,3 +464,72 @@ func TestBuildPodMetricResponse_PerContainerEmptyMapsStillFireInsights(t *testin
 
 	assert.NotEmpty(t, insights, "per-container collection makes an empty map mean 'unset', which is reportable")
 }
+
+// oomEvent is the shape a Go-agent OOMKilled / crash-loop finding actually has:
+// SubjectType is the subject's own kind ("pod"), the workload kind lives in
+// SubjectOwnerKind, and there are no Robusta-style workload labels. AutoExecute
+// resolves pod_name from SubjectOwner, so the action is handed a WORKLOAD name.
+func oomEvent() playbooks.PlaybookEvent {
+	return playbooks.PlaybookEvent{
+		Name:             "pod_oom_killer_enricher",
+		AggregationKey:   "pod_oom_killer_enricher",
+		SubjectType:      "pod",
+		SubjectName:      "report-worker-76c589bdc5-vth5x",
+		SubjectOwner:     "report-worker",
+		SubjectOwnerKind: "deployment",
+		SubjectNamespace: "namespace-232",
+	}
+}
+
+// Regression: on an OOM event the card rendered completely empty. `kind` falls
+// back to SubjectType ("pod"), and "pod" is the one value that makes the builder
+// emit an exact pod= match -- against a WORKLOAD name, which matches no series.
+// The regex decision was made correctly and then silently cancelled.
+//
+// This asserts the decision itself because nothing downstream distinguishes the
+// two cases: an exact match on a workload name and a workload with genuinely no
+// data both yield an empty card, no insights and no error.
+func TestPodMetricKindPrefixMatchesWorkloadOnAgentPodEvents(t *testing.T) {
+	params := podMetricEnricherParams{PodName: "report-worker", Namespace: "namespace-232"}
+	ctx := playbooks.NewPlaybookActionContext("t", "a", slog.Default(), oomEvent())
+
+	assert.Equal(t, "deployment", podMetricKind(ctx, params),
+		`a workload name must yield a prefix kind; "pod" would emit pod="report-worker" and match nothing`)
+
+	// A StatefulSet-owned pod keeps its own kind -- the builders scope on it.
+	stsEvent := oomEvent()
+	stsEvent.SubjectOwnerKind = "StatefulSet"
+	assert.Equal(t, "statefulset",
+		podMetricKind(playbooks.NewPlaybookActionContext("t", "a", slog.Default(), stsEvent), params))
+
+	// An event naming an actual pod is still matched exactly: SubjectName equals
+	// PodName, so no prefix signal fires and the exact form is correct.
+	podEvent := oomEvent()
+	podEvent.SubjectName = "report-worker"
+	assert.Equal(t, "pod", podMetricKind(
+		playbooks.NewPlaybookActionContext("t", "a", slog.Default(), podEvent),
+		podMetricEnricherParams{PodName: "report-worker", Namespace: "namespace-232"}),
+		"an exact pod subject must not be widened into a prefix match")
+}
+
+// regexWorkloadKind is only consulted once a prefix match has been decided, so
+// "pod" is the one answer it must never give.
+func TestRegexWorkloadKindNeverReturnsPod(t *testing.T) {
+	ctxWith := func(ownerKind string) playbooks.PlaybookActionContext {
+		event := oomEvent()
+		event.SubjectOwnerKind = ownerKind
+		return playbooks.NewPlaybookActionContext("t", "a", slog.Default(), event)
+	}
+
+	// SubjectType supplied "pod": the controller kind is the authoritative answer.
+	assert.Equal(t, "deployment", regexWorkloadKind(ctxWith("deployment"), "pod"))
+	assert.Equal(t, "StatefulSet", regexWorkloadKind(ctxWith("StatefulSet"), "pod"))
+
+	// An explicit workload label always wins -- alert-driven events set it.
+	assert.Equal(t, "daemonset", regexWorkloadKind(ctxWith("deployment"), "daemonset"))
+
+	// Nothing authoritative: "" maps on to "deployment", the generic prefix form.
+	// Returning "pod" here would cancel the prefix match that asked for this.
+	assert.Equal(t, "", regexWorkloadKind(ctxWith(""), "pod"))
+	assert.Equal(t, "deployment", workloadKindForUtilisation(regexWorkloadKind(ctxWith(""), "pod")))
+}
