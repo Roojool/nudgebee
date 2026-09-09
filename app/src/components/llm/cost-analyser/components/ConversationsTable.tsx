@@ -382,19 +382,21 @@ export function ConversationsTable({
         { name: 'Cost', width: '8%', sortEnabled: true, component: H.cost },
         { name: 'Tokens', width: '11%', sortEnabled: true, component: H.tokens },
       ]
-    : // Fixed layout: widths must sum to ~100%. Conversation takes the bulk;
-      // Models keeps enough room (~16%) that its nowrap chips never overflow.
+    : // Fixed layout: widths must sum to ~100% (previously summed to 75%, which
+      // starved Actions of the room its View/Go-to/Analyse controls need — #37961).
+      // Conversation takes the bulk; Models keeps enough room that its nowrap
+      // chips never overflow; Actions gets enough for all three row controls.
       [
         { name: 'Conversation', width: '24%', component: H.conversation },
-        { name: 'Models (calls · cost)', width: '10%', component: H.models },
-        { name: 'Start time', width: '6%', sortEnabled: true, component: H.start },
-        { name: 'Duration', width: '4%', sortEnabled: true, component: H.duration },
-        { name: 'Latency', width: '6%', sortEnabled: true, component: H.latency },
-        { name: 'Calls', width: '5%', sortEnabled: true, component: H.calls },
-        { name: 'Cost', width: '4%', sortEnabled: true, component: H.cost },
-        { name: 'Tokens', width: '6%', sortEnabled: true, component: H.tokens },
-        { name: 'Status', width: '6%', component: H.status },
-        { name: 'Actions', width: '4%' },
+        { name: 'Models (calls · cost)', width: '13%', component: H.models },
+        { name: 'Start time', width: '8%', sortEnabled: true, component: H.start },
+        { name: 'Duration', width: '5%', sortEnabled: true, component: H.duration },
+        { name: 'Latency', width: '8%', sortEnabled: true, component: H.latency },
+        { name: 'Calls', width: '6%', sortEnabled: true, component: H.calls },
+        { name: 'Cost', width: '5%', sortEnabled: true, component: H.cost },
+        { name: 'Tokens', width: '8%', sortEnabled: true, component: H.tokens },
+        { name: 'Status', width: '8%', component: H.status },
+        { name: 'Actions', width: '15%' },
       ];
 
   // Relative outlier highlighting: rank cost / avg-latency within the rows shown.
