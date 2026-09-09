@@ -445,6 +445,7 @@ func (z ZenDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 			alertType,
 			parsedPayload.EventSubjectNamespace,
 			parsedPayload.EventSubjectName,
+			incident.Title,
 			incident.IncidentKey,
 			incident.UniqueID,
 		)
@@ -454,7 +455,15 @@ func (z ZenDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 	// Only LLM-resolved subjects are learned — a deterministic match already came
 	// from structured metadata, not the title's wording, so it isn't a genuine
 	// title→service pattern and would misleadingly bias future prompts.
-	if resolvedByLLM && secCtx != nil && parsedPayload.EventSubjectName != "" && parsedPayload.EventTitle != "" {
+	//
+	// Never learn from a degraded run. When enrichment could not reach the API,
+	// the LLM saw only a title — and a generic one ("Deployment rollout is not
+	// progressing.") names no workload at all, so its answer is a guess. Writing
+	// that guess to the mapping table promotes it to a permanent rule that every
+	// later firing of the same title reuses without ever consulting the LLM
+	// again, so one throttled webhook can misattribute the alert indefinitely.
+	enrichmentUnavailable := parsedPayload.Investigation.Labels[LabelZendutyEnrichUnavailable] == "true"
+	if resolvedByLLM && !enrichmentUnavailable && secCtx != nil && parsedPayload.EventSubjectName != "" && parsedPayload.EventTitle != "" {
 		LearnSubjectMapping(sc, secCtx.GetTenantId(), TenantAttrZendutyIncidentsKey, parsedPayload.EventTitle, parsedPayload.EventSubjectName)
 	}
 
@@ -484,18 +493,28 @@ func (z ZenDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 //     without a recoverable payload (a non-Alertmanager integration, or the
 //     payload endpoint failing). Coarser than (1) — it cannot see the labels that
 //     distinguish sibling alerts on one workload — but stable, which is the point.
-//  3. incident_key, only when nothing above identifies the alert. Zenduty
+//  3. The same canonical key with the incident title standing in for the alert
+//     name, when a subject resolved but nothing named the alert. The title is the
+//     only alert identity such a payload carries; without it the key is "zenduty +
+//     subject" alone, which merges every alert on that workload into one chain —
+//     an LLM latency alert, a tool-failure alert and a crash-loop all sharing one
+//     occurrence chain (58 distinct alerts collapsed onto llm-server on dev).
+//  4. incident_key, only when nothing above identifies the alert. Zenduty
 //     auto-generates it per incident, so it is worthless as a dedup key for
 //     incidents Zenduty raised itself; it is a real key only when the caller
-//     supplied one through Zenduty's Events API.
-//  4. The per-incident unique_id — a guaranteed-unique last resort, which means no
+//     supplied one through Zenduty's Events API. It sits below (3) only for the
+//     subjectless shape, where a title on its own has nothing to anchor it to.
+//  5. The per-incident unique_id — a guaranteed-unique last resort, which means no
 //     grouping at all.
-func zendutyFingerprint(labels map[string]string, alertType, namespace, subject, incidentKey, uniqueID string) string {
+func zendutyFingerprint(labels map[string]string, alertType, namespace, subject, title, incidentKey, uniqueID string) string {
 	if fp := labels["nb_alert_fingerprint"]; fp != "" {
 		return fp
 	}
-	if alertType != "" || subject != "" {
+	if alertType != "" {
 		return core.CanonicalFingerprint("zenduty", alertType, namespace, subject)
+	}
+	if subject != "" {
+		return core.CanonicalFingerprint("zenduty", title, namespace, subject)
 	}
 	if incidentKey != "" {
 		return incidentKey

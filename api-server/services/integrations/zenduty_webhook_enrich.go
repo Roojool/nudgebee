@@ -45,21 +45,61 @@ import (
 // Being undocumented, this can break without notice — every step fails soft and
 // the webhook still processes with whatever it already had.
 
+// LabelZendutyEnrichUnavailable marks an alert whose API enrichment did not run
+// — throttled, no API key, no resolvable tenant, or the incident carried no
+// alert objects. The alert then reaches subject resolution with nothing but its
+// title, which is exactly when a guessed subject must not be promoted to a
+// learned mapping (see the LearnSubjectMapping call in zenduty_webhook.go).
+// Absent means enrichment ran: either it fetched, or the summary already carried
+// the labels it would have fetched.
+const LabelZendutyEnrichUnavailable = "nb_zenduty_enrich_unavailable"
+
 const zendutyEnrichCacheNamespace = "zenduty_alert_enrichment"
 const zendutyEnrichCacheTTL = 30 * time.Minute
 const zendutyEnrichAPITimeout = 10 * time.Second
 
-// Rate-limit breaker. Zenduty throttles per account, so a 429 on one incident
-// means the next incident's call is throttled too — without this, every webhook
-// delivery re-hammers an endpoint we already know is refusing us, and the
-// enrichment cache never helps because it is only written on success.
+// Retry policy for the Zenduty hops. Zenduty publishes a per-second AND a
+// per-minute quota per endpoint, and the alerts API we lean on hardest is the
+// tightest of them at 1/sec, 20/min. A 429 off the one-second bucket clears in
+// about a second, so abandoning the call on the first refusal throws away labels
+// a short pause would have recovered — Zenduty's own guidance is to retry with
+// requests spaced out. Only throttling and server-side failures are retried
+// (see zendutyRetryable), the delay is capped, and the whole enrichment shares
+// one budget (zendutyEnrichBudget) so a struggling API cannot hold the webhook
+// consumer for the sum of every hop's retries.
+const zendutyRetryAttempts = 3
+const zendutyRetryMaxDelay = 5 * time.Second
+
+// zendutyEnrichBudget bounds the wall-clock one enrichment may spend on Zenduty.
+// A single enrichment makes up to four sequential calls — alerts, teams, payload
+// URL, payload object — each with its own timeout and its own retries. Without a
+// shared budget, an account that is only marginally throttled (every call
+// succeeding on its last attempt) would hold the webhook consumer for the sum of
+// all four. The budget is advisory: it stops further retries, never a request
+// already in flight, so the real ceiling is the budget plus one request timeout.
+const zendutyEnrichBudget = 15 * time.Second
+
+// zendutyRetryBaseDelay is a var (not a const) so tests can shrink it — the real
+// value deliberately exceeds Zenduty's one-second bucket.
+var zendutyRetryBaseDelay = 1200 * time.Millisecond
+
+// Rate-limit breaker, for when the retries above still come back throttled.
+// Zenduty throttles per account, so a 429 on one incident means the next
+// incident's call is throttled too — without this, every webhook delivery
+// re-hammers an endpoint we already know is refusing us, and the enrichment
+// cache never helps because it is only written on success.
 //
-// Cooldown honours Retry-After when the response carries one, clamped to
-// [zendutyRateLimitMinCooldown, zendutyEnrichCacheTTL] — the upper bound keeps
-// the entry within the namespace's own expiration.
+// The cooldown is scaled to the quota that is actually breached. Exhausting the
+// retries means we are up against the per-minute bucket (20/min on the alerts
+// API), which refills continuously — so pause for tens of seconds, not minutes.
+// The old 5-minute cooldown (1-minute floor) answered a limit measured in
+// seconds by going blind for an entire alert storm, which is when the labels
+// matter most. Retry-After still wins when the response carries a usable one,
+// clamped to [zendutyRateLimitMinCooldown, zendutyEnrichCacheTTL] — the upper
+// bound keeps the entry within the namespace's own expiration.
 const zendutyRateLimitKeyPrefix = "ratelimit:"
-const zendutyRateLimitCooldown = 5 * time.Minute
-const zendutyRateLimitMinCooldown = 1 * time.Minute
+const zendutyRateLimitCooldown = 30 * time.Second
+const zendutyRateLimitMinCooldown = 5 * time.Second
 
 // zendutyAPIBaseURL is the base URL used by enrichment fetches. Package-level
 // var (not const) so tests can swap it for an httptest.Server URL.
@@ -130,10 +170,12 @@ func enrichWithZendutyAPI(sc *security.RequestContext, alert *core.EventIncoming
 
 	secCtx := sc.GetSecurityContext()
 	if secCtx == nil {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		return
 	}
 	tenantId := secCtx.GetTenantId()
 	if tenantId == "" {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		return
 	}
 
@@ -151,6 +193,7 @@ func enrichWithZendutyAPI(sc *security.RequestContext, alert *core.EventIncoming
 	// Zenduty throttles per account: while a cooldown from an earlier 429 is
 	// open, every call would be refused too. Skip without spending the request.
 	if zendutyRateLimited(tenantId) {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		sc.GetLogger().Debug("zendutywebhook: API enrichment skipped (rate-limit cooldown open)",
 			"incident", incidentID)
 		return
@@ -158,13 +201,16 @@ func enrichWithZendutyAPI(sc *security.RequestContext, alert *core.EventIncoming
 
 	apiKey, err := getZendutyAPIKey(sc, tenantId)
 	if err != nil {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		sc.GetLogger().Debug("zendutywebhook: API enrichment skipped (no API key)",
 			"incident", incidentID, "error", err)
 		return
 	}
 
-	alerts, err := fetchZendutyAlertsForIncident(incidentID, apiKey)
+	deadline := time.Now().Add(zendutyEnrichBudget)
+	alerts, err := fetchZendutyAlertsForIncident(incidentID, apiKey, deadline)
 	if err != nil {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		if httpErr, limited := isRateLimited(err); limited {
 			noteZendutyRateLimit(sc, tenantId, httpErr)
 		}
@@ -175,6 +221,7 @@ func enrichWithZendutyAPI(sc *security.RequestContext, alert *core.EventIncoming
 
 	selected, ok := selectZendutyAlert(alerts, incidentSummary)
 	if !ok {
+		alert.Labels[LabelZendutyEnrichUnavailable] = "true"
 		return
 	}
 
@@ -187,7 +234,7 @@ func enrichWithZendutyAPI(sc *security.RequestContext, alert *core.EventIncoming
 	// Recover the raw Alertmanager labels. Skipped when the webhook summary
 	// already carried them, since they'd only be a non-clobber no-op.
 	if !hadSummaryLabels {
-		labels, payloadErr := fetchZendutyAlertPayloadLabels(sc, selected, tenantId, apiKey)
+		labels, payloadErr := fetchZendutyAlertPayloadLabels(sc, selected, tenantId, apiKey, deadline)
 		if payloadErr != nil {
 			if httpErr, limited := isRateLimited(payloadErr); limited {
 				noteZendutyRateLimit(sc, tenantId, httpErr)
@@ -388,9 +435,60 @@ func noteZendutyRateLimit(sc *security.RequestContext, tenantId string, httpErr 
 	}
 }
 
-// zendutyGet performs an authenticated GET and returns the body on HTTP 200.
+// zendutyGet performs an authenticated GET and returns the body on HTTP 200,
+// retrying the attempts that are worth repeating (see zendutyRetryable).
 // Pass an empty apiKey for presigned URLs, which must NOT carry an auth header.
-func zendutyGet(url, apiKey, what string) ([]byte, error) {
+// deadline bounds the retries (see zendutyEnrichBudget); a zero deadline means
+// no budget, which is what the unit tests use to exercise the full retry ladder.
+func zendutyGet(url, apiKey, what string, deadline time.Time) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= zendutyRetryAttempts; attempt++ {
+		bodyBytes, err := zendutyGetOnce(url, apiKey, what)
+		if err == nil {
+			return bodyBytes, nil
+		}
+		lastErr = err
+		if attempt == zendutyRetryAttempts || !zendutyRetryable(err) {
+			break
+		}
+		delay := zendutyRetryDelay(err, attempt)
+		if !deadline.IsZero() && time.Now().Add(delay).After(deadline) {
+			break
+		}
+		time.Sleep(delay)
+	}
+	return nil, lastErr
+}
+
+// zendutyRetryable reports whether err is worth another attempt. Throttling and
+// server-side failures are transient; every other status is not — Zenduty
+// answers 401/404 when an integration is disabled or missing, and repeating
+// those would only spend the next second's quota on the same refusal. Transport
+// errors and timeouts are left alone too: the call already waits
+// zendutyEnrichAPITimeout, and tripling that delays the webhook far more than
+// the enrichment is worth.
+func zendutyRetryable(err error) bool {
+	var httpErr *zendutyHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+}
+
+// zendutyRetryDelay spaces the next attempt: Zenduty's own Retry-After when it
+// sends a usable one, otherwise a linear back-off off the one-second bucket.
+// Capped at zendutyRetryMaxDelay — once attempts run out the caller still falls
+// through to the un-enriched path, so waiting longer buys nothing.
+func zendutyRetryDelay(err error, attempt int) time.Duration {
+	var httpErr *zendutyHTTPError
+	if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
+		return min(httpErr.RetryAfter, zendutyRetryMaxDelay)
+	}
+	return min(time.Duration(attempt)*zendutyRetryBaseDelay, zendutyRetryMaxDelay)
+}
+
+// zendutyGetOnce is a single unretried GET attempt.
+func zendutyGetOnce(url, apiKey, what string) ([]byte, error) {
 	options := []common.HttpOption{common.HttpWithTimeout(zendutyEnrichAPITimeout)}
 	if apiKey != "" {
 		options = append(options, common.HttpWithHeaders(map[string]string{
@@ -425,9 +523,9 @@ func zendutyGet(url, apiKey, what string) ([]byte, error) {
 // fetchZendutyAlertsForIncident calls GET /api/incidents/{id}/alerts/ and returns
 // every alert on the incident. A collated incident holds more than one, so the
 // caller selects (see selectZendutyAlert) rather than assuming the first.
-func fetchZendutyAlertsForIncident(incidentID, apiKey string) ([]zendutyAlert, error) {
+func fetchZendutyAlertsForIncident(incidentID, apiKey string, deadline time.Time) ([]zendutyAlert, error) {
 	url := fmt.Sprintf("%s/incidents/%s/alerts/", zendutyAPIBaseURL, incidentID)
-	bodyBytes, err := zendutyGet(url, apiKey, "zenduty alerts API")
+	bodyBytes, err := zendutyGet(url, apiKey, "zenduty alerts API", deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -443,7 +541,7 @@ func fetchZendutyAlertsForIncident(incidentID, apiKey string) ([]zendutyAlert, e
 
 // fetchZendutyAccountID resolves the account that owns a team, via
 // GET /api/account/teams/. Cached per (tenant, team) — the mapping never changes.
-func fetchZendutyAccountID(sc *security.RequestContext, tenantId, teamID, apiKey string) (string, error) {
+func fetchZendutyAccountID(sc *security.RequestContext, tenantId, teamID, apiKey string, deadline time.Time) (string, error) {
 	if teamID == "" {
 		return "", errors.New("no team id on alert integration")
 	}
@@ -453,7 +551,7 @@ func fetchZendutyAccountID(sc *security.RequestContext, tenantId, teamID, apiKey
 		return string(data), nil
 	}
 
-	bodyBytes, err := zendutyGet(zendutyAPIBaseURL+"/account/teams/", apiKey, "zenduty teams API")
+	bodyBytes, err := zendutyGet(zendutyAPIBaseURL+"/account/teams/", apiKey, "zenduty teams API", deadline)
 	if err != nil {
 		return "", err
 	}
@@ -480,11 +578,11 @@ func fetchZendutyAccountID(sc *security.RequestContext, tenantId, teamID, apiKey
 // fetchZendutyAlertPayloadLabels recovers the raw Alertmanager body for an alert
 // and flattens it into labels. Two hops: the v2 endpoint returns a presigned S3
 // URL, which is then fetched without auth.
-func fetchZendutyAlertPayloadLabels(sc *security.RequestContext, a zendutyAlert, tenantId, apiKey string) (map[string]string, error) {
+func fetchZendutyAlertPayloadLabels(sc *security.RequestContext, a zendutyAlert, tenantId, apiKey string, deadline time.Time) (map[string]string, error) {
 	if a.UniqueID == "" {
 		return nil, errors.New("alert has no unique_id")
 	}
-	account, err := fetchZendutyAccountID(sc, tenantId, a.IntegrationObject.Team, apiKey)
+	account, err := fetchZendutyAccountID(sc, tenantId, a.IntegrationObject.Team, apiKey, deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +592,7 @@ func fetchZendutyAlertPayloadLabels(sc *security.RequestContext, a zendutyAlert,
 		return nil, err
 	}
 
-	presignBytes, err := zendutyGet(url, apiKey, "zenduty alert payload API")
+	presignBytes, err := zendutyGet(url, apiKey, "zenduty alert payload API", deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +608,7 @@ func fetchZendutyAlertPayloadLabels(sc *security.RequestContext, a zendutyAlert,
 	}
 
 	// Presigned — an Authorization header would conflict with the signature.
-	payloadBytes, err := zendutyGet(presigned.URL, "", zendutyPayloadObjectCall)
+	payloadBytes, err := zendutyGet(presigned.URL, "", zendutyPayloadObjectCall, deadline)
 	if err != nil {
 		return nil, err
 	}

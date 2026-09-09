@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,7 +39,7 @@ func TestZendutyEnrich_FetchAlerts_HappyPath(t *testing.T) {
 	zendutyAPIBaseURL = srv.URL
 	defer func() { zendutyAPIBaseURL = prev }()
 
-	got, err := fetchZendutyAlertsForIncident(incident, apiKey)
+	got, err := fetchZendutyAlertsForIncident(incident, apiKey, time.Time{})
 	assert.NoError(t, err)
 	assert.Len(t, got, 1)
 	assert.Equal(t, "KubeDeploymentReplicasMismatch", got[0].EntityID)
@@ -56,7 +57,7 @@ func TestZendutyEnrich_FetchAlerts_EmptyResults(t *testing.T) {
 	zendutyAPIBaseURL = srv.URL
 	defer func() { zendutyAPIBaseURL = prev }()
 
-	got, err := fetchZendutyAlertsForIncident("ZDFAKEINC0002", "key")
+	got, err := fetchZendutyAlertsForIncident("ZDFAKEINC0002", "key", time.Time{})
 	assert.NoError(t, err, "empty results is not an error")
 	assert.Empty(t, got)
 }
@@ -72,7 +73,7 @@ func TestZendutyEnrich_FetchAlerts_APIError(t *testing.T) {
 	zendutyAPIBaseURL = srv.URL
 	defer func() { zendutyAPIBaseURL = prev }()
 
-	got, err := fetchZendutyAlertsForIncident("ZDFAKEINC0003", "key")
+	got, err := fetchZendutyAlertsForIncident("ZDFAKEINC0003", "key", time.Time{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "401")
 	assert.Empty(t, got, "no enrichment on API error")
@@ -359,7 +360,7 @@ func TestZendutyEnrich_FetchAlerts_RateLimited(t *testing.T) {
 	zendutyAPIBaseURL = srv.URL
 	defer func() { zendutyAPIBaseURL = prev }()
 
-	_, err := fetchZendutyAlertsForIncident("ZDFAKEINC0429", "key")
+	_, err := fetchZendutyAlertsForIncident("ZDFAKEINC0429", "key", time.Time{})
 	assert.Error(t, err)
 
 	httpErr, limited := isRateLimited(err)
@@ -404,4 +405,170 @@ func TestZendutyThrottleHints(t *testing.T) {
 		retryAfter, _ := zendutyThrottleHints(header)
 		assert.Zero(t, retryAfter)
 	})
+}
+
+// Retry policy. Zenduty's alerts API is capped at 1 request/sec, and a burst of
+// webhooks trips it constantly: on dev, 425 of 476 Zenduty events over 14 days
+// reached subject resolution with no labels because the first 429 ended the
+// attempt. A one-second bucket refills in a second, so the call is worth
+// repeating — but only for the statuses that can change on their own.
+
+// withFastZendutyRetries shrinks the back-off so retry tests do not sleep for
+// seconds. Returns a restore func.
+func withFastZendutyRetries(t *testing.T) {
+	t.Helper()
+	prev := zendutyRetryBaseDelay
+	zendutyRetryBaseDelay = time.Millisecond
+	t.Cleanup(func() { zendutyRetryBaseDelay = prev })
+}
+
+// countingZendutyServer answers with the given statuses in order, then 200 with
+// a single-alert body. It reports how many requests it actually received.
+func countingZendutyServer(t *testing.T, statuses ...int) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := calls
+		calls++
+		if idx < len(statuses) {
+			w.WriteHeader(statuses[idx])
+			_, _ = w.Write([]byte(`throttled`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[{"unique_id":"AL1","entity_id":"KubeDeploymentRolloutStuck","summary":"Deployment rollout is not progressing."}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := zendutyAPIBaseURL
+	zendutyAPIBaseURL = srv.URL
+	t.Cleanup(func() { zendutyAPIBaseURL = prev })
+
+	return srv, &calls
+}
+
+func TestZendutyEnrich_Retries429ThenSucceeds(t *testing.T) {
+	withFastZendutyRetries(t)
+	_, calls := countingZendutyServer(t, http.StatusTooManyRequests)
+
+	alerts, err := fetchZendutyAlertsForIncident("ZDFAKEINC0RETRY", "key", time.Time{})
+	assert.NoError(t, err, "a 429 that clears on the next attempt must not lose the labels")
+	assert.Len(t, alerts, 1)
+	assert.Equal(t, "KubeDeploymentRolloutStuck", alerts[0].EntityID)
+	assert.Equal(t, 2, *calls)
+}
+
+func TestZendutyEnrich_Retries5xxThenSucceeds(t *testing.T) {
+	withFastZendutyRetries(t)
+	_, calls := countingZendutyServer(t, http.StatusBadGateway, http.StatusServiceUnavailable)
+
+	alerts, err := fetchZendutyAlertsForIncident("ZDFAKEINC05XX", "key", time.Time{})
+	assert.NoError(t, err)
+	assert.Len(t, alerts, 1)
+	assert.Equal(t, 3, *calls)
+}
+
+// Zenduty answers 401/404 when an integration is disabled or missing. Repeating
+// those spends the next second's quota on a refusal that cannot change.
+func TestZendutyEnrich_DoesNotRetryClientErrors(t *testing.T) {
+	withFastZendutyRetries(t)
+
+	for _, status := range []int{http.StatusUnauthorized, http.StatusNotFound, http.StatusBadRequest} {
+		_, calls := countingZendutyServer(t, status, status, status, status)
+
+		_, err := fetchZendutyAlertsForIncident("ZDFAKEINC0CLIENTERR", "key", time.Time{})
+		assert.Error(t, err)
+		assert.Equal(t, 1, *calls, "status %d must not be retried", status)
+	}
+}
+
+// Retries are bounded, and the error that survives them is still recognisable as
+// throttling so the breaker can open.
+func TestZendutyEnrich_RetriesAreBoundedAndStillOpenTheBreaker(t *testing.T) {
+	withFastZendutyRetries(t)
+	_, calls := countingZendutyServer(t,
+		http.StatusTooManyRequests, http.StatusTooManyRequests, http.StatusTooManyRequests, http.StatusTooManyRequests)
+
+	_, err := fetchZendutyAlertsForIncident("ZDFAKEINC0EXHAUST", "key", time.Time{})
+	assert.Error(t, err)
+	assert.Equal(t, zendutyRetryAttempts, *calls)
+
+	_, limited := isRateLimited(err)
+	assert.True(t, limited, "an exhausted retry must still be detectable as a rate limit")
+}
+
+func TestZendutyRetryable(t *testing.T) {
+	assert.True(t, zendutyRetryable(&zendutyHTTPError{StatusCode: http.StatusTooManyRequests}))
+	assert.True(t, zendutyRetryable(&zendutyHTTPError{StatusCode: http.StatusInternalServerError}))
+	assert.True(t, zendutyRetryable(&zendutyHTTPError{StatusCode: http.StatusBadGateway}))
+	assert.False(t, zendutyRetryable(&zendutyHTTPError{StatusCode: http.StatusUnauthorized}))
+	assert.False(t, zendutyRetryable(&zendutyHTTPError{StatusCode: http.StatusNotFound}))
+	assert.False(t, zendutyRetryable(errors.New("dial tcp: i/o timeout")),
+		"a timeout already cost zendutyEnrichAPITimeout; tripling that hurts the webhook more than the enrichment helps")
+}
+
+func TestZendutyRetryDelay(t *testing.T) {
+	t.Run("honours Retry-After", func(t *testing.T) {
+		err := &zendutyHTTPError{StatusCode: http.StatusTooManyRequests, RetryAfter: 2 * time.Second}
+		assert.Equal(t, 2*time.Second, zendutyRetryDelay(err, 1))
+	})
+
+	t.Run("caps a long Retry-After", func(t *testing.T) {
+		err := &zendutyHTTPError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Hour}
+		assert.Equal(t, zendutyRetryMaxDelay, zendutyRetryDelay(err, 1))
+	})
+
+	t.Run("backs off linearly without one", func(t *testing.T) {
+		err := &zendutyHTTPError{StatusCode: http.StatusTooManyRequests}
+		assert.Equal(t, zendutyRetryBaseDelay, zendutyRetryDelay(err, 1))
+		assert.Equal(t, 2*zendutyRetryBaseDelay, zendutyRetryDelay(err, 2))
+	})
+}
+
+// Regression guard on the cooldown scale. Zenduty's quotas are per-second and
+// per-minute; the breaker used to answer them with a 5-minute blackout (1-minute
+// floor), which went blind for exactly the alert storms where labels matter most.
+func TestZendutyRateLimitCooldownIsSecondsNotMinutes(t *testing.T) {
+	assert.LessOrEqual(t, zendutyRateLimitCooldown, time.Minute,
+		"a per-minute quota refills continuously; pausing longer than a minute just loses labels")
+	assert.LessOrEqual(t, zendutyRateLimitMinCooldown, 10*time.Second,
+		"the floor must not raise a Retry-After measured in seconds to minutes")
+	assert.LessOrEqual(t, zendutyRateLimitMinCooldown, zendutyRateLimitCooldown)
+}
+
+// The mirror of the webhook-level test: when the summary already carried the
+// labels the API would have returned, there is nothing to fetch and the run is
+// not degraded — learning stays allowed.
+func TestZendutyEnrich_NothingToFetch_IsNotFlaggedAsUnavailable(t *testing.T) {
+	alert := &core.EventIncomingWebhookInvestigation{Labels: map[string]string{
+		"alertname":       "KubePodCrashLooping",
+		"nb_alert_source": "prometheus",
+	}}
+
+	enrichWithZendutyAPI(newTestCtx(), alert, "ZDFAKEINC0NOFETCH", "Pod is crash looping")
+
+	assert.NotContains(t, alert.Labels, LabelZendutyEnrichUnavailable)
+}
+
+// One enrichment makes up to four sequential Zenduty calls. Each retrying to its
+// own limit would stack on the webhook consumer, so they share one budget: once
+// the next back-off would overrun it, the call stops retrying and the webhook
+// proceeds un-enriched rather than waiting.
+func TestZendutyEnrich_BudgetStopsFurtherRetries(t *testing.T) {
+	_, calls := countingZendutyServer(t,
+		http.StatusTooManyRequests, http.StatusTooManyRequests, http.StatusTooManyRequests)
+
+	// A deadline already in the past: the first failure must not sleep.
+	start := time.Now()
+	_, err := fetchZendutyAlertsForIncident("ZDFAKEINC0BUDGET", "key", start.Add(-time.Second))
+	assert.Error(t, err)
+	assert.Equal(t, 1, *calls, "an exhausted budget must not buy another attempt")
+	assert.Less(t, time.Since(start), zendutyRetryBaseDelay, "and must not have slept")
+}
+
+// The budget is a ceiling on retries, not on a request already in flight, so it
+// must leave room for the retry ladder it is meant to bound.
+func TestZendutyEnrichBudgetExceedsOneRetryLadder(t *testing.T) {
+	ladder := time.Duration(zendutyRetryAttempts-1) * zendutyRetryMaxDelay
+	assert.Greater(t, zendutyEnrichBudget, ladder,
+		"the first hop must be able to use its full retry ladder within the budget")
 }

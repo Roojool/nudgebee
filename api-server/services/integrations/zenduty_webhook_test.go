@@ -359,7 +359,7 @@ func TestZendutyFingerprint_Precedence(t *testing.T) {
 
 	t.Run("upstream Alertmanager fingerprint wins", func(t *testing.T) {
 		assert.Equal(t, "000fd06b1274d965",
-			zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "cloud-collector-server", "zd-key", "zd-uid"))
+			zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "cloud-collector-server", "a title", "zd-key", "zd-uid"))
 	})
 
 	// Two sibling alerts on ONE workload, told apart only by a label the resolved
@@ -367,41 +367,64 @@ func TestZendutyFingerprint_Precedence(t *testing.T) {
 	// the canonical fallback below cannot, which is exactly why it is the fallback.
 	t.Run("sibling alerts on one workload stay apart", func(t *testing.T) {
 		detect := zendutyFingerprint(map[string]string{"nb_alert_fingerprint": "b8d86a653803d8e0"},
-			"NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "", "zd-1")
+			"NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "a title", "", "zd-1")
 		redacted := zendutyFingerprint(map[string]string{"nb_alert_fingerprint": "bd0d9149542ad5f3"},
-			"NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "", "zd-2")
+			"NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "a title", "", "zd-2")
 		assert.NotEqual(t, detect, redacted)
 
-		merged := zendutyFingerprint(nil, "NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "", "zd-1")
+		merged := zendutyFingerprint(nil, "NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "a title", "", "zd-1")
 		assert.Equal(t, merged,
-			zendutyFingerprint(nil, "NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "", "zd-2"),
-			"documents the known coarseness of the no-payload fallback")
+			zendutyFingerprint(nil, "NBLLMEgressFilterFlagging", "nudgebee", "llm-server", "another title", "", "zd-2"),
+			"documents the known coarseness of the no-payload fallback: one alertname, one chain")
 	})
 
 	t.Run("canonical when no payload was recovered", func(t *testing.T) {
 		assert.Equal(t,
 			core.CanonicalFingerprint("zenduty", "HighP95Latency", "nudgebee", "cloud-collector-server"),
-			zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "cloud-collector-server", "zd-key", "zd-uid"))
+			zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "cloud-collector-server", "a title", "zd-key", "zd-uid"))
+	})
+
+	// The degraded shape that produced the dev incident: Zenduty sent no labels
+	// and the alerts API was throttled, so nothing named the alert — but a
+	// subject did resolve. Keying on the subject alone put every alert on that
+	// workload in one occurrence chain; the title has to carry the alert identity.
+	t.Run("title identifies the alert when nothing else does", func(t *testing.T) {
+		rollout := zendutyFingerprint(nil, "", "", "redis-replicas",
+			"[Prometheus][KubeDeploymentRolloutStuck] - Deployment rollout is not progressing.", "zd-key-1", "zd-uid-1")
+		latency := zendutyFingerprint(nil, "", "", "redis-replicas",
+			"[Prometheus][HighP95Latency] - High P95 latency for redis-replicas", "zd-key-2", "zd-uid-2")
+		assert.NotEqual(t, rollout, latency,
+			"two different alerts on one workload must not share an occurrence chain")
+
+		assert.NotEqual(t, core.CanonicalFingerprint("zenduty", "", "", "redis-replicas"), rollout,
+			"the subject-only key is what merged unrelated alerts; it must not be produced")
+
+		repeat := zendutyFingerprint(nil, "", "", "redis-replicas",
+			"[Prometheus][KubeDeploymentRolloutStuck] - Deployment rollout is not progressing.", "zd-key-3", "zd-uid-3")
+		assert.Equal(t, rollout, repeat,
+			"repeat firings still share a chain — neither incident_key nor unique_id may leak in")
 	})
 
 	t.Run("repeat firings share a key at every tier", func(t *testing.T) {
 		// Same alert, two incidents: Zenduty mints a fresh unique_id and a fresh
 		// random incident_key for each. Neither may leak into the key.
-		a := zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "svc", "key-a", "uid-a")
-		b := zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "svc", "key-b", "uid-b")
+		a := zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "svc", "a title", "key-a", "uid-a")
+		b := zendutyFingerprint(amFP, "HighP95Latency", "nudgebee", "svc", "a title", "key-b", "uid-b")
 		assert.Equal(t, a, b)
 
-		c := zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "svc", "key-a", "uid-a")
-		d := zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "svc", "key-b", "uid-b")
+		c := zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "svc", "a title", "key-a", "uid-a")
+		d := zendutyFingerprint(nil, "HighP95Latency", "nudgebee", "svc", "a title", "key-b", "uid-b")
 		assert.Equal(t, c, d)
 	})
 
+	// A title with no subject to anchor it to is not an identity — the caller's
+	// own incident_key still wins for the Events-API shape.
 	t.Run("incident_key only without any alert identity", func(t *testing.T) {
-		assert.Equal(t, "zd-key", zendutyFingerprint(nil, "", "", "", "zd-key", "zd-uid"))
+		assert.Equal(t, "zd-key", zendutyFingerprint(nil, "", "", "", "a title", "zd-key", "zd-uid"))
 	})
 
 	t.Run("unique_id is the last resort", func(t *testing.T) {
-		assert.Equal(t, "zd-uid", zendutyFingerprint(nil, "", "", "", "", "zd-uid"))
+		assert.Equal(t, "zd-uid", zendutyFingerprint(nil, "", "", "", "a title", "", "zd-uid"))
 	})
 }
 
@@ -482,4 +505,24 @@ func TestZenduty_RealPrometheusShape_NoLabels_FlagsUnstableKey(t *testing.T) {
 	assert.Empty(t, inv.Labels["alertname"], "guard: this shape carries no Alertmanager labels")
 	assert.Equal(t, "ZDFAKEINCIDENT00000002", inv.RuleId, "degrades to the per-incident id")
 	assert.Equal(t, "true", inv.Labels[event.LabelUnstableAggregationKey])
+}
+
+// A run that could not reach Zenduty's API must say so on the alert. The
+// LLM then sees nothing but a title, and a generic title ("Deployment rollout is
+// not progressing.") names no workload — so its answer is a guess that must not
+// be promoted to a learned title→service mapping. On dev one throttled webhook
+// on 2026-08-31 taught the tenant that KubeDeploymentRolloutStuck means
+// redis-replicas (a StatefulSet, which cannot even have a Deployment rollout),
+// and every firing for the next nine days reused it without asking again.
+func TestZenduty_EnrichmentUnavailable_IsFlaggedForTheLearnGuard(t *testing.T) {
+	zd := newZendutyIntegration(t)
+
+	out, err := zd.ProcessEventWebook(newTestCtx(), []core.IntegrationConfigValue{}, os.Getenv("TEST_ACCOUNT"), zendutyPrometheusNoLabelsPayload)
+	assert.NoError(t, err)
+	assert.Len(t, out, 1)
+
+	inv := out[0].Investigation
+	assert.Empty(t, inv.Labels["alertname"], "guard: this shape carries no Alertmanager labels")
+	assert.Equal(t, "true", inv.Labels[LabelZendutyEnrichUnavailable],
+		"no API enrichment ran, so a guessed subject must not be learned")
 }
