@@ -368,7 +368,7 @@ export default function GoogleChatSpacesPanel() {
         subtitle={toDelete ? `${toDelete.displayName} (${toDelete.spaceId})` : ''}
         confirmText='Unbind'
         cancelText='Cancel'
-        loading={!!busyId}
+        loader={!!busyId}
         onConfirm={handleDelete}
       >
         <Typography variant='body2'>

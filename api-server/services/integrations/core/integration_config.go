@@ -2033,12 +2033,12 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 	tenantID := ctx.GetSecurityContext().GetTenantId()
 
 	// Fetch integration record
-	var integrationType, integrationSource string
+	var integrationType, integrationSource, integrationName string
 	err = dbms.Db.QueryRow(`
-		SELECT type::text, source::text
+		SELECT type::text, source::text, COALESCE(name::text, '')
 		FROM integrations
 		WHERE id = $1 AND tenant_id = $2
-	`, integrationID, tenantID).Scan(&integrationType, &integrationSource)
+	`, integrationID, tenantID).Scan(&integrationType, &integrationSource, &integrationName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("integration not found")
@@ -2111,10 +2111,14 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 		accountIDs = append(accountIDs, accID)
 	}
 
-	if len(accountIDs) == 0 {
+	// Tenant-scoped integrations (messaging, ticketing, llm_gateway) have no
+	// cloud-account mapping, so an empty list is expected for them.
+	testAccountID := ""
+	if len(accountIDs) > 0 {
+		testAccountID = accountIDs[0]
+	} else if !isTenantScoped(integration) {
 		return errors.New("no accounts associated with this integration")
 	}
-	testAccountID := accountIDs[0]
 	if requestedAccountID != "" {
 		linked := false
 		for _, accountID := range accountIDs {
@@ -2127,6 +2131,12 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 			return errors.New("integrations: connection test is not permitted")
 		}
 		testAccountID = requestedAccountID
+	}
+
+	// Surface the name to ValidateConfig / TestConnection (as CreateIntegrationConfig
+	// does); some probes name the target in their output.
+	if integrationName != "" {
+		configValues = append(configValues, IntegrationConfigValue{Name: IntegrationConfigName, Value: integrationName})
 	}
 
 	// Apply schema defaults so hidden fields like connection_mode are always present

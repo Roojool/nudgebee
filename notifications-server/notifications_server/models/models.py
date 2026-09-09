@@ -104,6 +104,9 @@ class MessagingPlatform(Base):
                 if isinstance(getattr(self, "_integration_id", None), UUID)
                 else getattr(self, "_integration_id", None)
             ),
+            # ms_teams_webhook: the decrypted URL is the whole destination; must
+            # survive the installations cache round-trip.
+            "webhook_url": getattr(self, "webhook_url", None),
         }
         return {**standard_values}
 
@@ -138,6 +141,7 @@ class MessagingPlatform(Base):
 
         instance.token_expires_at = parse_datetime(data.get("token_expires_at"))
         instance.refresh_token_expires_at = parse_datetime(data.get("refresh_token_expires_at"))
+        instance.webhook_url = data.get("webhook_url")
         instance._origin = data.get("_origin")
         # Re-hydrate the integration id as a UUID so the encrypted-token write path
         # filters on the correct type regardless of strict DB-driver coercion.

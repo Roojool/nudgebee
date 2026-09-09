@@ -62,6 +62,49 @@ def test_build_installation_teams():
     assert inst.channels == {"team_id": "T1", "channels": [{"id": "C9"}]}
 
 
+def test_build_webhook_installation():
+    integ = Integration(id="44444444-4444-4444-4444-444444444444", name="Prod alerts", tenant_id="t1")
+    inst = mi.build_webhook_installation(
+        integ, {"webhook_url": "https://x.logic.azure.com/hook", "installed_by": "a@b.c"}
+    )
+    assert inst.platform == mi.MS_TEAMS_WEBHOOK_TYPE
+    assert inst.id == integ.id
+    assert inst.team_name == "Prod alerts"  # label surfaced in rule pickers
+    assert inst.webhook_url == "https://x.logic.azure.com/hook"
+    assert inst.channels is None
+    assert inst._origin == mi.ORIGIN_INTEGRATION
+
+
+def test_build_webhook_installation_is_reusable_for_other_platforms():
+    """The builder is parametrized so a future webhook platform reuses it rather
+    than copying — it reads the URL from the field it is told to."""
+    integ = Integration(id="66666666-6666-6666-6666-666666666666", name="Ops", tenant_id="t1")
+    inst = mi.build_webhook_installation(
+        integ, {"slack_url": "https://hooks.slack.com/services/x"}, platform="slack_webhook", url_field="slack_url"
+    )
+    assert inst.platform == "slack_webhook"
+    assert inst.webhook_url == "https://hooks.slack.com/services/x"
+
+
+def test_webhook_platform_types_membership():
+    assert mi.MS_TEAMS_WEBHOOK_TYPE in mi.WEBHOOK_PLATFORM_TYPES
+    assert "ms_teams" not in mi.WEBHOOK_PLATFORM_TYPES
+
+
+def test_webhook_url_survives_cache_roundtrip():
+    """The decrypted URL is the whole destination for a webhook target, so it must
+    survive the installations cache round-trip (to_dict -> from_dict)."""
+    from notifications_server.models.models import MessagingPlatform
+
+    integ = Integration(id="55555555-5555-5555-5555-555555555555", name="Prod", tenant_id="t1")
+    inst = mi.build_webhook_installation(integ, {"webhook_url": "https://x.logic.azure.com/hook"})
+
+    restored = MessagingPlatform.from_dict(inst.to_dict())
+
+    assert restored.platform == mi.MS_TEAMS_WEBHOOK_TYPE
+    assert restored.webhook_url == "https://x.logic.azure.com/hook"
+
+
 def test_cache_roundtrip_preserves_origin_and_integration_id():
     """A refreshed token is re-encrypted into integrations only when _origin and
     _integration_id survive the Redis cache round-trip (to_dict -> from_dict);

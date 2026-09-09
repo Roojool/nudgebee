@@ -96,6 +96,30 @@ func notifyGoogleChatBinding(tenantId, spaceId, event string) {
 	defer func() { _ = resp.Body.Close() }()
 }
 
+// notifyMessagingCacheInvalidate drops notifications-server's cached per-tenant
+// messaging installs so a new/deleted webhook target is routable without waiting
+// out the 60-minute cache TTL. Best-effort; a miss only delays visibility.
+func notifyMessagingCacheInvalidate(tenantId string) {
+	if tenantId == "" || config.Config.NotificationServiceUrl == "" {
+		return
+	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	if config.Config.NotificationServiceToken != "" {
+		headers["X-ACTION-TOKEN"] = config.Config.NotificationServiceToken
+	}
+	resp, err := common.HttpPost(
+		fmt.Sprintf("%s/api/integrations/messaging/invalidate-cache", config.Config.NotificationServiceUrl),
+		common.HttpWithTimeout(10*time.Second),
+		common.HttpWithHeaders(headers),
+		common.HttpWithJsonBody(map[string]any{"tenant_id": tenantId}),
+	)
+	if err != nil {
+		slog.Warn("integrations: messaging cache invalidate failed (best-effort)", "error", err, "tenant_id", tenantId)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+}
+
 func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
 	if err != nil {
@@ -160,6 +184,9 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace && request.IntegrationId == "" {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "bound")
 		}
+		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
+		}
 		return
 	case "integrations_delete_config":
 		var request IntegrationDeleteRequest
@@ -213,6 +240,9 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		onIntegrationConfigChanged(ctx, affectedAccountIds)
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "unbound")
+		}
+		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		return
 	case "integrations_get_schema":
@@ -316,6 +346,9 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		}
 
 		c.JSON(200, map[string]string{"status": "success"})
+		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
+		}
 		// Audit is persisted by core.UpdateIntegrationConfigStatus (CreateAudit,
 		// DB) — no MQ publish here to avoid a duplicate write.
 		// integrations_update_status doesn't change which accounts are linked
@@ -419,6 +452,13 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == "" {
 			c.JSON(400, common.ErrorActionBadRequest("integration_name is required"))
 			return
+		}
+
+		// Give the probe the row's name (as CreateIntegrationConfig does) so a
+		// pre-save test card can name the target.
+		if request.IntegrationConfigName != "" {
+			request.IntegrationConfigValues = append(request.IntegrationConfigValues,
+				core.IntegrationConfigValue{Name: core.IntegrationConfigName, Value: request.IntegrationConfigName})
 		}
 
 		testErr := core.TestIntegrationConnectionByConfig(

@@ -20,6 +20,7 @@ import { colors, ds } from 'src/utils/colors';
 import { safeJSONParse, toKebabCase } from 'src/utils/common';
 import ChannelAccountMapping from '@components/notifications/ChannelAccountMapping';
 import WatchedChannels from '@components/notifications/WatchedChannels';
+import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
 
 const MessagingIntegrationTile = ({
   provider, // "slack" | "google_chat"
@@ -683,6 +684,8 @@ const MessagingIntegrationTile = ({
       )}
 
       {provider === 'slack' && <WatchedChannels provider={provider} isConfigured={installationData?.length > 0} />}
+
+      {provider === 'ms_teams' && <MsTeamsWebhookTargets />}
     </>
   );
 };
