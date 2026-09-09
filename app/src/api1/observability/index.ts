@@ -201,21 +201,28 @@ const observability = {
     }
   },
 
-  async metricsLabelList(accountId: string, metricName: string) {
+  // `metricProvider` pins the provider the labels are read from. Without it the
+  // backend answers from the account default, so an ES index selected while the
+  // account defaults to Prometheus came back with Prometheus's `__name__`.
+  async metricsLabelList(accountId: string, metricName: string, options?: { metricProvider?: string }) {
     if (accountId === 'demo') return null;
     const METRICS_LABEL_LIST = `
-    query MetricsLabelList($accountId: String!, $metricName: String!) {
-      metrics_list_labels(request: {account_id: $accountId, metric: $metricName}) {
+    query MetricsLabelList($accountId: String!, $metricName: String!, $metricProvider: String) {
+      metrics_list_labels(request: {account_id: $accountId, metric: $metricName, metric_provider: $metricProvider}) {
         label
         attributes
       }
     }
     `;
     try {
-      const response = await queryGraphQL(METRICS_LABEL_LIST, 'MetricsLabelList', {
+      const variables: Record<string, any> = {
         accountId,
         metricName: metricName,
-      });
+      };
+      if (options?.metricProvider) {
+        variables.metricProvider = options.metricProvider;
+      }
+      const response = await queryGraphQL(METRICS_LABEL_LIST, 'MetricsLabelList', variables);
       return response;
     } catch (err) {
       console.error('Failed to fetch metrics labels:', err);
@@ -252,22 +259,27 @@ const observability = {
     });
   },
 
-  async metricsLabelValueList(accountId: string, labelName: string, request: Record<string, string>) {
+  // `metricProvider` pins the provider, same reason as metricsLabelList above.
+  async metricsLabelValueList(accountId: string, labelName: string, request: Record<string, string>, options?: { metricProvider?: string }) {
     if (accountId === 'demo') return null;
     const METRICS_LABEL_VALUE_LIST = `
-    query MetricsLabelValueList($accountId: String!, $labelName: String!, $request: jsonb) {
-      metrics_list_label_values(request: {account_id: $accountId, label: $labelName, request: $request}) {
+    query MetricsLabelValueList($accountId: String!, $labelName: String!, $request: jsonb, $metricProvider: String) {
+      metrics_list_label_values(request: {account_id: $accountId, label: $labelName, request: $request, metric_provider: $metricProvider}) {
         value
         attributes
       }
     }
     `;
     try {
-      const response = await queryGraphQL(METRICS_LABEL_VALUE_LIST, 'MetricsLabelValueList', {
+      const variables: Record<string, any> = {
         accountId,
         labelName: labelName,
         request: request,
-      });
+      };
+      if (options?.metricProvider) {
+        variables.metricProvider = options.metricProvider;
+      }
+      const response = await queryGraphQL(METRICS_LABEL_VALUE_LIST, 'MetricsLabelValueList', variables);
       return response;
     } catch (err) {
       console.error('Failed to fetch metrics label values:', err);

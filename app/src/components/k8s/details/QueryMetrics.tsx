@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import KubernetesTable2 from '@components/k8s/common/KubernetesTable2';
 import { Box, Typography } from '@mui/material';
 import { ToggleGroup } from '@ui/ToggleGroup';
@@ -32,8 +32,20 @@ import observability from '@api1/observability';
 import cache from '@lib/cache';
 import apiAccount from '@api1/account';
 import { useData } from '@context/DataContext';
-import { Info as InfoIcon } from '@mui/icons-material';
+import { Info as InfoIcon, KeyboardArrowDown as KeyboardArrowDownIcon } from '@mui/icons-material';
+import { DropdownMenu } from '@ui/DropdownMenu';
 import { Label } from '@ui/Label';
+
+// One entry of observability_get_default_provider.available_providers: a provider the
+// account can query for metrics, with the operator catalog it supports.
+interface AvailableMetricsProvider {
+  provider: string;
+  supported_operator_descriptors?: OperatorDescriptor[];
+}
+
+// snakeToTitleCase would render the hyphenated provider name verbatim, so spell the
+// one provider whose id is not snake_case out by hand.
+const metricsProviderLabel = (provider: string) => (provider === 'victoria-metrics' ? 'Victoria Metrics' : snakeToTitleCase(provider));
 
 // Data limiting constants to prevent memory issues with large datasets
 const MAX_TABLE_ROWS = 100;
@@ -128,6 +140,14 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   const [generateQuestionText, _setGenerateQuestionText] = useState('');
   const [qLEditor, setQLEditor] = useState('code');
   const [metricsProvider, setMetricsProvider] = useState('prometheus');
+  // The account's configured default. Kept apart from metricsProvider so the switcher
+  // can tell "switched back to default" (restore the resolved index) from an override.
+  const [defaultProvider, setDefaultProvider] = useState('');
+  const [defaultIndex, setDefaultIndex] = useState('');
+  const [availableProviders, setAvailableProviders] = useState<AvailableMetricsProvider[]>([]);
+  // Guards the async ES-index resolve below against a stale response landing after
+  // the user has switched providers again.
+  const selectedProviderRef = useRef('');
   const [operatorDescriptors, setOperatorDescriptors] = useState<OperatorDescriptor[] | undefined>(undefined);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [truncationWarnings, setTruncationWarnings] = useState<{
@@ -146,10 +166,14 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   };
 
   const fetchDefaultProvider = async () => {
-    const cached = cache.get(`${accountId}-metrics-v3`);
+    // v4: cache payload widened to carry available_providers + default_index so the
+    // switcher can render from cache without a refetch.
+    const cached = cache.get(`${accountId}-metrics-v4`);
     if (cached && typeof cached === 'object' && cached.provider) {
       setOperatorDescriptors(cached.operator_descriptors);
-      setEsIndex(cache.get(`${accountId}-metrics-index`) || '');
+      setAvailableProviders(cached.available_providers || []);
+      setDefaultIndex(cached.default_index || '');
+      setEsIndex(cached.default_index || '');
       return cached.provider;
     }
     try {
@@ -163,20 +187,47 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
         return '';
       }
 
-      const defaultIndex = res?.data?.data?.observability_get_default_provider?.default_index || '';
-      const descriptors = res?.data?.data?.observability_get_default_provider?.capabilities?.supported_operator_descriptors;
-      setOperatorDescriptors(descriptors);
-      setEsIndex(defaultIndex);
-      if (defaultIndex) {
-        cache.set(`${accountId}-metrics-index`, defaultIndex, 5 * 60);
+      const obs = res?.data?.data?.observability_get_default_provider;
+      const resolvedDefaultIndex = obs?.default_index || '';
+      const descriptors = obs?.capabilities?.supported_operator_descriptors;
+      const provider = obs?.provider || '';
+      // Drop any malformed entry without a provider name so the dropdown map never
+      // hits snakeToTitleCase(undefined) or builds an invalid option id.
+      const providers: AvailableMetricsProvider[] = Array.isArray(obs?.available_providers)
+        ? obs.available_providers.filter((p: AvailableMetricsProvider) => p?.provider)
+        : [];
+      // Guarantee the active default is always one of the selectable options (it can
+      // be missing when `provider` came from the cluster fallback), so it shows a
+      // check-mark and the user can switch back to it.
+      if (provider && !providers.some((p) => p?.provider === provider)) {
+        providers.unshift({ provider, supported_operator_descriptors: descriptors });
       }
-      const provider = res?.data?.data?.observability_get_default_provider?.provider || '';
-      cache.set(`${accountId}-metrics-v3`, { provider, operator_descriptors: descriptors }, 5 * 60);
+      setOperatorDescriptors(descriptors);
+      setAvailableProviders(providers);
+      setDefaultIndex(resolvedDefaultIndex);
+      setEsIndex(resolvedDefaultIndex);
+      cache.set(
+        `${accountId}-metrics-v4`,
+        { provider, operator_descriptors: descriptors, available_providers: providers, default_index: resolvedDefaultIndex },
+        5 * 60
+      );
       return provider;
     } catch (error: any) {
       snackbar.error(error.message || 'Failed to fetch default provider');
       return '';
     }
+  };
+
+  // Operator catalog for a given provider. Each available_providers entry carries its
+  // own supported_operator_descriptors; fall back to the default provider's entry,
+  // then to whatever catalog is currently loaded.
+  const getDescriptorsForProvider = (providerName: string): OperatorDescriptor[] | undefined => {
+    const entry = availableProviders?.find((p) => p?.provider === providerName);
+    if (entry?.supported_operator_descriptors) {
+      return entry.supported_operator_descriptors;
+    }
+    const defaultEntry = availableProviders?.find((p) => p?.provider === defaultProvider);
+    return defaultEntry?.supported_operator_descriptors ?? operatorDescriptors;
   };
 
   const resetAllStates = () => {
@@ -191,6 +242,50 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setLoading(false);
     setTruncationWarnings({});
     setNonFiniteCounts({});
+  };
+
+  // Switch the active metrics provider. Treated like a fresh provider: clears the
+  // current query/results, swaps in the new provider's operator catalog, and resets
+  // the ES index (restoring the configured default only when switching back to the
+  // account default). metricsProvider is already sent as `metric_provider` on every
+  // request, so the fetch follows the selection with no extra plumbing.
+  const handleProviderChange = (newProvider: string) => {
+    if (!newProvider || newProvider === metricsProvider) {
+      return;
+    }
+    const descriptors = getDescriptorsForProvider(newProvider);
+    resetAllStates();
+    setSolarwindsRequest(null);
+    setEsQueryType('dsl');
+    setOperatorDescriptors(descriptors);
+    selectedProviderRef.current = newProvider;
+    setMetricsProvider(newProvider);
+
+    if (newProvider === defaultProvider) {
+      // Switching back to the account default — its per-account/top-level index was
+      // already resolved on load.
+      setEsIndex(defaultIndex);
+      return;
+    }
+
+    // Overriding to a non-default provider. The index picker only renders for ES, so
+    // only ES needs a resolved default; ask the backend for ES's per-account
+    // (Advanced Settings mapping) / top-level index instead of leaving it blank.
+    setEsIndex('');
+    if (newProvider === 'ES' && accountId && accountId !== 'demo') {
+      apiAccount
+        .getDefaultProvider({ account_id: accountId, provider_type: 'metrics', provider: 'ES' })
+        .then((res: any) => {
+          const resolved = res?.data?.data?.observability_get_default_provider?.default_index || '';
+          // Ignore a stale response if the user has since switched providers.
+          if (resolved && selectedProviderRef.current === 'ES') {
+            setEsIndex(resolved);
+          }
+        })
+        .catch(() => {
+          // Non-fatal: the index picker just starts empty and the user picks one.
+        });
+    }
   };
 
   // Execute queries from URL parameters when router is ready and metrics provider is prometheus
@@ -219,11 +314,13 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     const init = async () => {
       if (accountId === 'demo') {
         setMetricsProvider('prometheus');
+        setDefaultProvider('prometheus');
+        selectedProviderRef.current = 'prometheus';
       } else {
-        const defaultProvider = await fetchDefaultProvider();
+        const resolvedDefault = await fetchDefaultProvider();
         let metricsProvider = '';
-        if (defaultProvider) {
-          metricsProvider = defaultProvider;
+        if (resolvedDefault) {
+          metricsProvider = resolvedDefault;
         } else {
           metricsProvider = selectedCluster?.agent?.connection_status?.prometheusUrl?.includes('chronosphere')
             ? 'chronosphere'
@@ -234,6 +331,8 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
             : '';
         }
         setMetricsProvider(metricsProvider);
+        setDefaultProvider(metricsProvider);
+        selectedProviderRef.current = metricsProvider;
       }
       const queryFromUrl = router.query.query as string;
       if ((!preparedEvidences || preparedEvidences.length === 0) && !queryFromUrl) {
@@ -970,9 +1069,9 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
         >
           {showQueryBox && (
             <>
-              {!!metricsProvider && (
-                <Box
-                  sx={{
+              {!!metricsProvider &&
+                (() => {
+                  const badgeSx = {
                     display: 'flex',
                     alignItems: 'center',
                     gap: 'var(--ds-space-2)',
@@ -981,29 +1080,69 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                     borderRadius: 'var(--ds-radius-md)',
                     border: '1px solid var(--ds-gray-alpha-200)',
                     minWidth: 'fit-content',
-                  }}
-                >
-                  <Text
-                    value='Metrics Provider:'
-                    sx={{
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'var(--ds-font-weight-medium)',
-                      color: 'var(--ds-gray-600)',
-                      whiteSpace: 'nowrap',
-                    }}
-                  />
-                  <CloudProviderIcon cloud_provider={metricsProvider} width='20px' height='20px' />
-                  <Text
-                    value={metricsProvider === 'victoria-metrics' ? 'Victoria Metrics' : snakeToTitleCase(metricsProvider)}
-                    sx={{
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'var(--ds-font-weight-semibold)',
-                      color: 'var(--ds-gray-700)',
-                      whiteSpace: 'nowrap',
-                    }}
-                  />
-                </Box>
-              )}
+                  } as const;
+                  const badgeInner = (
+                    <>
+                      <Text
+                        value='Metrics Provider:'
+                        sx={{
+                          fontSize: 'var(--ds-text-body-lg)',
+                          fontWeight: 'var(--ds-font-weight-medium)',
+                          color: 'var(--ds-gray-600)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      />
+                      <CloudProviderIcon cloud_provider={metricsProvider} width='20px' height='20px' />
+                      <Text
+                        value={metricsProviderLabel(metricsProvider)}
+                        sx={{
+                          fontSize: 'var(--ds-text-body-lg)',
+                          fontWeight: 'var(--ds-font-weight-semibold)',
+                          color: 'var(--ds-gray-700)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      />
+                    </>
+                  );
+
+                  // Only offer a switcher when the account has more than one
+                  // configured metrics provider; otherwise keep the static badge.
+                  if (availableProviders.length <= 1) {
+                    return <Box sx={badgeSx}>{badgeInner}</Box>;
+                  }
+
+                  return (
+                    <DropdownMenu
+                      align='start'
+                      minWidth={220}
+                      trigger={
+                        <Box
+                          component='button'
+                          type='button'
+                          id='metrics-provider-switcher'
+                          sx={{
+                            ...badgeSx,
+                            font: 'inherit',
+                            cursor: 'pointer',
+                            transition: 'border-color 120ms ease, background-color 120ms ease',
+                            '&:hover': { borderColor: 'var(--ds-gray-300)', backgroundColor: 'var(--ds-gray-alpha-200)' },
+                          }}
+                        >
+                          {badgeInner}
+                          <KeyboardArrowDownIcon sx={{ fontSize: 'var(--ds-text-heading)', color: 'var(--ds-gray-500)' }} />
+                        </Box>
+                      }
+                      items={availableProviders.map((p) => ({
+                        id: `metrics-provider-option-${p.provider}`,
+                        label: metricsProviderLabel(p.provider),
+                        icon: <CloudProviderIcon cloud_provider={p.provider} width='16px' height='16px' />,
+                        kbd: p.provider === metricsProvider ? '\u2713' : undefined,
+                        searchText: p.provider,
+                        onSelect: () => handleProviderChange(p.provider),
+                      }))}
+                    />
+                  );
+                })()}
               <ToggleGroup
                 selection='single'
                 size='md'
@@ -1040,6 +1179,13 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
               accountId={accountId}
               params={{ ...selectedDateRange }}
               logProvider={metricsProvider}
+              // The ES index picker lists targets through the logs action (there is no
+              // metrics equivalent), which resolves the account's DEFAULT LOG provider
+              // when no provider is pinned. On an account whose logs default is Loki,
+              // picking ES here asked Loki for indexes and 400'd. Pin the selected
+              // metrics provider so the listing resolves ES. Safe for the metrics
+              // formatted-query preview, which branches to its own handler.
+              providerOverride={metricsProvider}
               operatorDescriptors={operatorDescriptors}
               onQueryChange={(e: any) => {
                 setQuery(e.query);
