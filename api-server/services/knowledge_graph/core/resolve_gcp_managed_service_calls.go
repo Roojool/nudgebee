@@ -140,11 +140,11 @@ func ResolveGCPManagedServiceCalls(
 		}
 		e.Properties[resolveGCPManagedServicePropResolvedBy] = resolveGCPManagedServiceResolver
 		e.DestinationNodeID = match.ID
-		// The edge primary key is GenerateEdgeID(src, dst, rel) (see helpers.go /
-		// saveGraphToDB, which persists edge.ID verbatim). Repointing the
-		// destination without regenerating the ID leaves it hashing the old stub
-		// destination, colliding with the stub's still-present PK row on insert.
-		e.ID = GenerateEdgeID(e.SourceNodeID, match.ID, e.RelationshipType)
+		// The edge primary key is derived from its endpoints (see EdgeIDFor).
+		// Repointing the destination without regenerating the ID leaves it
+		// hashing the old stub destination, colliding with the stub's
+		// still-present PK row on insert.
+		e.ID = EdgeIDFor(e.SourceNodeID, match.ID, e.RelationshipType, e.CloudAccountID, e.TenantID)
 		rewritten++
 	}
 

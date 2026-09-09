@@ -1843,7 +1843,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:LoadBalancer:main-vpc:my-alb",
       "relationship_type": "ROUTES_TO",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {
@@ -1882,7 +1882,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:LoadBalancer:main-vpc:my-alb",
       "relationship_type": "RESOLVES_TO",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {
@@ -2017,7 +2017,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:ServerlessFunction::api-handler-function",
       "relationship_type": "PUBLISHES_TO",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {
@@ -2037,7 +2037,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:Database::users-table",
       "relationship_type": "CALLS",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {
@@ -2079,7 +2079,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:MessageQueue::order-queue",
       "relationship_type": "PUBLISHES_TO",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {
@@ -2099,7 +2099,7 @@
       "dst_key": "aws:test-account-aws-1:us-east-1:Topic::order-notifications",
       "relationship_type": "PUBLISHES_TO",
       "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {

@@ -109,7 +109,7 @@
       "dst_key": "azure:test-account-azure-1:eastus:ManagedCluster:microsoft.containerservice/managedclusters:my-aks",
       "relationship_type": "RUNS_ON",
       "cloud_account_id": "test-account-azure-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {

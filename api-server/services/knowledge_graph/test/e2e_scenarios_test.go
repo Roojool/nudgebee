@@ -269,7 +269,11 @@ func mergeGraph(nodes []*core.DbNode, edges []*core.DbEdge, opts mergeOpts) ([]*
 	edges = core.DeduplicateEdgesWithPriority(edges)
 
 	if opts.crossAccount && opts.svc != nil {
-		g := &core.Graph{Nodes: nodes, Edges: edges}
+		// TenantID must mirror BuildGraphs (core/service.go), which seeds the
+		// unified graph with req.TenantID. BuildCrossAccountRelationships stamps
+		// it onto every edge it creates, so leaving it empty here produced
+		// tenant-less duplicates of edges the sources had already emitted.
+		g := &core.Graph{Nodes: nodes, Edges: edges, TenantID: e2eTenantID}
 		rules := opts.svc.GetDefaultRelationships()
 		if caEdges, err := opts.svc.BuildCrossAccountRelationships(g, rules); err == nil && len(caEdges) > 0 {
 			edges = append(edges, caEdges...)

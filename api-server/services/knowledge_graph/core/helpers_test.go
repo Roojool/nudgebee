@@ -815,3 +815,89 @@ func TestConvertKgNodeToKgNodeSlimNamespace(t *testing.T) {
 		t.Errorf("cluster-scoped node should omit namespace: %s", payload)
 	}
 }
+
+// EdgeIDFor must hash every column knowledge_graph_edge's unique constraint
+// arbitrates on. This is the test that would have caught #38046: the PK was
+// derived from only three of the five, so two rows the constraint considers
+// distinct collided on knowledge_graph_edge_pkey, missed the upsert's DO UPDATE
+// arm, and aborted the transaction covering every edge in the graph.
+func TestEdgeIDFor_DependsOnEveryConflictColumn(t *testing.T) {
+	const (
+		src    = "11111111-1111-5111-8111-111111111111"
+		dst    = "22222222-2222-5222-8222-222222222222"
+		acct   = "33333333-3333-5333-8333-333333333333"
+		tenant = "44444444-4444-5444-8444-444444444444"
+	)
+	base := EdgeIDFor(src, dst, RelationshipCalls, acct, tenant)
+
+	variants := map[string]string{
+		"source_node_id":      EdgeIDFor("99999999-9999-5999-8999-999999999999", dst, RelationshipCalls, acct, tenant),
+		"destination_node_id": EdgeIDFor(src, "99999999-9999-5999-8999-999999999999", RelationshipCalls, acct, tenant),
+		"relationship_type":   EdgeIDFor(src, dst, RelationshipPublishesTo, acct, tenant),
+		"cloud_account_id":    EdgeIDFor(src, dst, RelationshipCalls, "99999999-9999-5999-8999-999999999999", tenant),
+		"tenant_id":           EdgeIDFor(src, dst, RelationshipCalls, acct, "99999999-9999-5999-8999-999999999999"),
+	}
+
+	seen := map[string]string{base: "baseline"}
+	for col, id := range variants {
+		if id == base {
+			t.Errorf("changing %s did not change the edge ID — the PK ignores a column the unique constraint keys on", col)
+		}
+		if prev, dup := seen[id]; dup {
+			t.Errorf("changing %s collides with %s", col, prev)
+		}
+		seen[id] = col
+	}
+}
+
+// The ID is a function of the natural key and nothing else, so two builds that
+// disagree about an edge's properties still upsert the same row.
+func TestEdgeIDFor_IgnoresNonKeyFieldsAndIsDeterministic(t *testing.T) {
+	args := []string{"src", "dst", "acct", "tenant"}
+	first := EdgeIDFor(args[0], args[1], RelationshipCalls, args[2], args[3])
+	second := EdgeIDFor(args[0], args[1], RelationshipCalls, args[2], args[3])
+	if first != second {
+		t.Fatalf("EdgeIDFor is not deterministic: %s != %s", first, second)
+	}
+	if first == "" {
+		t.Fatal("EdgeIDFor returned empty")
+	}
+}
+
+// The two schemes coexist on one table — legacy rows keep GenerateEdgeID values
+// that ON CONFLICT DO UPDATE never rewrites — so their hash spaces must not
+// overlap, or a newly derived PK could land on an unrelated existing row.
+func TestEdgeIDFor_DisjointFromGenerateEdgeID(t *testing.T) {
+	const src, dst = "src", "dst"
+	legacy := GenerateEdgeID(src, dst, RelationshipCalls)
+	for _, tc := range []struct{ acct, tenant string }{
+		{"", ""},
+		{"acct", ""},
+		{"", "tenant"},
+		{"acct", "tenant"},
+	} {
+		if got := EdgeIDFor(src, dst, RelationshipCalls, tc.acct, tc.tenant); got == legacy {
+			t.Errorf("EdgeIDFor(%q, %q) collides with GenerateEdgeID for the same endpoints", tc.acct, tc.tenant)
+		}
+	}
+}
+
+// The key format is a wire format: it decides every edge primary key written
+// from here on, and the argument that the new and legacy key spaces are
+// disjoint was verified against these exact bytes. A refactor that changes the
+// separators, their order, or the concatenation would silently re-key every
+// edge. Pin the output so that can only happen deliberately.
+func TestEdgeIDFor_KeyFormatIsStable(t *testing.T) {
+	const want = "0a6efd16-3121-5a4d-887a-d5b8bae70d2e"
+	got := EdgeIDFor(
+		"51d5e8fd-f99c-55a1-b91e-0bab6d184ae9",
+		"31b98da8-8ed9-5e6d-a2a5-11168e71f0c9",
+		RelationshipCalls,
+		"a2814c61-5b2d-4834-b645-cf68092b46dd",
+		"5d040fa4-5e2e-47b0-ac8c-86d75c7ec88c")
+	if got != want {
+		t.Fatalf("EdgeIDFor output changed: got %s, want %s.\n"+
+			"The key format is load-bearing — every edge PK derives from it. Change it only "+
+			"deliberately, and re-run the disjointness pre-flight against every environment first.", got, want)
+	}
+}

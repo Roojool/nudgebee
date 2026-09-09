@@ -261,6 +261,19 @@ var edgeUpsertCols = []string{
 	"source", "contributing_sources",
 }
 
+// edgeConflictCols is the unique constraint SaveEdges arbitrates on (migration
+// V578) — the natural key of an edge.
+//
+// EdgeIDFor hashes exactly these columns, which is what keeps the primary key
+// and this arbiter in agreement. Adding a column here without adding it to
+// EdgeIDFor reopens #38046: a row would then be able to miss the DO UPDATE arm
+// and still collide on knowledge_graph_edge_pkey. TestEdgeConflictColsMatchEdgeIDFor
+// pins the two together.
+var edgeConflictCols = []string{
+	"source_node_id", "destination_node_id", "relationship_type",
+	"cloud_account_id", "tenant_id",
+}
+
 // NewService creates a new knowledge graph service
 func NewService(ctx *security.RequestContext, logger *slog.Logger, dbManager *database.DatabaseManager) *Service {
 	if logger == nil {
@@ -1078,13 +1091,23 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	var nodeIDMapping map[string]string
 	unifiedGraph.Nodes, nodeIDMapping = DeduplicateNodesWithIDMapping(unifiedGraph.Nodes)
 
-	// Update edge node references to use surviving node IDs after deduplication
+	// Update edge node references to use surviving node IDs after deduplication.
+	// Repointing an endpoint invalidates the edge's derived ID, so regenerate it
+	// here too — SaveEdges derives the persisted PK itself, but the in-memory ID
+	// is what DeduplicateEdges keys on downstream, and a stale one merges the
+	// wrong edges.
 	for _, edge := range unifiedGraph.Edges {
+		repointed := false
 		if newID, exists := nodeIDMapping[edge.SourceNodeID]; exists {
 			edge.SourceNodeID = newID
+			repointed = true
 		}
 		if newID, exists := nodeIDMapping[edge.DestinationNodeID]; exists {
 			edge.DestinationNodeID = newID
+			repointed = true
+		}
+		if repointed {
+			edge.ID = EdgeIDFor(edge.SourceNodeID, edge.DestinationNodeID, edge.RelationshipType, edge.CloudAccountID, edge.TenantID)
 		}
 	}
 
@@ -1244,6 +1267,15 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	// The graph for this tenant is now rebuilt — refresh the filter-options cache so
 	// the dropdown's unfiltered load stays fast. Best-effort; never fails the build.
 	s.refreshFilterOptionsCache(req.TenantID)
+
+	// Surface a failed build to the caller. Returning nil here let a graph that
+	// never reached the database be counted and logged as a success by both
+	// callers, which is why #38046 ran for 23 days without anyone noticing.
+	// Only the save and cross-account steps set Success=false; per-source and
+	// per-flow-source errors are only logged and stay non-fatal.
+	if !response.Success {
+		return response, fmt.Errorf("knowledge graph build failed: %s", response.Error)
+	}
 
 	return response, nil
 }
@@ -1476,6 +1508,15 @@ func (s *Service) SaveEdges(edges []*DbEdge, nodes []*DbNode, syncVersion int64)
 		// between the same nodes with different relationship types are distinct;
 		// omitting the type here merged them and silently dropped one before the
 		// upsert. (account is already encoded in the source/dest node UUIDs.)
+		//
+		// This key must stay a SUBSET of edgeConflictCols. Being a subset is what
+		// guarantees no two surviving rows share an ON CONFLICT arbiter row —
+		// otherwise Postgres raises "ON CONFLICT DO UPDATE command cannot affect
+		// row a second time" (21000). Since EdgeIDFor hashes a superset of this
+		// key, it also guarantees distinct survivors get distinct primary keys.
+		// Omitting cloud_account_id is therefore safe and deliberate: adding it
+		// would stop collapsing two accounts' variants of one edge and double
+		// those rows.
 		compositeKey := edge.SourceNodeID + ":" + edge.DestinationNodeID + ":" + string(edge.RelationshipType) + ":" + edge.TenantID
 
 		if existing, exists := edgeMap[compositeKey]; exists {
@@ -1506,10 +1547,19 @@ func (s *Service) SaveEdges(edges []*DbEdge, nodes []*DbNode, syncVersion int64)
 
 	now := time.Now().UTC()
 	for i, edge := range validEdges {
-		// Generate ID if not present
-		if edge.ID == "" {
-			edge.ID = uuid.New().String()
-		}
+		// Derive the primary key from the full natural key, unconditionally —
+		// never trust the ID a caller arrived with. `onConflict` below arbitrates
+		// on all five identity columns while the id most callers set hashes only
+		// three of them, so a caller-supplied id can collide on
+		// knowledge_graph_edge_pkey without ever reaching the DO UPDATE arm. That
+		// aborts the one transaction covering every edge and freezes the tenant's
+		// graph permanently (#38046). Deriving it here puts the invariant at the
+		// write boundary, where no source, enricher or rewrite pass can break it.
+		//
+		// Safe to place here: endpoints are final (resolved at the top of this
+		// loop's parent), dedup has already picked a survivor, and the row values
+		// below have not been assembled yet.
+		edge.ID = EdgeIDFor(edge.SourceNodeID, edge.DestinationNodeID, edge.RelationshipType, edge.CloudAccountID, edge.TenantID)
 
 		// Set timestamps if not present; normalize any upstream-supplied
 		// CreatedAt to UTC so a local-time value from a source doesn't get
@@ -1573,7 +1623,7 @@ func (s *Service) SaveEdges(edges []*DbEdge, nodes []*DbNode, syncVersion int64)
 	})
 
 	// Use database manager's bulk insert with conflict resolution
-	onConflict := []string{"source_node_id", "destination_node_id", "relationship_type", "cloud_account_id", "tenant_id"}
+	onConflict := edgeConflictCols
 	onConflictUpdate := []string{"updated_at", "properties", "is_active", "last_sync_version", "source", "contributing_sources"}
 
 	// `contributing_sources` must UNION the existing column with the incoming
@@ -1669,12 +1719,12 @@ func (s *Service) SaveNodes(nodes []*DbNode, syncVersion int64) error {
 
 	now := time.Now().UTC()
 	for i, node := range deduplicatedNodes {
-		// Generate ID if not present
+		// Generate ID if not present. Must go through NodeIDFor: this used to
+		// hash its own "key:account:tenant" variant, which no NodeIDFor caller
+		// could ever reproduce, so an id-less node got an id that looked
+		// deterministic but matched nothing.
 		if node.ID == "" {
-			// Generate deterministic ID based on unique_key, cloud_account_id, and tenant_id
-			// This ensures the same node always gets the same ID, preventing primary key conflicts
-			compositeKey := fmt.Sprintf("%s:%s:%s", node.UniqueKey, node.CloudAccountID, node.TenantID)
-			node.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(compositeKey)).String()
+			node.ID = NodeIDFor(node.UniqueKey, node.TenantID, node.CloudAccountID)
 		}
 
 		// Set timestamps if not present; normalize any upstream-supplied

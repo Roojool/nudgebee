@@ -4145,10 +4145,11 @@ func (s *KnowledgeGraphService) SaveEdges(edges []*KnowledgeGraphEdge) error {
 
 	now := time.Now()
 	for i, edge := range validEdges {
-		// Generate ID if not present
-		if edge.ID == "" {
-			edge.ID = uuid.New().String()
-		}
+		// Derive the primary key from the full natural key, the same way
+		// knowledge_graph/core's SaveEdges does — this table has two writers and
+		// they share an ON CONFLICT target, so deriving the id in both makes a row
+		// identical no matter which one inserts it first. See kgcore.EdgeIDFor.
+		edge.ID = kgcore.EdgeIDFor(edge.SourceNodeID, edge.DestinationNodeID, kgcore.RelationshipType(edge.RelationshipType), edge.CloudAccountID, edge.TenantID)
 
 		// Set timestamps if not present
 		if edge.CreatedAt.IsZero() {

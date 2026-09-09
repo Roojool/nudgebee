@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"nudgebee/services/internal/testenv"
 	"nudgebee/services/security"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -1572,6 +1573,41 @@ func TestUpsertBatchSizesRespectPostgresParamLimit(t *testing.T) {
 	if got := EdgeBatchSize * len(edgeUpsertCols); got > pgParamLimit {
 		t.Errorf("edge upsert: EdgeBatchSize=%d × len(edgeUpsertCols)=%d = %d params, exceeds PostgreSQL limit %d",
 			EdgeBatchSize, len(edgeUpsertCols), got, pgParamLimit)
+	}
+}
+
+// TestEdgeConflictColsMatchEdgeIDFor pins the invariant behind issue #38046: the
+// edge primary key must be a function of exactly the columns the upsert
+// arbitrates on. When it is, a PK collision implies a natural-key collision and
+// the DO UPDATE arm always absorbs it. When it is not — the PK hashed three of
+// these five before this fix — a row can miss the arm, fall through to a plain
+// INSERT, collide on knowledge_graph_edge_pkey, and abort the single transaction
+// covering every edge, freezing a tenant's graph permanently.
+//
+// If you add a column to the unique constraint (migration V578), add it to
+// edgeConflictCols AND to EdgeIDFor's hash input, then update this list.
+func TestEdgeConflictColsMatchEdgeIDFor(t *testing.T) {
+	want := []string{
+		"source_node_id", "destination_node_id", "relationship_type",
+		"cloud_account_id", "tenant_id",
+	}
+
+	if !reflect.DeepEqual(edgeConflictCols, want) {
+		t.Fatalf("edgeConflictCols changed: got %v, want %v.\n"+
+			"EdgeIDFor hashes exactly %v — update both together or the PK and the "+
+			"ON CONFLICT arbiter stop agreeing (#38046).", edgeConflictCols, want, want)
+	}
+
+	// Every conflict column must also be a column SaveEdges actually writes,
+	// otherwise the arbiter keys on a value the insert never supplies.
+	written := make(map[string]bool, len(edgeUpsertCols))
+	for _, c := range edgeUpsertCols {
+		written[c] = true
+	}
+	for _, c := range edgeConflictCols {
+		if !written[c] {
+			t.Errorf("conflict column %q is not in edgeUpsertCols", c)
+		}
 	}
 }
 

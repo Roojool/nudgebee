@@ -324,8 +324,18 @@ func (s *AWSSource) propagateVPCNamesToResources(nodes []*core.DbNode, lookup *s
 		// Store VPC name in the resource node properties for hierarchy
 		node.Properties["vpc_name_hierarchy"] = vpcName
 
-		// Regenerate unique key for this node to use VPC name in hierarchy
-		node.UniqueKey = s.GenerateUniqueKey(node)
+		// Regenerate unique key for this node to use VPC name in hierarchy.
+		// The node's primary key is derived from its unique key, and SaveNodes'
+		// ON CONFLICT (id) DO UPDATE does not write unique_key — so rewriting the
+		// key without the id silently discards the rewrite and leaves a row whose
+		// id and unique_key disagree. Edges built on that id then outlive it. That
+		// desync is what seeded #38046.
+		newUniqueKey := s.GenerateUniqueKey(node)
+		if newUniqueKey == node.UniqueKey {
+			continue
+		}
+		node.UniqueKey = newUniqueKey
+		node.ID = core.NodeIDFor(newUniqueKey, node.TenantID, node.CloudAccountID)
 
 		s.logger.Debug("Updated resource hierarchy to use VPC name",
 			"resource_name", node.Properties["name"],
