@@ -35,6 +35,7 @@ import { useData } from '@context/DataContext';
 import { Info as InfoIcon, KeyboardArrowDown as KeyboardArrowDownIcon } from '@mui/icons-material';
 import { DropdownMenu } from '@ui/DropdownMenu';
 import { Label } from '@ui/Label';
+import { buildSeriesChart, decimateData, MAX_CHART_DATASETS, MAX_CHART_DATA_POINTS } from '@utils/metricSeriesChart';
 
 // One entry of observability_get_default_provider.available_providers: a provider the
 // account can query for metrics, with the operator catalog it supports.
@@ -49,8 +50,6 @@ const metricsProviderLabel = (provider: string) => (provider === 'victoria-metri
 
 // Data limiting constants to prevent memory issues with large datasets
 const MAX_TABLE_ROWS = 100;
-const MAX_CHART_DATASETS = 20;
-const MAX_CHART_DATA_POINTS = 500;
 
 // A metric series can hold values JSON cannot carry as numbers: +Inf and -Inf from a
 // ratio query whose denominator hit zero, NaN from 0/0, or something the provider sent
@@ -423,46 +422,6 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     }
   }, [preparedEvidences]);
 
-  /**
-   * Decimates an array to a maximum number of points, preserving peaks
-   * Uses a bucket-based approach to maintain visual accuracy
-   */
-  const decimateData = (data: number[], maxPoints: number): number[] => {
-    if (data.length <= maxPoints) {
-      return data;
-    }
-
-    const step = data.length / maxPoints;
-    const decimated: number[] = [];
-
-    for (let i = 0; i < maxPoints; i++) {
-      const startIdx = Math.floor(i * step);
-      const endIdx = Math.floor((i + 1) * step);
-
-      // Take the max value in each bucket to preserve peaks
-      let maxVal = data[startIdx];
-      for (let j = startIdx; j < endIdx && j < data.length; j++) {
-        if (data[j] > maxVal) {
-          maxVal = data[j];
-        }
-      }
-      decimated.push(maxVal);
-    }
-
-    return decimated;
-  };
-
-  /**
-   * Decimates labels to match decimated data
-   */
-  const decimateLabels = <T,>(labels: T[], maxPoints: number): T[] => {
-    if (labels.length <= maxPoints) {
-      return labels;
-    }
-    const step = labels.length / maxPoints;
-    return Array.from({ length: maxPoints }, (_, i) => labels[Math.floor(i * step)]);
-  };
-
   const processEvidenceDataKeys = (
     evidenceData: any,
     getQueryByKey: (key: string) => {
@@ -515,51 +474,16 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           ];
         }
 
-        // Typed as number[] rather than inferred: the payload is `any`, so the Set
-        // widened to unknown[] and every consumer of these labels had to be `any`
-        // to compile. They are Result.timestamps — Unix epoch milliseconds.
-        const labels: number[] = [...new Set<number>(g.payload?.flatMap((e: any) => e.timestamps as number[]) ?? [])];
-        labels.sort();
+        // Series alignment + downsampling is shared with the cloud account's
+        // Metrics tab; only the table half below is specific to this screen.
+        const chart = buildSeriesChart(g.payload);
+        const decimatedLabels = chart.labels;
+        const chartDataDataset = chart.dataset;
 
-        // Track original counts for truncation warning
-        maxTotalDatasets = Math.max(maxTotalDatasets, g.payload.length);
-        maxTotalDataPoints = Math.max(maxTotalDataPoints, labels.length);
-
-        // Limit number of datasets for charts
-        const limitedPayload = g.payload.slice(0, MAX_CHART_DATASETS);
-        datasetsWereTruncated = datasetsWereTruncated || g.payload.length > MAX_CHART_DATASETS;
-
-        // Check if decimation is needed
-        const needsDecimation = labels.length > MAX_CHART_DATA_POINTS;
-        pointsWereDecimated = pointsWereDecimated || needsDecimation;
-        const decimatedLabels = needsDecimation ? decimateLabels(labels, MAX_CHART_DATA_POINTS) : labels;
-
-        const chartDataDataset: any[] = [];
-
-        // Process limited payload for charts
-        limitedPayload?.forEach((item: any) => {
-          // Create a Map for O(1) lookups instead of O(N) indexOf calls
-          const timestampToValue = new Map<any, number>();
-          item.timestamps?.forEach((ts: any, idx: number) => {
-            timestampToValue.set(ts, parseFloat(item.values[idx]));
-          });
-
-          const values: any[] = [];
-          labels.forEach((label) => {
-            const value = timestampToValue.get(label);
-            values.push(value !== undefined ? value : 0);
-          });
-
-          // Decimate values for chart
-          const chartValues = needsDecimation ? decimateData(values, MAX_CHART_DATA_POINTS) : values;
-
-          chartDataDataset.push({
-            label: Object.entries(item.metric)
-              .map(([key, value]) => `${key}=${value}`)
-              .join('\n'),
-            data: chartValues,
-          });
-        });
+        maxTotalDatasets = Math.max(maxTotalDatasets, chart.totalDatasets);
+        maxTotalDataPoints = Math.max(maxTotalDataPoints, chart.totalDataPoints);
+        datasetsWereTruncated = datasetsWereTruncated || chart.datasetsWereTruncated;
+        pointsWereDecimated = pointsWereDecimated || chart.pointsWereDecimated;
 
         // Process all payload for table (will be limited later)
         const groupData = fromMetric
