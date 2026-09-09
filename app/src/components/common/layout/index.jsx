@@ -60,6 +60,7 @@ import Header1 from '@shared/header/Header1';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import SafeIcon from '@shared/icons/SafeIcon';
 import FirstLoginTour from '@components/onboarding/FirstLoginTour';
+import PendingAgentInstallBanner from '@components/integrations/PendingAgentInstallBanner';
 import SectionFirstVisitTour from '@components/onboarding/SectionFirstVisitTour';
 import Tooltip from '@ui/Tooltip';
 import ApiTokens from '@shared/settings/ApiTokens';
@@ -906,6 +907,12 @@ const PageLayout = ({ children }) => {
                 }}
               >
                 <Container maxWidth={false} sx={{ maxWidth: ds.space.mul(0, 900) }} style={{ paddingInline: 0 }}>
+                  {/* Reminder for a Kubernetes account whose install command was never
+                      run. Lives here, not on one page: the add-cluster modal is reachable
+                      from the header everywhere, so the reminder has to follow the user. */}
+                  <ErrorBoundary resetKey={router.asPath}>
+                    <PendingAgentInstallBanner />
+                  </ErrorBoundary>
                   <ErrorBoundary resetKey={router.asPath}>{children}</ErrorBoundary>
                 </Container>
               </Box>

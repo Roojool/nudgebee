@@ -161,6 +161,7 @@ query AccountAgentHealth {
       last_connected_at
       k8s_version
       version
+      status
     }
   }
 }
