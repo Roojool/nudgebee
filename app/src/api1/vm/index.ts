@@ -325,10 +325,10 @@ const GROUPING_DIMENSIONS: Record<VmVulnerabilityGrouping, { groupBy: string[]; 
   vm: { groupBy: ['resource_id', 'resource_name'], key: 'resource_id', label: 'resource_name', canListVms: false },
 };
 
-const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}) => ({
+const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}, status: string[] = OPEN_STATUSES) => ({
   account_id: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId },
   rule_name: { _eq: VM_VULNERABILITY_RULE },
-  status: { _in: OPEN_STATUSES },
+  status: { _in: status },
   ...extra,
 });
 
@@ -425,6 +425,7 @@ const apiVm = {
     vulnId,
     packageName,
     severity,
+    status,
     limit = 10,
     offset = 0,
   }: {
@@ -433,6 +434,8 @@ const apiVm = {
     vulnId?: string;
     packageName?: string;
     severity?: string;
+    /** Row statuses to list; defaults to the open ones. */
+    status?: string[];
     limit?: number;
     offset?: number;
   }) {
@@ -441,7 +444,7 @@ const apiVm = {
     if (vulnId) extra.vuln_id = { _eq: vulnId };
     if (packageName) extra.package_name = { _eq: packageName };
     if (severity) extra.severity = { _eq: severity };
-    const where = vmVulnerabilityWhere(accountId, extra);
+    const where = vmVulnerabilityWhere(accountId, extra, status);
     const response = await queryGraphQL(LIST_VM_VULNERABILITIES.replaceAll('__WHERE__', gqlStringify(where)), 'ListVmVulnerabilities', {
       limit,
       offset,
@@ -466,6 +469,7 @@ const apiVm = {
     vulnId,
     packageName,
     severity,
+    status,
     limit = 10,
     offset = 0,
     includeTotal = true,
@@ -478,6 +482,8 @@ const apiVm = {
     vulnId?: string;
     packageName?: string;
     severity?: string;
+    /** Row statuses to group; defaults to the open ones. */
+    status?: string[];
     limit?: number;
     offset?: number;
     /** Drop the group-count round trip when the caller only wants a top-N. */
@@ -498,7 +504,7 @@ const apiVm = {
     if (vulnId) extra.vuln_id = { _eq: vulnId };
     if (packageName) extra.package_name = { _eq: packageName };
     if (severity) extra.severity = { _eq: severity };
-    const where = vmVulnerabilityWhere(accountId, extra);
+    const where = vmVulnerabilityWhere(accountId, extra, status);
     const listVms = includeVms && dimension.canListVms;
     const groupColumns = [...dimension.groupBy, 'count', 'max_severity_weight', ...(listVms ? ['resource_names'] : [])];
     const query = VULNERABILITY_GROUPS.replaceAll('__TOTAL__', includeTotal ? VULNERABILITY_GROUPS_TOTAL : '')

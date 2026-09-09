@@ -23,6 +23,7 @@ import { safeJSONParse } from '@utils/common';
 import SecurityFindingPanel from './SecurityFindingPanel';
 import { fromImageScanRow } from './securityFinding';
 import { AskNubiIconButton, findingPromptContext, useAskNubiAboutSecurityFinding } from './askNubi';
+import { dismissMenuEntry, useRecommendationDismissal } from './dismissal';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 
 const SEVERITY_TO_DS_LEVEL = {
@@ -81,6 +82,10 @@ const KubernetesSecurityDetails = (props) => {
   // accordion; a single finding now opens the side panel instead.
   const [panelFinding, setPanelFinding] = useState(null);
   const { assistantName } = useTenantBranding();
+  const dismissal = useRecommendationDismissal(() => {
+    setPanelFinding(null);
+    getSecurityDetails();
+  });
   const askNubi = useAskNubiAboutSecurityFinding();
   const askAboutFinding = (item) =>
     askNubi({
@@ -171,6 +176,8 @@ const KubernetesSecurityDetails = (props) => {
       setIsTicketCreateFormOpen(true);
     } else if (menuItem.id === 'create-pull-request') {
       openPRModal(data);
+    } else if (menuItem.id === 'dismiss' || menuItem.id === 'reactivate') {
+      dismissal.toggle(data);
     }
   };
 
@@ -327,6 +334,7 @@ const KubernetesSecurityDetails = (props) => {
 
   const getMenuItems = (data) => {
     const hasFixAvailable = data?.recommendation?.FixedVersion;
+    const dismissEntry = dismissMenuEntry(data?.status, hasWriteAccess(data?.account_id));
     return [
       {
         icon: TicketsIcon,
@@ -342,6 +350,7 @@ const KubernetesSecurityDetails = (props) => {
         // flight, or a terminal one that needs no further action — blocks a new PR.
         disabled: !hasFixAvailable || !hasWriteAccess() || Boolean(data?.resolution && data.resolution.status !== 'Failed'),
       },
+      ...(dismissEntry ? [{ label: dismissEntry.label, id: dismissEntry.id }] : []),
     ];
   };
 
@@ -673,8 +682,10 @@ const KubernetesSecurityDetails = (props) => {
         }}
         onCreatePR={() => openPRModal(panelFinding)}
         onAskNubi={() => askAboutFinding(panelFinding)}
+        onDismiss={panelFinding && hasWriteAccess(panelFinding.account_id) ? () => dismissal.toggle(panelFinding) : undefined}
         createPRDisabledReason={!hasWriteAccess() ? 'You need write access to raise a pull request' : prBlockedReason(panelFinding)}
       />
+      {dismissal.modal}
       <CustomTable
         id={props.tableId}
         headers={BEST_PRACTICES_HEADER}

@@ -54,6 +54,8 @@ interface SecurityFindingPanelProps {
   /** Disables Create Pull Request, with the reason as a tooltip. */
   createPRDisabledReason?: string;
   onAskNubi?: (finding: SecurityFinding) => void;
+  /** Dismiss / snooze an Open finding, reactivate a Dismissed one. */
+  onDismiss?: (finding: SecurityFinding) => void;
 }
 
 /**
@@ -79,6 +81,7 @@ const SecurityFindingPanel = ({
   onCreatePR,
   createPRDisabledReason,
   onAskNubi,
+  onDismiss,
 }: SecurityFindingPanelProps) => {
   const [activeTab, setActiveTab] = useState(0);
   const { assistantName } = useTenantBranding();
@@ -481,7 +484,7 @@ const SecurityFindingPanel = ({
         </Box>
 
         {/* Actions — pinned to the bottom, matching the cost panel's action bar */}
-        {(onCreatePR || onCreateTicket || onAskNubi) && (
+        {(onCreatePR || onCreateTicket || onAskNubi || onDismiss) && (
           <PanelActions testId='security-finding-actions'>
             {onCreatePR && (
               <Button
@@ -517,6 +520,11 @@ const SecurityFindingPanel = ({
                 onClick={() => onAskNubi(finding)}
               >
                 Ask {assistantName}
+              </Button>
+            )}
+            {onDismiss && (
+              <Button id='security-finding-dismiss' tone='ghost' size='sm' onClick={() => onDismiss(finding)}>
+                {finding.status === 'Dismissed' ? 'Reactivate' : 'Dismiss / Snooze'}
               </Button>
             )}
           </PanelActions>

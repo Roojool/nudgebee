@@ -13,6 +13,8 @@ import { useLatestRequest } from '@components/vm/common';
 import { action } from '@utils/actionStyles';
 import { normalizeSeverity } from './securityFinding';
 import { AskNubiIconButton } from './askNubi';
+import { dismissMenuEntry } from './dismissal';
+import { hasWriteAccess } from '@lib/auth';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 import { type CloudPostureRule } from './cloudPosture';
 
@@ -31,6 +33,8 @@ const HEADERS = [
 export interface CloudResourceRowActions {
   onCreateTicket: (rule: CloudPostureRule, resource: any) => void;
   onAskNubi: (rule: CloudPostureRule, resource: any) => void;
+  /** Dismiss / snooze an Open resource finding, reactivate a Dismissed one. */
+  onDismiss: (rule: CloudPostureRule, resource: any) => void;
 }
 
 /**
@@ -71,6 +75,10 @@ interface CloudRuleResourcesProps {
   scopeAccountId?: string | string[];
   accountsById?: Record<string, string>;
   rowActions?: CloudResourceRowActions;
+  /** Statuses to list; defaults to the open ones. */
+  status?: string[];
+  /** Bump to reload after a row changed status. */
+  refreshKey?: number;
 }
 
 /**
@@ -85,7 +93,7 @@ interface CloudRuleResourcesProps {
  * could not reconstruct from the rows themselves, so it moves here rather than
  * being dropped when the panel does.
  */
-const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: CloudRuleResourcesProps) => {
+const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions, status, refreshKey }: CloudRuleResourcesProps) => {
   const [rows, setRows] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -111,8 +119,9 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
   const briefColumns = Math.max(1, [catalog?.description, guidance, remediation && !remediationHasCode].filter(Boolean).length);
 
   // Serialised rather than compared by reference so a caller building these
-  // inline cannot pin the reader to page one on every render.
-  const scopeKey = `${rule?.ruleName}|${[scopeAccountId ?? rule?.accountIds].flat().join(',')}`;
+  // inline cannot pin the reader to page one on every render. The status
+  // filter is part of it: page 5 of Open is out of range for Dismissed.
+  const scopeKey = `${rule?.ruleName}|${[scopeAccountId ?? rule?.accountIds].flat().join(',')}|${(status || []).join(',')}`;
   useEffect(() => {
     setPage(0);
   }, [scopeKey]);
@@ -125,6 +134,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
       const res: any = await recommendationApi.listCloudPostureResources({
         accountId: (scopeAccountId || rule.accountIds) as any,
         ruleName: rule.ruleName,
+        ...(status ? { status } : {}),
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       });
@@ -140,7 +150,7 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
     } finally {
       if (isLatest()) setLoading(false);
     }
-  }, [rule?.ruleName, rule?.accountIds, scopeAccountId, page, beginRequest]);
+  }, [rule?.ruleName, rule?.accountIds, scopeAccountId, page, beginRequest, status, refreshKey]);
 
   useEffect(() => {
     load();
@@ -177,9 +187,18 @@ const CloudRuleResources = ({ rule, scopeAccountId, accountsById, rowActions }: 
                 />
                 <ThreeDotsMenu
                   sx={{ ...action.primary }}
-                  menuItems={[{ id: 'create-ticket', label: 'Create ticket' }]}
+                  menuItems={[
+                    { id: 'create-ticket', label: 'Create ticket' },
+                    ...(() => {
+                      const entry = dismissMenuEntry(row.status, hasWriteAccess(row.account_id));
+                      return entry ? [{ id: entry.id, label: entry.label }] : [];
+                    })(),
+                  ]}
                   data={row}
-                  onMenuClick={() => rowActions.onCreateTicket(rule, row)}
+                  onMenuClick={(item: { id: string }) => {
+                    if (item.id === 'create-ticket') rowActions.onCreateTicket(rule, row);
+                    else if (item.id === 'dismiss' || item.id === 'reactivate') rowActions.onDismiss(rule, row);
+                  }}
                 />
               </Box>
             ) : null,

@@ -64,6 +64,10 @@ interface CisRulePanelProps {
   scopeAccountId?: string | string[];
   onCreateTicket?: (rule: CisRule) => void;
   onAskNubi?: (rule: CisRule) => void;
+  /** Dismiss / snooze every finding behind the rule, or reactivate them. */
+  onDismiss?: (rule: CisRule) => void;
+  /** Status the listing is showing, since a rule row carries none of its own. */
+  listedStatus?: string;
 }
 
 /**
@@ -79,7 +83,18 @@ interface CisRulePanelProps {
  * Hence tabs that differ from the CVE panel's: the rule and its remediation,
  * the resources failing it here, and the same rule on other clusters.
  */
-const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAccountId, onCreateTicket, onAskNubi }: CisRulePanelProps) => {
+const CisRulePanel = ({
+  open,
+  onClose,
+  rule,
+  accountName,
+  accountsById,
+  scopeAccountId,
+  onCreateTicket,
+  onAskNubi,
+  onDismiss,
+  listedStatus,
+}: CisRulePanelProps) => {
   const [activeTab, setActiveTab] = useState(0);
   const { assistantName } = useTenantBranding();
 
@@ -368,7 +383,7 @@ const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAcc
           )}
         </Box>
 
-        {(onCreateTicket || onAskNubi) && (
+        {(onCreateTicket || onAskNubi || onDismiss) && (
           <PanelActions testId='cis-rule-actions'>
             {onCreateTicket && (
               <Button
@@ -392,6 +407,11 @@ const CisRulePanel = ({ open, onClose, rule, accountName, accountsById, scopeAcc
                 onClick={() => onAskNubi(rule)}
               >
                 Ask {assistantName}
+              </Button>
+            )}
+            {onDismiss && (
+              <Button id='cis-rule-dismiss' tone='ghost' size='sm' onClick={() => onDismiss(rule)}>
+                {(rule.status || listedStatus) === 'Dismissed' ? 'Reactivate' : 'Dismiss / Snooze'}
               </Button>
             )}
           </PanelActions>

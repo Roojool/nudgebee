@@ -20,6 +20,7 @@ import apiVm, { SEVERITY_ORDER, VmVulnerability, VmVulnerabilityGroup, VmVulnera
 import SecurityFindingPanel from '@components/recommendations/security/SecurityFindingPanel';
 import { fromVmRow } from '@components/recommendations/security/securityFinding';
 import { AskNubiIconButton, findingPromptContext, useAskNubiAboutSecurityFinding } from '@components/recommendations/security/askNubi';
+import { dismissMenuEntry, useRecommendationDismissal } from '@components/recommendations/security/dismissal';
 import { CellText, joinVmNames, useLatestRequest } from './common';
 import { ds } from '@utils/colors';
 
@@ -107,17 +108,27 @@ const severityFromWeight = (weight: number) => WEIGHT_SEVERITY.find(([threshold]
  * in the label because a disabled menu item can't carry a tooltip. Applying the
  * patch is not built yet (the agent has no patch runner), so it's a placeholder.
  */
-const menuItems = (canCreateTicket: boolean) => [
-  {
-    id: 'create-ticket',
-    label: canCreateTicket ? 'Create Ticket' : 'Create Ticket · requires tickets:Write',
-    disabled: !canCreateTicket,
-  },
-  {
-    id: 'apply-patch',
-    label: 'Apply Patch · Coming Soon',
-    disabled: true,
-  },
+const menuItems = (canCreateTicket: boolean, finding: VmVulnerability) => {
+  const dismissEntry = dismissMenuEntry(finding.status, hasWriteAccess(finding.account_id));
+  return [
+    {
+      id: 'create-ticket',
+      label: canCreateTicket ? 'Create Ticket' : 'Create Ticket · requires tickets:Write',
+      disabled: !canCreateTicket,
+    },
+    {
+      id: 'apply-patch',
+      label: 'Apply Patch · Coming Soon',
+      disabled: true,
+    },
+    ...(dismissEntry ? [{ id: dismissEntry.id, label: dismissEntry.label }] : []),
+  ];
+};
+
+// Dismissed covers snoozed rows too: a snooze is Dismissed plus an expiry.
+const STATUS_OPTIONS = [
+  { label: 'Open', value: 'Open' },
+  { label: 'Dismissed / snoozed', value: 'Dismissed' },
 ];
 
 /** Markdown body for a ticket raised off one CVE finding. */
@@ -202,6 +213,7 @@ const VmVulnerabilities = ({
   const [groups, setGroups] = useState<VmVulnerabilityGroup[]>([]);
   const [total, setTotal] = useState(0);
   const [severity, setSeverity] = useState<string | null>(initialSeverity || null);
+  const [statusFilter, setStatusFilter] = useState<string>('Open');
   const [grouping, setGrouping] = useState<VmVulnerabilityGrouping | 'all'>('all');
   const [ticketFinding, setTicketFinding] = useState<VmVulnerability | null>(null);
   // Flat findings had no detail view at all — the scan already stores a
@@ -255,7 +267,13 @@ const VmVulnerabilities = ({
     // the older response overwrite the newer one.
     const isLatest = beginRequest();
     const paging = { limit: rowsPerPage, offset: page * rowsPerPage };
-    const filters = { cloudResourceId: vmScope, vulnId, packageName: packageScope, severity: severity || undefined };
+    const filters = {
+      cloudResourceId: vmScope,
+      vulnId,
+      packageName: packageScope,
+      severity: severity || undefined,
+      status: statusFilter === 'Dismissed' ? ['Dismissed'] : undefined,
+    };
     const request =
       grouping === 'all'
         ? apiVm
@@ -281,7 +299,7 @@ const VmVulnerabilities = ({
       .finally(() => {
         if (isLatest()) setLoading(false);
       });
-  }, [accountId, vmScope, vulnId, packageScope, severity, grouping, page, rowsPerPage, beginRequest]);
+  }, [accountId, vmScope, vulnId, packageScope, severity, statusFilter, grouping, page, rowsPerPage, beginRequest]);
 
   useEffect(() => {
     fetchRows();
@@ -309,9 +327,18 @@ const VmVulnerabilities = ({
     };
   }, [accountId, embedded]);
 
-  const onMenuClick = useCallback((item: { id: string }, finding: VmVulnerability) => {
-    if (item.id === 'create-ticket') setTicketFinding(finding);
-  }, []);
+  const dismissal = useRecommendationDismissal(() => {
+    setPanelFinding(null);
+    fetchRows();
+  });
+
+  const onMenuClick = useCallback(
+    (item: { id: string }, finding: VmVulnerability) => {
+      if (item.id === 'create-ticket') setTicketFinding(finding);
+      else if (item.id === 'dismiss' || item.id === 'reactivate') dismissal.toggle(finding);
+    },
+    [dismissal]
+  );
 
   // Where the VM goes depends on what the table is already scoped to. Scoped to
   // one VM (the inventory row's drill-down) it is not worth a line at all. Under
@@ -361,7 +388,7 @@ const VmVulnerabilities = ({
                 />
                 <ThreeDotsMenu
                   id={`vm-vulnerability-actions-${finding.id}`}
-                  menuItems={menuItems(canCreateTicket)}
+                  menuItems={menuItems(canCreateTicket, finding)}
                   data={finding}
                   onMenuClick={onMenuClick}
                   menuWidth={260}
@@ -444,6 +471,7 @@ const VmVulnerabilities = ({
       onAskNubi={() => {
         if (panelFinding) askAboutFinding(panelFinding);
       }}
+      onDismiss={panelFinding && hasWriteAccess(panelFinding.account_id) ? () => dismissal.toggle(panelFinding) : undefined}
     />
   );
 
@@ -476,6 +504,7 @@ const VmVulnerabilities = ({
         </ListingLayout>
         {ticketModal}
         {findingPanel}
+        {dismissal.modal}
       </Box>
     );
   }
@@ -518,6 +547,19 @@ const VmVulnerabilities = ({
               setSeverity(event?.target?.value || null);
             }}
           />
+          {!embedded && (
+            <FilterDropdown
+              id='vm-vulnerability-status'
+              label='Status'
+              value={statusFilter}
+              options={STATUS_OPTIONS}
+              clearable={false}
+              onSelect={(event: any) => {
+                setPage(0);
+                setStatusFilter(event?.target?.value || 'Open');
+              }}
+            />
+          )}
           {vmOptions.length > 0 && (
             <FilterDropdown
               id='vm-vulnerability-vm'
@@ -553,6 +595,7 @@ const VmVulnerabilities = ({
       </ListingLayout>
       {ticketModal}
       {findingPanel}
+      {dismissal.modal}
     </Box>
   );
 };

@@ -25,6 +25,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import { toast as snackbar } from '@ui/Toast';
 import CisRulePanel from './security/CisRulePanel';
 import { AskNubiIconButton, useAskNubiAboutSecurityFinding } from './security/askNubi';
+import { dismissMenuEntry, useRecommendationDismissal } from './security/dismissal';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 
 const CIS_HEADER = [
@@ -73,6 +74,31 @@ const KubernetesCisSecurity = (props) => {
   // a rule is the unit you act on, so it opens the side panel instead.
   const [panelRule, setPanelRule] = useState(null);
   const { assistantName } = useTenantBranding();
+  const dismissal = useRecommendationDismissal(() => {
+    setPanelRule(null);
+    listCisSecurityRecommendations();
+  });
+  // A rule row is a grouping: the action covers every finding behind it on that
+  // cluster, fetched here because the grouping carries no ids. Capped well above
+  // any real per-rule failure count so the whole group moves together.
+  const dismissRule = async (item) => {
+    const accountId = accountIdForRow(item);
+    try {
+      const res = await recommendationApi.getK8sRecommendation({
+        accountId,
+        category: 'Security',
+        ruleName: 'k8s-cis-1.23',
+        recommendation: { Id: item.rule_id },
+        status: [recommendationStatus],
+        limit: 500,
+      });
+      const rows = res?.data?.recommendation || [];
+      const cluster = props?.accountsById?.[accountId] || props?.kubernetes?.name || '';
+      dismissal.toggle({ recs: rows, subject: `CIS ${item.rule_id}${cluster ? ` on ${cluster}` : ''}` }, recommendationStatus);
+    } catch {
+      snackbar.error('Failed to load the findings for this rule');
+    }
+  };
   const askNubi = useAskNubiAboutSecurityFinding();
   const askAboutRule = (item) => {
     const accountId = accountIdForRow(item);
@@ -110,10 +136,13 @@ const KubernetesCisSecurity = (props) => {
     if (menuItem.id === 'create-ticket') {
       setTicketData(data);
       setIsTicketCreateFormOpen(true);
+    } else if (menuItem.id === 'dismiss' || menuItem.id === 'reactivate') {
+      dismissRule(data);
     }
   };
 
   const buildRow = (item) => {
+    const dismissEntry = dismissMenuEntry(recommendationStatus, hasWriteAccess(accountIdForRow(item)));
     const menuItems = [
       {
         icon: TicketsIcon,
@@ -121,6 +150,7 @@ const KubernetesCisSecurity = (props) => {
         id: 'create-ticket',
         disabled: !!item.ticket?.ticket_id,
       },
+      ...(dismissEntry ? [{ label: dismissEntry.label, id: dismissEntry.id }] : []),
     ];
     let data = [];
     if (props?.accountsById) {
@@ -268,7 +298,10 @@ const KubernetesCisSecurity = (props) => {
           setIsTicketCreateFormOpen(true);
         }}
         onAskNubi={askAboutRule}
+        onDismiss={panelRule && hasWriteAccess(accountIdForRow(panelRule)) ? dismissRule : undefined}
+        listedStatus={recommendationStatus}
       />
+      {dismissal.modal}
       {!props?.disableInfographic && (
         <Box sx={{ display: 'flex', gap: 'var(--ds-space-3)' }} mt={2} mb={2}>
           <WidgetCard sx={{ mt: 0, minWidth: '160px' }}>
