@@ -8570,7 +8570,19 @@ var table_metadata = map[string]TableDefinition{
 		Name:             "cloud_resources_list_v2",
 		PermissionModule: "cloud",
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			// cr_base is the request's filtered resource set (this module is always
+			// account-scoped). It is referenced twice, so Postgres materialises it
+			// once and the spend roll-up joins against those rows instead of
+			// SUM-ing the account's entire all-time spend history under a nested
+			// loop driven by a rows=1 misestimate -- the shape that made this a
+			// 60s+ query. __cr__where__ moves into the CTE for the same reason.
 			baseQuery := `(
+				WITH cr_base AS (
+					SELECT cr.region, cr.resourse_id, cr.service_name, cr.status, cr.name, cr.id,
+						cr.meta, cr.account, cr.tags, cr.created_at, cr.resourse_created_on, cr.type, cr.tenant
+					FROM cloud_resourses cr
+					__cr__where__
+				)
 				SELECT cr.region, cr.resourse_id, cr.service_name, cr.status, cr.name, cr.id,
 					cr.meta, cr.account, cr.tags, cr.created_at, cr.resourse_created_on, cr.type, cr.tenant,
 					cr.meta ->> 'namespace' as namespace,
@@ -8579,12 +8591,13 @@ var table_metadata = map[string]TableDefinition{
 					m.value::float as latest_metric_value,
 					m.timestamp as latest_metric_timestamp,
 					COUNT(*) OVER() as total_count
-				FROM cloud_resourses cr
+				FROM cr_base cr
 				LEFT JOIN (
-					SELECT cloud_resource_id, cloud_account, SUM(amount) as spend_amount
+					SELECT spends.cloud_resource_id, spends.cloud_account, SUM(spends.amount) as spend_amount
 					FROM spends
+					JOIN cr_base ON cr_base.id = spends.cloud_resource_id AND cr_base.account = spends.cloud_account
 					__spends__where__
-					GROUP BY cloud_resource_id, cloud_account
+					GROUP BY spends.cloud_resource_id, spends.cloud_account
 				) s ON s.cloud_resource_id = cr.id AND s.cloud_account = cr.account
 				LEFT JOIN LATERAL (
 					SELECT metric, value, timestamp
@@ -8594,7 +8607,6 @@ var table_metadata = map[string]TableDefinition{
 					ORDER BY timestamp DESC
 					LIMIT 1
 				) m ON true
-				__cr__where__
 			) as cloud_resources_list_v2`
 
 			metricColumns := []string{"metric"}

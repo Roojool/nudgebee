@@ -190,6 +190,37 @@ func TestQueryGenerationOnBuilder(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotEmpty(t, queryResponse)
 	})
+
+	// cloud_resources_list_v2 used to SUM the account's entire all-time spend
+	// history and join it to the resource rows under a rows=1 misestimate,
+	// which degraded to a 60s+ nested loop on busy accounts. The spend
+	// roll-up must instead be scoped to the request's filtered resource set.
+	t.Run("TestCloudResourcesListSpendRollupIsScoped", func(t *testing.T) {
+		queryRequest := QueryRequest{
+			Table: "cloud_resources_list_v2",
+			Columns: fromStringColsToQueryCols([]string{
+				"id", "name", "type", "status", "account", "spend_amount", "total_count",
+			}),
+			Where: QueryWhereClause{
+				Binary: map[string]map[BinaryWhereClauseType]any{
+					"account": {"_eq": testenv.FakeAccountID},
+					"type":    {"_eq": "log-group"},
+					"status":  {"_eq": "Active"},
+				},
+			},
+			OrderBy: []QueryOrderBy{{Column: "created_at", Order: "desc"}},
+			Limit:   10,
+		}
+		query, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), uuid.NewString(), queryRequest, table_metadata["cloud_resources_list_v2"])
+		assert.Nil(t, err)
+		assert.NotEmpty(t, query)
+		// spend is aggregated over only the filtered resources, not all of spends
+		assert.Contains(t, query, "WITH cr_base AS")
+		assert.Contains(t, query, "FROM spends")
+		assert.Contains(t, query, "JOIN cr_base ON cr_base.id = spends.cloud_resource_id AND cr_base.account = spends.cloud_account")
+		// the resource filter is applied once, inside the CTE
+		assert.Contains(t, query, "(type = 'log-group')")
+	})
 }
 
 func TestWhereGeneration(t *testing.T) {
