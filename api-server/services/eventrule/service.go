@@ -914,25 +914,20 @@ func ListAlertAgentPlaybook(context *security.RequestContext, request ListAgentP
 	return converted, nil
 }
 
-// isK8sAgentConnected reports whether the account has a non-proxy agent row whose
-// connection_status is populated. Returns false on any DB error or no matching row —
-// callers use this strictly as a hint to skip k8s-agent-dependent actions, so
-// failing closed avoids surfacing transient DB errors as spurious relay calls.
+// isK8sAgentConnected reports whether the account's in-cluster k8s agent is
+// currently registered with the relay. Callers use it as a hint to skip
+// k8s-agent-dependent actions.
+//
+// It used to run its own `connection_status IS NOT NULL` query here — a column
+// that is never cleared once an agent has connected even once, so clusters last
+// seen a year ago still read as connected. relay.AgentConnected tests
+// agent.status, the same column the relay routes on, and is the single
+// definition shared with the transport that enforces it.
 func isK8sAgentConnected(accountId string) bool {
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return false
-	}
-	var exists int
-	if qErr := dbms.Db.Get(&exists,
-		`SELECT 1 FROM agent WHERE cloud_account_id = $1 AND type != 'proxy' AND connection_status IS NOT NULL LIMIT 1`,
-		accountId); qErr != nil {
-		return false
-	}
-	return true
+	return relay.AgentConnected(accountId)
 }
 
-// IsK8sAgentConnected reports whether the account has a connected (non-proxy) k8s agent.
+// IsK8sAgentConnected reports whether the account has a connected in-cluster k8s agent.
 // Exported wrapper around isK8sAgentConnected so other packages (e.g. triage's threshold
 // apply capability check) can gate agent-dependent writes without duplicating the query.
 func IsK8sAgentConnected(accountId string) bool {

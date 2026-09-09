@@ -8,6 +8,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
+	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"strings"
 	"sync"
@@ -305,40 +306,15 @@ func GetAgentConnectionDetails(accountId string) (AgentDetails, error) {
 	return details, nil
 }
 
-// IsK8sAgentConnected reports whether accountId has a connected (non-proxy) K8s
-// agent — the same condition GetAgentConnectionDetails requires before it returns
-// details. Boolean rather than error-returning so "no agent row" and "the database
-// is unreachable" stay distinguishable; see agentConnectedFromLookup.
+// IsK8sAgentConnected reports whether accountId has a connected in-cluster K8s
+// agent. Kept as the name callers in this package's dependents already use; the
+// predicate itself lives in relay.AgentConnected so the gate and the transport
+// that enforces it can never disagree.
 //
-// eventrule keeps its own copy of this query (failing closed) because it cannot
-// import this package: eventrule -> account -> adapter -> llm -> tenant ->
-// eventrule. Leave the two independent.
+// It used to run its own `connection_status IS NOT NULL` query, which never
+// goes back to false once an agent has connected even once — clusters last seen
+// in 2024 still read as connected. relay.AgentConnected tests agent.status, the
+// same column the relay server routes on.
 func IsK8sAgentConnected(accountId string) bool {
-	if accountId == "" {
-		return false
-	}
-
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return agentConnectedFromLookup(err)
-	}
-
-	var exists int
-	return agentConnectedFromLookup(dbms.Db.Get(&exists,
-		`SELECT 1 FROM agent WHERE cloud_account_id = $1 AND type != 'proxy' AND connection_status IS NOT NULL LIMIT 1`,
-		accountId))
-}
-
-// agentConnectedFromLookup is the pure fail-open policy behind IsK8sAgentConnected,
-// split out to be testable without a database. Only a definitive no-rows answer
-// means "no agent": a wasted relay round-trip is cheaper than mistaking a DB blip
-// for "no agent" and silently truncating the account's graph.
-func agentConnectedFromLookup(err error) bool {
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return false
-	}
-	return true // undetermined — fail open
+	return relay.AgentConnected(accountId)
 }

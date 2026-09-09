@@ -428,6 +428,24 @@ func Execute(relayRequest RelayExecuteRequest) (map[string]any, error) {
 	// Extract Account ID for better logging
 	accountID := relayRequest.Body.AccountID // Adjust this based on actual struct field
 
+	// Requests routed to the in-cluster k8s agent are pointless when that agent
+	// is not registered — the relay answers every one of them with a 503
+	// "agent not connected". Most accounts on this path have no live agent
+	// (their clusters were decommissioned, or were only ever POCs), and each
+	// caller fans out over a dozen actions per event / graph build, so the
+	// round-trips dominated relay traffic. Skipping them here covers every
+	// caller at once, including one that disconnects mid-run.
+	//
+	// Only the k8s path is gated: proxy-targeted requests (AgentType "proxy")
+	// have their own registration and are left alone.
+	if relayRequest.AgentType == "" || relayRequest.AgentType == k8sAgentType {
+		if !AgentConnected(accountID) {
+			slog.Debug("relay: skipping request, k8s agent not connected",
+				"account_id", accountID, "action", relayRequest.Body.ActionName)
+			return data, errors.New(errMsgAgentNotConnected)
+		}
+	}
+
 	timeout := time.Duration(relayRequest.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 180 * time.Second
@@ -541,6 +559,15 @@ func Execute(relayRequest RelayExecuteRequest) (map[string]any, error) {
 
 func ExecuteRelayProxyApi(accountID string, params map[string]any, apiPath string) (map[string]any, error) {
 	data := make(map[string]any)
+
+	// Same gate as Execute: this path carries no agent type, so the relay routes
+	// it to the account's k8s agent and rejects it outright when that agent is
+	// gone. See AgentConnected.
+	if !AgentConnected(accountID) {
+		slog.Debug("relay: skipping proxy api request, k8s agent not connected",
+			"account_id", accountID, "api_path", apiPath)
+		return data, errors.New(errMsgAgentNotConnected)
+	}
 
 	maxRetries := 3
 	baseRetryInterval := 2 * time.Second
