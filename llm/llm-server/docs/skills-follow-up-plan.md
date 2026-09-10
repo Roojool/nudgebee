@@ -104,3 +104,21 @@ or evidence correctness.
   demonstrated.
 - Inferring procedure type, environment, or execution success from document
   titles.
+
+## Pending: KB labels in management and discovery
+
+Reuse existing KB labels across backend, UI, and search. This is follow-up work,
+not implemented by the code-analyzer workspace handoff PR.
+
+- Audit the existing labels schema/API; preserve labels on create, update,
+  list, and fetch, including updates from clients that omit labels.
+- Expose label editing and visibility in KB management and appropriate filters
+  in the listing and Test retrieval UI.
+- Carry labels into discovery metadata and use them when searching. Evaluate
+  explicit filters separately from relevance boosts so unlabeled but relevant
+  documents are not silently excluded.
+- Verify manual/integration KBs, label edits/removal, unlabeled entries, and
+  backend/UI round trips. Label-based retrieval must still honor account scope,
+  source eligibility, and Use in answers settings.
+- Trace RAG ingestion/search to determine whether indexed data needs metadata
+  backfill or reindexing; do not assume either.

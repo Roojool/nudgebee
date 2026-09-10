@@ -163,7 +163,8 @@ type AgenticAnalyzeRequest struct {
 	// Skills is a pre-rendered <skills> block of operator-authored skills mapped
 	// to the code agent. Resolved and forwarded by llm-server (which owns the
 	// skills DB); injected verbatim into the internal agent prompts.
-	Skills string `json:"skills,omitempty"`
+	Skills         string                   `json:"skills,omitempty"`
+	KnowledgeFiles []KnowledgeFileReference `json:"knowledge_files,omitempty"`
 
 	// PR followup fields — used to address CI failures and review comments on existing PRs
 	Followup bool   `json:"followup,omitempty"`
@@ -693,6 +694,9 @@ func (ah *AgenticAnalyzeHandler) resolveClients(req AgenticAnalyzeRequest, logge
 }
 
 func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req AgenticAnalyzeRequest) (*AgenticAnalyzeResponse, error) {
+	if len(req.KnowledgeFiles) > 0 {
+		req.Skills += NewFileHandler(ah.config).renderKnowledgeFiles(ctx, req.KnowledgeFiles)
+	}
 	// Normalize and validate request before processing
 	if err := ah.normalizeAndValidateRequest(&req); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)

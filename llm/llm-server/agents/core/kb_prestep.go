@@ -64,6 +64,7 @@ type kbAssemblyResult struct {
 }
 
 type kbDiscoveryResult struct {
+	candidates []toolcore.KnowledgeCandidate
 	content    string
 	menu       string
 	references []AgentReference
@@ -294,9 +295,12 @@ func retrieveRelevantKB(ctx *security.RequestContext, request NBAgentRequest, kb
 		"result_count", len(docs), "kept", len(kept),
 		"kbs_matched", len(refs), "injected", len(attributed), "query_chars", len(query))
 
+	var exactCandidates []toolcore.KnowledgeCandidate
+	menu := buildKnowledgeCandidateMenuCollect(ctx, request, attributed, refs, &exactCandidates)
 	return kbDiscoveryResult{
+		candidates: exactCandidates,
 		content:    formatRetrievedKBBlock(attributed),
-		menu:       buildKnowledgeCandidateMenu(ctx, request, attributed, refs),
+		menu:       menu,
 		references: refs,
 	}
 }
@@ -371,6 +375,10 @@ collect:
 // loading and renders only a compact index into ReAct prompts. Discovery is
 // account-wide; agent mappings are not required for a candidate to appear.
 func buildKnowledgeCandidateMenu(ctx *security.RequestContext, request NBAgentRequest, docs toolcore.RAGSearchResults, refs []AgentReference) string {
+	return buildKnowledgeCandidateMenuCollect(ctx, request, docs, refs, nil)
+}
+
+func buildKnowledgeCandidateMenuCollect(ctx *security.RequestContext, request NBAgentRequest, docs toolcore.RAGSearchResults, refs []AgentReference, candidates *[]toolcore.KnowledgeCandidate) string {
 	if len(docs) == 0 {
 		return ""
 	}
@@ -429,6 +437,9 @@ func buildKnowledgeCandidateMenu(ctx *security.RequestContext, request NBAgentRe
 		if err := toolcore.StoreKnowledgeCandidate(request.AccountId, request.ConversationId, request.MessageId, candidate); err != nil {
 			ctx.GetLogger().Warn("kb_prestep: unable to cache knowledge candidate", "candidate_id", id, "error", err)
 			continue
+		}
+		if candidates != nil {
+			*candidates = append(*candidates, candidate)
 		}
 		fmt.Fprintf(&sb, "id: %s - title: %s - source: %s - purpose: %s - snippet: %s\n",
 			id, escapeTemplateSyntax(candidate.Title), escapeTemplateSyntax(candidate.Source), candidate.Purpose,
@@ -925,4 +936,15 @@ func formatRetrievedKBBlock(docs toolcore.RAGSearchResults) string {
 	}
 	sb.WriteString("</retrieved_knowledge>")
 	return sb.String()
+}
+
+// DiscoverKnowledgeCandidates shares the executor's account-wide discovery and
+// eligibility rules with custom consumers that materialize selected documents.
+func DiscoverKnowledgeCandidates(ctx *security.RequestContext, request NBAgentRequest, agent NBAgent) []toolcore.KnowledgeCandidate {
+	if !AutomaticKnowledgeAllowed(request) || agent == nil {
+		return nil
+	}
+	names := append([]string{agent.GetName()}, agent.GetNameAliases()...)
+	kbs := fetchAgentKBs(ctx, request.AccountId, names, request.InheritSkillsFromAgents, request.SelectedSkillIds)
+	return retrieveRelevantKB(ctx, request, kbs).candidates
 }

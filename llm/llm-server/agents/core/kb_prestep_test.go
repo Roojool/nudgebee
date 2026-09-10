@@ -276,7 +276,9 @@ func TestBuildKnowledgeCandidateMenuIsCompactAndLoadable(t *testing.T) {
 		},
 	}}
 
-	menu := buildKnowledgeCandidateMenu(ctx, request, docs, nil)
+	var selected []toolcore.KnowledgeCandidate
+	menu := buildKnowledgeCandidateMenuCollect(ctx, request, docs, nil, &selected)
+	require.Len(t, selected, 1)
 	assert.Contains(t, menu, "<skill-lists>")
 	assert.Contains(t, menu, "source: servicenow")
 	assert.Contains(t, menu, "id: knowledge:")
@@ -636,4 +638,15 @@ func TestFormatRetrievedKBBlockPurpose(t *testing.T) {
 			require.Contains(t, got, "Unique body")
 		})
 	}
+}
+
+func TestKnowledgeDiscoveryDisabledSkipsAgentAndServices(t *testing.T) {
+	for _, policy := range []KnowledgePolicy{KnowledgeDisabled, KnowledgeLLMOnly} {
+		// No services or agent are needed when automatic discovery is disabled.
+		require.Empty(t, DiscoverKnowledgeCandidates(nil, NBAgentRequest{KnowledgePolicy: policy}, nil))
+	}
+}
+
+func TestKnowledgeDiscoveryMissingAgentSkipsServices(t *testing.T) {
+	require.Empty(t, DiscoverKnowledgeCandidates(nil, NBAgentRequest{KnowledgePolicy: KnowledgeAlways}, nil))
 }
