@@ -508,9 +508,55 @@ temporal:
       tag: '1.31.2'
     enabled: true
     replicaCount: 1
+    # Upstream ships no resources for any temporal role, so all four pods ran
+    # BestEffort and history OOMKilled. GOMEMLIMIT is 90% of each memory limit
+    # (Go does not read the cgroup cap); change one, change the other.
+    frontend:
+      resources:
+        limits: { cpu: 500m, memory: 500Mi }
+        requests: { cpu: 50m, memory: 250Mi }
+      additionalEnv:
+        - name: GOMEMLIMIT
+          value: '450MiB'
+    matching:
+      resources:
+        limits: { cpu: 500m, memory: 500Mi }
+        requests: { cpu: 50m, memory: 250Mi }
+      additionalEnv:
+        - name: GOMEMLIMIT
+          value: '450MiB'
+    worker:
+      resources:
+        limits: { cpu: 500m, memory: 500Mi }
+        requests: { cpu: 50m, memory: 250Mi }
+      additionalEnv:
+        - name: GOMEMLIMIT
+          value: '450MiB'
+    history:
+      resources:
+        limits: { cpu: 1000m, memory: 2Gi }
+        requests: { cpu: 100m, memory: 1Gi }
+      additionalEnv:
+        - name: GOMEMLIMIT
+          value: '1843MiB'
     dynamicConfig:
       limit.customSearchAttributes.keyword:
         - value: 100
+          constraints: {}
+      # history's caches had no real ceiling: mutable state was bounded by entry
+      # COUNT (128,000) because cacheSizeBasedLimit defaults false, and the events
+      # cache was per-shard (512KB x 512). Both now host-level byte budgets.
+      history.cacheSizeBasedLimit:
+        - value: true
+          constraints: {}
+      history.hostLevelCacheMaxSizeBytes:
+        - value: 377487360 # 360Mi
+          constraints: {}
+      history.enableHostLevelEventsCache:
+        - value: true
+          constraints: {}
+      history.eventsHostLevelCacheMaxSizeBytes:
+        - value: 188743680 # 180Mi
           constraints: {}
       frontend.validSearchAttributes:
         - value:
