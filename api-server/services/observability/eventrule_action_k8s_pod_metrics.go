@@ -644,6 +644,12 @@ func (a *podMetricAction) buildPodMetricResponse(ctx playbooks.PlaybookActionCon
 			"spec_found", spec.found, "containers", len(spec.containers))
 	}
 
+	// Characterise the shape of the memory curve. The resource-allocation
+	// insights above answer "is a limit set"; this answers "would raising it
+	// help", which is the question an OOMKill actually poses and the one the
+	// event itself cannot answer.
+	insights = append(insights, memoryTrendInsights(metricEntries, params.ResourceType)...)
+
 	podMetric := podMetricData{
 		Name:         "pod_metric",
 		Data:         metricEntries,

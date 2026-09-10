@@ -155,6 +155,33 @@ const workloadCloudResourceSQL = `
 	LIMIT 1
 `
 
+// configMapConsumersSQL resolves a ConfigMap to the workloads whose pod
+// template references it — mounted as a volume, or pulled in via envFrom /
+// valueFrom.configMapKeyRef. The knowledge graph's k8s source walks the real
+// pod spec on every build (knowledge_graph/sources/k8s/configsecret.go) and
+// stores the result as Workload -USES_CONFIG-> ConfigMap, so this reads an
+// already-computed relationship instead of re-deriving one from names.
+//
+// Deliberately no `level` filter: k8s edges are written without one, and
+// filtering on it returns nothing at all rather than failing loudly.
+const configMapConsumersSQL = `
+	SELECT w.properties->>'name' AS name, COALESCE(w.properties->>'kind', '') AS kind
+	FROM knowledge_graph_node cm
+	JOIN knowledge_graph_edge e
+	  ON e.destination_node_id = cm.id
+	 AND e.relationship_type = 'USES_CONFIG'
+	 AND e.is_active = true
+	JOIN knowledge_graph_node w
+	  ON w.id = e.source_node_id
+	 AND w.is_active = true
+	WHERE cm.tenant_id = $1 AND cm.cloud_account_id = $2
+	  AND cm.node_type = 'ConfigMap' AND cm.is_active = true
+	  AND cm.properties->>'namespace' = $3
+	  AND cm.properties->>'name' = $4
+	  AND w.properties->>'name' IS NOT NULL
+	ORDER BY 1, 2
+`
+
 // podCloudResourceSQL is the fallback for pod-subject events whose owning
 // workload could not be determined: link the pod's own cloud_resource_id.
 const podCloudResourceSQL = `
@@ -3437,6 +3464,16 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 	case "", "pod":
 		// Pod (or unspecified subject) → resolve via its owning workload.
 		workloadName = webhookEvent.SubjectOwner
+	case "configmap":
+		// A ConfigMap is not a workload, and its name collides with one
+		// constantly — charts routinely name a Deployment and its config
+		// the same thing. Falling through to the name match below would
+		// link an edit of `grafana` the ConfigMap onto `grafana` the
+		// Deployment whether or not that Deployment reads it, which is
+		// worse than no attribution: it asserts a causal link that may not
+		// exist. Resolve the workloads that actually consume it instead.
+		linkConfigMapConsumers(sc, dbms, tenantId, ns, subjectName, webhookEvent)
+		return
 	default:
 		// Subject is itself a workload.
 		workloadName = subjectName
@@ -3464,6 +3501,113 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 		case err != nil && err != sql.ErrNoRows:
 			sc.GetLogger().Warn("link_k8s_cloud_resource: pod lookup failed", "error", err, "namespace", ns, "pod", subjectName)
 		}
+	}
+}
+
+// ConfigMapConsumersLabel carries the workloads that consume the changed
+// ConfigMap, as "Kind/name" entries joined by ",". A ConfigMap edit is
+// otherwise an orphan event: nothing in it says which application just had
+// its configuration changed, which is the only reason anyone cares.
+const ConfigMapConsumersLabel = "nb_configmap_consumers"
+
+// maxConfigMapConsumersLabelled bounds the consumer label. A ConfigMap read
+// by hundreds of workloads (a cluster-wide CA bundle, a shared settings map)
+// would otherwise write an unbounded string into every event row.
+const maxConfigMapConsumersLabelled = 20
+
+type configMapConsumer struct {
+	Name string `db:"name"`
+	Kind string `db:"kind"`
+}
+
+func (c configMapConsumer) String() string {
+	if c.Kind == "" {
+		return c.Name
+	}
+	return c.Kind + "/" + c.Name
+}
+
+// configMapConsumers reads the workloads referencing a ConfigMap from the
+// knowledge graph. Best-effort: an empty result (graph not built yet, or the
+// ConfigMap wired up since the last build — the graph rebuilds hourly) leaves
+// the event unattributed, which is the correct outcome. Guessing from names is
+// what this function exists to avoid.
+func configMapConsumers(sc *security.RequestContext, dbms *database.DatabaseManager,
+	tenantId, accountId, namespace, name string) []configMapConsumer {
+
+	rows, err := dbms.Db.QueryxContext(sc.GetContext(), configMapConsumersSQL, tenantId, accountId, namespace, name)
+	if err != nil {
+		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer lookup failed",
+			"error", err, "namespace", namespace, "configmap", name)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+
+	var consumers []configMapConsumer
+	for rows.Next() {
+		var c configMapConsumer
+		if err := rows.StructScan(&c); err != nil {
+			sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer scan failed", "error", err)
+			return nil
+		}
+		if c.Name != "" {
+			consumers = append(consumers, c)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer rows failed", "error", err)
+		return nil
+	}
+	return consumers
+}
+
+// linkConfigMapConsumers attributes a ConfigMap change to the workloads that
+// read it. Every consumer is recorded in ConfigMapConsumersLabel; the
+// resource link is only set when there is exactly one, because with several
+// consumers any single choice would be arbitrary and the label already
+// carries the full set.
+func linkConfigMapConsumers(sc *security.RequestContext, dbms *database.DatabaseManager,
+	tenantId, namespace, name string, webhookEvent *Event) {
+
+	if name == "" {
+		return
+	}
+	consumers := configMapConsumers(sc, dbms, tenantId, webhookEvent.AccountId, namespace, name)
+	if len(consumers) == 0 {
+		return
+	}
+
+	labelled := consumers
+	suffix := ""
+	if len(labelled) > maxConfigMapConsumersLabelled {
+		suffix = fmt.Sprintf(",+%d more", len(labelled)-maxConfigMapConsumersLabelled)
+		labelled = labelled[:maxConfigMapConsumersLabelled]
+	}
+	names := make([]string, 0, len(labelled))
+	for _, c := range labelled {
+		names = append(names, c.String())
+	}
+	if webhookEvent.Labels == nil {
+		webhookEvent.Labels = map[string]string{}
+	}
+	webhookEvent.Labels[ConfigMapConsumersLabel] = strings.Join(names, ",") + suffix
+
+	if len(consumers) != 1 {
+		return
+	}
+	only := consumers[0]
+	webhookEvent.SubjectOwner = only.Name
+	webhookEvent.SubjectOwnerKind = only.Kind
+
+	var crid string
+	err := dbms.Db.QueryRowxContext(sc.GetContext(), workloadCloudResourceSQL,
+		tenantId, webhookEvent.AccountId, namespace, only.Name).Scan(&crid)
+	switch {
+	case err == nil && crid != "":
+		webhookEvent.CloudResourceId = crid
+	case err != nil && err != sql.ErrNoRows:
+		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer workload lookup failed",
+			"error", err, "namespace", namespace, "workload", only.Name)
 	}
 }
 

@@ -830,8 +830,66 @@ def _as_naive_utc(value):
     return value
 
 
+# Reverse of the api-server's ConfigMap→consumers lookup: the ConfigMaps this
+# workload's pod template references. Built by the knowledge graph's k8s source
+# from the real pod spec (volumes, envFrom, valueFrom.configMapKeyRef), so it
+# covers the case the whole feature exists for — an `envFrom` value, which
+# appears nowhere in the pod template and therefore in no rollout revision.
+_WORKLOAD_CONFIGMAPS_SQL = """
+    select distinct cm.properties->>'name'
+    from knowledge_graph_node w
+    join knowledge_graph_edge e
+      on e.source_node_id = w.id
+     and e.relationship_type = 'USES_CONFIG'
+     and e.is_active = true
+    join knowledge_graph_node cm
+      on cm.id = e.destination_node_id
+     and cm.is_active = true
+    where w.tenant_id = %s and w.cloud_account_id = %s and w.is_active = true
+      and w.properties->>'namespace' = %s
+      and w.properties->>'name' = %s
+"""
+
+# How many changes the evidence carries. One is not enough for the commonest
+# shape of a config incident: a value is edited, the workload restarts so the
+# new value is actually read, and the restart is the newer change. Returning
+# only the newest hands the reader "a deployment happened" and drops the edit
+# that caused it. Several lets them discriminate; the deployment_history
+# playbook remains the place to see the complete list.
+CONFIG_CHANGE_CORRELATION_LIMIT = 5
+
+
+def get_consumed_configmap_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """ConfigMaps the workload reads, per the knowledge graph.
+
+    Best-effort: the graph rebuilds hourly, so a ConfigMap wired up in the last
+    hour has no edge yet and simply isn't correlated. That is the right failure
+    mode — the alternative, matching ConfigMaps to workloads by name, asserts
+    causal links that do not exist.
+    """
+    if not workload_name or not namespace:
+        return []
+    try:
+        rows = database.run_query(
+            _WORKLOAD_CONFIGMAPS_SQL,
+            [tenant, cloud_account_id, namespace, workload_name],
+        )
+    except Exception:
+        logger.exception("Failed to look up ConfigMaps consumed by %s/%s", namespace, workload_name)
+        return []
+    return [row[0] for row in rows if row and row[0]]
+
+
 def get_last_config_change(config_change_event, data, finding):
-    """Find the configuration change this alert should be shown against.
+    """Find the configuration changes this alert should be shown against.
+
+    Two sources, one query: changes to the workload itself (image, replicas,
+    resources, a restart), and changes to the ConfigMaps it consumes. The
+    second is the one an engineer cannot find by hand — editing a ConfigMap
+    leaves the consuming Deployment's spec byte-identical, so `kubectl rollout
+    history` has no revision to diff and Kubernetes emits no event at all. The
+    workload → ConfigMap link comes from the knowledge graph's USES_CONFIG
+    edges, never from matching names.
 
     Two bounds that were missing, and each produced a wrong answer:
 
@@ -846,39 +904,53 @@ def get_last_config_change(config_change_event, data, finding):
     shows how long before the alert it happened, which is the useful disclosure.
     Silently dropping it would just return the card to being empty, which reads
     as "nothing changed" rather than "the last change was a while ago".
-
-    Note this returns ONE change. When several changes precede an alert, the
-    deployment_history playbook is what lists them all; this is the single
-    headline change and cannot say which of them mattered.
     """
-    if finding["finding_type"] != "configuration_change" and finding["service_key"]:
-        conditions = [
-            "cloud_account_id = %s",
-            "finding_type = %s",
-            "subject_namespace = %s",
-            "service_key = %s",
-            "tenant = %s",
-        ]
-        values = [
-            data["cloud_account_id"],
-            "configuration_change",
-            finding["subject_namespace"],
-            finding["service_key"],
-            data["tenant"],
-        ]
-        # A finding without a start time cannot bound anything; keep the old
-        # behaviour for it rather than dropping every candidate change.
-        alert_starts_at = _as_naive_utc(finding.get("starts_at"))
-        if alert_starts_at is not None:
-            conditions.append("starts_at <= %s")
-            values.append(alert_starts_at)
-        select_config_change_event = sql.SQL(
-            "select id, service_key, evidences, starts_at from {} where "
-            + " and ".join(conditions)
-            + " order by starts_at desc nulls last limit 1"
-        ).format(sql.Identifier("events"))
-        config_change_event = database.run_query(select_config_change_event, values)
-    return config_change_event
+    if finding["finding_type"] == "configuration_change" or not finding["service_key"]:
+        return config_change_event
+
+    namespace = finding["subject_namespace"]
+    conditions = [
+        "cloud_account_id = %s",
+        "finding_type = %s",
+        "subject_namespace = %s",
+        "tenant = %s",
+    ]
+    values = [
+        data["cloud_account_id"],
+        "configuration_change",
+        namespace,
+        data["tenant"],
+    ]
+    # A finding without a start time cannot bound anything; keep the old
+    # behaviour for it rather than dropping every candidate change.
+    alert_starts_at = _as_naive_utc(finding.get("starts_at"))
+    if alert_starts_at is not None:
+        conditions.append("starts_at <= %s")
+        values.append(alert_starts_at)
+
+    # service_key is "<namespace>/<workload>" and is already owner-resolved for
+    # pod-subject findings, which is what makes it the right key here.
+    workload_name = finding["service_key"].split("/", 1)[-1]
+    subject_clauses = ["service_key = %s"]
+    values.append(finding["service_key"])
+    configmaps = get_consumed_configmap_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)
+    if configmaps:
+        # Names are expanded into placeholders rather than bound as an
+        # ANY(%s) array so an empty list can never produce an untyped empty
+        # array; the clause is simply omitted when there is nothing to add.
+        subject_clauses.append(
+            "(subject_type = 'configmap' and subject_name in ({}))".format(",".join(["%s"] * len(configmaps)))
+        )
+        values.extend(configmaps)
+    conditions.append("({})".format(" or ".join(subject_clauses)))
+    values.append(CONFIG_CHANGE_CORRELATION_LIMIT)
+
+    select_config_change_event = sql.SQL(
+        "select id, service_key, evidences, starts_at from {} where "
+        + " and ".join(conditions)
+        + " order by starts_at desc nulls last limit %s"
+    ).format(sql.Identifier("events"))
+    return database.run_query(select_config_change_event, values)
 
 
 def get_resource_info(cloud_account_id, finding, tenant):
@@ -1989,12 +2061,14 @@ def format_evidence(evidence, config_change_event: List, aggregation_key: str):
             if action_name == "service_map_enricher":
                 check_neighboring_workload_health(item, {})
             item["insight"] = insights
-    if len(config_change_event) > 0:
+    # One block per correlated change, newest first. A single block used to be
+    # appended here; with a ConfigMap edit followed by the restart that made it
+    # take effect, that block was always the restart.
+    for change in config_change_event:
         try:
-            config_data = get_config_change_data(config_change_event, aggregation_key)
-            formatted_evidence.append(config_data)
+            formatted_evidence.append(get_config_change_data(change, aggregation_key))
         except Exception:
-            logging.exception("Failed to handle config change event %s", config_change_event)
+            logger.exception("Failed to handle config change event %s", change)
     return formatted_evidence
 
 
@@ -2039,7 +2113,9 @@ def _parse_json_dict(data):
 
 
 def get_config_change_data(config_change_event, aggregation_key):
-    # config_change_event[0] = (id, service_key, evidences, starts_at).
+    # config_change_event = (id, service_key, evidences, starts_at) — one row.
+    # (It took the whole result set and used [0] until this had to render more
+    # than one correlated change.)
     # evidences is a JSONB array of evidence blocks. One historic shape was a
     # single-element [{type:"diff", data:object}]; another shape prepends a
     # raw kubewatch {type:"json", data:"<json-string>"} so the diff lives at
@@ -2047,7 +2123,7 @@ def get_config_change_data(config_change_event, aggregation_key):
     # hard-coding [0] — the indexed path raised KeyError on the kubewatch
     # JSON string and the exception was swallowed by the caller, dropping
     # the diff from the rendered evidence.
-    evidences = config_change_event[0][2] or []
+    evidences = config_change_event[2] or []
     diff_entry = None
     for ev in evidences:
         if isinstance(ev, dict) and ev.get("type") == "diff" and ev.get("data") is not None:
@@ -2088,7 +2164,11 @@ def get_config_change_data(config_change_event, aggregation_key):
                 "data": data,
                 "insight": get_change_insights(data, aggregation_key),
             }
-    config_data["start_at"] = config_change_event[0][3].isoformat()
+    # starts_at is nullable, and the correlation query orders `nulls last` — so
+    # with several changes returned instead of one, a null-timestamped row can
+    # now reach here in the tail rather than only when every row was null.
+    starts_at = config_change_event[3]
+    config_data["start_at"] = starts_at.isoformat() if starts_at is not None else None
     return config_data
 
 
@@ -2107,19 +2187,68 @@ def get_change_insights(config_data, aggregation_key) -> List[Dict[str, Any]]:
                 add_unique_insight(insights, unique_insights, insight)
                 break
         else:
-            get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path)
+            get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path, config_data)
 
     return insights
 
 
-def get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path):
+def _memory_limit_direction(config_data, updated_path) -> str:
+    """'raised', 'lowered', or '' when the old/new values can't be compared.
+
+    Quantities arrive as Kubernetes strings ("192Mi", "1Gi") and either side may
+    be absent when the limit was added or removed. An unparseable pair yields ''
+    so the caller gives neutral advice rather than advice built on a guess.
+    """
+    for entry in (config_data or {}).get("updated_values") or []:
+        if not isinstance(entry, dict) or entry.get("path") != updated_path:
+            continue
+        # A limit added or removed leaves one side null; there is no direction
+        # to read from that, and str(None) would just reach parse_size_to_gb as
+        # the literal "None".
+        old_value, new_value = entry.get("old"), entry.get("new")
+        if old_value is None or new_value is None:
+            return ""
+        try:
+            old = parse_size_to_gb(str(old_value))
+            new = parse_size_to_gb(str(new_value))
+        except Exception:
+            # Broad on purpose: the only job here is to pick between three
+            # canned sentences, and no parse failure is worth failing an
+            # event over.
+            return ""
+        if old == new:
+            return ""
+        return "raised" if new > old else "lowered"
+    return ""
+
+
+def get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path, config_data=None):
     if "resources.limits['memory']" in updated_path:
         insight = {
             "message": "Resource memory limit were updated",
             "severity": "Critical",
         }
         if aggregation_key == "pod_oom_killer_enricher":
-            insight["recommendation"] = "Increase memory limit in pod specifications"
+            # This used to recommend "Increase memory limit in pod
+            # specifications" unconditionally — including when the limit had
+            # just been raised and the workload OOMed anyway, which is the
+            # case where raising it again is exactly the wrong move. The
+            # direction of the change decides which advice is honest.
+            direction = _memory_limit_direction(config_data, updated_path)
+            if direction == "raised":
+                insight["recommendation"] = (
+                    "The memory limit was already raised and the workload still hit it. "
+                    "Find what is consuming the memory before raising it again — if the working "
+                    "set grows without settling, no limit is large enough."
+                )
+            elif direction == "lowered":
+                insight["recommendation"] = (
+                    "The memory limit was lowered shortly before this OOMKill. "
+                    "Compare it against the workload's actual usage; reverting the reduction is "
+                    "the first thing to check."
+                )
+            else:
+                insight["recommendation"] = "Check the workload's memory usage against this limit before changing it."
         add_unique_insight(insights, unique_insights, insight)
     elif "resources.requests['memory']" in updated_path:
         insight = {
