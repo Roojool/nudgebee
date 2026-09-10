@@ -13,6 +13,7 @@ import { Button } from '@ui/Button';
 import { toast } from '@ui/Toast';
 import AlarmCreationModal from '@components/cloudaccount/AlarmCreationModal';
 import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
+import { hasCliCommand } from './cliCommands';
 import { hasWriteAccess, hasPermission, missingPermissionMessage } from '@lib/auth';
 import { safeParseJSON, panelActionBarSx } from './utils';
 
@@ -103,7 +104,7 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
           >
             Create Ticket
           </Button>
-          {isK8sRightSizing && (
+          {hasCliCommand(rec) && (
             <Button
               tone='secondary'
               size='sm'
