@@ -15,9 +15,10 @@
  * Built-in bullet composition:
  *   For the common "bulleted clickable text" case (the legacy
  *   CustomListWithShowMore shape) you can omit `renderItem` entirely and pass
- *   string items plus `bullet` / `maxItemLength` / `onItemClick`. List then
- *   renders a leading brand bullet, per-item character truncation with a hover
- *   Tooltip carrying the full text, and an optional click handler. Provide
+ *   string items plus `bullet` / `lineClamp` / `onItemClick`. List then
+ *   renders a leading brand bullet, per-item width-based line-clamp (fills the
+ *   available width, then ellipsis) with a hover Tooltip carrying the full text
+ *   only when the row actually overflows, and an optional click handler. Provide
  *   `renderItem` to take full control instead — the two are mutually exclusive.
  *
  * Don't (per spec):
@@ -64,43 +65,62 @@ export interface ListProps<T> {
   /* --- Built-in bullet composition (ignored when `renderItem` is provided) --- */
   /** Show a leading brand bullet dot on each row. */
   bullet?: boolean;
-  /** Truncate string items longer than this many characters, with a Tooltip carrying the full text. */
-  maxItemLength?: number;
+  /**
+   * Clamp each row's text to this many lines, filling the available width and
+   * showing a hover Tooltip with the full text only when it actually overflows.
+   * Default 2.
+   */
+  lineClamp?: number;
   /** Click handler for the built-in row (makes the text interactive). */
   onItemClick?: (item: T, index: number) => void;
 }
+
+// Long lines are clipped by CSS (see clampSx below); offer the full text on hover.
+// A simple length check decides whether a row can overflow — no per-row DOM
+// measurement, which is fragile around web-font/layout load timing. The threshold
+// is deliberately low: a shorter row never wraps even on a narrow panel, and a
+// longer row that happens to fit on a very wide panel just repeats its own text on
+// hover (harmless).
+const TOOLTIP_LENGTH_THRESHOLD = 100;
 
 function BulletRow<T>({
   item,
   index,
   bullet,
-  maxItemLength,
+  lineClamp = 2,
   onItemClick,
 }: {
   item: T;
   index: number;
   bullet?: boolean;
-  maxItemLength?: number;
+  lineClamp?: number;
   onItemClick?: (item: T, index: number) => void;
 }) {
   const text = typeof item === 'string' ? item : String(item);
-  const needsTruncation = maxItemLength != null && text.length > maxItemLength;
-  const displayText = needsTruncation ? text.slice(0, maxItemLength) + '…' : text;
   const clickable = !!onItemClick;
+  const mayTruncate = text.length > TOOLTIP_LENGTH_THRESHOLD;
+
+  // 1 line → nowrap + horizontal ellipsis; >1 line → vertical -webkit-line-clamp.
+  const clampSx =
+    lineClamp === 1
+      ? ({ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const)
+      : ({ display: '-webkit-box', WebkitLineClamp: lineClamp, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word' } as const);
 
   const textNode = (
     <Box
-      component='span'
       onClick={clickable ? () => onItemClick!(item, index) : undefined}
       sx={{
+        ...clampSx,
+        flex: '1 1 auto',
+        minWidth: 0,
         color: 'var(--ds-brand-500)',
         paddingLeft: 'var(--ds-space-1)',
         fontSize: 'var(--ds-text-body)',
+        lineHeight: 1.5,
         cursor: clickable ? 'pointer' : 'default',
-        wordBreak: 'break-all',
       }}
     >
-      {displayText}
+      {text}
     </Box>
   );
 
@@ -120,7 +140,7 @@ function BulletRow<T>({
           }}
         />
       )}
-      {needsTruncation ? (
+      {mayTruncate ? (
         <Tooltip
           title={<Box sx={{ maxHeight: TOOLTIP_MAX_HEIGHT, overflow: 'auto', fontSize: 'var(--ds-text-small)', lineHeight: 1.5 }}>{text}</Box>}
           placement='top'
@@ -146,7 +166,7 @@ export function List<T>({
   id,
   ariaLabel,
   bullet,
-  maxItemLength,
+  lineClamp,
   onItemClick,
 }: ListProps<T>) {
   const [expanded, setExpanded] = React.useState(false);
@@ -168,7 +188,7 @@ export function List<T>({
   const collapseLabel = truncate?.collapseLabel ?? 'Show less ↑';
 
   const renderRow = (item: T, i: number) =>
-    renderItem ? renderItem(item, i) : <BulletRow item={item} index={i} bullet={bullet} maxItemLength={maxItemLength} onItemClick={onItemClick} />;
+    renderItem ? renderItem(item, i) : <BulletRow item={item} index={i} bullet={bullet} lineClamp={lineClamp} onItemClick={onItemClick} />;
 
   return (
     <Box
@@ -192,7 +212,9 @@ export function List<T>({
           key={keyFor ? keyFor(item, i) : i}
           role='listitem'
           sx={{
-            padding: 'var(--ds-space-3)',
+            // Bulleted text lists read as a tight cluster, not spaced-out cards, so the
+            // bullet composition uses a compact row rhythm; renderItem rows keep the roomier default.
+            padding: bullet ? 'var(--ds-space-1) var(--ds-space-2)' : 'var(--ds-space-3)',
             borderBottom: divider === 'between' && i < visibleItems.length - 1 ? '1px solid var(--ds-gray-200)' : 'none',
           }}
         >

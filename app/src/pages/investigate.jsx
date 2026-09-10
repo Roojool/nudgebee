@@ -2591,7 +2591,7 @@ const Investigate = () => {
                                   bordered={false}
                                   divider='none'
                                   bullet
-                                  maxItemLength={120}
+                                  lineClamp={1}
                                   truncate={{ show: 3, label: 'Show more ({n})', collapseLabel: 'Show less' }}
                                   onItemClick={handleInsightClick}
                                 />
