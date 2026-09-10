@@ -476,6 +476,7 @@ const MessageStream = ({ messages, isProcessing, collapsedObj, setCollapsedObj, 
                 showFullText={!!showFullText[response.originalIndex]}
                 onShowFullText={() => handleShowFullText(response.originalIndex)}
                 isLoadingInvestigation={isProcessing}
+                isResponseInProgress={isLastGroup && isProcessing}
                 {...itemProps}
                 generateQuestionText={group?.question?.text || itemProps?.generateQuestionText}
                 siblingTasks={tasks}
