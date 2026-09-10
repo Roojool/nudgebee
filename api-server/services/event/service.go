@@ -871,8 +871,18 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 			// Undo re-applies what the change introduced. It is the same operation in the other
 			// direction, so it goes through the same builder, dispatch, audit and record.
 			undo, _ := queryData["undo"].(bool)
-			request, err := getRevertRecommendationRequest(cr, r, undo)
+			// The operator can pick WHICH recorded change to undo. Without a selection this is
+			// the alert's own attached change, which is what the single-change card sends.
+			changeEventId, _ := queryData["change_event_id"].(string)
+			changeSource, err := resolveRevertSource(ctx, r, changeEventId)
 			if err != nil {
+				return EventRecommendationApplyResponse{}, err
+			}
+			request, err := getRevertRecommendationRequest(cr, changeSource, undo)
+			if err != nil {
+				return EventRecommendationApplyResponse{}, err
+			}
+			if err := assertNoLaterChangeOnSamePaths(ctx, changeSource, request); err != nil {
 				return EventRecommendationApplyResponse{}, err
 			}
 			recommendationRequest = adapter.ApplyRecommendationRequest{
@@ -1491,6 +1501,267 @@ func auditEventResolutionApply(ctx *security.RequestContext, r models.Event, req
 	if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); err != nil {
 		ctx.GetLogger().Error("failed to create audit event for event resolution apply", "error", err)
 	}
+}
+
+// resolveRevertSource picks the event whose recorded diff the revert acts on.
+//
+// An empty changeEventId keeps the historical behaviour: the alert carries one attached change
+// and that is what gets undone. When the operator picks a change from the history list instead,
+// the diff must come from THAT event — the alert's own attached change is a different change,
+// and reverting it while the UI showed another is the failure this whole path exists to stop.
+//
+// The selected event is checked against the alert rather than trusted: same tenant, same account,
+// same resource, and actually a configuration change. An id from a stale page or a hand-made
+// request must not be able to reach into another tenant's history or revert an unrelated workload.
+func resolveRevertSource(ctx *security.RequestContext, alert models.Event, changeEventId string) (models.Event, error) {
+	if strings.TrimSpace(changeEventId) == "" {
+		return alert, nil
+	}
+	if changeEventId == alert.Id {
+		return alert, nil
+	}
+	change, err := GetEvent(ctx, changeEventId)
+	if err != nil {
+		ctx.GetLogger().Error("error getting selected change event", "error", err, "change_event_id", changeEventId)
+		return models.Event{}, err
+	}
+	if change.Id == "" {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected change no longer exists")
+	}
+	if change.FindingType == nil || *change.FindingType != "configuration_change" {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected event is not a configuration change")
+	}
+	if !sameStringValue(change.Tenant, alert.Tenant) || !sameStringValue(change.CloudAccountId, alert.CloudAccountId) {
+		return models.Event{}, common.ErrorUnauthorized("event resolution: the selected change belongs to another account")
+	}
+	if !sameChangeTarget(change, alert) {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected change is for a different resource than this event")
+	}
+	return change, nil
+}
+
+// sameChangeTarget compares what two events are about. cloud_resource_id is the reliable
+// identifier and is preferred; service_key is the fallback for an event recorded before its
+// resource synced, which is the same fallback the resource lookup above uses.
+func sameChangeTarget(change, alert models.Event) bool {
+	if change.CloudResourceId != nil && alert.CloudResourceId != nil {
+		return *change.CloudResourceId == *alert.CloudResourceId
+	}
+	if change.ServiceKey != nil && alert.ServiceKey != nil && *change.ServiceKey != "" {
+		return *change.ServiceKey == *alert.ServiceKey
+	}
+	return false
+}
+
+func sameStringValue(a, b *string) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// assertNoLaterChangeOnSamePaths refuses a revert that would silently undo a more recent change.
+//
+// The agent applies a revert by writing each recorded `old` value at its path on the LIVE object.
+// That is safe for the newest change and only for the newest change: if the image went v1 -> v2 in
+// the change being reverted and v2 -> v3 in a later one, writing v1 discards v3 with nothing said.
+// Reverting the newest change was accidentally safe from this; letting the operator choose an
+// older one removes that accident, so the check arrives with the choice.
+//
+// A conflict blocks rather than warns. The operator cannot see the later change from the revert
+// dialog, so a warning asks them to accept a risk they have no way to evaluate.
+func assertNoLaterChangeOnSamePaths(ctx *security.RequestContext, change models.Event, request map[string]any) error {
+	revertPaths, _ := request["revert_paths"].([]any)
+	// The conflict query filters on these, and Postgres compares NULL with `=` as UNKNOWN — a nil
+	// here returns no rows, which reads as "no later change" and waves the revert through. That is
+	// the one direction this guard must never fail in, so refuse instead. `tenant` is NOT NULL in
+	// the schema and cannot be nil for a persisted event; `cloud_account_id` is nullable and can.
+	if change.Tenant == nil || change.CloudAccountId == nil {
+		return common.ErrorBadRequest("event resolution: the selected change is missing its tenant or account, so later changes cannot be checked; not reverting")
+	}
+	if change.StartsAt == nil {
+		// Without a time for the change there is no "later" to compare against, and a revert that
+		// cannot be checked must not proceed on a mutation path.
+		return common.ErrorBadRequest("event resolution: the selected change has no recorded time, so a later change cannot be ruled out; not reverting")
+	}
+	if len(revertPaths) == 0 {
+		// No paths means this request carries the pre-change manifest instead, which the Python
+		// agent applies by REPLACING the whole object. Every field a later change touched is
+		// discarded by that, not just an overlapping one — so the guard has to be stricter here,
+		// not absent. Returning nil (as this did) left the entire un-migrated-tenant cohort with
+		// no protection at all, on the more destructive of the two paths.
+		if !hasManifestPayload(request) {
+			return nil
+		}
+		later, err := laterChangesOnResource(ctx, change)
+		if err != nil {
+			ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
+			return common.ErrorBadRequest("event resolution: cannot verify whether a later change exists; not reverting")
+		}
+		if len(later) > 0 {
+			when := ""
+			if later[0].StartsAt != nil {
+				when = later[0].StartsAt.UTC().Format(time.RFC3339)
+			}
+			return common.ErrorBadRequest(fmt.Sprintf(
+				"event resolution: this change has no field-level diff, so reverting it replaces the whole object and would discard the later change at %s. Revert the later change first.", when))
+		}
+		return nil
+	}
+	targeted := make(map[string]bool, len(revertPaths))
+	for _, raw := range revertPaths {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := entry["path"].(string); path != "" {
+			targeted[path] = true
+		}
+	}
+	if len(targeted) == 0 {
+		return nil
+	}
+
+	later, err := laterChangesOnResource(ctx, change)
+	if err != nil {
+		// Fail closed. Reverting without knowing what came after is the mutation this guards, so
+		// a lookup failure must not become a silent green light.
+		ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
+		return common.ErrorBadRequest("event resolution: cannot verify whether a later change touched the same fields; not reverting")
+	}
+	// What the change being reverted left behind at each path. A later change only conflicts if it
+	// moved the field somewhere ELSE: reverting writes this change's `old` back, which is safe
+	// exactly while the live value is still this change's `new`.
+	appliedValues := changedValuesOf(change)
+
+	for _, l := range later {
+		for path, laterValue := range changedValuesOf(l) {
+			if !targeted[path] {
+				continue
+			}
+			// The same change recorded twice is not a later change. Dev has these in quantity —
+			// undo-test-app carries pairs of config-change events sharing a timestamp, a path and
+			// both values — and treating a duplicate record as a conflict would refuse a revert
+			// that is perfectly safe, which is worse than the gap it was meant to close.
+			if applied, ok := appliedValues[path]; ok && sameChangedValue(applied, laterValue) {
+				continue
+			}
+			when := ""
+			if l.StartsAt != nil {
+				when = l.StartsAt.UTC().Format(time.RFC3339)
+			}
+			return common.ErrorBadRequest(fmt.Sprintf(
+				"event resolution: %q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
+				path, when))
+		}
+	}
+	return nil
+}
+
+// hasManifestPayload reports whether the request carries a pre-change manifest under its per-kind
+// key ("deployment", "statefulset", ...). Those keys are whatever the resource's kind lowercases
+// to, so this asks the question the other way round: is there anything here beyond the fixed
+// fields the builder always sets.
+func hasManifestPayload(request map[string]any) bool {
+	for key := range request {
+		switch key {
+		case "name", "namespace", "kind", "revert_paths":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// laterChangesOnResource returns the configuration changes recorded on the same resource after
+// the given change. Bounded: a revert only needs to know whether ANY later change collides, and
+// the check runs on the click path.
+func laterChangesOnResource(ctx *security.RequestContext, change models.Event) ([]models.Event, error) {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{
+		"finding_type = 'configuration_change'",
+		"tenant = $1",
+		"cloud_account_id = $2",
+		// >= , not > . Two config changes recorded at the same instant is not a corner case:
+		// it is the reported one — a command edit and a replica edit that both land at the
+		// alert's offset 0. A strict > would let the sibling through unchecked, which is
+		// precisely the pair most likely to touch the same workload. id != $4 keeps the
+		// change being reverted out of its own conflict set.
+		"starts_at >= $3",
+		"id != $4",
+	}
+	args := []any{change.Tenant, change.CloudAccountId, change.StartsAt, change.Id}
+	if change.CloudResourceId != nil {
+		conditions = append(conditions, "cloud_resource_id = $5")
+		args = append(args, *change.CloudResourceId)
+	} else if change.ServiceKey != nil && *change.ServiceKey != "" {
+		// Non-empty, matching sameChangeTarget. An empty service_key identifies nothing, so
+		// querying for it would match every event that also has none and report their changes as
+		// conflicts — refusing reverts for an unrelated reason.
+		conditions = append(conditions, "service_key = $5")
+		args = append(args, *change.ServiceKey)
+	} else {
+		return nil, fmt.Errorf("event resolution: change %s identifies no resource", change.Id)
+	}
+
+	query := "SELECT id, starts_at, evidences FROM events WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY starts_at ASC LIMIT 50"
+	rows, err := dbms.Db.Queryx(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			ctx.GetLogger().Error("error closing rows", "error", closeErr)
+		}
+	}()
+
+	var later []models.Event
+	for rows.Next() {
+		var e models.Event
+		if scanErr := rows.Scan(&e.Id, &e.StartsAt, &e.Evidences); scanErr != nil {
+			return nil, scanErr
+		}
+		later = append(later, e)
+	}
+	return later, rows.Err()
+}
+
+// changedValuesOf maps each path a config-change event touched to the value it left there. Read
+// from the same diff evidence the revert itself is built from, so the two cannot disagree about
+// what a change covers. `undo` direction is used because it reports the change's `new` side, which
+// is what the live object should still hold if nothing has touched the field since.
+func changedValuesOf(e models.Event) map[string]any {
+	values := map[string]any{}
+	for _, entry := range extractRevertPaths(e, true) {
+		change, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := change["path"].(string); path != "" {
+			values[path] = change["old"]
+		}
+	}
+	return values
+}
+
+// sameChangedValue compares two recorded diff values. They arrive as decoded JSON — strings,
+// numbers, maps, nil — so compare their canonical encodings rather than trying to type-switch
+// every shape a manifest field can take.
+func sameChangedValue(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	aJSON, errA := common.MarshalJson(a)
+	bJSON, errB := common.MarshalJson(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return string(aJSON) == string(bJSON)
 }
 
 // getRevertRecommendationRequest builds the params that undo the configuration

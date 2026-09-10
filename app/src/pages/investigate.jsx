@@ -2729,7 +2729,7 @@ const Investigate = () => {
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], flexWrap: 'wrap' }}>
                                             <Text
-                                              value={describeActionTitle(resolvableOption.id, resolvableOption.text)}
+                                              value={describeActionTitle(resolvableOption.id, resolvableOption.text, resolvableOption.actionSubject)}
                                               sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }}
                                             />
                                             {/* Whether this removes the cause or only restores service —
@@ -2812,7 +2812,11 @@ const Investigate = () => {
                                                       // is a rollout, and one click was too few to ask for it.
                                                       setPendingUndo({
                                                         cardId: resolvableOption.id,
-                                                        actionTitle: describeActionTitle(resolvableOption.id, resolvableOption.text),
+                                                        actionTitle: describeActionTitle(
+                                                          resolvableOption.id,
+                                                          resolvableOption.text,
+                                                          resolvableOption.actionSubject
+                                                        ),
                                                         target: describeUndoTarget(resolvableOption, row),
                                                         ...undoable,
                                                       });

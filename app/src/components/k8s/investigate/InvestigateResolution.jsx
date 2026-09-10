@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Typography, Box, Radio, RadioGroup, FormControlLabel } from '@mui/material';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
 import apiRecommendations from '@api1/recommendation';
+import apiKubernetes from '@api1/kubernetes';
 import * as yaml from 'js-yaml';
 import CustomTable from '@shared/tables/CustomTable';
 import PropTypes from 'prop-types';
@@ -11,7 +12,14 @@ import { toast as snackbar } from '@ui/Toast';
 import { parseHttpResponseBodyMessage, safeJSONParse } from 'src/utils/common';
 import { ds } from '@utils/colors';
 
-const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnackBar, isRevertTheDevelopment = false, cardId = '' }) => {
+const InvestigateResolution = ({
+  row,
+  handleClose,
+  updateInvestigateSuccessSnackBar,
+  isRevertTheDevelopment = false,
+  cardId = '',
+  changeEventId = '',
+}) => {
   const [requestBody, setRequestBody] = useState({});
   const [selectedOption, setSelectedOption] = useState('');
   const [loading, setLoading] = useState(false);
@@ -22,6 +30,41 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
     imageChangeContainerName: '',
     imageNameWithTag: '',
   });
+  // When the operator picked a specific change to undo, the table below must describe THAT
+  // change. It is loaded from the change's own event rather than from the summary the history
+  // card renders: that summary truncates long values, and approving a revert from a shortened
+  // container command means approving something you have not seen.
+  const [selectedChange, setSelectedChange] = useState(null);
+  const [selectedChangeError, setSelectedChangeError] = useState('');
+  const revertsSelectedChange = !!changeEventId && changeEventId !== row?.id;
+
+  useEffect(() => {
+    if (!revertsSelectedChange) {
+      setSelectedChange(null);
+      setSelectedChangeError('');
+      return undefined;
+    }
+    let cancelled = false;
+    setSelectedChange(null);
+    setSelectedChangeError('');
+    apiKubernetes
+      .resolveEventRecord(changeEventId, row?.cloud_account_id)
+      .then((res) => {
+        if (cancelled) return;
+        const event = res?.data?.events?.[0];
+        if (!event) {
+          setSelectedChangeError('That change could not be loaded, so there is nothing to confirm against.');
+          return;
+        }
+        setSelectedChange(event);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedChangeError('That change could not be loaded, so there is nothing to confirm against.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [revertsSelectedChange, changeEventId, row?.cloud_account_id]);
 
   const handleRadioChange = (e) => {
     const value = e.target.value;
@@ -71,7 +114,14 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
       const jsonParsed = typeof json === 'string' ? safeJSONParse(json) : json;
       existingVolume = jsonParsed?.spec?.resources?.requests?.storage ?? '';
     }
-    const diff = row?.evidences.find((f) => f.type == 'diff')?.data ?? '';
+    // The selected change's own evidence wins when there is one; otherwise this is the single
+    // change the alert carries, which is what the older card sends.
+    const diffSource = revertsSelectedChange ? selectedChange : row;
+    // `|| []` only guards null/undefined. Evidences arriving as an object — a shape this code does
+    // not control, since it is whatever the record parsed to — is truthy, and .find on it throws,
+    // taking the whole revert dialog down.
+    const evidences = Array.isArray(diffSource?.evidences) ? diffSource.evidences : [];
+    const diff = evidences.find((f) => f?.type == 'diff')?.data ?? '';
     if (diff) {
       diffExists = true;
       const stripKind = (path) => path.replace(/^(StatefulSet|DaemonSet|Deployment|ReplicaSet|Rollout)\./, '');
@@ -107,9 +157,19 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
     }
 
     if (isRevertTheDevelopment) {
+      // Nothing is confirmable until the selected change has loaded, and a revert dispatched
+      // from an empty table would undo fields the operator never saw.
+      if (revertsSelectedChange && !selectedChange) {
+        return <Typography>{selectedChangeError || 'Loading the change you selected…'}</Typography>;
+      }
       return (
         <>
           {diff?.resource_name && <Typography>Resource Name: {diff?.resource_name}</Typography>}
+          {revertsSelectedChange && selectedChange?.starts_at && (
+            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
+              {`Undoing the change deployed at ${selectedChange.starts_at}`}
+            </Typography>
+          )}
           <CustomTable
             tableData={revertChanges}
             headers={['Path', 'Old Value', 'New Value']}
@@ -310,6 +370,11 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
   };
 
   const handleSubmit = () => {
+    // Belt and braces with the disabled Submit: a revert must never be dispatched for a change
+    // whose contents were never rendered.
+    if (revertsSelectedChange && !selectedChange) {
+      return;
+    }
     if (!validateValuesBeforeSubmit()) {
       return;
     }
@@ -323,6 +388,7 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
           ? {
               revert: true,
               ...(cardId && { card_id: cardId }),
+              ...(revertsSelectedChange && { change_event_id: changeEventId }),
             }
           : { ...requestBody, ...(cardId && { card_id: cardId }) },
         'kubernetes',
@@ -378,7 +444,10 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
         <Button size='md' onClick={handleClose} tone='secondary'>
           Cancel
         </Button>
-        <Button size='md' onClick={handleSubmit} loading={loading}>
+        {/* Dispatching before the selected change has loaded approves a diff the operator has not
+            seen — the dialog is still showing "Loading…" at that point. The server validates the
+            change independently, so this is about consent, not corruption. */}
+        <Button size='md' onClick={handleSubmit} loading={loading} disabled={revertsSelectedChange && !selectedChange}>
           Submit
         </Button>
       </Box>
@@ -392,6 +461,7 @@ InvestigateResolution.propTypes = {
   updateInvestigateSuccessSnackBar: PropTypes.func,
   isRevertTheDevelopment: PropTypes.bool,
   cardId: PropTypes.string,
+  changeEventId: PropTypes.string,
 };
 
 export default InvestigateResolution;

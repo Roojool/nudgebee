@@ -806,19 +806,77 @@ def get_event_data(cloud_account_name, data, evidence, finding, resource_key, re
     return event
 
 
+def _as_naive_utc(value):
+    """Normalise a finding timestamp for comparison against events.starts_at.
+
+    events.starts_at is `timestamp` (no zone). Handing psycopg2 a timezone-aware
+    datetime makes Postgres convert it through the session TimeZone on the way to
+    the naive column, which silently shifts the bound by the session offset -- the
+    same trap discovery_handler documents on this column. Returns None when there
+    is nothing usable, so the caller can leave the bound off entirely rather than
+    compare against a wrong one.
+    """
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def get_last_config_change(config_change_event, data, finding):
+    """Find the configuration change this alert should be shown against.
+
+    Two bounds that were missing, and each produced a wrong answer:
+
+    - The query had no relation to the alert's own start time, so a change made
+      AFTER the alert fired could be attached as its cause. Ordering by
+      created_at (ingest time) rather than starts_at (when the change happened)
+      compounded it, because a late-arriving old change sorted first.
+    - It was scoped by cloud_account_id alone, not by tenant.
+
+    Changes older than the alert are deliberately NOT excluded here. An alert on
+    a workload that last deployed six weeks ago should still say so — the UI
+    shows how long before the alert it happened, which is the useful disclosure.
+    Silently dropping it would just return the card to being empty, which reads
+    as "nothing changed" rather than "the last change was a while ago".
+
+    Note this returns ONE change. When several changes precede an alert, the
+    deployment_history playbook is what lists them all; this is the single
+    headline change and cannot say which of them mattered.
+    """
     if finding["finding_type"] != "configuration_change" and finding["service_key"]:
-        select_config_change_event = sql.SQL(
-            "select id, service_key, evidences,starts_at from {} where "
-            "cloud_account_id = %s  and finding_type = %s and subject_namespace = %s and service_key = %s "
-            "order by created_at desc limit 1"
-        ).format(sql.Identifier("events"))
+        conditions = [
+            "cloud_account_id = %s",
+            "finding_type = %s",
+            "subject_namespace = %s",
+            "service_key = %s",
+            "tenant = %s",
+        ]
         values = [
             data["cloud_account_id"],
             "configuration_change",
             finding["subject_namespace"],
             finding["service_key"],
+            data["tenant"],
         ]
+        # A finding without a start time cannot bound anything; keep the old
+        # behaviour for it rather than dropping every candidate change.
+        alert_starts_at = _as_naive_utc(finding.get("starts_at"))
+        if alert_starts_at is not None:
+            conditions.append("starts_at <= %s")
+            values.append(alert_starts_at)
+        select_config_change_event = sql.SQL(
+            "select id, service_key, evidences, starts_at from {} where "
+            + " and ".join(conditions)
+            + " order by starts_at desc nulls last limit 1"
+        ).format(sql.Identifier("events"))
         config_change_event = database.run_query(select_config_change_event, values)
     return config_change_event
 

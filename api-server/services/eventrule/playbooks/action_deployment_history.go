@@ -21,6 +21,21 @@ const (
 	deploymentHistoryLookbackHours = 168
 	deploymentHistoryLookback      = deploymentHistoryLookbackHours * time.Hour
 	deploymentHistoryLookbackLabel = "7 days"
+
+	// Bounds on the per-deployment change summary. The full evidences JSONB was
+	// removed from this response in #27136 after heap profiling showed it driving
+	// services-server to OOMKill at its 3GB limit (140MB fetched, 274MB marshaled
+	// into the response, 807MB re-serialized by InsertEvent). It is the pre-change
+	// and post-change YAML manifests that carry that weight — averaging ~9.7KB per
+	// change against ~255B for the changed-field list alone, measured over 2530
+	// config changes.
+	//
+	// So the manifests stay out and only the changed paths come back, capped: a
+	// change touching 38 fields exists in the wild, and one long value (a full
+	// container command, a rendered annotation) would otherwise undo the saving on
+	// its own.
+	maxChangedFieldsPerDeployment = 20
+	maxChangedValueChars          = 256
 )
 
 type deploymentHistoryAction struct{}
@@ -49,6 +64,24 @@ type deploymentEventSummary struct {
 	DeploymentStrategy string    `json:"deployment_strategy,omitempty"` // canary, blue-green, rolling
 	CanarySteps        string    `json:"canary_steps,omitempty"`        // e.g., "10% → 30min pause"
 	RolloutStatus      string    `json:"rollout_status,omitempty"`      // aborted, paused, completed, updated
+
+	// ChangedFields is what this deployment actually changed. Every entry in the
+	// list carries the same generic title ("The deployment's configuration was
+	// changed"), so without this the operator sees N indistinguishable rows and
+	// cannot tell the command edit from the replica bump — which is the whole
+	// reason a wrong change gets blamed.
+	ChangedFields  []changedField `json:"updated_values,omitempty"`
+	FieldsOmitted  int            `json:"fields_omitted,omitempty"`
+	ValueTruncated bool           `json:"value_truncated,omitempty"`
+}
+
+// changedField is one path the deployment changed. Old is nil when the change
+// ADDED the field (the diff records a null there), which reads differently from
+// an empty string and is what the revert path keys on.
+type changedField struct {
+	Path string  `json:"path"`
+	Old  *string `json:"old"`
+	New  *string `json:"new"`
 }
 
 func (a *deploymentHistoryAction) CanAutoExecute(ctx PlaybookActionContext) bool {
@@ -310,6 +343,9 @@ func queryDeploymentEvents(accountId, rolloutName, namespace string, eventStartT
 		// Extract deployment strategy from evidences
 		dep.DeploymentStrategy, dep.CanarySteps = extractDeploymentStrategy(evidences)
 
+		// Extract the changed paths, WITHOUT the manifests they came from.
+		dep.ChangedFields, dep.FieldsOmitted, dep.ValueTruncated = extractChangedFields(evidences)
+
 		// Extract rollout status from title
 		dep.RolloutStatus = extractRolloutStatus(dep.Title)
 
@@ -318,6 +354,96 @@ func queryDeploymentEvents(accountId, rolloutName, namespace string, eventStartT
 
 	return deployments, nil
 }
+
+// extractChangedFields pulls the changed paths out of a config-change event's
+// diff evidence, bounded by maxChangedFieldsPerDeployment and
+// maxChangedValueChars. It deliberately reads only `updated_values` and never
+// `data.old` / `data.new` — those are the full manifests that made this response
+// an OOM source (see the constants above).
+//
+// omitted counts the fields dropped by the cap and truncated reports whether any
+// value was shortened, so the UI can say so rather than showing a clipped value
+// as if it were the whole thing — an operator approving a revert from a
+// half-rendered container command is the failure this guards against.
+func extractChangedFields(evidences []map[string]interface{}) (fields []changedField, omitted int, truncated bool) {
+	for _, evidence := range evidences {
+		if evidenceType, _ := evidence["type"].(string); evidenceType != "diff" {
+			continue
+		}
+		data, ok := evidence["data"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		updatedValues, ok := data["updated_values"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, raw := range updatedValues {
+			entry, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			path, _ := entry["path"].(string)
+			if path == "" {
+				continue
+			}
+			if len(fields) >= maxChangedFieldsPerDeployment {
+				omitted++
+				continue
+			}
+			oldVal, oldTruncated := renderChangedValue(entry["old"])
+			newVal, newTruncated := renderChangedValue(entry["new"])
+			truncated = truncated || oldTruncated || newTruncated
+			fields = append(fields, changedField{Path: path, Old: oldVal, New: newVal})
+		}
+	}
+	return fields, omitted, truncated
+}
+
+// renderChangedValue flattens a diff value to a bounded string. A nil result
+// means the diff recorded null there — the field was added by this change (or
+// removed, reading the other direction) — which must stay distinguishable from
+// an empty string. Non-scalars are marshaled rather than dropped: an env-var
+// object or a whole container is a legitimate value at a changed path.
+func renderChangedValue(v interface{}) (*string, bool) {
+	if v == nil {
+		return nil, false
+	}
+	var rendered string
+	switch typed := v.(type) {
+	case string:
+		rendered = typed
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			rendered = fmt.Sprintf("%v", typed)
+		} else {
+			rendered = string(encoded)
+		}
+	}
+	// The byte length is only a cheap pre-filter: a value can exceed it in bytes while being well
+	// within the limit in characters. Cut on a rune boundary — slicing bytes splits a multi-byte
+	// character in half and emits invalid UTF-8, and annotation values, env values and image tags
+	// carry non-ASCII into a string that is rendered straight into the page.
+	if len(rendered) > maxChangedValueChars {
+		cut := len(rendered)
+		count := 0
+		for i := range rendered {
+			if count == maxChangedValueChars {
+				cut = i
+				break
+			}
+			count++
+		}
+		// Report truncation only if something was actually removed. A 200-character value that
+		// happens to occupy 400 bytes reaches here untouched, and calling it truncated would put
+		// "long values are shortened" on the page beside a value shown in full.
+		return ptr(rendered[:cut]), cut < len(rendered)
+	}
+	return ptr(rendered), false
+}
+
+func ptr(s string) *string { return &s }
 
 // extractDeploymentStrategy extracts deployment strategy from evidences field
 func extractDeploymentStrategy(evidences []map[string]interface{}) (strategy, canarySteps string) {

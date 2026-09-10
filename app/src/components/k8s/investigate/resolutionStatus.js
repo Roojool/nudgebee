@@ -237,7 +237,15 @@ const ACTION_TITLE_BY_CARD = {
  * @param {string} cardId
  * @param {string} fallback
  */
-export const describeActionTitle = (cardId, fallback) => ACTION_TITLE_BY_CARD[cardKey(cardId)] || fallback || 'Run this action';
+export const describeActionTitle = (cardId, fallback, subject) => {
+  const title = ACTION_TITLE_BY_CARD[cardKey(cardId)];
+  if (!title) return fallback || 'Run this action';
+  // "the last deployment change" is only unambiguous when there was one. A workload with several
+  // recent changes gets several rows that read identically, and the operator cannot tell which
+  // change a row would undo — the very confusion this area is being fixed for. When the card knows
+  // which change it acts on, say so.
+  return subject ? `${title.replace(/ the last deployment change$/, '')} the change deployed ${subject}`.trim() : title;
+};
 
 /**
  * Whether a card is offering a way to act on the event right now.
