@@ -197,6 +197,62 @@ func TestValidateReferencedLabelValues(t *testing.T) {
 	})
 }
 
+// TestValidateReferencedLabelValues_MultipleWrongLabelsAreDeterministic guards the
+// concurrency refactor (nb-38104): labels are now probed in parallel (bounded fan-out)
+// instead of one at a time, but the function must still return the SAME error every run —
+// the first wrong label in sorted order — regardless of which goroutine's backend call
+// happens to finish first. Run repeatedly to surface any race-dependent flakiness a
+// single run could miss.
+func TestValidateReferencedLabelValues_MultipleWrongLabelsAreDeterministic(t *testing.T) {
+	ctx := mockRequestContext()
+	logReq := FetchLogRequest{AccountId: "acct", StartTime: 1000, EndTime: 2000}
+
+	for i := 0; i < 50; i++ {
+		src := &fakeLabelSource{labelValues: map[string][]string{
+			"app":       {"llm-server", "api-server"},
+			"namespace": {"prod", "staging"},
+			"pod":       {"pod-a", "pod-b"},
+		}}
+		// All three are wrong; "app" sorts first alphabetically, so its typo must always be
+		// the one reported.
+		err := validateReferencedLabelValues(ctx, src, logReq, map[string][]whereFieldValue{
+			"pod":       eqVals("pod-zzz"),
+			"namespace": eqVals("prodd"),
+			"app":       eqVals("llm-serverr"),
+		})
+		require.Errorf(t, err, "iteration %d", i)
+		assert.Containsf(t, err.Error(), "app", "iteration %d: must always report the first-sorted wrong label", i)
+		assert.Containsf(t, err.Error(), "llm-serverr", "iteration %d", i)
+		assert.NotContainsf(t, err.Error(), "namespace", "iteration %d: must not report a later label", i)
+		assert.NotContainsf(t, err.Error(), "pod-zzz", "iteration %d", i)
+	}
+}
+
+// TestValidateReferencedLabelValues_ProbesEveryReferencedLabel guards against a bug in the
+// bounded worker pool (e.g. an off-by-one on the concurrency limit or the results slice)
+// silently dropping a label instead of validating it.
+func TestValidateReferencedLabelValues_ProbesEveryReferencedLabel(t *testing.T) {
+	ctx := mockRequestContext()
+	logReq := FetchLogRequest{AccountId: "acct", StartTime: 1000, EndTime: 2000}
+	src := &fakeLabelSource{labelValues: map[string][]string{
+		"app": {"llm-server"}, "namespace": {"prod"}, "pod": {"pod-a"}, "container": {"main"},
+	}}
+
+	err := validateReferencedLabelValues(ctx, src, logReq, map[string][]whereFieldValue{
+		"app": eqVals("llm-server"), "namespace": eqVals("prod"),
+		"pod": eqVals("pod-a"), "container": eqVals("main"),
+	})
+	require.NoError(t, err)
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	queried := make(map[string]bool, len(src.valuesReqs))
+	for _, req := range src.valuesReqs {
+		queried[req.LabelName] = true
+	}
+	assert.Equal(t, map[string]bool{"app": true, "namespace": true, "pod": true, "container": true}, queried)
+}
+
 // The value check is the one that catches a valid field filtered to a value the backend
 // has never seen — the real-world "kubernetes.labels.app = app-dev turns 224,979 hits into
 // 0" case. It only works if the index reaches the source and a truncated value page is not

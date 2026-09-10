@@ -5,6 +5,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,11 +18,16 @@ import (
 // it; valuesErr forces QueryLabelValues to fail. lastValuesReq records the most recent
 // QueryLabelValues request so tests can assert on the (widened) time window passed in.
 type fakeLabelSource struct {
+	mu            sync.Mutex
 	labels        []OutputLogLabel
 	err           error
 	labelValues   map[string][]string
 	valuesErr     error
 	lastValuesReq FetchLogLabelValuesRequest
+	// valuesReqs records every QueryLabelValues call (lastValuesReq only keeps the most
+	// recent), so a test can assert every referenced label was actually probed under
+	// concurrent fan-out, not just the last one to finish.
+	valuesReqs    []FetchLogLabelValuesRequest
 	lastLabelsReq FetchLogLabelRequest
 	// probeLogs / probeErr are what QueryLogs answers the labelValueExists probe with:
 	// probeLogs non-empty means the backend does hold the value, probeErr means the probe
@@ -33,16 +39,23 @@ type fakeLabelSource struct {
 }
 
 func (f *fakeLabelSource) QueryLogs(_ *security.RequestContext, req FetchLogRequest) ([]OutputLog, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.probeCalled++
 	f.probeReqs = append(f.probeReqs, req)
 	return f.probeLogs, f.probeErr
 }
 func (f *fakeLabelSource) QueryLabels(_ *security.RequestContext, req FetchLogLabelRequest) ([]OutputLogLabel, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastLabelsReq = req
 	return f.labels, f.err
 }
 func (f *fakeLabelSource) QueryLabelValues(_ *security.RequestContext, req FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastValuesReq = req
+	f.valuesReqs = append(f.valuesReqs, req)
 	if f.valuesErr != nil {
 		return nil, f.valuesErr
 	}

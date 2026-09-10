@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // promqlLabelNameRe matches valid PromQL label names. Enforced on every
@@ -1220,6 +1222,13 @@ const labelValuesPageSize = 1000
 // far below this number, which is what CompleteTraceLabelValuesSource exists to handle.
 const maxLabelValuesToScan = labelValuesPageSize
 
+// labelValidationMaxConcurrency bounds how many labels validateReferencedLabelValues
+// probes at once. Matches seriesMatchMaxConcurrency's cap (prometheus_series.go) for
+// the same reason: enough to collapse a typical multi-field where-clause into one
+// round trip's worth of wall-clock, without firing an unbounded burst of concurrent
+// queries at the backend when a request references many labels.
+const labelValidationMaxConcurrency = 6
+
 // unknownValueError builds the actionable message returned when a query filters a label to a
 // value the provider has never seen. It names the label and offending value plus the closest
 // valid value(s); when nothing is close it gives action-agnostic guidance (verify or drop the
@@ -1360,36 +1369,54 @@ func validateReferencedLabelValues(ctx *security.RequestContext, source LogSourc
 
 	labels := make([]string, 0, len(referencedValues))
 	for label := range referencedValues {
-		labels = append(labels, label)
-	}
-	sort.Strings(labels)
-
-	for _, label := range labels {
 		// Line-body filters (content/message/…) aren't labels — never value-check them.
 		if _, ok := lineContent[label]; ok {
 			continue
 		}
-		labelValues, err := source.QueryLabelValues(ctx, FetchLogLabelValuesRequest{
-			LabelName:         label,
-			AccountId:         fetchLogRequest.AccountId,
-			LogProvider:       fetchLogRequest.LogProvider,
-			LogProviderSource: fetchLogRequest.LogProviderSource,
-			StartTime:         startTime,
-			EndTime:           endTime,
-			// Same index the log query used. nil for every non-ES provider, which is
-			// what preserves their existing (window-driven) value discovery.
-			Request: labelDiscoveryRequest(fetchLogRequest.Request),
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+
+	// Probe every label concurrently — each is an independent backend lookup. errgroup
+	// here is used purely for bounded concurrency + wait: each goroutine writes its own
+	// indexed slot and always returns nil, so the sequential scan below still returns the
+	// same "first unmatched label in sorted order" result the original sequential loop
+	// did, deterministically, regardless of which probe happens to finish first.
+	errs := make([]error, len(labels))
+	eg := new(errgroup.Group)
+	eg.SetLimit(labelValidationMaxConcurrency)
+	for i := range labels {
+		i := i
+		eg.Go(func() error {
+			label := labels[i]
+			labelValues, err := source.QueryLabelValues(ctx, FetchLogLabelValuesRequest{
+				LabelName:         label,
+				AccountId:         fetchLogRequest.AccountId,
+				LogProvider:       fetchLogRequest.LogProvider,
+				LogProviderSource: fetchLogRequest.LogProviderSource,
+				StartTime:         startTime,
+				EndTime:           endTime,
+				// Same index the log query used. nil for every non-ES provider, which is
+				// what preserves their existing (window-driven) value discovery.
+				Request: labelDiscoveryRequest(fetchLogRequest.Request),
+			})
+			// Unknown label or discovery failure → fail open; an empty listing usually means the
+			// lookup itself is broken, not that the label has no values.
+			if err != nil || len(labelValues) == 0 {
+				return nil
+			}
+			// A page returned at exactly the cap is truncated. Its values are still real, so a
+			// filter missing from it is still worth confirming — but the closest match to a wrong
+			// value may be one of the ones we never saw, so it must not be offered as a suggestion.
+			suggestable := len(labelValues) < maxLabelValuesToScan
+			errs[i] = unmatchedValueError(ctx, source, fetchLogRequest, label, referencedValues[label], labelValues, suggestable, startTime, endTime)
+			return nil
 		})
-		// Unknown label or discovery failure → fail open; an empty listing usually means the
-		// lookup itself is broken, not that the label has no values.
-		if err != nil || len(labelValues) == 0 {
-			continue
-		}
-		// A page returned at exactly the cap is truncated. Its values are still real, so a
-		// filter missing from it is still worth confirming — but the closest match to a wrong
-		// value may be one of the ones we never saw, so it must not be offered as a suggestion.
-		suggestable := len(labelValues) < maxLabelValuesToScan
-		if err := unmatchedValueError(ctx, source, fetchLogRequest, label, referencedValues[label], labelValues, suggestable, startTime, endTime); err != nil {
+	}
+	_ = eg.Wait() // goroutines never return an error; per-label results live in errs.
+
+	for _, err := range errs {
+		if err != nil {
 			return err
 		}
 	}
