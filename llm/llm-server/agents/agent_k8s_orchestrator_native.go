@@ -10,10 +10,11 @@ import (
 )
 
 // AgentK8sOrchestratorNativeName is the K8s-native variant of the K8s
-// orchestrator. It exposes a lean, kubectl-first tool set — kubectl_execute
-// for every cluster-side operation, standard_diagnostic_grep for
-// categorised grep bundles on saved log files, shell_execute for
-// post-processing, helm_execute for chart operations, plus the metrics
+// orchestrator. It exposes a lean, Kubernetes-CLI-first tool set —
+// kubectl_execute for standalone reads and mutations, shell_execute for
+// bounded read-only composition and local computation,
+// standard_diagnostic_grep for categorised grep bundles on saved log files,
+// helm_execute for chart operations, plus the metrics
 // and traces sub-agents for historical telemetry. Cloud provider
 // wrappers (aws/gcp/azure/datadog), NL-wrapper sub-agents (logs / events
 // / resource_search / fetch_logs / service_dependency_graph / server) and
@@ -79,7 +80,7 @@ func (a *K8sNativeAgent) GetNameAliases() []string {
 }
 
 func (a *K8sNativeAgent) GetDescription() string {
-	return `SRE/DevOps troubleshooting expert operating in K8s-native mode: cluster-side operations (logs, events, resources, describe, exec, mutations) run directly through kubectl_execute; historical / custom metrics via the metrics sub-agent; traces via the traces sub-agent; helm operations via helm_execute; shell-side post-processing via shell_execute. Selected when the operator or caller has declared K8s-native intent — optimized for direct cluster diagnostics.`
+	return `SRE/DevOps troubleshooting expert operating in K8s-native mode: standalone Kubernetes reads and mutations run through kubectl_execute; bounded read-only pipelines, loops, combined queries, and local computation run through shell_execute; historical / custom metrics use the metrics sub-agent; traces use the traces sub-agent; helm operations use helm_execute. Selected when the operator or caller has declared K8s-native intent — optimized for CLI-native cluster diagnostics.`
 }
 
 func (a *K8sNativeAgent) GetPlannerType() core.AgentPlannerType {
@@ -107,9 +108,9 @@ func (a *K8sNativeAgent) GetSupportedTools(ctx *security.RequestContext) []toolc
 		TracesAgentName,                  // in-cluster trace queries
 		NudgebeeAgentName,                // Nudgebee product docs and authorized configuration state
 	}
-	// shell_execute handles post-processing (grep/awk/sort) of kubectl
-	// output saved to workspace files. standard_diagnostic_grep also
-	// depends on the underlying shell primitive.
+	// shell_execute handles bounded read-only Kubernetes composition and local
+	// processing. standard_diagnostic_grep also depends on the underlying shell
+	// primitive.
 	names = append(names, toolcore.ToolExecuteShellCommand)
 	if config.Config.LlmServerThinkToolEnabled {
 		names = append(names, tools.ThinkToolName)
