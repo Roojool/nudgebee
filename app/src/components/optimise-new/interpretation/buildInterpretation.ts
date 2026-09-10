@@ -11,7 +11,14 @@
  * lighter title/insight re-frame and degrades gracefully.
  */
 import type { InterpretationData } from './InterpretationPanel';
-import { summarizeRightSizing, summarizeCloudRightSizing, formatCloudTargetSpec, type RightSizingSummary } from '../rightSizingData';
+import {
+  summarizeRightSizing,
+  summarizeCloudRightSizing,
+  formatCloudTargetSpec,
+  splitSavings,
+  type RightSizingSummary,
+  type SavingsSplit,
+} from '../rightSizingData';
 import { summarizeConfigIssues } from '../evidence/configIssues';
 
 interface BuildArgs {
@@ -151,7 +158,8 @@ export function formatReplicaWindow(r: RightSizingSummary['replicas']): string {
 
 function podRightSizing(
   summary: RightSizingSummary,
-  savings: number
+  savings: number,
+  split: SavingsSplit | null = null
 ): Pick<InterpretationData, 'verdict' | 'impact' | 'impactIsCost' | 'evidence' | 'confidence' | 'observedWindow'> {
   const containerLabel = summary.containerCount > 1 ? `${summary.primary} (+${summary.containerCount - 1} more)` : summary.primary;
   const verdict = summary.changeText
@@ -164,7 +172,21 @@ function podRightSizing(
   // The dollar figure is per pod times replicas; say which replica count it
   // assumed so a swing on an autoscaled workload reads as a range, not a bug.
   const atReplicas = formatReplicaWindow(summary.replicas);
-  if (Math.round(savings) >= 1) {
+  if (split && Math.round(split.gross) >= 1 && Math.round(split.cost) >= 1) {
+    // Name containers by the side they contributed to, not by their own net: a
+    // container whose cpu saving and memory cost cancel still belongs on both.
+    const saver = split.containers.filter((c) => (c.cpu ?? 0) > 0 || (c.memory ?? 0) > 0).map((c) => c.name);
+    const payer = split.containers.filter((c) => (c.cpu ?? 0) < 0 || (c.memory ?? 0) < 0).map((c) => c.name);
+    const netText =
+      Math.round(Math.abs(split.net)) >= 1 ? `net ${split.net > 0 ? 'saves' : 'costs'} ~$${Math.round(Math.abs(split.net))}/mo` : 'net ~$0/mo';
+    const sameContainers = saver.join(', ') === payer.join(', ');
+    impact = sameContainers
+      ? `Saves ~$${Math.round(split.gross)}/mo and costs ~$${Math.round(split.cost)}/mo more on ${saver.join(', ')} · ${netText}${atReplicas}.`
+      : `Saves ~$${Math.round(split.gross)}/mo on ${saver.join(', ')} · costs ~$${Math.round(split.cost)}/mo more on ${payer.join(
+          ', '
+        )} · ${netText}${atReplicas}.`;
+    impactIsCost = Math.round(split.net) >= 1;
+  } else if (Math.round(savings) >= 1) {
     impact = `~$${Math.round(savings)}/mo savings${atReplicas}${summary.reclaimText ? ` · reclaims ${summary.reclaimText}` : ''}.`;
     impactIsCost = true;
   } else if (monthlyIncrease >= 1) {
@@ -287,7 +309,7 @@ export function buildInterpretation({
   if (ruleName === 'pod_right_sizing') {
     const summary = recData ? summarizeRightSizing(recData) : null;
     if (summary) {
-      const r = podRightSizing(summary, savings || 0);
+      const r = podRightSizing(summary, savings || 0, splitSavings(recData));
       return {
         verdict: r.verdict,
         serviceName: serviceName || undefined,

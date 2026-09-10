@@ -373,6 +373,13 @@ def calculate_container_savings(
         memory_cost_per_hour: Cost per GB of memory per hour
         pods_count: Running pods for the workload; the per-pod saving is scaled by this
 
+    Each priced entry also keeps its own signed monthly figure in
+    add_info.estimated_savings. The row stores only the workload net, and a
+    container that saves on one resource and pays on another nets to nothing
+    there; the per-entry figures are what lets a reader show the saving and
+    the added cost side by side. Keep in sync with
+    process_resource_recommendation in the k8s-collector.
+
     Returns:
         Estimated monthly savings in dollars, which may be negative when the
         recommendation raises requests
@@ -400,15 +407,22 @@ def calculate_container_savings(
             # CPU costs are per core
             original_hourly_cost = allocated_request * cpu_cost_per_hour
             new_hourly_cost = recommended_request * cpu_cost_per_hour
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas  # Monthly savings
-
         elif resource_type == "memory":
             # Memory costs are per GB (values in bytes, convert to GB)
             original_gb = allocated_request / (1024 * 1024 * 1024)
             recommended_gb = recommended_request / (1024 * 1024 * 1024)
             original_hourly_cost = original_gb * memory_cost_per_hour
             new_hourly_cost = recommended_gb * memory_cost_per_hour
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas  # Monthly savings
+        else:
+            continue
+
+        entry_saving = (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas  # Monthly savings
+        add_info = rec.get("add_info")
+        if not isinstance(add_info, dict):
+            add_info = {}
+            rec["add_info"] = add_info
+        add_info["estimated_savings"] = entry_saving
+        saving += entry_saving
 
     return saving
 

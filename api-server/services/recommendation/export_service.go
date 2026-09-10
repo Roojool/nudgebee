@@ -70,6 +70,10 @@ type ContainerRecommendation struct {
 		Request *float64 `json:"request"`
 		Limit   *float64 `json:"limit"`
 	} `json:"recommended"`
+	AddInfo struct {
+		// This entry's own signed monthly figure, stamped by the producers.
+		EstimatedSavings *float64 `json:"estimated_savings"`
+	} `json:"add_info"`
 }
 
 // GenerateRecommendationExport generates an export file and returns base64 encoded data

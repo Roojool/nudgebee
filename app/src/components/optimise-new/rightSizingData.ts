@@ -110,6 +110,37 @@ const allocOf = (entry: any): number | null => {
   return typeof v === 'number' ? v : null;
 };
 
+export interface SavingsSplit {
+  /** Sum of the entries that save money, per month. */
+  gross: number;
+  /** Sum of the entries that cost money, per month, as a positive number. */
+  cost: number;
+  net: number;
+  containers: { name: string; cpu: number | null; memory: number | null; total: number }[];
+}
+
+/** Per-entry signed figures the producers stamp on add_info; null on rows written before. */
+export function splitSavings(recData: any): SavingsSplit | null {
+  const containers = extractContainerData(recData);
+  let seen = false;
+  let gross = 0;
+  let cost = 0;
+  const out: SavingsSplit['containers'] = [];
+  for (const c of containers) {
+    const cpu = typeof c.cpu?.add_info?.estimated_savings === 'number' ? c.cpu.add_info.estimated_savings : null;
+    const memory = typeof c.memory?.add_info?.estimated_savings === 'number' ? c.memory.add_info.estimated_savings : null;
+    if (cpu == null && memory == null) continue;
+    seen = true;
+    for (const v of [cpu, memory]) {
+      if (v == null) continue;
+      if (v > 0) gross += v;
+      else cost -= v;
+    }
+    out.push({ name: c.containerName, cpu, memory, total: (cpu || 0) + (memory || 0) });
+  }
+  return seen ? { gross, cost, net: gross - cost, containers: out } : null;
+}
+
 export function summarizeRightSizing(recData: any): RightSizingSummary | null {
   const containers = extractContainerData(recData);
   if (containers.length === 0) return null;

@@ -85,14 +85,55 @@ def format_savings(amount: float) -> str:
     return f"${amount:.2f}"
 
 
-def format_savings_clause(amount: float) -> str:
+def savings_split(recommendation: Any) -> Optional[Tuple[float, float]]:
+    """(gross saving, added cost) per month from the per-entry figures a pod
+    rightsizing producer stamps on add_info.estimated_savings, or None when the
+    payload carries none (rows written before the producers recorded them, and
+    every other rule)."""
+    if not isinstance(recommendation, dict):
+        return None
+    gross = 0.0
+    cost = 0.0
+    seen = False
+    for resources in recommendation.values():
+        if not isinstance(resources, list):
+            continue
+        for res in resources:
+            if not isinstance(res, dict):
+                continue
+            add_info = res.get("add_info")
+            figure = add_info.get("estimated_savings") if isinstance(add_info, dict) else None
+            if not isinstance(figure, (int, float)) or isinstance(figure, bool):
+                continue
+            seen = True
+            if figure > 0:
+                gross += figure
+            else:
+                cost -= figure
+    return (gross, cost) if seen else None
+
+
+def is_mixed_split(split: Optional[Tuple[float, float]]) -> bool:
+    """Both a saving and an added cost of at least a dollar."""
+    return split is not None and split[0] >= 1 and split[1] >= 1
+
+
+def format_savings_clause(amount: float, recommendation: Any = None) -> str:
     """The savings clause for one recommendation, worded for its direction.
 
     A negative estimated_savings is a cost impact, not a saving: right-sizing an
     under-provisioned workload up buys reliability and raises the bill. Rendering
     it through format_savings alone produces "Savings: $-38.13/mo", so flip the
     wording rather than the sign.
+
+    A workload that saves on one container and pays on another nets to almost
+    nothing in `amount`; when the payload carries the per-entry figures, name
+    both sides so the row never reads as "no cost change".
     """
+    split = savings_split(recommendation)
+    if is_mixed_split(split):
+        gross, cost = split  # type: ignore[misc]
+        return f"Saves {format_savings(gross)}/mo · costs {format_savings(cost)}/mo more"
     if amount < 0:
         return f"Costs {format_savings(-amount)}/mo more"
     return f"Savings: {format_savings(amount)}/mo"
@@ -340,7 +381,11 @@ def build_posture_item_attachments(
     for account_name, rec in ranked[:MAX_ALERT_ITEMS]:
         title = f"{format_rule_name(rec.rule_name)} — {short_resource_name(rec.resource_name)}"
         lines = [f"*{title}*"]
-        if rec.estimated_savings > 0:
+        split = savings_split(rec.recommendation)
+        if is_mixed_split(split):
+            gross, cost = split  # type: ignore[misc]
+            lines.append(f"Saves *{format_savings(gross)}/mo* · costs *{format_savings(cost)}/mo* more")
+        elif rec.estimated_savings > 0:
             lines.append(
                 f"Save *{format_savings(rec.estimated_savings)}/mo*{format_waste_clause(rec.wasted_since_detected)}"
             )

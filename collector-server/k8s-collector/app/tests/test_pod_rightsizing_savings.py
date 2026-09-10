@@ -113,6 +113,49 @@ class TestEntriesWithoutNumbers(unittest.TestCase):
         self.assertTrue(ignore)
 
 
+# Golden vector shared with the ml-k8s-server twin (test_vertical_rightsizing_savings.py):
+# an app container that saves on both resources and a sidecar that pays on both.
+# Per pod: app cpu 1.0->0.5 (+$14.40), app memory 4G->2G (+$7.20),
+# sidecar cpu 0.1->0.3 (-$5.76), sidecar memory 1G->2G (-$3.60); net +$12.24.
+# Memory figures are matched to the cent: this producer rounds the recommended
+# memory to a Mi boundary first, the ml-k8s-server twin does not.
+MIXED_APP = [_entry("cpu", 1.0, 0.5), _entry("memory", 4 * GB, 2 * GB)]
+MIXED_SIDECAR = [_entry("cpu", 0.1, 0.3), _entry("memory", 1 * GB, 2 * GB)]
+MIXED_EXPECTED = {
+    "app": {"cpu": 14.40, "memory": 7.20},
+    "sidecar": {"cpu": -5.76, "memory": -3.60},
+}
+
+
+class TestPerEntryFigures(unittest.TestCase):
+    def test_each_entry_keeps_its_own_signed_figure(self):
+        for name, content in (("app", MIXED_APP), ("sidecar", MIXED_SIDECAR)):
+            with self.subTest(container=name):
+                total, _ = process_resource_recommendation(CPU_RATE, MEM_RATE, content, SETTINGS, "res-1", 1)
+                by_resource = {e["resource"]: e["add_info"]["estimated_savings"] for e in content}
+                for resource, expected in MIXED_EXPECTED[name].items():
+                    self.assertAlmostEqual(by_resource[resource], expected, delta=0.01)
+                self.assertAlmostEqual(total, sum(MIXED_EXPECTED[name].values()), delta=0.02)
+
+    def test_entry_figures_carry_the_replica_multiplier(self):
+        content = [_entry("cpu", 1.0, 0.5)]
+        process_resource_recommendation(CPU_RATE, MEM_RATE, content, SETTINGS, "res-1", 3)
+        self.assertAlmostEqual(content[0]["add_info"]["estimated_savings"], 3 * 0.5 * CPU_RATE * HOURS_PER_MONTH)
+
+    def test_unpriced_entries_get_no_figure(self):
+        content = [{"resource": "memory", "info": "No data"}, _entry("cpu", 1.0, 0.5)]
+        process_resource_recommendation(CPU_RATE, MEM_RATE, content, SETTINGS, "res-1", 1)
+        self.assertNotIn("add_info", content[0])
+        self.assertAlmostEqual(content[1]["add_info"]["estimated_savings"], 0.5 * CPU_RATE * HOURS_PER_MONTH)
+
+    def test_entry_figure_is_added_to_existing_add_info(self):
+        entry = _entry("cpu", 1.0, 0.5)
+        entry["add_info"] = {"replicas": {"avg": 2}}
+        process_resource_recommendation(CPU_RATE, MEM_RATE, [entry], SETTINGS, "res-1", 1)
+        self.assertEqual(entry["add_info"]["replicas"], {"avg": 2})
+        self.assertAlmostEqual(entry["add_info"]["estimated_savings"], 0.5 * CPU_RATE * HOURS_PER_MONTH)
+
+
 if __name__ == "__main__":
     unittest.main()
 

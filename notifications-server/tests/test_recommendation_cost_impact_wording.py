@@ -17,7 +17,12 @@ from notifications_server.message_templates.google_chat.recommendation_resolutio
 from notifications_server.message_templates.ms_teams.recommendation_resolution import (
     get_teams_recommendation_resolution_template,
 )
-from notifications_server.message_templates.slack.recommendation_nudge_digest import format_savings_clause
+from notifications_server.message_templates.slack.recommendation_nudge_digest import (
+    DigestRecommendation,
+    format_savings_clause,
+    build_posture_item_attachments,
+    savings_split,
+)
 from notifications_server.message_templates.slack.recommendation_resolution import (
     RecommendationResolutionParams,
 )
@@ -81,3 +86,53 @@ def test_real_savings_still_render_as_savings(render):
     body = _text(render(_params(212.98)))
     assert "212.98" in body
     assert "Costs" not in body
+
+
+# A mixed workload: the app container saves, the sidecar costs, and the row net
+# is a few cents. The per-entry figures come from the producers' add_info stamp.
+def _entry(resource, dollars):
+    return {
+        "resource": resource,
+        "allocated": {"request": 1},
+        "recommended": {"request": 2},
+        "add_info": {"estimated_savings": dollars},
+    }
+
+
+MIXED_PAYLOAD = {
+    "app": [_entry("cpu", 28.2), _entry("memory", 12.1)],
+    "sidecar": [_entry("cpu", -10.0), _entry("memory", -29.93)],
+}
+SAVING_ONLY_PAYLOAD = {"app": [_entry("cpu", 28.2), _entry("memory", 12.1)]}
+LEGACY_PAYLOAD = {"app": [{"resource": "cpu", "allocated": {"request": 1}, "recommended": {"request": 0.5}}]}
+
+
+def test_split_reads_the_per_entry_figures():
+    assert savings_split(MIXED_PAYLOAD) == pytest.approx((40.3, 39.93))
+    assert savings_split(SAVING_ONLY_PAYLOAD) == pytest.approx((40.3, 0))
+    assert savings_split(LEGACY_PAYLOAD) is None
+    assert savings_split("not a payload") is None
+
+
+def test_mixed_workload_names_both_sides_instead_of_the_net():
+    assert format_savings_clause(0.37, MIXED_PAYLOAD) == "Saves $40.30/mo · costs $39.93/mo more"
+
+
+def test_single_direction_payload_keeps_the_net_wording():
+    assert format_savings_clause(40.3, SAVING_ONLY_PAYLOAD) == "Savings: $40.30/mo"
+    assert format_savings_clause(-38.13, LEGACY_PAYLOAD) == "Costs $38.13/mo more"
+
+
+def test_digest_attachment_names_both_sides_for_a_mixed_workload():
+    rec = DigestRecommendation(
+        id="r1",
+        rule_name="pod_right_sizing",
+        resource_name="checkout",
+        finops_score=50,
+        finops_band="Medium",
+        estimated_savings=0.37,
+        recommendation=MIXED_PAYLOAD,
+    )
+    text = build_posture_item_attachments([("k8s-prod", rec)], base_url="", color="#000000")[0]["text"]
+    assert "Saves *$40.30/mo* · costs *$39.93/mo* more" in text
+    assert "Save *$0" not in text

@@ -1560,7 +1560,9 @@ def process_resource_recommendation(
     usable numbers contributes nothing rather than discarding the container
     (a sidecar with no memory series must not erase the app container's
     cpu saving). A container with no usable entry at all is still dropped:
-    there is nothing to show for it.
+    there is nothing to show for it. Each priced entry keeps its own signed
+    monthly figure in add_info.estimated_savings, so a reader can show the
+    saving and the added cost side by side where the row net cancels them.
     """
     saving = 0
     new_cpu = 0
@@ -1591,7 +1593,13 @@ def process_resource_recommendation(
                 memory_cost_per_hour, rec, settings
             )
         if new_hourly_cost != 0 and original_hourly_cost != 0:
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas
+            entry_saving = (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas
+            add_info = rec.get("add_info")
+            if not isinstance(add_info, dict):
+                add_info = {}
+                rec["add_info"] = add_info
+            add_info["estimated_savings"] = entry_saving
+            saving += entry_saving
     if r_content and usable_entries == 0:
         logging.info(f"No usable data for any resource on {resource_id}, ignoring the container")
         ignore_recommendation = True

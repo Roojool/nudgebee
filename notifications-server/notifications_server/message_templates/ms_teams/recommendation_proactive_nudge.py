@@ -63,7 +63,7 @@ def get_teams_recommendation_proactive_nudge_template(
         for rec in acc_data.recommendations[:5]:
             rec_text = (
                 f"{counter}. **{rec.resource_name}** — {format_rule_name(rec.rule_name)}\n"
-                f"{format_savings_clause(rec.estimated_savings)} · "
+                f"{format_savings_clause(rec.estimated_savings, rec.recommendation)} · "
                 f"Severity: {rec.severity}"
             )
             body.append(

@@ -31,7 +31,8 @@ def get_gchat_recommendation_proactive_nudge_template(
         lines.append(f"*{acc_data.account_name}*")
         for rec in acc_data.recommendations[:5]:
             lines.append(f"  {counter}. *{rec.resource_name}* \u2014 {format_rule_name(rec.rule_name)}")
-            lines.append(f"     {format_savings_clause(rec.estimated_savings)} \u00b7 " f"Severity: {rec.severity}")
+            clause = format_savings_clause(rec.estimated_savings, rec.recommendation)
+            lines.append(f"     {clause} \u00b7 " f"Severity: {rec.severity}")
             counter += 1
 
         remaining = len(acc_data.recommendations) - 5

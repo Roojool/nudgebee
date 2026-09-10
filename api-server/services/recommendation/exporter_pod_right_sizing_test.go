@@ -37,10 +37,10 @@ func TestPodRightSizingRowsCarryWorkloadSavingsOnce(t *testing.T) {
 		t.Fatalf("later container rows must leave the savings blank, got %v", *second.WorkloadSavings)
 	}
 
-	if got := first.ToStringSlice()[10]; got != "40.00" {
+	if got := first.ToStringSlice()[12]; got != "40.00" {
 		t.Fatalf("savings column on the first row = %q", got)
 	}
-	if got := second.ToStringSlice()[10]; got != "" {
+	if got := second.ToStringSlice()[12]; got != "" {
 		t.Fatalf("savings column on the second row = %q", got)
 	}
 	if first.MemoryRequest != 2048 || first.MemoryRecommended != 1024 || first.MemorySavings != 50 {
@@ -51,13 +51,35 @@ func TestPodRightSizingRowsCarryWorkloadSavingsOnce(t *testing.T) {
 	}
 }
 
+func TestPodRightSizingRowsCarryEachEntrysOwnFigure(t *testing.T) {
+	app := containerRec("cpu", 2, 1)
+	app.AddInfo.EstimatedSavings = f(28.2)
+	appMemory := containerRec("memory", 2048*1024*1024, 1024*1024*1024)
+	appMemory.AddInfo.EstimatedSavings = f(-10)
+	recMap := map[string][]ContainerRecommendation{
+		"app":     {app, appMemory},
+		"sidecar": {containerRec("cpu", 0.5, 0.1)},
+	}
+	rows := podRightSizingRows(PodRightSizingRow{}, recMap, 18.2)
+
+	first := rows[0].(*PodRightSizingRow).ToStringSlice()
+	if first[7] != "28.20" || first[11] != "-10.00" {
+		t.Fatalf("per-resource figures on the app row = %q and %q", first[7], first[11])
+	}
+	// A row written before the producers stamped the figure stays blank there.
+	second := rows[1].(*PodRightSizingRow).ToStringSlice()
+	if second[7] != "" || second[11] != "" {
+		t.Fatalf("per-resource figures without a stamp = %q and %q", second[7], second[11])
+	}
+}
+
 func TestPodRightSizingRowsColumnsMatchHeader(t *testing.T) {
 	cols := (&PodRightSizingExporter{}).GetColumns()
 	rows := podRightSizingRows(PodRightSizingRow{}, map[string][]ContainerRecommendation{"app": {}}, 0)
 	if got := len(rows[0].ToStringSlice()); got != len(cols) {
 		t.Fatalf("row has %d cells for %d columns", got, len(cols))
 	}
-	if cols[10].Name != "Workload Monthly Savings ($)" {
-		t.Fatalf("savings header = %q", cols[10].Name)
+	if cols[12].Name != "Workload Monthly Savings ($)" {
+		t.Fatalf("savings header = %q", cols[12].Name)
 	}
 }

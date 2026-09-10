@@ -22,6 +22,7 @@ import Currency from '@shared/format/Currency';
 import Datetime from '@shared/format/Datetime';
 import recommendationApi from '@api1/recommendation';
 import { daysSinceLong, dismissalLabel, getResourceDisplayName } from './utils';
+import { splitSavings } from './rightSizingData';
 import CommandExecutionHistory from '@components/cloudaccount/CommandExecutionHistory';
 
 // Severity → DS Label tone (mirrors the summary list mapping).
@@ -213,6 +214,8 @@ const RecommendationDetailPanel = ({
   const category = rec.category || '';
   const ruleName = rec.rule_name || '';
   const savings = rec.estimated_savings || 0;
+  const split = ruleName === 'pod_right_sizing' ? splitSavings(rec.recommendation) : null;
+  const mixed = Boolean(split && Math.round(split.gross) >= 1 && Math.round(split.cost) >= 1);
   const status = rec.status || 'Open';
   const namespace = rec.resource_k8s_namespace || '';
   const accountName = accounts[rec.account_id]?.name || '';
@@ -280,7 +283,7 @@ const RecommendationDetailPanel = ({
               onClick={onClose}
               id='detail-panel-close'
             />
-            {savings !== 0 && (
+            {(savings !== 0 || mixed) && (
               <Box sx={{ textAlign: 'right' }}>
                 <Typography
                   sx={{
@@ -295,7 +298,7 @@ const RecommendationDetailPanel = ({
                   {/* A negative estimated_savings is a cost increase, not a saving.
                       The figure below is already rendered as an absolute value, so
                       only the label distinguishes the two directions. */}
-                  {savings > 0 ? 'Projected Savings' : 'Additional Cost'}
+                  {mixed ? 'Net cost impact' : savings > 0 ? 'Projected Savings' : 'Additional Cost'}
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'flex-end', gap: ds.space[1], mt: ds.space[0] }}>
                   <Currency
@@ -305,13 +308,26 @@ const RecommendationDetailPanel = ({
                     sx={{
                       fontSize: ds.text.title,
                       fontWeight: ds.weight.semibold,
-                      color: savings > 0 ? ds.green[600] : ds.red[600],
+                      color: mixed && Math.round(Math.abs(savings)) < 1 ? ds.gray[700] : savings > 0 ? ds.green[600] : ds.red[600],
                     }}
                   />
                   <Box component='span' sx={{ fontSize: ds.text.caption, color: ds.gray[400], fontWeight: ds.weight.medium }}>
                     /mo
                   </Box>
                 </Box>
+                {mixed && split && (
+                  <Typography sx={{ fontSize: ds.text.caption, mt: ds.space[0], whiteSpace: 'nowrap' }}>
+                    <Box component='span' sx={{ color: ds.green[600], fontWeight: ds.weight.medium }}>
+                      saves ${Math.round(split.gross)}
+                    </Box>
+                    <Box component='span' sx={{ color: ds.gray[400] }}>
+                      {' · '}
+                    </Box>
+                    <Box component='span' sx={{ color: ds.red[600], fontWeight: ds.weight.medium }}>
+                      costs ${Math.round(split.cost)} more
+                    </Box>
+                  </Typography>
+                )}
               </Box>
             )}
           </Box>
