@@ -121,3 +121,25 @@ func TestProgressPreservedAfterComplete(t *testing.T) {
 	assert.Equal(t, "completed", state.Status)
 	assert.Equal(t, "Creating pull request...", state.Progress)
 }
+
+// A cancellation can land after InitAnalysis but before SetCancelFunc registers
+// the CancelFunc. CancelAnalysis can only record the status there, so honouring
+// the request falls to SetCancelFunc. Without that, the status says "cancelled",
+// CancelAnalysis has already returned true, and every later attempt short-circuits
+// on the non-running status — leaving the context live for the full deadline.
+func TestSetCancelFuncHonoursCancellationRequestedBeforeItRan(t *testing.T) {
+	InitAnalysis("test-cancel-before-registration")
+	defer CleanupAnalysis("test-cancel-before-registration")
+
+	require.True(t, CancelAnalysis("test-cancel-before-registration"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	SetCancelFunc("test-cancel-before-registration", cancel)
+
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("context still live after registering a cancel func on a cancelled analysis")
+	}
+}
