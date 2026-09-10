@@ -635,8 +635,8 @@ type appConfig struct {
 	// asserted symptom as a claim rather than a fact. Each orchestrator keeps its
 	// own provider-specific evidence recipe. Dark/default-off global deploy flag.
 	OrchestratorGroundingEnabled bool `mapstructure:"llm_orchestrator_grounding_enabled"`
-	// ClaimCritiqueShadowEnabled compares a claim audit with existing critique; never enforces it.
-	ClaimCritiqueShadowEnabled bool `mapstructure:"llm_claim_critique_shadow_enabled"`
+	// ClaimCritiqueFeedbackEnabled lets captured claim gaps use the existing refinement budget.
+	ClaimCritiqueFeedbackEnabled bool `mapstructure:"llm_claim_critique_feedback_enabled"`
 	// PremiseVerificationEnabled gates the "confirm the symptom before diagnosing it"
 	// discipline in the answer critiquer. When on, the top-level investigation must
 	// treat a user-asserted symptom ("X is down",
@@ -1398,7 +1398,7 @@ func init() {
 	viper.SetDefault("llm_server_k8s_orchestrator_mode", "lean")
 	viper.SetDefault("llm_orchestrator_grounding_enabled", false)
 	viper.SetDefault("llm_premise_verification_enabled", false)
-	viper.SetDefault("llm_claim_critique_shadow_enabled", false)
+	viper.SetDefault("llm_claim_critique_feedback_enabled", false)
 	viper.SetDefault("llm_server_workspace_port", 8080)
 	viper.SetDefault("llm_server_workspace_local_url", "")   // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_local_token", "") // must match NB_WORKSPACE_TOKEN on the local code-analysis process

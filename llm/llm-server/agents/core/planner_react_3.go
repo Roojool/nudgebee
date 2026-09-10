@@ -40,10 +40,7 @@ type NBReActPlanner3 struct {
 	retryConfig           RetryConfig
 	refinementAttempts    int
 	maxRefinementAttempts int
-	refinementData        []struct {
-		feedback string
-		answer   string
-	}
+	refinementData        []refinementRecord
 
 	// consecutiveNotebookOnlyTurns counts back-to-back turns whose only content
 	// was a notebook update (no action / final answer). It bounds the notebook-only
@@ -345,19 +342,21 @@ func (o *NBReActPlanner3) Marshal() ([]byte, error) {
 		"notebookStaleWarningsLog": o.notebookStaleWarningsLog,
 		"notebookAgentID":          o.notebookAgentID,
 	}
+	state["refinementData"] = o.refinementData
 	return common.MarshalJson(state)
 }
 
 // Unmarshal restores the planner state from JSON.
 func (o *NBReActPlanner3) Unmarshal(data []byte) error {
 	var state struct {
-		Notebook                 string `json:"notebook"`
-		RefinementAttempts       int    `json:"refinementAttempts"`
-		NotebookUpdateCount      int    `json:"notebookUpdateCount"`
-		NotebookLastUpdateTurn   *int   `json:"notebookLastUpdateTurn"`
-		NotebookFirstUpdateTurn  *int   `json:"notebookFirstUpdateTurn"`
-		NotebookStaleWarningsLog int    `json:"notebookStaleWarningsLog"`
-		NotebookAgentID          string `json:"notebookAgentID"`
+		RefinementData           []refinementRecord `json:"refinementData"`
+		Notebook                 string             `json:"notebook"`
+		RefinementAttempts       int                `json:"refinementAttempts"`
+		NotebookUpdateCount      int                `json:"notebookUpdateCount"`
+		NotebookLastUpdateTurn   *int               `json:"notebookLastUpdateTurn"`
+		NotebookFirstUpdateTurn  *int               `json:"notebookFirstUpdateTurn"`
+		NotebookStaleWarningsLog int                `json:"notebookStaleWarningsLog"`
+		NotebookAgentID          string             `json:"notebookAgentID"`
 	}
 	err := common.UnmarshalJson(data, &state)
 	if err != nil {
@@ -365,6 +364,10 @@ func (o *NBReActPlanner3) Unmarshal(data []byte) error {
 	}
 	o.Notebook = state.Notebook
 	o.refinementAttempts = state.RefinementAttempts
+	o.refinementData = nil
+	if config.Config.ClaimCritiqueFeedbackEnabled {
+		o.refinementData = state.RefinementData
+	}
 	// Any legacy PostRefinementToolIndex in the state blob is ignored — the
 	// refinement-focus compression path was removed in #33897, so the field
 	// has no runtime consumer. Old state deserializes cleanly (unknown JSON
@@ -1671,6 +1674,12 @@ func (o *NBReActPlanner3) Plan(
 	intermediateSteps []NBAgentPlannerToolActionStep,
 	input string,
 ) ([]NBAgentPlannerToolAction, *NBAgentPlannerFinishAction, error) {
+	// Feedback may request a tool read. Keep its budget and redirect when the
+	// executor returns with that observation, including approval/resume.
+	if config.Config.ClaimCritiqueFeedbackEnabled && len(intermediateSteps) == 0 {
+		o.refinementAttempts = 0
+		o.refinementData = nil
+	}
 	// Initialise stepCount from the existing history on the very first call.
 	// This handles resumed conversations where intermediateSteps already
 	// contains prior tool invocations: new DisplayIDs will continue from
@@ -1705,8 +1714,10 @@ func (o *NBReActPlanner3) Plan(
 		}
 	}
 
-	o.refinementAttempts = 0
-	o.refinementData = nil
+	if !config.Config.ClaimCritiqueFeedbackEnabled {
+		o.refinementAttempts = 0
+		o.refinementData = nil
+	}
 
 	firstPlanCallOfTurn := o.planCallCount == 0
 	o.planCallCount++
@@ -1776,7 +1787,7 @@ func (o *NBReActPlanner3) Plan(
 				for _, rd := range o.refinementData {
 					mcList = append(mcList, llms.MessageContent{
 						Role:  llms.ChatMessageTypeAI,
-						Parts: []llms.ContentPart{llms.TextContent{Text: rd.answer}},
+						Parts: []llms.ContentPart{llms.TextContent{Text: rd.Answer}},
 					})
 					// Refinement message: present the critique feedback without
 					// offering a rewrite-vs-tool opt-out. The critique prompt is
@@ -1785,7 +1796,7 @@ func (o *NBReActPlanner3) Plan(
 					// follow it. When no tool action is appropriate (format /
 					// hallucination / no-execution-path), the critique feedback
 					// itself will guide a rewrite.
-					feedbackMsg := fmt.Sprintf("The previous final answer was: %s\nThe critique feedback was: %s\nFollow the critique feedback exactly. If it names a specific tool to call, you MUST issue that tool action now via <thought_action> and produce no <final_answer> this turn. Otherwise, refine the answer to address the feedback. Refer to previous conversation/messages for better context.", rd.answer, rd.feedback)
+					feedbackMsg := fmt.Sprintf("The previous final answer was: %s\nThe critique feedback was: %s\nFollow the critique feedback exactly. If it names a specific tool to call, you MUST issue that tool action now via <thought_action> and produce no <final_answer> this turn. Otherwise, refine the answer to address the feedback. Refer to previous conversation/messages for better context.", rd.Answer, rd.Feedback)
 					mcList = append(mcList, llms.MessageContent{
 						Role:  llms.ChatMessageTypeHuman,
 						Parts: []llms.ContentPart{llms.TextContent{Text: feedbackMsg}},
@@ -1895,11 +1906,15 @@ func (o *NBReActPlanner3) Plan(
 				return actions, nil, nil
 			}
 
-			if o.refinementAttempts >= o.maxRefinementAttempts {
-				logger.Warn("reactagent3: max refinement attempts reached, accepting current answer", "attempts", o.refinementAttempts)
-				MetricsCritiqueDecision(o.nbAgent.GetName(), "force_accept", o.refinementAttempts)
-				return nil, finish, nil
+		}
+
+		if finish != nil && (!isSummaryToolUsed || config.Config.ClaimCritiqueFeedbackEnabled) && o.refinementAttempts >= o.maxRefinementAttempts {
+			logger.Warn("reactagent3: max refinement attempts reached, accepting current answer", "attempts", o.refinementAttempts)
+			if o.maxRefinementAttempts > 0 {
+				captureClaimBudgetStop(o.ctx, o.request, "react3", o.nbAgent.GetName(), input, finish.Data, o.Notebook, intermediateSteps)
 			}
+			MetricsCritiqueDecision(o.nbAgent.GetName(), "force_accept", o.refinementAttempts)
+			return nil, finish, nil
 		}
 
 		// Critique the final answer
@@ -1943,12 +1958,9 @@ func (o *NBReActPlanner3) Plan(
 			o.refinementAttempts++
 			logger.Info("reactagent3: answer rejected by critique, refining", "feedback", feedback, "attempt", o.refinementAttempts)
 			MetricsCritiqueDecision(o.nbAgent.GetName(), "refine", o.refinementAttempts)
-			o.refinementData = append(o.refinementData, struct {
-				feedback string
-				answer   string
-			}{
-				feedback: feedback,
-				answer:   finish.Data,
+			o.refinementData = append(o.refinementData, refinementRecord{
+				Feedback: feedback,
+				Answer:   finish.Data,
 			})
 			isSummaryToolUsed = false
 		}
@@ -2241,7 +2253,13 @@ func (o *NBReActPlanner3) runCritique(input, scratchpad, finalAnswer string, int
 	Debug(msg string, args ...any)
 }) (resultDecision, resultFeedback string) {
 	defer func() {
-		runClaimCritiqueShadow(o.ctx, o.request, "react3", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps)
+		resultDecision, resultFeedback = runClaimCritiqueShadow(o.ctx, o.request, "react3", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps)
+		// Surface the feedback actually returned to the planner, including claim gaps.
+		if !strings.EqualFold(resultDecision, "accept") && resultFeedback != "" {
+			if err := o.saveCritiqueAsToolCall(resultFeedback); err != nil {
+				logger.Error("reactagent3: failed to save critique as tool call", "error", err)
+			}
+		}
 	}()
 	// Same fail-safe as the format error below: critiquing under an empty instruction
 	// would reject or accept answers on no basis at all, so skip the gate and accept
@@ -2343,15 +2361,6 @@ func (o *NBReActPlanner3) runCritique(input, scratchpad, finalAnswer string, int
 	err := o.saveCritique("react_answer", input, finalAnswer, critiqueResult.Choices[0].Content, decision)
 	if err != nil {
 		logger.Error("reactagent3: failed to save critique", "error", err)
-	}
-
-	// When the critique rejects the answer, persist it as a dummy tool call so
-	// the UI can surface it in the agent's Tool Details drawer — giving the end
-	// user visibility that the system is refining its answer.
-	if !strings.EqualFold(decision, "accept") && feedback != "" {
-		if toolCallErr := o.saveCritiqueAsToolCall(feedback); toolCallErr != nil {
-			logger.Error("reactagent3: failed to save critique as tool call", "error", toolCallErr)
-		}
 	}
 
 	return decision, feedback

@@ -516,6 +516,9 @@ func (o *NBReActPlanner4) Plan(
 		}
 
 		if !o.shouldCritique() || len(o.refinementData) >= o.maxRefinementAttempts {
+			if o.shouldCritique() && o.maxRefinementAttempts > 0 && len(o.refinementData) >= o.maxRefinementAttempts {
+				captureClaimBudgetStop(o.ctx, o.request, "react4", o.agentName(), plannerInput, finish.Data, o.Notebook, intermediateSteps)
+			}
 			// Log the gate inputs on the skip path, exactly as react_3 does
 			// ("reactagent3: skipping critique"). Without this the accept and
 			// the never-ran cases are indistinguishable in logs — a silently
@@ -1645,7 +1648,7 @@ func (o *NBReActPlanner4) flattenTranscript(steps []NBAgentPlannerToolActionStep
 // analytics persistence for react_4 is a follow-up.
 func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, intermediateSteps []NBAgentPlannerToolActionStep) (resultDecision, resultFeedback string) {
 	defer func() {
-		runClaimCritiqueShadow(o.ctx, o.request, "react4", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps)
+		resultDecision, resultFeedback = runClaimCritiqueShadow(o.ctx, o.request, "react4", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps)
 	}()
 	logger := o.ctx.GetLogger()
 
