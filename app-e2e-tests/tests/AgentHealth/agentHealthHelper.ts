@@ -108,6 +108,23 @@ export async function openAgentHealthUnscoped(page: Page): Promise<AgentHealthLo
   return locators;
 }
 
+export const PREDATES_REDESIGN =
+  "The deployed app predates the Agent Health redesign (no Components card on the Agent tab).";
+
+// This suite runs against the DEPLOYED dev app, not the branch under review, so a page
+// change lands here one deploy later than the spec describing it. Probing for the redesign —
+// rather than assuming either shape — is what keeps these specs honest in both windows: they
+// exercise the new UI wherever it exists and skip where it does not, instead of failing every
+// run until the deploy catches up. Same reason the Observability tab already carries a guard.
+//
+// Waits for whichever shape the app has before answering, so it cannot mistake a page that
+// has not finished mounting for the old one. Remove this, and the guards calling it, once the
+// redesign is deployed everywhere.
+export async function hasRedesignedAgentTab(locators: AgentHealthLocators): Promise<boolean> {
+  await expect(locators.componentsCard.or(locators.legacyFeaturesHeading).first()).toBeVisible({ timeout: 60000 });
+  return (await locators.componentsCard.count()) > 0;
+}
+
 // MUI marks the open tab with aria-selected, and unlike the URL it is always in step with
 // which panel is mounted — agentHealth.jsx derives its tab from the hash, so the attribute
 // is what proves the derivation happened rather than just that the link changed the URL.

@@ -2,24 +2,41 @@
 import { Page, Locator, expect } from "@playwright/test";
 import { CommonLocators } from "../GlobalLocators";
 
-// Column contracts, copied from the header arrays in app/src/pages/agentHealth.jsx.
-export const AGENT_HEADERS = ["Status", "Agent Version", "Latest Version", "Last Connected", "K8s(Provider/Version)"];
+// Contracts copied from app/src/pages/agentHealth.jsx. They describe the K8s shape of the
+// page: a cloud account keeps the older one-row agent table (HEADERS_CLOUD) and a Features
+// block, which this suite's configured cluster never renders.
+// The facts the K8s summary card states about the install, as the `agent-fact-<key>`
+// testids name them. Same five values the old five-column agent table carried, minus
+// "Latest Version" — which now only appears in the update callout, since a cluster that
+// is already current has no use for it.
+export const AGENT_FACTS = ["version", "kubernetes", "namespace", "agent-url"];
 
-// Every entry the Agent tab's Features block renders for a k8s account, in page order.
-export const AGENT_FEATURES = ["Relay", "Prometheus", "Alert Manager", "Logs", "Traces", "OpenCost", "Node Agent"];
+// Every component the Agent tab's Components table reports on, in page order, keyed the
+// way its `component-<key>` testid is.
+export const AGENT_COMPONENTS = ["relay", "prometheus", "alert-manager", "logs", "traces", "opencost", "node-agent"];
 
-// What a feature row is allowed to report. OpenCost has a third state ("Managed server-side")
-// because the spend sync can collect it outside the agent, and logs/metrics/traces can read
-// "served by an integration" when a non-agent backend owns that signal — the Agent tab states
-// no status of its own for those, and the Observability tab reports them instead.
-export const FEATURE_STATE = /Connected|Disconnected|Managed server-side|served by an integration/;
+// What a component row is allowed to report. OpenCost has a third state ("Managed
+// server-side") because the spend sync can collect it outside the agent, and
+// logs/metrics/traces read "Served by integration" when a non-agent backend owns that
+// signal — the Agent tab states no health verdict of its own for those, and the
+// Observability tab reports them instead.
+export const COMPONENT_STATE = /Connected|Disconnected|Managed server-side|Served by integration/;
 
-// The status the page renders when the agent has never reported in. agentHealth.jsx prints
-// `acc.status.replace('_', ' ')`, so the raw NOT_CONNECTED reaches the cell as "NOT CONNECTED".
+// Column contract of the Components table, copied from HEADERS_COMPONENTS.
+export const COMPONENT_HEADERS = ["Component", "Status", "Endpoint", "Details"];
+
+// Column contract of the Scheduled Jobs table, copied from HEADERS_SCHEDULED_JOBS.
+export const SCHEDULED_JOB_HEADERS = ["Action Name", "Job Status", "Schedule", "Last Execution", "Executions"];
+
+// The status the summary card's chip reports when the agent has never reported in.
+// agentHealth.jsx prints the raw status with underscores swapped for spaces, so
+// NOT_CONNECTED reaches the chip as "NOT CONNECTED".
 export const NOT_CONNECTED = "NOT CONNECTED";
 
-// Column contract of the Observability tab, copied from HEADERS_OBSERVABILITY.
-export const OBSERVABILITY_HEADERS = ["Signal", "Provider", "Source", "Status", "Last Checked", "Error"];
+// The signals the Observability tab reports on, keyed as their `observability-<key>`
+// testids are, and what each card's chip is allowed to say.
+export const OBSERVABILITY_SIGNALS = ["logs", "metrics", "traces"];
+export const SIGNAL_STATE = /Connected|Disconnected|Not configured/;
 
 export class AgentHealthLocators extends CommonLocators {
   readonly agentTab: Locator;
@@ -27,15 +44,28 @@ export class AgentHealthLocators extends CommonLocators {
   readonly observabilityTab: Locator;
 
   readonly agentCard: Locator;
-  readonly agentTable: Locator;
-  readonly agentEmpty: Locator;
-  readonly notConnectedMessage: Locator;
-  readonly upgradeWarning: Locator;
-  readonly featuresHeading: Locator;
+  readonly agentStatusChip: Locator;
+  readonly disconnectedBanner: Locator;
+  readonly servicesBanner: Locator;
+  readonly updateBanner: Locator;
+  readonly updateGuideButton: Locator;
+
+  readonly componentsCard: Locator;
+  readonly componentsTable: Locator;
+  readonly componentsEmpty: Locator;
+
   readonly scheduledJobsCard: Locator;
+  readonly scheduledJobsTable: Locator;
+  readonly scheduledJobsFilter: Locator;
+
+  // The pre-redesign Agent tab's "Features" heading. Kept solely so the suite can tell an
+  // app that predates the redesign from one that already carries it — see
+  // hasRedesignedAgentTab.
+  readonly legacyFeaturesHeading: Locator;
 
   readonly proxyCard: Locator;
   readonly observabilityCard: Locator;
+  readonly observabilitySummary: Locator;
   readonly proxyOnboarding: Locator;
   readonly proxyPanel: Locator;
 
@@ -53,37 +83,49 @@ export class AgentHealthLocators extends CommonLocators {
       .or(page.locator("#tab-observability"))
       .first();
 
-    // The three cards are ListingLayout ids and nothing else: ListingLayout renders a plain
+    // The cards are ListingLayout ids and nothing else: ListingLayout renders a plain
     // Card <div> with no data-testid, no role and no accessible name, and the only text in
-    // it is the toolbar title — which is a child node, so matching on it would return the
-    // title rather than the card. Deliberately id-only; a wider fallback would be wrong.
+    // it is the header/toolbar title — which is a child node, so matching on it would
+    // return the title rather than the card. Deliberately id-only; a wider fallback would
+    // be wrong.
     this.agentCard = page.locator("#agent-health");
+    this.componentsCard = page.locator("#agent-components");
     this.scheduledJobsCard = page.locator("#scheduled-jobs-table");
     this.proxyCard = page.locator("#proxy-agent-health");
     this.observabilityCard = page.locator("#observability");
 
-    // Scoped to its own card, so the CSS fallback cannot drift to another table.
-    this.agentTable = this.agentCard.getByRole("table").or(this.agentCard.locator("table")).first();
+    // ds/Label takes an `id` but no data-testid (it declares its props and drops the rest),
+    // so the chips carry ids. Same for ds/Banner.
+    this.agentStatusChip = page.locator("#agent-status");
+    this.disconnectedBanner = page.locator("#agent-disconnected-banner");
+    this.servicesBanner = page.locator("#agent-services-banner");
+    this.updateBanner = page.locator("#agent-update-banner");
+    this.updateGuideButton = page.getByTestId("agent-update-guide-btn");
+    this.observabilitySummary = page.locator("#observability-summary");
 
-    // CustomTable is given no `id` here, so EmptyData's `#<id>-no-data` handle is useless —
-    // the heading is an <h2>, which is what the role primary reaches.
-    this.agentEmpty = this.agentCard
-      .getByRole("heading", { name: "No Data Available" })
-      .or(this.agentCard.getByText("No Data Available", { exact: true }))
-      .first();
+    // Each table is given an `id` by the page, which CustomTable puts on the <table>
+    // itself; role="table" via its aria-label is the primary, the id the fallback.
+    this.componentsTable = this.componentsCard.getByRole("table").or(page.locator("#agent-components-table")).first();
+    this.scheduledJobsTable = this.scheduledJobsCard.getByRole("table").or(page.locator("#scheduled-jobs")).first();
+    this.scheduledJobsFilter = page.locator("#scheduled-jobs-filter");
 
-    // Both banners are bare <Typography color='red'> inside the card: no role, no id, and
-    // the copy is the only thing identifying them. Scoped to the card and left fallback-less
-    // rather than matched page-wide.
-    this.notConnectedMessage = this.agentCard.getByText("The Agent is not connected", { exact: true });
-    this.upgradeWarning = this.agentCard.getByText("Please update your agent version", { exact: true });
-    this.featuresHeading = this.agentCard.getByText("Features", { exact: true });
+    // CustomTable's EmptyData heading is an <h2> carrying `#<table id>-no-data`.
+    this.componentsEmpty = this.emptyIn(this.componentsCard);
+
+    this.legacyFeaturesHeading = this.agentCard.getByText("Features", { exact: true });
 
     // The proxy empty state is an unadorned Box; its headline is the only stable handle.
     this.proxyOnboarding = page.getByText("Get started with Proxy Agent monitoring", { exact: true });
     // Whichever of the two the account has: a proxy agent reporting in gets the health card,
     // an account without one gets the onboarding panel. Both are the Proxy Agent tab's own body.
     this.proxyPanel = this.proxyCard.or(this.proxyOnboarding).first();
+  }
+
+  emptyIn(card: Locator): Locator {
+    return card
+      .getByRole("heading", { name: "No Data Available" })
+      .or(card.getByText("No Data Available", { exact: true }))
+      .first();
   }
 
   // Rows that hold real data. While the fetch is in flight CustomTable swaps in a skeleton
@@ -101,18 +143,32 @@ export class AgentHealthLocators extends CommonLocators {
     return table.getByRole("columnheader", { name, exact: true }).or(table.locator("th", { hasText: name })).first();
   }
 
-  // One Features entry. Filtering on "<name> - " picks the outer <li> that owns the label:
-  // the nested detail items under Prometheus/Logs/Traces/OpenCost read "Status - ", "URL - "
-  // and never repeat their parent's label.
-  featureItem(name: string): Locator {
-    return this.agentCard
-      .locator("li")
-      .filter({ hasText: `${name} - ` })
-      .first();
+  // One fact from the summary card — "Agent version", "Kubernetes", "Namespace", "Agent URL".
+  agentFact(key: string): Locator {
+    return this.agentCard.getByTestId(`agent-fact-${key}`);
   }
 
+  // One row of the Components table. The name cell carries the testid, so the row is its
+  // ancestor <tr> — matched structurally rather than by the component's label, which is a
+  // substring of nothing but is still safer read this way ("Logs" also appears in the
+  // Details column of other rows).
+  componentRow(key: string): Locator {
+    return this.dataRowsIn(this.componentsTable).filter({ has: this.page.getByTestId(`component-${key}`) }).first();
+  }
 
-  // Settles the card on its end state. Skeleton-gone is checked first and the outcome
+  // One option of the Scheduled Jobs filter. ds/ToggleGroup in single-selection mode
+  // renders each option as role="radio" (not a button) with its label as the accessible
+  // name, and marks the active one with aria-checked.
+  jobFilterOption(name: RegExp): Locator {
+    return this.scheduledJobsFilter.getByRole("radio", { name });
+  }
+
+  // One signal's card on the Observability tab.
+  signalCard(key: string): Locator {
+    return this.observabilityCard.getByTestId(`observability-${key}`);
+  }
+
+  // Settles a card on its end state. Skeleton-gone is checked first and the outcome
   // second, because CustomTable renders the empty panel only once `loading` is false —
   // asserting the outcome alone would accept the pre-fetch frame.
   async waitForTable(table: Locator, empty: Locator, timeout = 60000): Promise<void> {

@@ -160,3 +160,27 @@ export const nextCronRuns = (expr: string, count = 3): Date[] => {
     return [];
   }
 };
+
+/**
+ * The first fire time strictly after `from`, in UTC — i.e. when a schedule that
+ * last ran at `from` is next due. Null when the expression is unparseable or is
+ * an `@every` descriptor, whose cadence is anchored to registration time rather
+ * than to the wall clock and so cannot be derived from one past run.
+ *
+ * Used to decide whether a run is overdue (its next due time is already past)
+ * without hard-coding any assumption about the shape of the schedule.
+ */
+export const nextCronRunAfter = (expr: string, from: Date): Date | null => {
+  if (!validateCron(expr).valid || !(from instanceof Date) || Number.isNaN(from.getTime())) {
+    return null;
+  }
+  const { spec } = stripTimezonePrefix(expr);
+  if (EVERY_DESCRIPTOR.test(spec)) {
+    return null;
+  }
+  try {
+    return CronExpressionParser.parse(spec, { tz: 'UTC', currentDate: from }).next().toDate();
+  } catch {
+    return null;
+  }
+};

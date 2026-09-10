@@ -1,4 +1,4 @@
-import { describeCron, nextCronRuns, validateCron } from '../cron';
+import { describeCron, nextCronRunAfter, nextCronRuns, validateCron } from '../cron';
 
 describe('validateCron', () => {
   it.each([
@@ -63,5 +63,26 @@ describe('nextCronRuns', () => {
 
   it('returns nothing for an invalid expression', () => {
     expect(nextCronRuns('99 * * * *')).toEqual([]);
+  });
+});
+
+describe('nextCronRunAfter', () => {
+  it('returns the first fire time strictly after the given instant', () => {
+    const next = nextCronRunAfter('0 9 * * *', new Date('2026-06-08T09:00:00Z'));
+    expect(next?.toISOString()).toBe('2026-06-09T09:00:00.000Z');
+  });
+
+  it('is what tells an overdue run from an on-time one', () => {
+    const lastRun = new Date('2026-06-08T00:00:00Z');
+    // Daily job whose next due time (09-Jun 00:00) is long past.
+    expect(nextCronRunAfter('0 0 * * *', lastRun)!.getTime()).toBeLessThan(new Date('2026-06-12T00:00:00Z').getTime());
+    // Monthly job from the same last run is not yet due on the same date.
+    expect(nextCronRunAfter('0 0 1 * *', lastRun)!.getTime()).toBeGreaterThan(new Date('2026-06-12T00:00:00Z').getTime());
+  });
+
+  it('returns null for @every, an invalid expression, or an unusable date', () => {
+    expect(nextCronRunAfter('@every 1h', new Date())).toBeNull();
+    expect(nextCronRunAfter('99 * * * *', new Date())).toBeNull();
+    expect(nextCronRunAfter('0 9 * * *', new Date('nonsense'))).toBeNull();
   });
 });

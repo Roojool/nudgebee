@@ -7,7 +7,7 @@ import k8sApi from '@api1/kubernetes';
 import Text from '@shared/format/Text';
 import Datetime from '@shared/format/Datetime';
 import { useRouter } from 'next/router';
-import { Box, Typography, Stack } from '@mui/material';
+import { Box, Typography, Stack, IconButton } from '@mui/material';
 import { AgentIconBlue } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { hasWriteAccess } from '@lib/auth';
@@ -15,17 +15,38 @@ import CustomTable from '@shared/tables/CustomTable';
 import { useData } from '@context/DataContext';
 import Tabs from '@shared/navigation/Tabs';
 import SyncIcon from '@mui/icons-material/Sync';
+import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined';
+import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
+import ShowChartOutlinedIcon from '@mui/icons-material/ShowChartOutlined';
+import NotificationsNoneOutlinedIcon from '@mui/icons-material/NotificationsNoneOutlined';
+import SubjectOutlinedIcon from '@mui/icons-material/SubjectOutlined';
+import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
+import PaidOutlinedIcon from '@mui/icons-material/PaidOutlined';
+import DnsOutlinedIcon from '@mui/icons-material/DnsOutlined';
 import { toast as snackbar } from '@ui/Toast';
 import VmAgents from '@components/vm/VmAgents';
+import { Label } from '@ui/Label';
+import Banner from '@ui/Banner';
+import Card from '@ui/Card';
+import ToggleGroup from '@ui/ToggleGroup';
+import Tooltip from '@ui/Tooltip';
+import { describeCron, nextCronRunAfter } from '@utils/cron';
+import { docsUrl } from '@lib/externalUrls';
 
-const HEADERS_K8S = ['Status', 'Agent Version', 'Latest Version', 'Last Connected', 'K8s(Provider/Version)'];
 const HEADERS_CLOUD = ['Status', 'Last Connected', 'Cloud', 'Account'];
 const HEADERS_PROXY = ['Status', 'Last Connected'];
 const HEADERS_PROXY_DATASOURCES = ['Name', 'Type', 'Proxy Type', 'Status', 'Last Check', 'Error'];
-const HEADERS_OBSERVABILITY = ['Signal', 'Provider', 'Source', 'Status', 'Last Checked', 'Error'];
-const HEADERS_SCHEDULED_JOBS = ['Action Name', 'Job Status', 'Execution Count', 'Last Execution Time', 'Cron'];
+const HEADERS_COMPONENTS = ['Component', 'Status', 'Endpoint', 'Details'];
+// Executions is right-aligned: a column of counts is read by magnitude, and CustomTable
+// takes the alignment from the header rather than from each cell.
+const HEADERS_SCHEDULED_JOBS = ['Action Name', 'Job Status', 'Schedule', 'Last Execution', { name: 'Executions', align: 'right' }];
 const HEADERS_CLOUD_FEATURES = ['Feature', 'Status', 'Last Sync', 'Next Sync', 'Error'];
 const LATEST_CF_TEMPLATE_VERSION = '2';
+
+// Where the "View update guide" action goes. Same document the global header snackbar
+// links to (components/common/header/Header1.jsx) — one upgrade path, one page describing it.
+const AGENT_UPGRADE_DOCS_URL = docsUrl('/docs/installation/agent/installation/upgrade/');
 
 const AGENT_TAB = { text: 'Agent', value: 0, fragment: 'agent', id: 'tab-agent' };
 const OBSERVABILITY_TAB = { text: 'Observability', value: 1, fragment: 'observability', id: 'tab-observability' };
@@ -79,6 +100,51 @@ export const buildDisconnectedServices = (connectionStatus, providerStatus) => {
     disconnected.push('NodeAgent');
   }
   return disconnected;
+};
+
+/** What each component state reports in the Components table's Status column. */
+const COMPONENT_STATE_LABEL = {
+  connected: { text: 'Connected', tone: 'success' },
+  disconnected: { text: 'Disconnected', tone: 'critical' },
+  'server-side': { text: 'Managed server-side', tone: 'info' },
+  integration: { text: 'Served by integration', tone: 'neutral' },
+};
+
+/** The three states a scheduled job's `job_status` code can hold, and how each reads. */
+const JOB_STATUS = { 1: { text: 'New', tone: 'neutral' }, 2: { text: 'Running', tone: 'info' } };
+const JOB_STATUS_DONE = { text: 'Done', tone: 'success' };
+
+/**
+ * Whether a job's last run is older than its own schedule allows — the next fire time
+ * after that run is already in the past. Derived from the cron rather than from a fixed
+ * staleness window, so an hourly job and a monthly one are each judged on their own terms.
+ *
+ * Unknowable (and so not overdue) in three cases: a job that has never run, an
+ * unparseable expression, and an `@every` descriptor, whose cadence is anchored to when
+ * the agent registered it rather than to the wall clock (see utils/cron nextCronRunAfter).
+ */
+const isJobOverdue = (cron, lastExec) => {
+  if (!lastExec) return false;
+  const due = nextCronRunAfter(cron ?? '', lastExec);
+  return due !== null && due.getTime() < Date.now();
+};
+
+/** One row's worth of a scheduled job, in the shape the table, the filter and the counts all read. */
+export const toScheduledJob = (job) => {
+  const cron = job?.scheduling_params?.cron_expression ?? '';
+  const lastExecSec = job?.state?.last_exec_time_sec;
+  const lastExec = lastExecSec && lastExecSec > 0 ? new Date(lastExecSec * 1000) : null;
+  return {
+    name: (job?.runnable_params?.action_func_name ?? '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+    status: JOB_STATUS[job?.state?.job_status] ?? JOB_STATUS_DONE,
+    cron,
+    // Readable form of the same expression, shown above it. Empty when cronstrue cannot
+    // describe it, in which case the cron alone is all the row can honestly say.
+    schedule: describeCron(cron),
+    lastExec,
+    execCount: job?.state?.exec_count ?? 0,
+    overdue: isJobOverdue(cron, lastExec),
+  };
 };
 
 const AgentHealth = () => {
@@ -141,11 +207,18 @@ const AgentHealth = () => {
     cloudSpendsError: '',
     prometheusAdditionalLabels: '',
   });
+  // The K8s agent's own facts, for the summary card that replaced the one-row agent
+  // table. Kept separate from `agentFeatures` (which holds what the agent reported
+  // *about its components*) because these come off the account row, not connection_status.
+  const [agentSummary, setAgentSummary] = useState(null);
   const [latestVersions, setLatestVersions] = useState({});
   const [shouldUpgrade, setShouldUpgrade] = useState(false);
   const [disconnectedService, setDisconnectedService] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Raw job records, not table rows: the overdue count, the filter and the summary line
+  // all read the same fields, so the rows are built at render time from these.
   const [scheduledJobsData, setScheduledJobsData] = useState([]);
+  const [jobFilter, setJobFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(0);
   const [recordsPerPage, setRecordsPerPage] = useState(50);
   const [syncLoading, setSyncLoading] = useState(false);
@@ -218,13 +291,13 @@ const AgentHealth = () => {
           acc.connection_status = acc.connection_status || {};
 
           if (agentType === 'k8s') {
-            tableData.push([
-              { component: <Text value={acc.status.replace('_', ' ') ?? '-'} /> },
-              { component: <Text value={acc.version ?? '-'} /> },
-              { component: <Text value={latestVersionsData?.agent_version_latest ?? '-'} /> },
-              { component: <Datetime value={acc.last_connected_at} /> },
-              { text: `${acc.k8s_provider || '-'} / ${acc.k8s_version ?? '-'}` },
-            ]);
+            setAgentSummary({
+              status: acc.status ?? '',
+              version: acc.version ?? '',
+              lastConnectedAt: acc.last_connected_at ?? '',
+              k8sProvider: acc.k8s_provider ?? '',
+              k8sVersion: acc.k8s_version ?? '',
+            });
             if (latestVersionsData?.agent_version_latest && acc.version !== latestVersionsData?.agent_version_latest) {
               setShouldUpgrade(true);
             } else {
@@ -271,22 +344,7 @@ const AgentHealth = () => {
 
             // Add scheduled jobs data
             if (acc.connection_status?.schedule_jobs) {
-              scheduledJobsTableData.push(
-                ...acc.connection_status.schedule_jobs.map((job) => [
-                  { text: job.runnable_params.action_func_name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) },
-                  { text: job.state.job_status === 1 ? 'New' : job.state.job_status === 2 ? 'Running' : 'Done' },
-                  { text: job.state.exec_count },
-                  {
-                    component:
-                      job.state.last_exec_time_sec && job.state.last_exec_time_sec > 0 ? (
-                        <Datetime value={new Date(job.state.last_exec_time_sec * 1000)} />
-                      ) : (
-                        <Text value='-' />
-                      ),
-                  },
-                  { text: job.scheduling_params.cron_expression },
-                ])
-              );
+              scheduledJobsTableData.push(...acc.connection_status.schedule_jobs.map(toScheduledJob));
             }
           } else {
             tableData.push([
@@ -295,6 +353,9 @@ const AgentHealth = () => {
               { text: acc.type },
               { text: acc?.connection_status?.account_number },
             ]);
+            // Same reason as the providerStatus reset above: a cloud account has no agent
+            // summary, and last cluster's card must not survive the switch.
+            setAgentSummary(null);
             setShouldUpgrade(false);
 
             setAgentFeatures({
@@ -557,72 +618,260 @@ const AgentHealth = () => {
       traces: agentFeatures.isTracesManagerConnected,
     }[signal] ?? false);
 
-  const buildObservabilityTableData = () =>
-    OBSERVABILITY_SIGNALS.map(({ key, label }) => {
-      const entry = providerStatus?.[key];
-      const viaIntegration = integrationServed(providerStatus, key);
-      const connected = viaIntegration?.connected;
-      const provider = entry?.provider || agentReportedProvider(key);
-      // Both sources of "as of when", picked by whoever answered the Status column: the
-      // cron's probe time for an integration, the agent's own report time for a signal it
-      // serves. A row with no provider at all reports neither — nothing was checked.
-      const lastChecked = viaIntegration ? providerStatus?.checkedAt : provider ? agentFeatures.healthCheckedAt : '';
+  // One entry per signal, as the Observability cards read it. Same resolution as before —
+  // only the presentation moved from a table row to a card.
+  const observabilitySignals = OBSERVABILITY_SIGNALS.map(({ key, label }) => {
+    const entry = providerStatus?.[key];
+    const viaIntegration = integrationServed(providerStatus, key);
+    const provider = entry?.provider || agentReportedProvider(key);
+    // Both sources of "as of when", picked by whoever answered the status: the cron's probe
+    // time for an integration, the agent's own report time for a signal it serves. A signal
+    // with no provider at all reports neither — nothing was checked.
+    return {
+      key,
+      label,
+      provider,
+      // A probed integration reports its probe; an agent-served signal reports the agent's
+      // own flag for it. `source` is what says which of the two answered, and `lastChecked`
+      // dates whichever it was.
+      connected: viaIntegration ? !!viaIntegration.connected : agentSignalConnected(key),
+      configured: !!provider,
+      source: viaIntegration ? `Integration "${viaIntegration.integration_name}"` : provider ? 'Agent' : '',
+      lastChecked: viaIntegration ? providerStatus?.checkedAt : provider ? agentFeatures.healthCheckedAt : '',
+      error: entry?.error || '',
+    };
+  });
+
+  const connectedSignalCount = observabilitySignals.filter((signal) => signal.configured && signal.connected).length;
+
+  const copyToClipboard = (value) => {
+    navigator.clipboard
+      ?.writeText(value)
+      .then(() => snackbar.success('Copied to clipboard'))
+      .catch(() => snackbar.error('Could not copy to clipboard'));
+  };
+
+  // The components of the agent, in the order the Components table lists them. `state` is
+  // what the Status column reports; `details` are the name/value pairs that column carries
+  // for the components that have any.
+  //
+  // 'integration' is not a health verdict: for a signal a non-agent backend serves, green
+  // or red would both be the agent's opinion about something it never touches, so the row
+  // states who owns the answer and the Observability tab reports it. Same rule the Features
+  // list followed before the redesign.
+  const buildComponents = () => [
+    { key: 'relay', label: 'Relay', icon: <HubOutlinedIcon />, state: agentFeatures.isRelayConnected ? 'connected' : 'disconnected' },
+    {
+      key: 'prometheus',
+      label: 'Prometheus',
+      icon: <ShowChartOutlinedIcon />,
+      state: integrationServed(providerStatus, 'metrics') ? 'integration' : agentFeatures.isPrometheusConnected ? 'connected' : 'disconnected',
+      endpoint: agentFeatures.prometheusUrl,
+      error: agentFeatures.prometheusError,
+      details: [
+        { label: 'Retention', value: getPrometheusRetentionTime(agentFeatures.prometheusRetentionTime) },
+        { label: 'Additional labels', value: agentFeatures.prometheusAdditionalLabels || 'None' },
+      ],
+    },
+    {
+      key: 'alert-manager',
+      label: 'Alert Manager',
+      icon: <NotificationsNoneOutlinedIcon />,
+      state: agentFeatures.isAlertManagerConnected ? 'connected' : 'disconnected',
+      error: agentFeatures.alertManagerError,
+    },
+    {
+      key: 'logs',
+      label: 'Logs',
+      icon: <SubjectOutlinedIcon />,
+      state: integrationServed(providerStatus, 'logs') ? 'integration' : agentFeatures.isLogsManagerConnected ? 'connected' : 'disconnected',
+      endpoint: agentFeatures.logsProviderUrl,
+      error: agentFeatures.logsError,
+      details: agentFeatures.logsProvider ? [{ label: 'Provider', value: agentFeatures.logsProvider }] : [],
+    },
+    {
+      key: 'traces',
+      label: 'Traces',
+      icon: <AccountTreeOutlinedIcon />,
+      state: integrationServed(providerStatus, 'traces') ? 'integration' : agentFeatures.isTracesManagerConnected ? 'connected' : 'disconnected',
+      endpoint: agentFeatures.tracesUrl,
+      error: agentFeatures.tracesError,
+      details: agentFeatures.traceProvider ? [{ label: 'Provider', value: agentFeatures.traceProvider }] : [],
+    },
+    {
+      key: 'opencost',
+      label: 'OpenCost',
+      icon: <PaidOutlinedIcon />,
+      // opencostServerSide is stamped by the backend spend sync when OpenCost is collected
+      // server-side (post-migration default, agent OpenCost off) — a third state, not a failure.
+      state: agentFeatures.isOpenCostConnected ? 'connected' : agentFeatures.isOpenCostServerSide ? 'server-side' : 'disconnected',
+      endpoint: agentFeatures.isOpenCostConnected ? agentFeatures.opencostUrl : '',
+      error: agentFeatures.opencostError,
+    },
+    {
+      key: 'node-agent',
+      label: 'Node Agent',
+      icon: <DnsOutlinedIcon />,
+      state: agentFeatures.isNodeAgentConnected ? 'connected' : 'disconnected',
+      error: agentFeatures.nodeAgentError,
+      details: agentFeatures.isNodeAgentConnected ? [{ label: 'Instances', value: String(agentFeatures.nodeAgentCount) }] : [],
+    },
+  ];
+
+  // Endpoint cell: the URL the agent reported, in mono with a copy affordance because these
+  // are long in-cluster service addresses nobody retypes. An em dash where the component
+  // reports no endpoint of its own (Relay, Alert Manager, Node Agent).
+  const renderEndpoint = (endpoint, label) =>
+    endpoint ? (
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: ds.space[1], minWidth: 0 }}>
+        <Typography sx={{ fontFamily: ds.font.mono, fontSize: ds.text.small, color: ds.gray[700], overflowWrap: 'anywhere', minWidth: 0 }}>
+          {endpoint}
+        </Typography>
+        <Tooltip title='Copy endpoint'>
+          <IconButton size='small' aria-label={`Copy ${label} endpoint`} onClick={() => copyToClipboard(endpoint)} sx={{ p: ds.space[1] }}>
+            <ContentCopyOutlinedIcon sx={{ fontSize: 14, color: ds.gray[500] }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
+    ) : (
+      <Text value='-' />
+    );
+
+  // Details cell: the component's own name/value facts, and — when it is reporting
+  // disconnected — the reason its health check gave, which is the whole value of the cell
+  // on a broken cluster.
+  const renderComponentDetails = (component) => {
+    const showReason = component.state === 'disconnected' && component.error;
+    if (component.state === 'integration') {
+      return <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>Reported on the Observability tab</Typography>;
+    }
+    if (!component.details?.length && !showReason) {
+      return <Text value='-' />;
+    }
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
+        {!!component.details?.length && (
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', columnGap: ds.space[3], rowGap: ds.space[1] }}>
+            {component.details.map((detail) => (
+              <Typography key={detail.label} sx={{ fontSize: ds.text.small, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+                {detail.label}{' '}
+                <Box component='span' sx={{ color: ds.gray[700], fontWeight: ds.weight.medium }}>
+                  {detail.value || '-'}
+                </Box>
+              </Typography>
+            ))}
+          </Box>
+        )}
+        {showReason && <Typography sx={{ fontSize: ds.text.small, color: ds.red[500] }}>Reason - {component.error}</Typography>}
+      </Box>
+    );
+  };
+
+  const buildComponentsTableData = () =>
+    buildComponents().map((component) => {
+      const state = COMPONENT_STATE_LABEL[component.state];
       return [
-        { text: label },
-        { text: provider || '-' },
-        { text: viaIntegration ? `Integration "${viaIntegration.integration_name}"` : provider ? 'Agent' : '-' },
-        {
-          // A probed integration reports its probe; an agent-served signal reports the
-          // agent's own flag for it. Both are a real Connected/Disconnected — the Source
-          // column is what says which of the two answered, and Last Checked dates
-          // whichever of the two it was.
-          component: !provider ? (
-            <Text value='Not configured' />
-          ) : (
-            <Typography
-              component='span'
-              variant='body2'
-              sx={{ color: (viaIntegration ? connected : agentSignalConnected(key)) ? ds.green[500] : ds.red[500] }}
-            >
-              {(viaIntegration ? connected : agentSignalConnected(key)) ? 'Connected' : 'Disconnected'}
-            </Typography>
-          ),
-        },
-        { component: lastChecked ? <Datetime value={lastChecked} /> : <Text value='-' /> },
         {
           component: (
-            <Typography component='span' variant='body2' color={entry?.error ? 'error' : undefined}>
-              {entry?.error || '-'}
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }} data-testid={`component-${component.key}`}>
+              <Box
+                sx={{
+                  flexShrink: 0,
+                  width: ds.space.mul(0, 14),
+                  height: ds.space.mul(0, 14),
+                  borderRadius: ds.radius.md,
+                  backgroundColor: ds.blue[100],
+                  color: ds.brand[500],
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  '& svg': { width: 16, height: 16 },
+                }}
+              >
+                {component.icon}
+              </Box>
+              <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[700] }}>{component.label}</Typography>
+            </Box>
           ),
         },
+        { component: <Label tone={state.tone} dot text={state.text} /> },
+        {
+          // Blank for an integration-served signal, like the Details cell beside it: the URL
+          // the agent last reported is its own check's address, not the backend actually
+          // serving the signal, so printing it here would contradict the row's own status.
+          component: renderEndpoint(component.state === 'integration' ? '' : component.endpoint, component.label),
+        },
+        { component: renderComponentDetails(component) },
       ];
     });
 
-  // Surface the agent's per-feature health-check failure reason next to a
-  // "Disconnected" status. Renders nothing when connected or no reason reported.
-  const renderReason = (disconnected, error) =>
-    disconnected && error ? (
-      <li>
-        <Typography component='span' color='error' variant='body2'>
-          Reason - {error}
-        </Typography>
-      </li>
-    ) : null;
+  // "6 connected · 1 managed server-side" — the states actually present, so a healthy
+  // cluster does not carry a "0 disconnected" clause it has no use for.
+  const componentsSummary = () => {
+    const states = buildComponents().map((component) => component.state);
+    const count = (state) => states.filter((entry) => entry === state).length;
+    return [
+      `${count('connected')} connected`,
+      count('disconnected') > 0 && `${count('disconnected')} disconnected`,
+      count('server-side') > 0 && `${count('server-side')} managed server-side`,
+      count('integration') > 0 && `${count('integration')} served by an integration`,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  };
 
-  // A signal this agent does not serve. The Agent tab deliberately reports no status for
-  // it — green or red would both be the agent's opinion about a backend it never touches —
-  // and points at the tab that owns the answer.
-  const renderDelegatedFeature = (label) => (
-    <li>
-      <b>{label} - </b>
-      <Typography component='span' variant='body2' sx={{ color: ds.gray[600] }}>
-        served by an integration (see Observability)
-      </Typography>
-    </li>
-  );
+  // The status the summary card's chip reports. CONNECTED is the only healthy value the
+  // API returns; anything else (NOT_CONNECTED, and any state added later) reads as a
+  // problem rather than being silently shown as green.
+  const agentStatus = (() => {
+    const raw = (agentSummary?.status ?? '').replace(/_/g, ' ');
+    if (!raw) return { text: 'Unknown', tone: 'neutral' };
+    return { text: raw === 'CONNECTED' ? 'Connected' : raw, tone: raw === 'CONNECTED' ? 'success' : 'critical' };
+  })();
 
-  const paginatedScheduledJobsData = scheduledJobsData.slice(currentPage * recordsPerPage, (currentPage + 1) * recordsPerPage);
+  const overdueJobCount = scheduledJobsData.filter((job) => job.overdue).length;
+  // The filter control is only offered while something is overdue, so a filter left on
+  // 'overdue' after the last one caught up would leave an empty table and no visible
+  // control to clear it. Derived rather than reset in an effect: nothing needs to happen
+  // on the transition, the filter simply does not apply when there is nothing to filter to.
+  const showOverdueOnly = jobFilter === 'overdue' && overdueJobCount > 0;
+  const filteredJobs = showOverdueOnly ? scheduledJobsData.filter((job) => job.overdue) : scheduledJobsData;
+
+  const buildScheduledJobsTableData = () =>
+    filteredJobs.slice(currentPage * recordsPerPage, (currentPage + 1) * recordsPerPage).map((job) => {
+      const row = [
+        {
+          component: <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[700] }}>{job.name}</Typography>,
+        },
+        { component: <Label tone={job.status.tone} dot text={job.status.text} /> },
+        {
+          component: (
+            <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+              {job.schedule && <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700] }}>{job.schedule}</Typography>}
+              <Typography sx={{ fontFamily: ds.font.mono, fontSize: ds.text.caption, color: ds.gray[500] }}>{job.cron || '-'}</Typography>
+            </Box>
+          ),
+        },
+        {
+          component: job.lastExec ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
+              <Datetime value={job.lastExec} />
+              {job.overdue && <Label tone='warning' text='Overdue' />}
+            </Box>
+          ) : (
+            <Text value='-' />
+          ),
+        },
+        { text: String(job.execCount) },
+      ];
+      // An overdue row is tinted the same amber family as its chip — the row is the unit a
+      // reader scans, and the chip alone is easy to miss in a long list. Mixed with the
+      // surface so a page of overdue jobs does not read as a solid block of warning.
+      if (job.overdue) {
+        row.sx = { backgroundColor: 'color-mix(in srgb, var(--ds-amber-100) 45%, var(--ds-background-100))' };
+      }
+      return row;
+    });
 
   // Observability describes a K8s cluster's log/metric/trace backends. A cloud account has
   // none of that surface — the provider-status check only ever stamps K8s accounts — so it
@@ -648,166 +897,237 @@ const AgentHealth = () => {
 
       {activeTab === 0 && (
         <>
-          <ListingLayout id='agent-health' sx={{ mt: 3 }}>
-            <ListingLayout.Toolbar title='Agent Health' />
-            <ListingLayout.Body>
-              {data[0]?.status === 'NOT_CONNECTED' ? (
-                <Typography color='red'>The Agent is not connected</Typography>
-              ) : (
-                shouldUpgrade && <Typography color='red'>Please update your agent version</Typography>
-              )}
-              {disconnectedService && disconnectedService.length > 0 ? (
-                <Typography color='red'>{`The ${disconnectedService.join(', ')} services are disconnected.`}</Typography>
-              ) : null}
-              <CustomTable headers={agentType === 'k8s' ? HEADERS_K8S : HEADERS_CLOUD} tableData={agentHealthData} loading={loading} />
+          {agentType === 'k8s' ? (
+            <>
+              {/* One card for what the agent IS: its status, when it last reported, and the
+                  four facts that identify the install. The one-row table this replaced spent
+                  a full table on five values and still hid the namespace and URL in a bullet
+                  list below it. */}
+              <ListingLayout id='agent-health' sx={{ mt: 3 }}>
+                <ListingLayout.Header
+                  icon={<SafeIcon src={AgentIconBlue} alt='' width={22} height={22} />}
+                  title={
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
+                      <Box component='span'>Agent Health</Box>
+                      <Label id='agent-status' size='md' dot tone={agentStatus.tone} text={agentStatus.text} />
+                    </Box>
+                  }
+                  description={
+                    agentSummary?.lastConnectedAt ? (
+                      <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1] }}>
+                        Last heartbeat <Datetime value={agentSummary.lastConnectedAt} />
+                      </Box>
+                    ) : (
+                      'This cluster has not reported a heartbeat yet.'
+                    )
+                  }
+                  actions={
+                    shouldUpgrade && (
+                      <DsButton
+                        tone='secondary'
+                        size='sm'
+                        data-testid='agent-update-guide-btn'
+                        icon={<OpenInNewIcon fontSize='small' />}
+                        iconPlacement='end'
+                        onClick={() => window.open(AGENT_UPGRADE_DOCS_URL, '_blank', 'noopener,noreferrer')}
+                      >
+                        View update guide
+                      </DsButton>
+                    )
+                  }
+                />
+                <ListingLayout.Body sx={{ pt: 'var(--ds-space-4)', pb: 'var(--ds-space-5)' }}>
+                  {/* One banner, most severe first — per the Banner spec, two stacked on the
+                      same surface is not allowed, and a disconnected agent makes the version
+                      it last reported the less interesting of the two facts. */}
+                  {agentSummary?.status === 'NOT_CONNECTED' ? (
+                    <Banner surface='section' tone='critical' id='agent-disconnected-banner' message='The Agent is not connected' />
+                  ) : disconnectedService.length > 0 ? (
+                    <Banner
+                      surface='section'
+                      tone='critical'
+                      id='agent-services-banner'
+                      message={`The ${disconnectedService.join(', ')} services are disconnected.`}
+                    />
+                  ) : shouldUpgrade ? (
+                    <Banner
+                      surface='section'
+                      tone='warning'
+                      id='agent-update-banner'
+                      title='Update available.'
+                      message={`This cluster runs agent ${agentSummary?.version || 'an unreported version'}; the latest release is ${
+                        latestVersions?.agent_version_latest ?? 'newer'
+                      }.`}
+                    />
+                  ) : null}
+                  <Box
+                    sx={{
+                      mt: disconnectedService.length > 0 || shouldUpgrade || agentSummary?.status === 'NOT_CONNECTED' ? 'var(--ds-space-4)' : 0,
+                      display: 'grid',
+                      gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', lg: 'repeat(4, minmax(0, 1fr))' },
+                      gap: ds.space[4],
+                    }}
+                  >
+                    {[
+                      { key: 'version', label: 'Agent version', value: agentSummary?.version, mono: true },
+                      {
+                        key: 'kubernetes',
+                        label: 'Kubernetes',
+                        value: [agentSummary?.k8sProvider, agentSummary?.k8sVersion].filter(Boolean).join(' · '),
+                      },
+                      { key: 'namespace', label: 'Namespace', value: agentFeatures.namespace, mono: true },
+                      { key: 'agent-url', label: 'Agent URL', value: agentFeatures.agentUrl, mono: true },
+                    ].map((fact) => (
+                      <Box key={fact.key} data-testid={`agent-fact-${fact.key}`} sx={{ minWidth: 0 }}>
+                        <Typography
+                          sx={{ fontSize: ds.text.caption, fontWeight: ds.weight.medium, color: ds.gray[600], fontFamily: ds.font.display }}
+                        >
+                          {fact.label}
+                        </Typography>
+                        <Typography
+                          sx={{
+                            mt: ds.space[1],
+                            fontSize: fact.mono ? ds.text.small : ds.text.body,
+                            fontFamily: fact.mono ? ds.font.mono : undefined,
+                            fontWeight: fact.mono ? ds.weight.regular : ds.weight.medium,
+                            color: ds.gray[700],
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {fact.value || '-'}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </ListingLayout.Body>
+              </ListingLayout>
 
-              <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mt: 2, mb: 1 }}>Features</Typography>
-              {agentType === 'k8s' ? (
-                <ul>
-                  <li>
-                    <b>Relay - </b>
-                    {agentFeatures.isRelayConnected ? 'Connected' : 'Disconnected'}
-                  </li>
-                  {agentFeatures.agentUrl && (
-                    <li>
-                      <b>Agent URL - </b>
-                      {agentFeatures.agentUrl}
-                    </li>
-                  )}
-                  {integrationServed(providerStatus, 'metrics') ? (
-                    renderDelegatedFeature('Prometheus')
-                  ) : (
-                    <li>
-                      <b>Prometheus - </b>
-                      <ul>
-                        <li>Status - {agentFeatures.isPrometheusConnected ? 'Connected' : 'Disconnected'}</li>
-                        <li>Data Retention - {getPrometheusRetentionTime(agentFeatures.prometheusRetentionTime)}</li>
-                        <li>URL - {agentFeatures.prometheusUrl}</li>
-                        <li>Additional Labels - {agentFeatures.prometheusAdditionalLabels}</li>
-                        {renderReason(!agentFeatures.isPrometheusConnected, agentFeatures.prometheusError)}
-                      </ul>
-                    </li>
-                  )}
-                  <li>
-                    <b>Alert Manager - </b> {agentFeatures.isAlertManagerConnected ? 'Connected' : 'Disconnected'}
-                    {!agentFeatures.isAlertManagerConnected && agentFeatures.alertManagerError && (
-                      <ul>{renderReason(true, agentFeatures.alertManagerError)}</ul>
-                    )}
-                  </li>
-                  {integrationServed(providerStatus, 'logs') ? (
-                    renderDelegatedFeature('Logs')
-                  ) : (
-                    <li>
-                      <b>Logs - </b>
-                      <ul>
-                        <li>Status - {agentFeatures.isLogsManagerConnected ? 'Connected' : 'Disconnected'}</li>
-                        <li>Provider - {agentFeatures.logsProvider}</li>
-                        <li>URL - {agentFeatures.logsProviderUrl}</li>
-                        {renderReason(!agentFeatures.isLogsManagerConnected, agentFeatures.logsError)}
-                      </ul>
-                    </li>
-                  )}
-                  {integrationServed(providerStatus, 'traces') ? (
-                    renderDelegatedFeature('Traces')
-                  ) : (
-                    <li>
-                      <b>Traces - </b>
-                      <ul>
-                        <li>Status - {agentFeatures.isTracesManagerConnected ? 'Connected' : 'Disconnected'}</li>
-                        <li>URL - {agentFeatures.tracesUrl}</li>
-                        {renderReason(!agentFeatures.isTracesManagerConnected, agentFeatures.tracesError)}
-                      </ul>
-                    </li>
-                  )}
-                  <li>
-                    <b>OpenCost - </b>
+              {/* And one card for what the agent TALKS TO. The bullet list this replaced
+                  nested status, URL and per-component facts three levels deep, so no two
+                  components could be compared without reading both of them in full. */}
+              <ListingLayout id='agent-components' sx={{ mt: 3 }}>
+                <ListingLayout.Toolbar title='Components'>
+                  {/* lineHeight matches ToolbarTitle's own 32px line box — without it this
+                      sits at the top of the flex-start row and reads as a superscript. */}
+                  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], lineHeight: '32px' }}>{componentsSummary()}</Typography>
+                </ListingLayout.Toolbar>
+                <ListingLayout.Body>
+                  <CustomTable
+                    id='agent-components-table'
+                    headers={HEADERS_COMPONENTS}
+                    tableData={buildComponentsTableData()}
+                    loading={loading}
+                    // Centre each row: the name cell's icon tile is taller than one text
+                    // line, so CustomTable's default top-alignment would leave the component
+                    // name sitting below the status chip beside it.
+                    sx={{ '&& tbody td': { verticalAlign: 'middle' } }}
+                  />
+                </ListingLayout.Body>
+              </ListingLayout>
+            </>
+          ) : (
+            <ListingLayout id='agent-health' sx={{ mt: 3 }}>
+              <ListingLayout.Toolbar title='Agent Health' />
+              <ListingLayout.Body>
+                {data[0]?.status === 'NOT_CONNECTED' && <Typography color='red'>The Agent is not connected</Typography>}
+                <CustomTable headers={HEADERS_CLOUD} tableData={agentHealthData} loading={loading} />
+
+                <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mt: 2, mb: 1 }}>Features</Typography>
+                <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
+                  <DsButton
+                    tone='primary'
+                    size='sm'
+                    onClick={handleSyncNow}
+                    disabled={syncLoading}
+                    loading={syncLoading}
+                    icon={<SyncIcon fontSize='small' />}
+                  >
+                    Sync Now
+                  </DsButton>
+                </Box>
+                <CustomTable headers={HEADERS_CLOUD_FEATURES} tableData={buildCloudFeaturesTableData()} loading={loading} />
+
+                {cfStack && (
+                  <>
+                    <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mt: 2, mb: 1 }}>
+                      CloudFormation Stack
+                    </Typography>
                     <ul>
                       <li>
-                        Status -{' '}
-                        {agentFeatures.isOpenCostConnected
-                          ? 'Connected'
-                          : agentFeatures.isOpenCostServerSide
-                          ? 'Managed server-side'
-                          : 'Disconnected'}
+                        <b>Template Version - </b>
+                        {cfStack.template_version || '-'}
+                        {cfStack.template_version && cfStack.template_version !== LATEST_CF_TEMPLATE_VERSION && (
+                          <Typography component='span' color='error' variant='body2' sx={{ ml: 1 }}>
+                            (update available)
+                          </Typography>
+                        )}
                       </li>
-                      {agentFeatures.isOpenCostConnected && <li>URL - {agentFeatures.opencostUrl}</li>}
-                      {renderReason(!agentFeatures.isOpenCostConnected && !agentFeatures.isOpenCostServerSide, agentFeatures.opencostError)}
+                      <li>
+                        <b>Stack Name - </b>
+                        {cfStack.stack_name || '-'}
+                      </li>
+                      <li>
+                        <b>Stack Region - </b>
+                        {cfStack.stack_region || '-'}
+                      </li>
+                      <li>
+                        <b>Stack Status - </b>
+                        {cfStack.stack_status || '-'}
+                      </li>
+                      <li>
+                        <b>Last Checked - </b>
+                        {cfStack.updated_at ? <Datetime value={cfStack.updated_at} /> : '-'}
+                      </li>
                     </ul>
-                  </li>
-                  <li>
-                    <b>Node Agent - </b> {agentFeatures.isNodeAgentConnected ? 'Connected (' + agentFeatures.nodeAgentCount + ')' : 'Disconnected'}
-                    {!agentFeatures.isNodeAgentConnected && agentFeatures.nodeAgentError && (
-                      <ul>{renderReason(true, agentFeatures.nodeAgentError)}</ul>
-                    )}
-                  </li>
-                  <li>
-                    <b>Agent Namespace - </b> {agentFeatures.namespace}
-                  </li>
-                </ul>
-              ) : (
-                <>
-                  <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-                    <DsButton
-                      tone='primary'
-                      size='sm'
-                      onClick={handleSyncNow}
-                      disabled={syncLoading}
-                      loading={syncLoading}
-                      icon={<SyncIcon fontSize='small' />}
-                    >
-                      Sync Now
-                    </DsButton>
-                  </Box>
-                  <CustomTable headers={HEADERS_CLOUD_FEATURES} tableData={buildCloudFeaturesTableData()} loading={loading} />
-
-                  {cfStack && (
-                    <>
-                      <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mt: 2, mb: 1 }}>
-                        CloudFormation Stack
-                      </Typography>
-                      <ul>
-                        <li>
-                          <b>Template Version - </b>
-                          {cfStack.template_version || '-'}
-                          {cfStack.template_version && cfStack.template_version !== LATEST_CF_TEMPLATE_VERSION && (
-                            <Typography component='span' color='error' variant='body2' sx={{ ml: 1 }}>
-                              (update available)
-                            </Typography>
-                          )}
-                        </li>
-                        <li>
-                          <b>Stack Name - </b>
-                          {cfStack.stack_name || '-'}
-                        </li>
-                        <li>
-                          <b>Stack Region - </b>
-                          {cfStack.stack_region || '-'}
-                        </li>
-                        <li>
-                          <b>Stack Status - </b>
-                          {cfStack.stack_status || '-'}
-                        </li>
-                        <li>
-                          <b>Last Checked - </b>
-                          {cfStack.updated_at ? <Datetime value={cfStack.updated_at} /> : '-'}
-                        </li>
-                      </ul>
-                    </>
-                  )}
-                </>
-              )}
-            </ListingLayout.Body>
-          </ListingLayout>
+                  </>
+                )}
+              </ListingLayout.Body>
+            </ListingLayout>
+          )}
           {agentType === 'k8s' && scheduledJobsData.length > 0 && (
             <ListingLayout id='scheduled-jobs-table' sx={{ mt: 3 }}>
-              <ListingLayout.Toolbar title='Scheduled Jobs' />
+              <ListingLayout.Toolbar title='Scheduled Jobs'>
+                {/* Same 32px line box as the title beside it — see the Components toolbar. */}
+                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], lineHeight: '32px' }}>
+                  {scheduledJobsData.length} jobs
+                  {overdueJobCount > 0 ? ` · ${overdueJobCount} past their expected run` : ''}
+                </Typography>
+                <ListingLayout.ToolbarSpacer />
+                {/* Offered only when there is something to filter to — a lone "Overdue 0"
+                    control is a dead end, and ToggleGroup's single mode always has a
+                    selection, so there is no neutral state to fall back to. */}
+                {overdueJobCount > 0 && (
+                  <ToggleGroup
+                    id='scheduled-jobs-filter'
+                    selection='single'
+                    size='sm'
+                    ariaLabel='Filter scheduled jobs'
+                    value={jobFilter}
+                    onChange={(next) => {
+                      setJobFilter(next);
+                      // The filtered list is shorter, so whatever page the reader was on may
+                      // no longer exist — landing them on an empty page reads as no data.
+                      setCurrentPage(0);
+                    }}
+                    options={[
+                      { value: 'all', label: `All ${scheduledJobsData.length}` },
+                      { value: 'overdue', label: `Overdue ${overdueJobCount}` },
+                    ]}
+                  />
+                )}
+              </ListingLayout.Toolbar>
               <ListingLayout.Body>
                 <CustomTable
+                  id='scheduled-jobs'
                   headers={HEADERS_SCHEDULED_JOBS}
-                  tableData={paginatedScheduledJobsData}
+                  tableData={buildScheduledJobsTableData()}
                   loading={loading}
+                  // Same reason as the Components table: the Schedule cell is two lines
+                  // (readable form above the cron), so top-alignment would strand the job
+                  // name, its status and its last run on the first of those two lines.
+                  sx={{ '&& tbody td': { verticalAlign: 'middle' } }}
                   rowsPerPage={recordsPerPage}
-                  totalRows={scheduledJobsData.length}
+                  totalRows={filteredJobs.length}
                   pageNumber={currentPage + 1}
                   onPageChange={(page, limit) => {
                     setCurrentPage(page - 1);
@@ -996,14 +1316,100 @@ const AgentHealth = () => {
 
       {activeTab === 1 && (
         <ListingLayout id='observability' sx={{ mt: 3 }}>
-          <ListingLayout.Toolbar title='Observability' />
-          <ListingLayout.Body>
-            <Typography sx={{ fontSize: ds.text.body, color: ds.gray[600], mb: 2 }}>
-              Where this cluster&apos;s logs, metrics and traces actually come from. A signal served by an integration is checked directly against
-              that backend, so its status is independent of the agent. Last Checked is when that check ran &mdash; for a signal the agent serves, when
-              the agent last reported it.
-            </Typography>
-            <CustomTable headers={HEADERS_OBSERVABILITY} tableData={buildObservabilityTableData()} loading={loading} />
+          <ListingLayout.Header
+            title={
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
+                <Box component='span'>Observability</Box>
+                <Label
+                  id='observability-summary'
+                  size='md'
+                  dot
+                  tone={connectedSignalCount === OBSERVABILITY_SIGNALS.length ? 'success' : 'warning'}
+                  text={`${connectedSignalCount} of ${OBSERVABILITY_SIGNALS.length} connected`}
+                />
+              </Box>
+            }
+            description={
+              <>
+                Where this cluster&apos;s logs, metrics and traces actually come from. A signal served by an integration is checked directly against
+                that backend, so its status is independent of the agent. Last Checked is when that check ran &mdash; for a signal the agent serves,
+                when the agent last reported it.
+              </>
+            }
+          />
+          {/* One card per signal rather than three rows of a six-column table: every cell in
+              that table was a short label, so most of its width went to whitespace while the
+              provider and error strings — the two that actually vary — were the ones squeezed. */}
+          <ListingLayout.Body sx={{ pt: 'var(--ds-space-4)', pb: 'var(--ds-space-5)' }}>
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+                gap: ds.space[4],
+              }}
+            >
+              {observabilitySignals.map((signal) => (
+                <Card
+                  key={signal.key}
+                  variant='outlined'
+                  size='sm'
+                  elevation='flat'
+                  data-testid={`observability-${signal.key}`}
+                  header={
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: ds.space[2] }}>
+                      <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], fontFamily: ds.font.display }}>
+                        {signal.label}
+                      </Typography>
+                      {signal.configured ? (
+                        <Label dot tone={signal.connected ? 'success' : 'critical'} text={signal.connected ? 'Connected' : 'Disconnected'} />
+                      ) : (
+                        <Label tone='neutral' text='Not configured' />
+                      )}
+                    </Box>
+                  }
+                >
+                  <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+                    {[
+                      { label: 'Provider', value: signal.provider, mono: true },
+                      { label: 'Source', value: signal.source },
+                      { label: 'Last checked', value: signal.lastChecked ? <Datetime value={signal.lastChecked} /> : '' },
+                      { label: 'Error', value: signal.error, tone: signal.error ? 'error' : undefined },
+                    ].map((row) => (
+                      <Box
+                        key={row.label}
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'baseline',
+                          justifyContent: 'space-between',
+                          gap: ds.space[2],
+                          py: ds.space[2],
+                          borderBottom: `1px solid ${ds.gray[200]}`,
+                          '&:last-of-type': { borderBottom: 0 },
+                        }}
+                      >
+                        <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], flexShrink: 0 }}>{row.label}</Typography>
+                        <Typography
+                          component='div'
+                          sx={{
+                            fontSize: row.mono ? ds.text.small : ds.text.body,
+                            fontFamily: row.mono ? ds.font.mono : undefined,
+                            color: row.tone === 'error' ? ds.red[500] : row.value ? ds.gray[700] : ds.gray[500],
+                            textAlign: 'right',
+                            overflowWrap: 'anywhere',
+                            minWidth: 0,
+                          }}
+                        >
+                          {/* "None" for an error, "-" everywhere else: an empty Error row is
+                              good news and should read that way, an empty Provider row is
+                              simply an answer the page does not have. */}
+                          {row.value || (row.label === 'Error' ? 'None' : '-')}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </Card>
+              ))}
+            </Box>
           </ListingLayout.Body>
         </ListingLayout>
       )}
