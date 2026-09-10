@@ -750,6 +750,9 @@ class AskAiCard {
             )}
 
             {code_analysis_enabled !== false && source_updates?.gitDiff && localAiData?.source_details?.[ANNOTATIONS.WORKLOAD_GIT_REPO] && (
+              /* No gitDiff prop on purpose: the diff is rendered immediately above this button, so
+                 repeating it inside the confirmation would show the same patch twice. The
+                 remediation row, which has no diff on screen, does pass it. */
               <EventRaisePrPanel
                 data={cardInstance.buildResolveData()}
                 repoUrl={localAiData?.source_details?.[ANNOTATIONS.WORKLOAD_GIT_REPO]}
