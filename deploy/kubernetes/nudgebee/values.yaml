@@ -13,7 +13,9 @@ global:
   # whatever name that registry uses.
   testImage: 'ghcr.io/nudgebee/busybox:1.37.0'
   # StorageClass for every PVC the stack creates: postgresql, redis, rabbitmq,
-  # clickhouse (bitnami subcharts read this global directly) and qdrant. Empty
+  # clickhouse (bitnami subcharts read this global directly) and qdrant. The
+  # bundled nudgebee-agent reads the same global with the same precedence, so
+  # its ClickHouse volume is covered too on installs that enable it. Empty
   # means each PVC is left without a storageClassName, so the cluster's default
   # StorageClass is used. "-" disables dynamic provisioning (binds a pre-created
   # PV).
