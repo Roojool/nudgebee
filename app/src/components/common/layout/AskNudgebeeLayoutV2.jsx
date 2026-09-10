@@ -324,6 +324,16 @@ const AskNudgebeeLayout = ({
                 />
 
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <DsButton
+                    tone='ghost'
+                    size='sm'
+                    composition='icon-only'
+                    icon={<SafeIcon alt='Profile Icon' src={ProfileOutlineIcon} width={24} height={24} />}
+                    aria-label='Account Settings'
+                    tooltip='Account Settings'
+                    tooltipPlacement='right'
+                    onClick={handleOpenUserMenu}
+                  />
                   {getUserSession()?.tenant?.name && (
                     <Tooltip title={getUserSession()?.tenant?.name} placement='right'>
                       <Typography
@@ -341,16 +351,6 @@ const AskNudgebeeLayout = ({
                       </Typography>
                     </Tooltip>
                   )}
-                  <DsButton
-                    tone='ghost'
-                    size='sm'
-                    composition='icon-only'
-                    icon={<SafeIcon alt='Profile Icon' src={ProfileOutlineIcon} width={24} height={24} />}
-                    aria-label='Account Settings'
-                    tooltip='Account Settings'
-                    tooltipPlacement='right'
-                    onClick={handleOpenUserMenu}
-                  />
                   <Menu
                     id='menu-appbar'
                     sx={{
