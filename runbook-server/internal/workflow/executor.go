@@ -759,7 +759,8 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 			updateFinalWorkflowStatusAndExecuteHooks(ctx, wf, lastExecTarget, inputs, logger, workflowError)
 		} else if !wf.DryRun {
 			// A called run records status on the callee's row, but not its hooks or tags.
-			setLastExecutionStatus(ctx, wf, lastExecTarget, model.WorkflowExecutionStatusFailed, workflowError.Error(), logger)
+			childStatus, childMessage := terminalStatusFor(workflowError)
+			setLastExecutionStatus(ctx, wf, lastExecTarget, childStatus, childMessage, logger)
 		}
 		return "", workflowError
 	}
@@ -888,12 +889,39 @@ func (e *WorkflowExecutor) ExecuteWorkflowInternal(ctx workflow.Context, wf *mod
 	return string(resultBytes), nil
 }
 
+// cleanupContext returns the context end-of-run bookkeeping must run on.
+// Temporal fails every activity scheduled on a canceled workflow.Context
+// immediately, so a canceled run used to write no terminal status at all and
+// its automation kept showing "Running" for good (#37544). A disconnected
+// context still executes, which is what the cleanup needs.
+func cleanupContext(ctx workflow.Context) workflow.Context {
+	if ctx.Err() == nil {
+		return ctx
+	}
+	disconnected, _ := workflow.NewDisconnectedContext(ctx)
+	return disconnected
+}
+
+// terminalStatusFor maps a run's outcome to the status its workflow row records.
+// A user cancel is not a failure: it gets CANCELED, matching what the
+// executions list reads back from Temporal for the same run.
+func terminalStatusFor(workflowError error) (model.WorkflowExecutionStatus, string) {
+	if workflowError == nil {
+		return model.WorkflowExecutionStatusCompleted, ""
+	}
+	if temporal.IsCanceledError(workflowError) {
+		return model.WorkflowExecutionStatusCanceled, "Execution canceled"
+	}
+	return model.WorkflowExecutionStatusFailed, workflowError.Error()
+}
+
 // setLastExecutionStatus records status on targetWorkflowID's row, which is not always
 // wf.ID (see resolveLastExecutionTarget) — hence the copy; wf keeps its own id elsewhere.
 func setLastExecutionStatus(ctx workflow.Context, wf *model.Workflow, targetWorkflowID string, status model.WorkflowExecutionStatus, statusMessage string, logger temporalLog.Logger) {
 	if targetWorkflowID == "" {
 		return
 	}
+	ctx = cleanupContext(ctx)
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second, // Short timeout for status update
 		RetryPolicy: &temporal.RetryPolicy{
@@ -1868,6 +1896,10 @@ func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Wo
 		}
 	}()
 
+	// Everything below is end-of-run bookkeeping the user is owed even when the
+	// run was canceled, so it runs on a context the cancel cannot short-circuit.
+	ctx = cleanupContext(ctx)
+
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -1879,12 +1911,8 @@ func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Wo
 	}
 	statusUpdateCtx := workflow.WithActivityOptions(ctx, activityOptions)
 
-	finalStatus := model.WorkflowExecutionStatusCompleted
-	var statusMessage string
-	if workflowError != nil {
-		finalStatus = model.WorkflowExecutionStatusFailed
-		statusMessage = workflowError.Error()
-	}
+	finalStatus, statusMessage := terminalStatusFor(workflowError)
+	canceled := finalStatus == model.WorkflowExecutionStatusCanceled
 
 	if !wf.DryRun {
 		logger.Info("updating final workflow status", "id", targetWorkflowID, "tenant", wf.TenantID, "account", wf.AccountID)
@@ -1899,7 +1927,11 @@ func updateFinalWorkflowStatusAndExecuteHooks(ctx workflow.Context, wf *model.Wo
 		}
 	}
 
-	if workflowError != nil {
+	if canceled {
+		// On.Failure is for a run that broke, not for one the user stopped; only
+		// On.Always (below) is owed to a cancel.
+		logger.Info("Workflow canceled")
+	} else if workflowError != nil {
 		logger.Error("Workflow failed", "error", workflowError)
 		if wf != nil && wf.Definition.Hooks != nil && len(wf.Definition.Hooks.Failure) > 0 {
 			onFailureCtx := createActivityCtxForAction(ctx)
