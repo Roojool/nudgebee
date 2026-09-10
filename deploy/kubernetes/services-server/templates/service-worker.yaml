@@ -1,0 +1,38 @@
+{{- if (.Values.worker | default dict).enabled }}
+{{- /* Service in front of the worker pods, for scheduled cron traffic only.
+
+       runbook-server fires 35 cron triggers at services-server, almost all at
+       /rpc-cron, where most handlers reply 200 and then run the job in a
+       detached goroutine on whichever pod took the request. Through the main
+       Service that is always an API pod — so without this, the split moves the queue
+       consumers off the API pods but leaves every scheduled job (knowledge
+       graph refresh, insights, SLO, cleanups, recommendation refreshes...) on
+       them.
+
+       Point runbook-server at this Service by setting its
+       SERVICE_API_SERVER_CRON_URL to http://<fullname>-worker:<port>. Unset,
+       runbook-server keeps using SERVICE_API_SERVER_URL, i.e. the API pods,
+       exactly as before. Do NOT repoint SERVICE_API_SERVER_URL itself: every
+       other service, and runbook-server's own non-cron calls, use it for
+       ordinary RPC that belongs on the API pods.
+
+       Ordering matters in both directions, because runbook-server stores the
+       resolved URL inside its Temporal schedules and only rewrites them when
+       it restarts: enable the worker before setting the cron URL, and unset the
+       cron URL (and restart runbook-server) before disabling the worker. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "services-server.fullname" . }}-worker
+  labels:
+    {{- include "services-server.workerLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "services-server.workerSelectorLabels" . | nindent 4 }}
+{{- end }}

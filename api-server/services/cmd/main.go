@@ -118,6 +118,12 @@ func main() {
 			"Generate with: openssl rand -hex 32.")
 	}
 
+	// Announce the deployment role up front: on a split deployment the single
+	// most useful thing in a pod's first log line is whether it is meant to be
+	// draining queues. See config.appConfig.ServerRole.
+	slog.Info("starting services-server", "server_role", config.Config.ServerRole,
+		"background_jobs", config.RunsBackgroundJobs())
+
 	tp, mp, err := initOtel()
 	if err != nil {
 		slog.Error(err.Error())

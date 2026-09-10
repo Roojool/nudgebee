@@ -22,8 +22,45 @@ var Config appConfig
 
 const SERVICE_NAME = "services-server"
 
+// Valid ServerRole values. See appConfig.ServerRole for what each one runs.
+const (
+	ServerRoleAll    = "all"
+	ServerRoleAPI    = "api"
+	ServerRoleWorker = "worker"
+)
+
+// RunsBackgroundJobs reports whether this process should start the RabbitMQ
+// consumers and the long-running EE startup goroutines.
+//
+// Fails open: an unrecognised SERVER_ROLE runs background jobs. A typo that
+// silently disabled every consumer would leave queues filling with nobody
+// draining them and no error anywhere, which is far worse than a pod doing
+// more work than intended.
+func RunsBackgroundJobs() bool {
+	return Config.ServerRole != ServerRoleAPI
+}
+
 type appConfig struct {
 	NudgebeeLicense string `mapstructure:"nudgebee_license"`
+
+	// ServerRole selects which halves of the process are active, so a single
+	// image can be deployed twice: HTTP-serving pods and background-job pods.
+	//
+	//   all    (default) — HTTP server AND RabbitMQ consumers AND EE startup
+	//                      goroutines. The historical, single-Deployment
+	//                      behaviour; every single-replica, OSS and on-prem
+	//                      install stays on this.
+	//   api             — HTTP server only. common.MqConsume is inert (see
+	//                      common/mq.go) and api.RunEEStartupHooks is skipped.
+	//   worker          — HTTP server (for /health, pprof and the OTel metrics
+	//                      endpoint) plus consumers and startup goroutines. Not
+	//                      a member of the services-server Service.
+	//
+	// Handler-spawned background work (scan_orchestrator heartbeat evaluation,
+	// application/profiler tickers, triage's rule-match batcher) is NOT gated
+	// by this — it runs on whichever pod received the request, which for those
+	// flows is always an API pod.
+	ServerRole string `mapstructure:"server_role"`
 
 	ServiceApiServerToken           string `mapstructure:"action_api_server_token"`
 	ServiceApiServerTokenHeader     string `mapstructure:"action_api_server_token_header"`
@@ -352,6 +389,8 @@ func init() {
 	viper.SetConfigType("dotenv")
 	viper.AddConfigPath(".")
 
+	viper.SetDefault("server_role", ServerRoleAll)
+
 	viper.SetDefault("action_api_server_token_header", "X-ACTION-TOKEN")
 
 	viper.SetDefault("clickhouse_host", "http://localhost:8123")
@@ -576,6 +615,17 @@ func init() {
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		slog.Error("Error unmarshalling config", "error", err)
+	}
+
+	switch Config.ServerRole {
+	case ServerRoleAll, ServerRoleAPI, ServerRoleWorker:
+	default:
+		// Fail open — see RunsBackgroundJobs. Loud, because the operator asked
+		// for a split deployment and is not getting one.
+		slog.Warn("unrecognised SERVER_ROLE; treating this pod as \"all\" (HTTP + background jobs)",
+			"server_role", Config.ServerRole,
+			"valid", []string{ServerRoleAll, ServerRoleAPI, ServerRoleWorker})
+		Config.ServerRole = ServerRoleAll
 	}
 
 	// Two distinct startup checks on NUDGEBEE_ENCRYPTION_KEY:

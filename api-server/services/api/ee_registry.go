@@ -2,6 +2,8 @@ package api
 
 import (
 	"log/slog"
+
+	"nudgebee/services/config"
 	"nudgebee/services/security"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +40,19 @@ func RegisterEEStartupHook(h StartupHook) {
 
 // RunEEStartupHooks fires every registered startup hook in its own goroutine.
 // Called once from cmd/main.go.
+//
+// Skipped entirely on SERVER_ROLE=api pods: these hooks are background jobs
+// (the AWS Marketplace SQS poller, the licence feature-flag reconcile loop),
+// which belong on the worker Deployment. Nothing an API pod serves depends on
+// them having run in-process — licence checks read immutable in-memory state
+// parsed at boot, and the one-shot feature_flag convergence is a *bootstrap*
+// hook (RunEEBootstrapHooks), which still runs on every pod regardless of role.
 func RunEEStartupHooks() {
+	if !config.RunsBackgroundJobs() {
+		slog.Info("skipping EE startup hooks on this pod (SERVER_ROLE=api); the worker deployment runs them",
+			"hook_count", len(eeStartupHooks))
+		return
+	}
 	for _, h := range eeStartupHooks {
 		go h()
 	}

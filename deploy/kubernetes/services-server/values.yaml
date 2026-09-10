@@ -78,6 +78,45 @@ resources:
     cpu: 300m
     memory: 1024Mi
 
+# Background-job ("worker") deployment.
+#
+# Off by default: with worker.enabled false there is exactly one deployment and
+# it does what it always did — serve HTTP *and* drain every RabbitMQ queue. That
+# is what every single-replica, OSS and on-prem install wants, and it is the
+# only shape a one-pod install can have.
+#
+# Turn it on and the deployment splits in two: the existing deployment runs with
+# SERVER_ROLE=api and serves only HTTP, while a second `<fullname>-worker`
+# deployment runs the consumers and the EE background goroutines. The two roles
+# are complementary by construction, so there is no way to end up with a queue
+# nobody consumes — see templates/_helpers.tpl "services-server.serverRole".
+#
+# Scheduled crons: runbook-server fires them at /rpc-cron, and each one runs as
+# a goroutine on whichever pod took the call. Enabling the worker also renders a
+# `<fullname>-worker` Service; set runbook-server's SERVICE_API_SERVER_CRON_URL
+# to it to move those jobs onto the worker. Unset, they stay on the API pods.
+# Enable the worker before setting that URL, and unset it before disabling the
+# worker — runbook-server bakes the URL into its schedules at startup.
+#
+# Worth knowing before enabling: background work started from inside a
+# user-facing HTTP handler (scan_orchestrator's heartbeat evaluation,
+# application/profiler tickers, triage's rule-match batcher) is NOT moved by
+# this — it still runs on the API pods. Don't size API resources down on the
+# assumption they are now HTTP-only.
+worker:
+  enabled: false
+  # Fixed on purpose — no HPA. The point of the split is a known, deterministic
+  # number of consumers; autoscaling would silently change per-queue
+  # concurrency (replicas x the rabbit_mq_*_concurrency config values).
+  replicaCount: 1
+  # Each of the following falls back to the top-level value when unset, so a
+  # worker only needs to override what genuinely differs from the API pods.
+  resources: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 autoscaling:
   enabled: false
   minReplicas: 1

@@ -200,10 +200,28 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 		opt(consumeOpts)
 	}
 
+	// Single choke point for the API/worker deployment split: on a pod running
+	// with SERVER_ROLE=api, no consumer is started, so every queue is drained
+	// exclusively by the worker Deployment. Gating here rather than in each of
+	// the eight consumer packages means a consumer added later is covered
+	// without its author having to know the split exists.
+	//
+	// The connection is still dialled first, deliberately. getConnection is
+	// lazy and MqConsume used to be the only eager caller, so returning before
+	// it would leave API pods reporting nb_services_mq_status=0 until their
+	// first publish — turning a real dependency alert into noise on two thirds
+	// of the fleet. Dialling keeps the gauge meaning the same thing on every
+	// pod; only the consumer count differs by role.
 	conn := getConnection()
 	if conn == nil {
 		slog.Error("rbmq: initial connection to rabbitmq failed for consumer setup", "queue", queue, "exchange", exchangeName)
 		return ErrRbmqNoConn
+	}
+
+	if !config.RunsBackgroundJobs() {
+		slog.Info("rbmq: consumer not started on this pod (SERVER_ROLE=api); the worker deployment drains this queue",
+			"queue", queue, "exchange", exchangeName)
+		return nil
 	}
 
 	go func() {
