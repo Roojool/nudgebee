@@ -7,7 +7,7 @@ import { toast as snackbar } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
 import { Label } from '@ui/Label';
 import { hasWriteAccess, fetchFeatureFlagsForAccount, canManage } from '@lib/auth';
-import { Box, Grid, IconButton, Stack, Typography } from '@mui/material';
+import { Box, Grid, IconButton, Typography } from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import Tooltip from '@ui/Tooltip';
 import { Input } from '@ui/Input';
@@ -40,11 +40,18 @@ import apiUser from '@api1/user';
 import CopyButton from '@shared/buttons/CopyButton';
 import AccountEnvToggle, { accountEnvTooltip, DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import AccountEnvText from '@shared/format/AccountEnvText';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { EmptyState } from '@ui/EmptyState';
+import AddIcon from '@mui/icons-material/Add';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 
 // Agents connect asynchronously minutes after an account is created, so the
 // health columns are still empty on the fetch that follows install. Poll to
 // pick them up instead of making the user reload the page (#34174).
 const AGENT_POLL_MS = 30000;
+
+// The status each page opens on; relaxed to "all" once if it returns nothing.
+const DEFAULT_STATUS_FILTER = 'active';
 
 const K8sIntegrationTile = () => {
   const headers = [
@@ -85,7 +92,9 @@ const K8sIntegrationTile = () => {
   const [initialAccountEnv, setInitialAccountEnv] = useState(DEFAULT_ACCOUNT_ENV);
   const [nameInput, setNameInput] = useState('');
   const [selectedNameFilter, setSelectedNameFilter] = useState('');
-  const [selectedStatusFilter, setSelectedStatusFilter] = useState('active');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState(DEFAULT_STATUS_FILTER);
+  // The connect-empty-state must not flash before the first response lands.
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [featureOptions, setFeatureOptions] = useState([]);
   const [selectedFeatures, setSelectedFeatures] = useState([]);
@@ -135,6 +144,29 @@ const K8sIntegrationTile = () => {
     { label: 'Active', value: 'active' },
     { label: 'Disabled', value: 'disabled' },
   ];
+
+  // Swap the filter bar + table for a "connect your first cluster" prompt only when the
+  // list is empty with the filters untouched. A zero-row result the user filtered their
+  // way into keeps the toolbar, otherwise clearing that filter is unreachable. Known
+  // edge: status defaults to Active, so a tenant whose only clusters are disabled sees
+  // this prompt too.
+  const showConnectPrompt = hasLoaded && !loading && totalCount === 0 && !selectedNameFilter && !selectedStatusFilter;
+
+  // When the default status filter hides everything, fall back to "all statuses" once
+  // before declaring the screen empty. Without this a tenant whose only configs are
+  // disabled sees the connect prompt — with no filter left on screen to clear, its
+  // disabled configs would be unreachable from the UI.
+  const relaxedStatusRef = useRef(false);
+  useEffect(() => {
+    if (!hasLoaded || loading || relaxedStatusRef.current) {
+      return;
+    }
+    if (totalCount === 0 && !selectedNameFilter && selectedStatusFilter) {
+      relaxedStatusRef.current = true;
+      setSelectedStatusFilter('');
+      setCurrentPage(0);
+    }
+  }, [hasLoaded, loading, totalCount, selectedNameFilter, selectedStatusFilter]);
 
   const getMenuItems = (item) => {
     return hasWriteAccess()
@@ -242,6 +274,7 @@ const K8sIntegrationTile = () => {
         // response could clear a spinner the live request still needs.
         if (seq === listSeqRef.current) {
           setLoading(false);
+          setHasLoaded(true);
         }
       });
   };
@@ -908,69 +941,96 @@ const K8sIntegrationTile = () => {
       </Modal>
       <K8sAccountModal openModal={openModal} handleClose={closeModal} handleOnAccountCreate={handleOnAccountCreate} />
       <ListingLayout id='k8s-integrations'>
-        <ListingLayout.Toolbar
-          title={
-            <Stack direction='row' alignItems='center' spacing={1}>
-              <Typography color={ds.gray[700]} fontSize={ds.text.title} fontWeight={600}>
-                Kubernetes
-              </Typography>
-              <CloudProviderIcon cloud_provider='K8S' />
-            </Stack>
-          }
+        <ListingLayout.Header
+          icon={<CloudProviderIcon cloud_provider='K8S' width={ds.space[5]} height={ds.space[5]} />}
+          title='Kubernetes'
+          description={getIntegrationDescription('K8S')}
           actions={
             canManage('integrations', 'Write') ? (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <TourLauncher tourId='connect-cluster' label='How to connect a cluster' />
-                <DsButton id='add-k8s-account' tone='primary' size='md' onClick={() => setOpenModal(true)} aria-label='Add K8s Account'>
+                <DsButton
+                  id='add-k8s-account'
+                  tone='primary'
+                  size='md'
+                  icon={<AddIcon sx={{ fontSize: 18 }} />}
+                  onClick={() => setOpenModal(true)}
+                  aria-label='Add K8s Account'
+                >
                   Add K8s Account
                 </DsButton>
               </Box>
             ) : undefined
           }
-        >
-          <FilterDropdown
-            id='k8s-status-filter'
-            label='Status'
-            options={statusOptions}
-            value={statusOptions.find((o) => o.value === selectedStatusFilter) ?? null}
-            onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
-          />
-          <SearchInput
-            id='k8s-name-search'
-            value={nameInput}
-            onChange={(next) => {
-              setNameInput((prev) => {
-                if (prev.trim() !== '' && next.trim() === '') {
+        />
+        {showConnectPrompt ? (
+          <ListingLayout.Body padding={ds.space[5]}>
+            <EmptyState
+              id='k8s-no-accounts'
+              icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
+              title='No Kubernetes clusters connected'
+              description={getIntegrationDescription('K8S')}
+              action={
+                canManage('integrations', 'Write')
+                  ? { label: 'Add K8s Account', onClick: () => setOpenModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  : undefined
+              }
+            />
+          </ListingLayout.Body>
+        ) : (
+          <>
+            <ListingLayout.Toolbar
+              actions={
+                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>
+                  {totalCount} {totalCount === 1 ? 'cluster' : 'clusters'}
+                </Typography>
+              }
+            >
+              <FilterDropdown
+                id='k8s-status-filter'
+                label='Status'
+                options={statusOptions}
+                value={statusOptions.find((o) => o.value === selectedStatusFilter) ?? null}
+                onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
+              />
+              <SearchInput
+                id='k8s-name-search'
+                value={nameInput}
+                onChange={(next) => {
+                  setNameInput((prev) => {
+                    if (prev.trim() !== '' && next.trim() === '') {
+                      setSelectedNameFilter('');
+                      setCurrentPage(0);
+                    }
+                    return next;
+                  });
+                }}
+                onEnterPress={() => {
+                  setSelectedNameFilter(nameInput);
+                  setCurrentPage(0);
+                }}
+                onClear={() => {
+                  setNameInput('');
                   setSelectedNameFilter('');
                   setCurrentPage(0);
-                }
-                return next;
-              });
-            }}
-            onEnterPress={() => {
-              setSelectedNameFilter(nameInput);
-              setCurrentPage(0);
-            }}
-            onClear={() => {
-              setNameInput('');
-              setSelectedNameFilter('');
-              setCurrentPage(0);
-            }}
-            label='Enter Name'
-          />
-        </ListingLayout.Toolbar>
-        <ListingLayout.Body>
-          <CustomTable
-            stickyColumnIndex={'9'}
-            loading={loading}
-            tableData={tableData}
-            headers={headers}
-            totalRows={totalCount || tableData.length}
-            rowsPerPage={recordsPerPage}
-            pageNumber={currentPage + 1}
-            onPageChange={onPageChange}
-          />
-        </ListingLayout.Body>
+                }}
+                label='Enter Name'
+              />
+            </ListingLayout.Toolbar>
+            <ListingLayout.Body>
+              <CustomTable
+                stickyColumnIndex={'9'}
+                loading={loading}
+                tableData={tableData}
+                headers={headers}
+                totalRows={totalCount || tableData.length}
+                rowsPerPage={recordsPerPage}
+                pageNumber={currentPage + 1}
+                onPageChange={onPageChange}
+              />
+            </ListingLayout.Body>
+          </>
+        )}
       </ListingLayout>
     </>
   );

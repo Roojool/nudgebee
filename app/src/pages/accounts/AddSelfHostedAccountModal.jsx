@@ -10,6 +10,7 @@ import { toast as snackbar } from '@ui/Toast';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import { addPendingAgentInstall } from '@components/integrations/pendingAgentInstall';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const SETUP_INSTRUCTIONS = `### Self-Hosted VM Fleet
   A self-hosted account groups virtual machines we reach through an agent rather
@@ -101,6 +102,7 @@ const AddSelfHostedAccountModal = ({ open, onClose }) => {
       open={open}
       handleClose={isSubmitting ? () => {} : () => handleCloseModal(false)}
       title='Add Self-Hosted Account'
+      subtitle={getIntegrationDescription('SELFHOSTED')}
       loader={isSubmitting}
     >
       <MarkDowns data={SETUP_INSTRUCTIONS} sx={{ width: 'auto' }} />

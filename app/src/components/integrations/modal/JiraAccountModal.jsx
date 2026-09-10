@@ -13,6 +13,7 @@ import Tooltip from '@ui/Tooltip';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // Pure display placeholder shown in edit mode to indicate a token is stored.
 // The real token is never sent to the client. A field still equal to this on
@@ -211,7 +212,14 @@ const JiraAccountModal = ({ openModal, handleClose, editConfig = null }) => {
   };
 
   return (
-    <Modal width='md' open={openModal} handleClose={handleClose} title={isEdit ? 'Edit Jira Account' : 'Add Jira Account'} loader={isSubmitting}>
+    <Modal
+      width='md'
+      open={openModal}
+      handleClose={handleClose}
+      title={isEdit ? 'Edit Jira Account' : 'Add Jira Account'}
+      subtitle={getIntegrationDescription('JIRA')}
+      loader={isSubmitting}
+    >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: 3, pb: 1 }}>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <Input

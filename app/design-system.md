@@ -276,7 +276,8 @@ The standard table screen (recommendations, inventory, audit lists). Built from 
 
 ```
 ListingLayout                     ← card chrome
-├── ListingLayout.Toolbar         ← header: title + filters (left) + actions (right)
+├── ListingLayout.Header          ← optional identity band: icon + title + description (left) + primary action (right)
+├── ListingLayout.Toolbar         ← filters (left) + actions (right); its own `title` when there is no Header
 │     ├── FilterDropdown / SearchInput / Chip   (left, filter widgets)
 │     ├── ListingLayout.ToolbarSpacer           (pushes the rest right)
 │     └── Button / DropdownMenu                 (right, action cluster)
@@ -294,7 +295,9 @@ import FilterDropdownButton from '@ui/FilterDropdown';
 import CustomTable from '@shared/tables/CustomTable';
 
 <ListingLayout id="recommendations">
-  <ListingLayout.Toolbar title="Recommendations" actions={<Button>Export</Button>}>
+  <ListingLayout.Header title="Recommendations" description="Savings we found across your accounts." actions={<Button>Export</Button>} />
+
+  <ListingLayout.Toolbar>
     <FilterDropdownButton ... />
     <FilterDropdownButton ... />
   </ListingLayout.Toolbar>
@@ -312,7 +315,12 @@ primitive today.
 **Don'ts** (from `ListingLayout`'s JSDoc):
 
 - Don't put page-level `Stat` summary cards inside `ListingLayout` — they are siblings _above_ it.
-- Don't grow `ListingLayout`'s prop API — compose primitives into the slots instead.
+- Don't grow `ListingLayout`'s prop API with **widget** props (the `filterOptions` / `searchOption` /
+  `toggleButtons` / `modalButton` creep that sank `BoxLayout2`) — compose primitives into the slots
+  instead. `Header`'s `icon` / `title` / `description` are the exception: plain identity copy the shell
+  lays out, not widgets it has to know about. Its `actions` stays a slot.
+- Don't pair `Header` with a Toolbar `title` — the Header names the screen, and the Toolbar then
+  carries only filters (plus a right-aligned result count, if the screen shows one).
 
 ### 2.2 Recipe — Modal dialog ⭐ worked example
 

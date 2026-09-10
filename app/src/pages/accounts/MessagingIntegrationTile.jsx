@@ -21,6 +21,10 @@ import { safeJSONParse, toKebabCase } from 'src/utils/common';
 import ChannelAccountMapping from '@components/notifications/ChannelAccountMapping';
 import WatchedChannels from '@components/notifications/WatchedChannels';
 import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { EmptyState } from '@ui/EmptyState';
+import AddIcon from '@mui/icons-material/Add';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 
 const MessagingIntegrationTile = ({
   provider, // "slack" | "google_chat"
@@ -53,6 +57,12 @@ const MessagingIntegrationTile = ({
   // response or channel-list hint), so the user knows to invite it.
   const [inviteUrl, setInviteUrl] = useState(null);
   const [channelListHint, setChannelListHint] = useState(null);
+  // Which provider the rows in state belong to. Tagged rather than a plain "have I
+  // loaded" boolean because this component is reused across providers without
+  // remounting — the account-form switch returns the same element type — so an
+  // untagged flag stays true through the swap.
+  const [loadedFor, setLoadedFor] = useState(null);
+  const hasLoaded = loadedFor === provider;
 
   // Fetch installations
   const listMessagingPlatform = () => {
@@ -67,7 +77,8 @@ const MessagingIntegrationTile = ({
           setInstallationData([]);
         }
       })
-      .catch(() => setIsLoading(false));
+      .catch(() => setIsLoading(false))
+      .finally(() => setLoadedFor(provider));
   };
 
   // Fetch available channels
@@ -455,6 +466,7 @@ const MessagingIntegrationTile = ({
         open={openInstallModal}
         handleClose={closeInstallModal}
         title={inviteUrl ? 'Invite the Bot to Your Server' : 'Install Discord Integration'}
+        subtitle={getIntegrationDescription(provider)}
         loader={isInstalling}
         actionButtons={
           <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', p: '12px 24px' }}>
@@ -635,7 +647,10 @@ const MessagingIntegrationTile = ({
         </Box>
       </Modal>
       <ListingLayout id={`${provider}-integrations`}>
-        <ListingLayout.Toolbar
+        <ListingLayout.Header
+          icon={<CloudProviderIcon cloud_provider={provider.toUpperCase()} width={ds.space[5]} height={ds.space[5]} />}
+          title={displayName}
+          description={getIntegrationDescription(provider)}
           actions={
             canManage('messagingplatforms', 'Write') ? (
               <Stack direction='row' spacing={1}>
@@ -653,6 +668,7 @@ const MessagingIntegrationTile = ({
                   id={`add-to-${toKebabCase(displayName)}-btn`}
                   tone='primary'
                   size='md'
+                  icon={<AddIcon sx={{ fontSize: 18 }} />}
                   disabled={tableData?.length > 0}
                   onClick={handleInstall}
                 >
@@ -661,22 +677,29 @@ const MessagingIntegrationTile = ({
               </Stack>
             ) : undefined
           }
-        >
-          <Stack direction='row' alignItems='center' spacing={ds.space[2]}>
-            <CloudProviderIcon cloud_provider={provider.toUpperCase()} />
-            <Box display='flex' flexDirection='column'>
-              <Typography sx={{ fontFamily: 'var(--ds-font-display)' }} fontSize={ds.text.title} fontWeight={ds.weight.semibold} color={ds.gray[700]}>
-                {displayName}
-              </Typography>
-              <Typography fontSize={ds.text.caption} color={ds.gray[600]}>
-                {`Connect your ${displayName} user to ${getBrandTitle()}. Use the "Add to ${displayName}" button to install the app.`}
-              </Typography>
-            </Box>
-          </Stack>
-        </ListingLayout.Toolbar>
-        <ListingLayout.Body>
-          <CustomTable id={provider} headers={headers} tableData={tableData} loading={isLoading} />
-        </ListingLayout.Body>
+        />
+        {hasLoaded && !isLoading && tableData?.length === 0 ? (
+          // This page has no filters, so an empty table can only mean "the app is not
+          // installed yet" — the install instruction that used to sit permanently under
+          // the title now lives here, where it is the one thing left to do.
+          <ListingLayout.Body padding={ds.space[5]}>
+            <EmptyState
+              id={`${provider}-not-installed`}
+              icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
+              title={`${displayName} is not connected yet`}
+              description={`Connect your ${displayName} user to ${getBrandTitle()}. Use the "Add to ${displayName}" button to install the app.`}
+              action={
+                canManage('messagingplatforms', 'Write')
+                  ? { label: `Add to ${displayName}`, onClick: handleInstall, icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  : undefined
+              }
+            />
+          </ListingLayout.Body>
+        ) : (
+          <ListingLayout.Body>
+            <CustomTable id={provider} headers={headers} tableData={tableData} loading={isLoading} />
+          </ListingLayout.Body>
+        )}
       </ListingLayout>
 
       {(provider === 'slack' || provider === 'ms_teams') && (

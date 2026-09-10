@@ -10,6 +10,7 @@ import { Button } from '@ui/Button';
 import { snackbar } from '@shared/snackbarService';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const SETUP_INSTRUCTIONS = `### Cloud Foundry Account Setup
   ### Step 1. Enter Account Name
@@ -139,6 +140,7 @@ const AddCloudFoundryAccountModal = ({ open, onClose }) => {
       open={open}
       handleClose={isSubmitting ? () => {} : () => handleCloseModal(false)}
       title='Add Cloud Foundry Account'
+      subtitle={getIntegrationDescription('CLOUDFOUNDRY')}
       loader={isSubmitting}
     >
       <MarkDowns data={SETUP_INSTRUCTIONS} sx={{ width: 'auto' }} />

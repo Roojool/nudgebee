@@ -9,6 +9,7 @@ import { getAccountCreationSuccessMsg } from 'src/utils/common';
 import PropTypes from 'prop-types';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // Pure display placeholder shown in edit mode to indicate an API key is stored.
 // The real key is never sent to the client. A field still equal to this on
@@ -169,6 +170,7 @@ const FreshdeskAccountModal = ({ openModal, handleClose, editConfig = null }) =>
       open={openModal}
       handleClose={handleAccountClose}
       title={isEdit ? 'Edit Freshdesk Account' : 'Add Freshdesk Account'}
+      subtitle={getIntegrationDescription('FRESHDESK')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: 1 }}>

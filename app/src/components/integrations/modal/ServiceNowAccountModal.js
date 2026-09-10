@@ -10,6 +10,7 @@ import { getAccountCreationSuccessMsg } from 'src/utils/common';
 import PropTypes from 'prop-types';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // Pure display placeholder shown in edit mode to indicate a password is stored.
 // The real password is never sent to the client. A field still equal to this on
@@ -183,6 +184,7 @@ const ServiceNowAccountModal = ({ openModal, handleClose, editConfig = null }) =
       open={openModal}
       handleClose={handleAccountClose}
       title={isEdit ? 'Edit ServiceNow Account' : 'Add ServiceNow Account'}
+      subtitle={getIntegrationDescription('SERVICENOW')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: 1 }}>

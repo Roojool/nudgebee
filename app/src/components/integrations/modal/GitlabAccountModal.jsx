@@ -11,6 +11,7 @@ import Tooltip from '@ui/Tooltip';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // Pure display placeholder shown in edit mode to indicate a token is stored.
 // The real token is never sent to the client. A field still equal to this on
@@ -188,6 +189,7 @@ const GitlabAccountModal = ({ openModal, handleClose, editConfig = null }) => {
       open={openModal}
       handleClose={() => handleCloseModal()}
       title={isEdit ? 'Edit GitLab Account' : 'Add GitLab Account'}
+      subtitle={getIntegrationDescription('GITLAB')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: ds.space[5], pb: ds.space[2] }}>

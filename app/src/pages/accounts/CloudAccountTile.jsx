@@ -2,7 +2,7 @@ import { Box, Grid, Typography, Stack, Alert } from '@mui/material';
 import { Input } from '@ui/Input';
 import { getBrandTitle } from '@hooks/useTenantBranding';
 import { ContentCopy, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import apiAccount from '@api1/account';
 import apiIntegrations from '@api1/integrations';
 import { Modal } from '@ui/Modal';
@@ -29,6 +29,10 @@ import CfUpdateModal from './CfUpdateModal';
 import EnableGcpWebhookModal from './EnableGcpWebhookModal';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import AccountEnvText from '@shared/format/AccountEnvText';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { EmptyState } from '@ui/EmptyState';
+import AddIcon from '@mui/icons-material/Add';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 
 const EVENTGRID_INSTRUCTIONS = `### Enable Real-Time Resource Events
   ### Step 1. Copy the values below
@@ -62,6 +66,9 @@ const TABLE_HEADERS = [
   { name: '', width: '5%' },
 ];
 
+// The status each page opens on; relaxed to "all" once if it returns nothing.
+const DEFAULT_STATUS_FILTER = 'active';
+
 const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addAccountButtonText, AddOrgModalComponent, addOrgButtonText }) => {
   const [loading, setLoading] = useState(false);
   const [rawAccounts, setRawAccounts] = useState([]);
@@ -83,7 +90,14 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
   const [totalCount, setTotalCount] = useState(0);
   const [nameInput, setNameInput] = useState('');
   const [selectedNameFilter, setSelectedNameFilter] = useState('');
-  const [selectedStatusFilter, setSelectedStatusFilter] = useState('active');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState(DEFAULT_STATUS_FILTER);
+  // Which provider the rows in state belong to. Tagged rather than a plain "have I
+  // loaded" boolean because this component is reused across providers without
+  // remounting — the account-form switch returns the same element type — so an
+  // untagged flag stays true through the swap and paints the previous provider's
+  // emptiness under the new provider's name.
+  const [loadedFor, setLoadedFor] = useState(null);
+  const hasLoaded = loadedFor === cloudProvider;
   const [refreshKey, setRefreshKey] = useState(0);
   const [eventGridModalOpen, setEventGridModalOpen] = useState(false);
   const [eventGridLoading, setEventGridLoading] = useState(false);
@@ -158,6 +172,31 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
     setCurrentPage(page - 1);
     setRecordsPerPage(limit);
   };
+
+  // Swap the filter bar + table for a "connect your first account" prompt only when the
+  // list is empty with the filters untouched. A zero-row result the user filtered their
+  // way into keeps the toolbar, otherwise clearing that filter is unreachable. Known
+  // edge: status defaults to Active, so a tenant whose only accounts are disabled sees
+  // this prompt too.
+  const showConnectPrompt = hasLoaded && !loading && totalCount === 0 && !selectedNameFilter && !selectedStatusFilter;
+
+  // When the default status filter hides everything, fall back to "all statuses" once
+  // before declaring the screen empty. Without this a tenant whose only accounts are
+  // disabled sees the connect prompt — with no filter left on screen to clear, those
+  // accounts would be unreachable from the UI.
+  // Tagged for the same reason as `loadedFor`: a plain boolean would stay true
+  // after a swap and skip this fallback for every later provider in the session.
+  const relaxedFor = useRef(null);
+  useEffect(() => {
+    if (!hasLoaded || loading || relaxedFor.current === cloudProvider) {
+      return;
+    }
+    if (totalCount === 0 && !selectedNameFilter && selectedStatusFilter) {
+      relaxedFor.current = cloudProvider;
+      setSelectedStatusFilter('');
+      setCurrentPage(0);
+    }
+  }, [hasLoaded, loading, totalCount, selectedNameFilter, selectedStatusFilter, cloudProvider]);
 
   const statusOptions = [
     { label: 'Active', value: 'active' },
@@ -442,6 +481,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
       })
       .finally(() => {
         setLoading(false);
+        setLoadedFor(cloudProvider);
       });
   };
 
@@ -1177,15 +1217,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         />
       )}
       <ListingLayout id={`${cloudProvider?.toLowerCase()}-integrations`}>
-        <ListingLayout.Toolbar
-          title={
-            <Stack direction='row' alignItems='center' spacing={1}>
-              <Typography color={ds.gray[700]} fontSize={ds.text.title} fontWeight={600}>
-                {title}
-              </Typography>
-              <CloudProviderIcon cloud_provider={cloudProvider} />
-            </Stack>
-          }
+        <ListingLayout.Header
+          icon={<CloudProviderIcon cloud_provider={cloudProvider} width={ds.space[5]} height={ds.space[5]} />}
+          title={title}
+          description={getIntegrationDescription(cloudProvider)}
           actions={
             canManage('integrations', 'Write') ? (
               <Stack direction='row' spacing={1}>
@@ -1194,6 +1229,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
                     id={`${toKebabCase(addOrgButtonText)}-btn`}
                     tone='primary'
                     size='md'
+                    icon={<AddIcon sx={{ fontSize: 18 }} />}
                     onClick={() => setOpenOrgModal(true)}
                     aria-label={addOrgButtonText}
                   >
@@ -1204,6 +1240,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
                   id={`${toKebabCase(addAccountButtonText)}-btn`}
                   tone='primary'
                   size='md'
+                  icon={<AddIcon sx={{ fontSize: 18 }} />}
                   onClick={() => setOpenAddModal(true)}
                   aria-label={addAccountButtonText}
                 >
@@ -1212,49 +1249,74 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
               </Stack>
             ) : undefined
           }
-        >
-          <FilterDropdown
-            id={`${cloudProvider?.toLowerCase()}-status-filter`}
-            label='Status'
-            options={statusOptions}
-            value={statusOptions.find((o) => o.value === selectedStatusFilter) ?? null}
-            onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
-          />
-          <SearchInput
-            id={`${cloudProvider?.toLowerCase()}-name-search`}
-            value={nameInput}
-            onChange={(next) => {
-              setNameInput((prev) => {
-                if (prev.trim() !== '' && next.trim() === '') {
+        />
+        {showConnectPrompt ? (
+          <ListingLayout.Body padding={ds.space[5]}>
+            <EmptyState
+              id={`${cloudProvider?.toLowerCase()}-no-accounts`}
+              icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
+              title={`No ${title} accounts connected`}
+              description={getIntegrationDescription(cloudProvider)}
+              action={
+                canManage('integrations', 'Write')
+                  ? { label: addAccountButtonText, onClick: () => setOpenAddModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  : undefined
+              }
+            />
+          </ListingLayout.Body>
+        ) : (
+          <>
+            <ListingLayout.Toolbar
+              actions={
+                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>
+                  {totalCount} {totalCount === 1 ? 'account' : 'accounts'}
+                </Typography>
+              }
+            >
+              <FilterDropdown
+                id={`${cloudProvider?.toLowerCase()}-status-filter`}
+                label='Status'
+                options={statusOptions}
+                value={statusOptions.find((o) => o.value === selectedStatusFilter) ?? null}
+                onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
+              />
+              <SearchInput
+                id={`${cloudProvider?.toLowerCase()}-name-search`}
+                value={nameInput}
+                onChange={(next) => {
+                  setNameInput((prev) => {
+                    if (prev.trim() !== '' && next.trim() === '') {
+                      setSelectedNameFilter('');
+                      setCurrentPage(0);
+                    }
+                    return next;
+                  });
+                }}
+                onEnterPress={() => {
+                  setSelectedNameFilter(nameInput);
+                  setCurrentPage(0);
+                }}
+                onClear={() => {
+                  setNameInput('');
                   setSelectedNameFilter('');
                   setCurrentPage(0);
-                }
-                return next;
-              });
-            }}
-            onEnterPress={() => {
-              setSelectedNameFilter(nameInput);
-              setCurrentPage(0);
-            }}
-            onClear={() => {
-              setNameInput('');
-              setSelectedNameFilter('');
-              setCurrentPage(0);
-            }}
-            label='Enter Name'
-          />
-        </ListingLayout.Toolbar>
-        <ListingLayout.Body>
-          <CustomTable
-            loading={loading}
-            tableData={tableData}
-            headers={TABLE_HEADERS}
-            totalRows={totalCount || tableData.length}
-            rowsPerPage={recordsPerPage}
-            pageNumber={currentPage + 1}
-            onPageChange={onPageChange}
-          />
-        </ListingLayout.Body>
+                }}
+                label='Enter Name'
+              />
+            </ListingLayout.Toolbar>
+            <ListingLayout.Body>
+              <CustomTable
+                loading={loading}
+                tableData={tableData}
+                headers={TABLE_HEADERS}
+                totalRows={totalCount || tableData.length}
+                rowsPerPage={recordsPerPage}
+                pageNumber={currentPage + 1}
+                onPageChange={onPageChange}
+              />
+            </ListingLayout.Body>
+          </>
+        )}
       </ListingLayout>
     </>
   );

@@ -16,6 +16,9 @@ import apiIntegrations from '@api1/integrations';
 import { canManage } from '@lib/auth';
 import { action } from 'src/utils/actionStyles';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { EmptyState } from '@ui/EmptyState';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 
 const GOOGLE_CHAT_SPACE_TYPE = 'google_chat_space';
 const SPACE_ID_PATTERN = /^spaces\/[A-Za-z0-9_-]+$/;
@@ -126,6 +129,8 @@ export default function GoogleChatSpacesPanel() {
   const incomingValid = useMemo(() => SPACE_ID_PATTERN.test(incomingSpaceId), [incomingSpaceId]);
   const alreadyBound = useMemo(() => spaces.some((s) => s.spaceId === incomingSpaceId), [spaces, incomingSpaceId]);
   const showPendingRow = incomingValid && !alreadyBound && !loading;
+  // Nothing bound and nothing waiting to be bound — the bot has not reached a space yet.
+  const showNoSpaces = !loading && spaces.length === 0 && !showPendingRow;
 
   // integrationId switches the backend from create (rejects an existing name) to
   // update (upserts the given fields), so re-saving a bound space — e.g. toggling
@@ -293,7 +298,10 @@ export default function GoogleChatSpacesPanel() {
   return (
     <>
       <ListingLayout id='google-chat-spaces'>
-        <ListingLayout.Toolbar
+        <ListingLayout.Header
+          icon={<CloudProviderIcon cloud_provider='GOOGLE_CHAT' width={ds.space[5]} height={ds.space[5]} />}
+          title='Google Chat'
+          description={getIntegrationDescription('GOOGLE_CHAT')}
           actions={
             <Stack direction='row' spacing={1} alignItems='center'>
               {checkingPermission ? (
@@ -318,46 +326,48 @@ export default function GoogleChatSpacesPanel() {
               ) : null}
             </Stack>
           }
-        >
-          <Stack direction='row' alignItems='center' spacing={ds.space[2]}>
-            <CloudProviderIcon cloud_provider='GOOGLE_CHAT' />
-            <Box display='flex' flexDirection='column'>
-              <Typography sx={{ fontFamily: 'var(--ds-font-display)' }} fontSize={ds.text.title} fontWeight={ds.weight.semibold} color={ds.gray[700]}>
-                Google Chat
-              </Typography>
-              <Typography fontSize={ds.text.caption} color={ds.gray[600]}>
-                {`Connects through the ${getBrandTitle()} bot — no user sign-in. Add the bot to a space; when it posts the Connect card, a tenant admin binds the space here. Pick a default for notifications that don’t name a space.`}
-              </Typography>
-            </Box>
-          </Stack>
-        </ListingLayout.Toolbar>
-        <ListingLayout.Body>
-          {showPendingRow ? (
-            <Box sx={{ p: 2, mb: 2, border: '1px solid', borderColor: 'warning.main', borderRadius: 1 }} data-testid='gchat-pending-row'>
-              <Stack direction='row' alignItems='center' justifyContent='space-between' spacing={2}>
-                <Box>
-                  <Stack direction='row' spacing={1} alignItems='center'>
-                    <Typography variant='subtitle2'>{incomingDisplayName || incomingSpaceId}</Typography>
-                    <Label tone='warning' text='Pending' size='sm' />
+        />
+        <ListingLayout.Body padding={showNoSpaces ? ds.space[5] : undefined}>
+          {showNoSpaces ? (
+            // No filters on this screen, and no pending Connect card either — so an
+            // empty list means the bot has not been added to a space yet. The how-it-works
+            // copy that used to sit permanently under the title now lives here.
+            <EmptyState
+              id='gchat-no-spaces'
+              icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
+              title='No Google Chat spaces connected'
+              description={`Connects through the ${getBrandTitle()} bot — no user sign-in. Add the bot to a space; when it posts the Connect card, a tenant admin binds the space here. Pick a default for notifications that don’t name a space.`}
+            />
+          ) : (
+            <>
+              {showPendingRow ? (
+                <Box sx={{ p: 2, mb: 2, border: '1px solid', borderColor: 'warning.main', borderRadius: 1 }} data-testid='gchat-pending-row'>
+                  <Stack direction='row' alignItems='center' justifyContent='space-between' spacing={2}>
+                    <Box>
+                      <Stack direction='row' spacing={1} alignItems='center'>
+                        <Typography variant='subtitle2'>{incomingDisplayName || incomingSpaceId}</Typography>
+                        <Label tone='warning' text='Pending' size='sm' />
+                      </Stack>
+                      <Typography variant='caption' sx={{ color: ds.gray[600] }}>
+                        {incomingSpaceId}
+                      </Typography>
+                    </Box>
+                    {userCanManage ? (
+                      <DsButton data-testid='gchat-connect-submit' disabled={connecting} onClick={handleConnect}>
+                        {connecting ? <CircularProgress size={16} /> : 'Connect'}
+                      </DsButton>
+                    ) : (
+                      <Typography variant='caption' sx={{ color: ds.gray[600] }}>
+                        Ask a tenant admin to connect
+                      </Typography>
+                    )}
                   </Stack>
-                  <Typography variant='caption' sx={{ color: ds.gray[600] }}>
-                    {incomingSpaceId}
-                  </Typography>
                 </Box>
-                {userCanManage ? (
-                  <DsButton data-testid='gchat-connect-submit' disabled={connecting} onClick={handleConnect}>
-                    {connecting ? <CircularProgress size={16} /> : 'Connect'}
-                  </DsButton>
-                ) : (
-                  <Typography variant='caption' sx={{ color: ds.gray[600] }}>
-                    Ask a tenant admin to connect
-                  </Typography>
-                )}
-              </Stack>
-            </Box>
-          ) : null}
+              ) : null}
 
-          <CustomTable id='google-chat' headers={headers} tableData={tableData} loading={loading} />
+              <CustomTable id='google-chat' headers={headers} tableData={tableData} loading={loading} />
+            </>
+          )}
         </ListingLayout.Body>
       </ListingLayout>
 

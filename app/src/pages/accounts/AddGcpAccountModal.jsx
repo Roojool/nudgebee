@@ -22,6 +22,7 @@ import MarkDowns from '@shared/viewers/MarkDowns';
 import ValidationResultBanner from '@components/accounts/ValidationResultBanner';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const SETUP_GUIDE_CONTENT = `### Prerequisites
 
@@ -424,7 +425,14 @@ const AddGcpAccountModal = ({ open, onClose }) => {
   // ──── Render ────
 
   return (
-    <Modal width='md' open={open} handleClose={isLoading ? () => {} : () => handleCloseModal(step === 3)} title='Add GCP Account' loader={isLoading}>
+    <Modal
+      width='md'
+      open={open}
+      handleClose={isLoading ? () => {} : () => handleCloseModal(step === 3)}
+      title='Add GCP Account'
+      subtitle={getIntegrationDescription('GCP')}
+      loader={isLoading}
+    >
       <Box sx={{ mb: ds.space[5], mt: ds.space[4] }}>
         <Stepper steps={STEPS.map((label) => ({ id: label, label }))} current={step} orientation='horizontal' />
       </Box>

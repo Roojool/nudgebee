@@ -25,6 +25,7 @@ import { useBrandingConfig } from '@hooks/useTenantBranding';
 import { ProgressLinear } from '@ui/ProgressLinear';
 import { useTour } from '@components/common/tour';
 import { addPendingAgentInstall, AGENT_CONNECTED } from '@components/integrations/pendingAgentInstall';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // How often the install step re-checks the agent for the new account. The
 // Helm/script run itself takes minutes.
@@ -458,6 +459,7 @@ helm repo update`;
       // stray backdrop click shouldn't drop the install instructions.
       backdropClickClose={!isWaitingForAgent}
       title='Add Kubernetes Account'
+      subtitle={getIntegrationDescription('K8S')}
       rightComponentOnTitle={
         <Box sx={{ mr: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
           <Button

@@ -16,6 +16,7 @@ import { toast as snackbar } from '@ui/Toast';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const SETUP_GUIDE_CONTENT = `### Prerequisites
 
@@ -312,6 +313,7 @@ const AddAzureAccountModal = ({ open, onClose }) => {
       open={open}
       handleClose={isLoading ? () => {} : () => handleCloseModal(onboardResults !== null)}
       title='Add Azure Account'
+      subtitle={getIntegrationDescription('AZURE')}
       loader={isLoading}
     >
       <Box sx={{ mb: ds.space[5], mt: ds.space[4] }}>

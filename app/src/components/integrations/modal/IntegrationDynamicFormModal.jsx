@@ -212,6 +212,7 @@ const IntegrationDynamicFormModal = ({
   openModal,
   handleClose,
   title,
+  subtitle,
   integrationData = [],
   editData = null,
   listIntegrationConfigurationById,
@@ -2264,6 +2265,7 @@ const IntegrationDynamicFormModal = ({
             </Typography>
           </Box>
         }
+        subtitle={subtitle}
         open={
           showModal &&
           [
@@ -2294,6 +2296,7 @@ const IntegrationDynamicFormModal = ({
         open={openModal && !showModal}
         handleClose={() => handleCloseModal(false)}
         title={title}
+        subtitle={subtitle}
         loader={isSubmitting || isLoadingSchema}
       >
         {isAgentSource ? (
@@ -3339,6 +3342,7 @@ IntegrationDynamicFormModal.propTypes = {
   openModal: PropTypes.bool,
   handleClose: PropTypes.func,
   title: PropTypes.string,
+  subtitle: PropTypes.string,
   integrationData: PropTypes.array,
   editData: PropTypes.object,
   listIntegrationConfigurationById: PropTypes.func,

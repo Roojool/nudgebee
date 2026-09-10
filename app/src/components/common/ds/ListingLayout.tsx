@@ -9,6 +9,12 @@
  *
  * Anatomy:
  *   <ListingLayout id="...">
+ *     <ListingLayout.Header               // optional identity band
+ *       icon={<ProviderIcon />}
+ *       title="Jira"
+ *       description="Create and sync Jira issues from events and recommendations."
+ *       actions={<DsButton>Add Jira Account</DsButton>}
+ *     />
  *     <ListingLayout.Toolbar title="...">
  *       <FilterDropdown ... />        // left side
  *       <FilterDropdown ... />
@@ -34,6 +40,12 @@
  * Don't:
  *   - Don't put the page-level Stat summary cards inside ListingLayout — they
  *     live as siblings above. The shell is for the table card only.
+ *   - Don't grow the prop API with widget props (see "Why slots not props").
+ *     Header is the exception: `icon`/`title`/`description` are plain identity
+ *     copy the shell lays out, not widgets it has to know about. Its `actions`
+ *     slot stays a slot.
+ *   - Don't use Header AND a Toolbar `title` on the same screen — the Header
+ *     names the screen, and the Toolbar then carries only filters.
  *   - Don't paginate inside Body. Pagination is a Footer-slot primitive per
  *     Table spec.
  */
@@ -50,11 +62,25 @@ export interface ListingLayoutProps {
 }
 
 export interface ListingLayoutToolbarProps {
-  /** Section heading. Omit when the page already has an outer tab/title bar above the card. */
+  /** Section heading. Omit when the screen uses `ListingLayout.Header`, or already has an outer tab/title bar above the card. */
   title?: React.ReactNode;
   /** Filter widgets (FilterDropdown, SearchInput, Chip groups). Rendered left-aligned after the title. */
   children?: React.ReactNode;
   /** Right-aligned action cluster (download menu, auto-refresh, primary button). */
+  actions?: React.ReactNode;
+  id?: string;
+  'data-testid'?: string;
+  sx?: SxProps<Theme>;
+}
+
+export interface ListingLayoutHeaderProps {
+  /** Provider / subject icon. Rendered inside a tinted rounded tile. */
+  icon?: React.ReactNode;
+  /** What this screen is — the provider or subject name. */
+  title: React.ReactNode;
+  /** One line saying what connecting/using it buys the reader. */
+  description?: React.ReactNode;
+  /** Right-aligned primary action for the screen (usually a single "Add …" button). */
   actions?: React.ReactNode;
   id?: string;
   'data-testid'?: string;
@@ -107,6 +133,80 @@ function ToolbarTitle({ title }: { title: React.ReactNode }) {
         {title}
       </Typography>
     </Tooltip>
+  );
+}
+
+function Header({ icon, title, description, actions, id, sx, ...rest }: ListingLayoutHeaderProps) {
+  // The screen's identity band: icon + name + one-line description on the left,
+  // the single primary action on the right, a rule underneath separating it from
+  // whatever comes next (a filter Toolbar, or an EmptyState when there is
+  // nothing to filter). Deliberately its own row rather than part of Toolbar —
+  // squeezing a name, a sentence, the filters and the primary button into one
+  // flex row is what made the description unreadable at narrow widths.
+  return (
+    <Box
+      id={id}
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: ds.space[3],
+        padding: `${ds.space[4]} ${ds.space[5]}`,
+        borderBottom: `1px solid ${ds.gray[200]}`,
+        borderTopLeftRadius: ds.radius.xl,
+        borderTopRightRadius: ds.radius.xl,
+        ...sx,
+      }}
+      {...rest}
+    >
+      {icon && (
+        <Box
+          sx={{
+            flexShrink: 0,
+            // 44px — the --ds-space-* scale has no such step, and space-0 is the
+            // documented 2px escape hatch for exactly this.
+            width: ds.space.mul(0, 22),
+            height: ds.space.mul(0, 22),
+            borderRadius: ds.radius.lg,
+            backgroundColor: ds.blue[100],
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {icon}
+        </Box>
+      )}
+      <Box sx={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
+        <Typography
+          component={typeof title === 'string' || typeof title === 'number' ? 'h2' : 'div'}
+          sx={{
+            fontSize: ds.text.title,
+            fontWeight: ds.weight.semibold,
+            color: ds.gray[700],
+            fontFamily: 'var(--ds-font-display)',
+            lineHeight: 1.3,
+            margin: 0,
+          }}
+        >
+          {title}
+        </Typography>
+        {description && (
+          <Typography
+            component={typeof description === 'string' || typeof description === 'number' ? 'p' : 'div'}
+            sx={{
+              fontSize: ds.text.body,
+              fontWeight: ds.weight.regular,
+              color: ds.gray[600],
+              lineHeight: 1.4,
+              margin: 0,
+            }}
+          >
+            {description}
+          </Typography>
+        )}
+      </Box>
+      {actions && <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: ds.space[2] }}>{actions}</Box>}
+    </Box>
   );
 }
 
@@ -216,6 +316,7 @@ export function ListingLayout({ id, children, sx }: ListingLayoutProps) {
   );
 }
 
+ListingLayout.Header = Header;
 ListingLayout.Toolbar = Toolbar;
 ListingLayout.ToolbarSpacer = ToolbarSpacer;
 ListingLayout.Body = Body;
