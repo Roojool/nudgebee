@@ -76,6 +76,15 @@ def _data():
     return {"tenant": TENANT, "cloud_account_id": ACCOUNT}
 
 
+def _is_graph_query(query):
+    """The two knowledge-graph lookups, told apart from the events query.
+
+    psycopg2 is stubbed, so the events query is a MagicMock while the graph
+    lookups are plain strings.
+    """
+    return isinstance(query, str) and "knowledge_graph_node" in query
+
+
 def _events_query_text():
     """The events-query string, as handed to psycopg2's sql.SQL().
 
@@ -105,14 +114,43 @@ class TestConsumedConfigMapNames(unittest.TestCase):
         q.assert_not_called()
 
 
+class TestRoutedIngressNames(unittest.TestCase):
+    """The routing side: which Ingresses send traffic to this workload.
+
+    Name matching can never produce this — in dev, Ingress `app` routes to
+    service `notifications`, so the workload and the Ingress fronting it share
+    no name at all.
+    """
+
+    def test_returns_ingresses_from_the_graph(self):
+        with mock.patch.object(eh.database, "run_query", return_value=[("app",)]) as q:
+            names = eh.get_routed_ingress_names(TENANT, ACCOUNT, "nudgebee-oss", "notifications")
+        self.assertEqual(names, ["app"])
+        self.assertEqual(q.call_args[0][1], [TENANT, ACCOUNT, "nudgebee-oss", "notifications"])
+
+    def test_traverses_exposes_backwards(self):
+        # EXPOSES is declared "K8sService -> Workload" but written
+        # Workload -> K8sService; a query built from the comment silently
+        # returns nothing.
+        with mock.patch.object(eh.database, "run_query", return_value=[]) as q:
+            eh.get_routed_ingress_names(TENANT, ACCOUNT, "nudgebee-oss", "notifications")
+        query = q.call_args[0][0]
+        self.assertIn("exposes.source_node_id = w.id", query)
+        self.assertIn("routes.destination_node_id = svc.id", query)
+
+    def test_graph_failure_is_not_fatal(self):
+        with mock.patch.object(eh.database, "run_query", side_effect=Exception("no graph")):
+            self.assertEqual(eh.get_routed_ingress_names(TENANT, ACCOUNT, "sessions", "sessions-api"), [])
+
+
 class TestGetLastConfigChange(unittest.TestCase):
     def test_returns_several_changes_not_just_the_newest(self):
         edit = (1, "sessions/sessions-config", [], datetime.now(timezone.utc) - timedelta(hours=6))
         restart = (2, "sessions/sessions-api", [], datetime.now(timezone.utc) - timedelta(hours=6))
 
         def fake_query(query, values):
-            if "knowledge_graph_node" in query:
-                return [("sessions-config",)]
+            if _is_graph_query(query):
+                return [("sessions-config",)] if "USES_CONFIG" in query else []
             return [restart, edit]
 
         with mock.patch.object(eh.database, "run_query", side_effect=fake_query):
@@ -124,8 +162,10 @@ class TestGetLastConfigChange(unittest.TestCase):
         captured = {}
 
         def fake_query(query, values):
-            if isinstance(query, str) and "knowledge_graph_node" in query:
-                return [("sessions-config",), ("sessions-app",)]
+            if _is_graph_query(query):
+                if "USES_CONFIG" in query:
+                    return [("sessions-config",), ("sessions-app",)]
+                return [("sessions-public",)]
             captured["values"] = values
             return []
 
@@ -135,9 +175,11 @@ class TestGetLastConfigChange(unittest.TestCase):
         query = _events_query_text()
         self.assertIn("service_key = %s", query)
         self.assertIn("subject_type = 'configmap'", query)
+        self.assertIn("subject_type = 'ingress'", query)
         self.assertIn("sessions/sessions-api", captured["values"])
         self.assertIn("sessions-config", captured["values"])
         self.assertIn("sessions-app", captured["values"])
+        self.assertIn("sessions-public", captured["values"])
         # Ordered by when the change happened, not when we ingested it.
         self.assertIn("order by starts_at desc", query)
         # The two sources are OR'd inside one group, so the namespace/tenant
@@ -155,6 +197,7 @@ class TestGetLastConfigChange(unittest.TestCase):
         self.assertIn("service_key = %s", query)
         # No empty IN () list — that is a syntax error, not an empty result.
         self.assertNotIn("subject_type = 'configmap'", query)
+        self.assertNotIn("subject_type = 'ingress'", query)
 
     def test_change_events_do_not_correlate_against_themselves(self):
         finding = _oom_finding()
@@ -173,7 +216,7 @@ class TestGetLastConfigChange(unittest.TestCase):
         captured = {}
 
         def fake_query(query, values):
-            if isinstance(query, str) and "knowledge_graph_node" in query:
+            if _is_graph_query(query):
                 return []
             captured["values"] = values
             return []
@@ -193,7 +236,7 @@ class TestGetLastConfigChange(unittest.TestCase):
         captured = {}
 
         def fake_query(query, values):
-            if isinstance(query, str) and "knowledge_graph_node" in query:
+            if _is_graph_query(query):
                 return []
             captured["values"] = values
             return []

@@ -35,7 +35,7 @@ func configMapEvent() *Event {
 	}
 }
 
-func consumerRows(pairs ...[2]string) *sqlmock.Rows {
+func relatedRows(pairs ...[2]string) *sqlmock.Rows {
 	rows := sqlmock.NewRows([]string{"name", "kind"})
 	for _, p := range pairs {
 		rows = rows.AddRow(p[0], p[1])
@@ -53,7 +53,7 @@ func TestLinkK8sCloudResourceId_ConfigMapWithOneConsumer(t *testing.T) {
 
 	mock.ExpectQuery(`USES_CONFIG`).
 		WithArgs(cmTenant, cmAccount, "sessions", "sessions-config").
-		WillReturnRows(consumerRows([2]string{"sessions-api", "Deployment"}))
+		WillReturnRows(relatedRows([2]string{"sessions-api", "Deployment"}))
 	mock.ExpectQuery(`FROM k8s_workloads`).
 		WithArgs(cmTenant, cmAccount, "sessions", "sessions-api").
 		WillReturnRows(sqlmock.NewRows([]string{"cloud_resource_id"}).AddRow(cmCrid))
@@ -77,7 +77,7 @@ func TestLinkK8sCloudResourceId_ConfigMapWithSeveralConsumers(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	mock.ExpectQuery(`USES_CONFIG`).
-		WillReturnRows(consumerRows(
+		WillReturnRows(relatedRows(
 			[2]string{"sessions-api", "Deployment"},
 			[2]string{"sessions-worker", "Deployment"},
 		))
@@ -103,7 +103,7 @@ func TestLinkK8sCloudResourceId_ConfigMapNeverNameMatchesAWorkload(t *testing.T)
 	defer func() { _ = db.Close() }()
 
 	// No USES_CONFIG edge exists (graph not built yet, or nothing reads it).
-	mock.ExpectQuery(`USES_CONFIG`).WillReturnRows(consumerRows())
+	mock.ExpectQuery(`USES_CONFIG`).WillReturnRows(relatedRows())
 	// Any k8s_workloads lookup after that would be the name match. None is
 	// registered, so sqlmock fails the test if one is attempted.
 
@@ -144,7 +144,7 @@ func TestLinkK8sCloudResourceId_ConsumerLabelIsBounded(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	rows := sqlmock.NewRows([]string{"name", "kind"})
-	for i := 0; i < maxConfigMapConsumersLabelled+7; i++ {
+	for i := 0; i < maxRelatedWorkloadsLabelled+7; i++ {
 		rows = rows.AddRow("workload", "Deployment")
 	}
 	mock.ExpectQuery(`USES_CONFIG`).WillReturnRows(rows)
@@ -155,7 +155,7 @@ func TestLinkK8sCloudResourceId_ConsumerLabelIsBounded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 	label := ev.Labels[ConfigMapConsumersLabel]
 	assert.Contains(t, label, "+7 more", "the count that was dropped has to be stated")
-	assert.Equal(t, maxConfigMapConsumersLabelled, len(splitConsumers(label)))
+	assert.Equal(t, maxRelatedWorkloadsLabelled, len(splitConsumers(label)))
 }
 
 // splitConsumers counts the entries in the label, ignoring the "+N more" tail.

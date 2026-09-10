@@ -182,6 +182,45 @@ const configMapConsumersSQL = `
 	ORDER BY 1, 2
 `
 
+// ingressBackendsSQL resolves an Ingress to the workloads it routes traffic
+// to, two hops through the knowledge graph:
+//
+//	Ingress -ROUTES_TO_SERVICE-> K8sService <-EXPOSES- Workload
+//
+// Note the second hop runs backwards. EXPOSES is declared as
+// "K8sService → Workload" (knowledge_graph/core/types.go) but written
+// Workload → K8sService, and a query built from the comment returns nothing
+// at all rather than failing.
+//
+// An Ingress name is a particularly bad guess at a workload name: in our own
+// dev cluster `nudgebee-oss/app` routes to service `notifications`, and
+// `nudgebee/k8s-collector` fans out to two Deployments. Matching by name
+// picks the same-named workload when one exists and silently drops the rest.
+const ingressBackendsSQL = `
+	SELECT DISTINCT w.properties->>'name' AS name, COALESCE(w.properties->>'kind', '') AS kind
+	FROM knowledge_graph_node ing
+	JOIN knowledge_graph_edge routes
+	  ON routes.source_node_id = ing.id
+	 AND routes.relationship_type = 'ROUTES_TO_SERVICE'
+	 AND routes.is_active = true
+	JOIN knowledge_graph_node svc
+	  ON svc.id = routes.destination_node_id
+	 AND svc.is_active = true
+	JOIN knowledge_graph_edge exposes
+	  ON exposes.destination_node_id = svc.id
+	 AND exposes.relationship_type = 'EXPOSES'
+	 AND exposes.is_active = true
+	JOIN knowledge_graph_node w
+	  ON w.id = exposes.source_node_id
+	 AND w.is_active = true
+	WHERE ing.tenant_id = $1 AND ing.cloud_account_id = $2
+	  AND ing.node_type = 'Ingress' AND ing.is_active = true
+	  AND ing.properties->>'namespace' = $3
+	  AND ing.properties->>'name' = $4
+	  AND w.properties->>'name' IS NOT NULL
+	ORDER BY 1, 2
+`
+
 // podCloudResourceSQL is the fallback for pod-subject events whose owning
 // workload could not be determined: link the pod's own cloud_resource_id.
 const podCloudResourceSQL = `
@@ -3472,7 +3511,18 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 		// Deployment whether or not that Deployment reads it, which is
 		// worse than no attribution: it asserts a causal link that may not
 		// exist. Resolve the workloads that actually consume it instead.
-		linkConfigMapConsumers(sc, dbms, tenantId, ns, subjectName, webhookEvent)
+		linkRelatedWorkloads(sc, dbms, configMapConsumersSQL, "configmap",
+			ConfigMapConsumersLabel, tenantId, ns, subjectName, webhookEvent)
+		return
+	case "ingress":
+		// Same trap, and this one has been firing all along: Ingress
+		// changes are already emitted, so the name match below has been
+		// attributing them by naming coincidence. It picks the same-named
+		// workload when one exists and silently drops every other backend
+		// — including, in the common case of one Ingress fronting several
+		// services, the one whose traffic the change actually broke.
+		linkRelatedWorkloads(sc, dbms, ingressBackendsSQL, "ingress",
+			IngressBackendsLabel, tenantId, ns, subjectName, webhookEvent)
 		return
 	default:
 		// Subject is itself a workload.
@@ -3510,92 +3560,102 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 // its configuration changed, which is the only reason anyone cares.
 const ConfigMapConsumersLabel = "nb_configmap_consumers"
 
-// maxConfigMapConsumersLabelled bounds the consumer label. A ConfigMap read
-// by hundreds of workloads (a cluster-wide CA bundle, a shared settings map)
-// would otherwise write an unbounded string into every event row.
-const maxConfigMapConsumersLabelled = 20
+// IngressBackendsLabel carries the workloads the changed Ingress routes to,
+// in the same shape. An Ingress name is not a workload name — routing is the
+// only thing that says whose traffic just changed.
+const IngressBackendsLabel = "nb_ingress_backends"
 
-type configMapConsumer struct {
+// maxRelatedWorkloadsLabelled bounds these labels. A ConfigMap read by
+// hundreds of workloads (a cluster-wide CA bundle) or an Ingress fronting a
+// large namespace would otherwise write an unbounded string into every event
+// row.
+const maxRelatedWorkloadsLabelled = 20
+
+// relatedWorkload is a workload reached from the changed object through the
+// knowledge graph — a ConfigMap's consumer, an Ingress's backend.
+type relatedWorkload struct {
 	Name string `db:"name"`
 	Kind string `db:"kind"`
 }
 
-func (c configMapConsumer) String() string {
-	if c.Kind == "" {
-		return c.Name
+func (w relatedWorkload) String() string {
+	if w.Kind == "" {
+		return w.Name
 	}
-	return c.Kind + "/" + c.Name
+	return w.Kind + "/" + w.Name
 }
 
-// configMapConsumers reads the workloads referencing a ConfigMap from the
-// knowledge graph. Best-effort: an empty result (graph not built yet, or the
-// ConfigMap wired up since the last build — the graph rebuilds hourly) leaves
-// the event unattributed, which is the correct outcome. Guessing from names is
-// what this function exists to avoid.
-func configMapConsumers(sc *security.RequestContext, dbms *database.DatabaseManager,
-	tenantId, accountId, namespace, name string) []configMapConsumer {
+// relatedWorkloads runs one of the graph traversals above. Best-effort: an
+// empty result (graph not built yet, or the relationship created since the
+// last build — the graph rebuilds hourly) leaves the event unattributed,
+// which is the correct outcome. Guessing from names is what this exists to
+// avoid.
+func relatedWorkloads(sc *security.RequestContext, dbms *database.DatabaseManager,
+	query, subjectKind, tenantId, accountId, namespace, name string) []relatedWorkload {
 
-	rows, err := dbms.Db.QueryxContext(sc.GetContext(), configMapConsumersSQL, tenantId, accountId, namespace, name)
+	rows, err := dbms.Db.QueryxContext(sc.GetContext(), query, tenantId, accountId, namespace, name)
 	if err != nil {
-		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer lookup failed",
-			"error", err, "namespace", namespace, "configmap", name)
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload lookup failed",
+			"error", err, "subject_kind", subjectKind, "namespace", namespace, "name", name)
 		return nil
 	}
 	defer func() { _ = rows.Close() }()
 
-	var consumers []configMapConsumer
+	var related []relatedWorkload
 	for rows.Next() {
-		var c configMapConsumer
-		if err := rows.StructScan(&c); err != nil {
-			sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer scan failed", "error", err)
+		var w relatedWorkload
+		if err := rows.StructScan(&w); err != nil {
+			sc.GetLogger().Warn("link_k8s_cloud_resource: related workload scan failed",
+				"error", err, "subject_kind", subjectKind)
 			return nil
 		}
-		if c.Name != "" {
-			consumers = append(consumers, c)
+		if w.Name != "" {
+			related = append(related, w)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer rows failed", "error", err)
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload rows failed",
+			"error", err, "subject_kind", subjectKind)
 		return nil
 	}
-	return consumers
+	return related
 }
 
-// linkConfigMapConsumers attributes a ConfigMap change to the workloads that
-// read it. Every consumer is recorded in ConfigMapConsumersLabel; the
-// resource link is only set when there is exactly one, because with several
-// consumers any single choice would be arbitrary and the label already
-// carries the full set.
-func linkConfigMapConsumers(sc *security.RequestContext, dbms *database.DatabaseManager,
-	tenantId, namespace, name string, webhookEvent *Event) {
+// linkRelatedWorkloads attributes a change on a non-workload object to the
+// workloads the graph connects it to. All of them are recorded in `label`;
+// the resource link is only set when there is exactly one, because with
+// several any single choice would be arbitrary and the label already carries
+// the full set.
+func linkRelatedWorkloads(sc *security.RequestContext, dbms *database.DatabaseManager,
+	query, subjectKind, label, tenantId, namespace, name string, webhookEvent *Event) {
 
 	if name == "" {
 		return
 	}
-	consumers := configMapConsumers(sc, dbms, tenantId, webhookEvent.AccountId, namespace, name)
-	if len(consumers) == 0 {
+	related := relatedWorkloads(sc, dbms, query, subjectKind, tenantId, webhookEvent.AccountId, namespace, name)
+	if len(related) == 0 {
 		return
 	}
 
-	labelled := consumers
+	labelled := related
 	suffix := ""
-	if len(labelled) > maxConfigMapConsumersLabelled {
-		suffix = fmt.Sprintf(",+%d more", len(labelled)-maxConfigMapConsumersLabelled)
-		labelled = labelled[:maxConfigMapConsumersLabelled]
+	if len(labelled) > maxRelatedWorkloadsLabelled {
+		suffix = fmt.Sprintf(",+%d more", len(labelled)-maxRelatedWorkloadsLabelled)
+		labelled = labelled[:maxRelatedWorkloadsLabelled]
 	}
 	names := make([]string, 0, len(labelled))
-	for _, c := range labelled {
-		names = append(names, c.String())
+	for _, w := range labelled {
+		names = append(names, w.String())
 	}
 	if webhookEvent.Labels == nil {
 		webhookEvent.Labels = map[string]string{}
 	}
-	webhookEvent.Labels[ConfigMapConsumersLabel] = strings.Join(names, ",") + suffix
+	webhookEvent.Labels[label] = strings.Join(names, ",") + suffix
 
-	if len(consumers) != 1 {
+	if len(related) != 1 {
 		return
 	}
-	only := consumers[0]
+	only := related[0]
 	webhookEvent.SubjectOwner = only.Name
 	webhookEvent.SubjectOwnerKind = only.Kind
 
@@ -3606,8 +3666,8 @@ func linkConfigMapConsumers(sc *security.RequestContext, dbms *database.Database
 	case err == nil && crid != "":
 		webhookEvent.CloudResourceId = crid
 	case err != nil && err != sql.ErrNoRows:
-		sc.GetLogger().Warn("link_k8s_cloud_resource: configmap consumer workload lookup failed",
-			"error", err, "namespace", namespace, "workload", only.Name)
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload resource lookup failed",
+			"error", err, "subject_kind", subjectKind, "namespace", namespace, "workload", only.Name)
 	}
 }
 

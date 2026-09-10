@@ -859,23 +859,62 @@ _WORKLOAD_CONFIGMAPS_SQL = """
 CONFIG_CHANGE_CORRELATION_LIMIT = 5
 
 
-def get_consumed_configmap_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
-    """ConfigMaps the workload reads, per the knowledge graph.
+# The routing side of the same question: which Ingresses send traffic to this
+# workload. Two hops — Ingress -ROUTES_TO_SERVICE-> K8sService <-EXPOSES- Workload.
+# The second hop runs backwards: EXPOSES is declared "K8sService -> Workload" in
+# knowledge_graph/core/types.go but written Workload -> K8sService, and a query
+# built from the comment returns nothing rather than failing.
+_WORKLOAD_INGRESSES_SQL = """
+    select distinct ing.properties->>'name'
+    from knowledge_graph_node w
+    join knowledge_graph_edge exposes
+      on exposes.source_node_id = w.id
+     and exposes.relationship_type = 'EXPOSES'
+     and exposes.is_active = true
+    join knowledge_graph_node svc
+      on svc.id = exposes.destination_node_id
+     and svc.is_active = true
+    join knowledge_graph_edge routes
+      on routes.destination_node_id = svc.id
+     and routes.relationship_type = 'ROUTES_TO_SERVICE'
+     and routes.is_active = true
+    join knowledge_graph_node ing
+      on ing.id = routes.source_node_id
+     and ing.is_active = true
+    where w.tenant_id = %s and w.cloud_account_id = %s and w.is_active = true
+      and w.properties->>'namespace' = %s
+      and w.properties->>'name' = %s
+"""
 
-    Best-effort: the graph rebuilds hourly, so a ConfigMap wired up in the last
-    hour has no edge yet and simply isn't correlated. That is the right failure
-    mode — the alternative, matching ConfigMaps to workloads by name, asserts
-    causal links that do not exist.
+
+def get_consumed_configmap_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """ConfigMaps the workload reads, per the knowledge graph."""
+    return _related_object_names(
+        _WORKLOAD_CONFIGMAPS_SQL, "ConfigMaps", tenant, cloud_account_id, namespace, workload_name
+    )
+
+
+def get_routed_ingress_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """Ingresses that route traffic to the workload, per the knowledge graph."""
+    return _related_object_names(
+        _WORKLOAD_INGRESSES_SQL, "Ingresses", tenant, cloud_account_id, namespace, workload_name
+    )
+
+
+def _related_object_names(query, what, tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """Objects the graph connects to this workload.
+
+    Best-effort: the graph rebuilds hourly, so a relationship created in the
+    last hour has no edge yet and simply isn't correlated. That is the right
+    failure mode — the alternative, matching objects to workloads by name,
+    asserts causal links that do not exist.
     """
     if not workload_name or not namespace:
         return []
     try:
-        rows = database.run_query(
-            _WORKLOAD_CONFIGMAPS_SQL,
-            [tenant, cloud_account_id, namespace, workload_name],
-        )
+        rows = database.run_query(query, [tenant, cloud_account_id, namespace, workload_name])
     except Exception:
-        logger.exception("Failed to look up ConfigMaps consumed by %s/%s", namespace, workload_name)
+        logger.exception("Failed to look up %s related to %s/%s", what, namespace, workload_name)
         return []
     return [row[0] for row in rows if row and row[0]]
 
@@ -933,15 +972,19 @@ def get_last_config_change(config_change_event, data, finding):
     workload_name = finding["service_key"].split("/", 1)[-1]
     subject_clauses = ["service_key = %s"]
     values.append(finding["service_key"])
-    configmaps = get_consumed_configmap_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)
-    if configmaps:
-        # Names are expanded into placeholders rather than bound as an
-        # ANY(%s) array so an empty list can never produce an untyped empty
-        # array; the clause is simply omitted when there is nothing to add.
+    # Names are expanded into placeholders rather than bound as an ANY(%s)
+    # array so an empty list can never produce an untyped empty array; each
+    # clause is simply omitted when there is nothing to add.
+    for subject_type, names in (
+        ("configmap", get_consumed_configmap_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)),
+        ("ingress", get_routed_ingress_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)),
+    ):
+        if not names:
+            continue
         subject_clauses.append(
-            "(subject_type = 'configmap' and subject_name in ({}))".format(",".join(["%s"] * len(configmaps)))
+            "(subject_type = '{}' and subject_name in ({}))".format(subject_type, ",".join(["%s"] * len(names)))
         )
-        values.extend(configmaps)
+        values.extend(names)
     conditions.append("({})".format(" or ".join(subject_clauses)))
     values.append(CONFIG_CHANGE_CORRELATION_LIMIT)
 
