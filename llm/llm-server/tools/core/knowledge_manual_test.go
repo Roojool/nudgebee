@@ -21,7 +21,7 @@ func TestResolveManualKnowledgeCanonicalIdentity(t *testing.T) {
 	}
 	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
 
-	mock.ExpectQuery(`SELECT id, name, LEFT.* FROM llm_knowledgebases WHERE account_id = \$1.*status = 'active' AND enabled`).WithArgs("account-a", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data"}).AddRow("manual-a", "Runbook", "FULL-CONTENT-TAIL"))
+	mock.ExpectQuery(`SELECT id, name, LEFT.* FROM llm_knowledgebases WHERE account_id = \$1.*status = 'active' AND enabled`).WithArgs("account-a", sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "note_category"}).AddRow("manual-a", "Runbook", "FULL-CONTENT-TAIL", "sop"))
 	docs := RAGSearchResults{
 		{Document: "partial", Metadata: map[string]any{"collection": "kb_manual-a", "source": "/tmp/file.json"}},
 		{Document: "other chunk", Metadata: map[string]any{"collection": "kb_manual-a"}},
@@ -34,6 +34,7 @@ func TestResolveManualKnowledgeCanonicalIdentity(t *testing.T) {
 	assert.Equal(t, "manual-a", got[0].Metadata["kb_id"])
 	assert.Equal(t, "Runbook", got[0].Metadata["title"])
 	assert.Equal(t, "manual", got[0].Metadata["source"])
+	assert.Equal(t, KnowledgePurposeProcedure, KnowledgeDocumentPurpose(got[0]))
 	assert.Equal(t, docs[3], got[1])
 	require.NoError(t, mock.ExpectationsWereMet())
 }
