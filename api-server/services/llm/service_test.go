@@ -9,6 +9,7 @@ import (
 	"nudgebee/services/config"
 	"nudgebee/services/security"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,4 +158,45 @@ func TestChatCompletion_E2E(t *testing.T) {
 	assert.NotEmpty(t, resp.ConversationId)
 	assert.NotEmpty(t, resp.SessionId)
 	assert.NotEmpty(t, resp.Status)
+}
+
+// A conversation the user stopped in Nubi (TERMINATED) or the server reaped
+// (KILLED) never reaches COMPLETED. Polling on until the retry budget runs out
+// costs minutes and reports a timeout that names nothing — the same defect
+// #36990 describes on the automation side of this call.
+func TestChatCompletion_StopsWhenConversationTerminated(t *testing.T) {
+	for _, status := range []string{"TERMINATED", "KILLED"} {
+		t.Run(status, func(t *testing.T) {
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/completions/chat" {
+					_ = json.NewEncoder(w).Encode(llmApiResponse{
+						Data: &llmAgentResponse{ConversationId: "conv-1", SessionId: "sess-1", Status: "IN_PROGRESS"},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(llmApiResponse{
+					Data: &llmAgentResponse{ConversationId: "conv-1", SessionId: "sess-1", Status: status},
+				})
+			}))
+			defer server.Close()
+
+			oldURL := config.Config.LLMServerEndpoint
+			config.Config.LLMServerEndpoint = server.URL
+			config.Config.ServicesServerLLMRetryAttempts = 10
+			config.Config.ServicesServerLLMInitialBackoffSeconds = 1
+			defer func() { config.Config.LLMServerEndpoint = oldURL }()
+
+			sc := security.NewRequestContext(context.Background(), &security.SecurityContext{}, slog.Default(), nil, nil)
+
+			_, err := ChatCompletion(sc, ConversationApiRequest{Query: "hi", AccountId: "acc-1"})
+
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "conversation was "+strings.ToLower(status)+" before it answered")
+			assert.NotContains(t, err.Error(), "max retry attempts reached")
+			assert.Equal(t, 2, callCount, "one chat + one poll: the call ends on the first poll that sees the stop")
+		})
+	}
 }

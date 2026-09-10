@@ -7,6 +7,7 @@ import (
 	"nudgebee/runbook/common"
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/services/security"
+	"strings"
 	"time"
 )
 
@@ -118,6 +119,18 @@ type llmAgentResponse struct {
 
 type llmChatResponse struct {
 	Data llmAgentResponse `json:"data"`
+}
+
+// stoppedConversationStatuses are the states a conversation ends in without ever
+// producing an answer: TERMINATED is a user pressing Stop in Nubi, KILLED is the
+// server reaping the run. Neither can become COMPLETED, so polling on is waiting
+// for something that will not happen — which is what left an automation showing
+// "In Progress" for the full retry budget (180 × 5s by default) after its
+// conversation had visibly ended (#36990). Same terminal set the chat UI treats
+// as final.
+var stoppedConversationStatuses = map[string]bool{
+	"TERMINATED": true,
+	"KILLED":     true,
 }
 
 func ProcessRequest(ctx *security.RequestContext, request LLMRequest) (LLMResponse, error) {
@@ -277,6 +290,10 @@ func ProcessRequest(ctx *security.RequestContext, request LLMRequest) (LLMRespon
 				}, nil
 			}
 			return LLMResponse{}, errors.New("llm: completed but no messages found")
+		}
+
+		if stoppedConversationStatuses[status] {
+			return LLMResponse{}, fmt.Errorf("llm: conversation was %s before it answered", strings.ToLower(status))
 		}
 
 		if status == "FAILED" || status == "ERROR" {

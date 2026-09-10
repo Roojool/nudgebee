@@ -9,6 +9,7 @@ import (
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/services/security"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -371,4 +372,47 @@ func TestProcessRequest_E2E(t *testing.T) {
 	assert.NotEmpty(t, resp.ConversationId)
 	assert.NotEmpty(t, resp.SessionId)
 	assert.NotEmpty(t, resp.Status)
+}
+
+// #36990: terminating an automation's Nubi conversation from the chat UI left the
+// automation reporting "In Progress" until the whole retry budget ran out — 180
+// polls, 15 minutes on the shipped defaults — because TERMINATED was not a status
+// the poll loop recognised as final. It must stop on the first poll that sees it,
+// with an error that names why.
+func TestProcessRequest_StopsWhenConversationTerminated(t *testing.T) {
+	for _, status := range []string{"TERMINATED", "KILLED"} {
+		t.Run(status, func(t *testing.T) {
+			callCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/completions/chat" {
+					_ = json.NewEncoder(w).Encode(llmChatResponse{
+						Data: llmAgentResponse{ConversationId: "conv-1", SessionId: "sess-1", Status: "IN_PROGRESS"},
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(llmChatResponse{
+					Data: llmAgentResponse{ConversationId: "conv-1", SessionId: "sess-1", Status: status},
+				})
+			}))
+			defer server.Close()
+
+			oldURL := config.Config.LlmServerUrl
+			config.Config.LlmServerUrl = server.URL
+			config.Config.RunbookServerLlmRetryAttempts = 10
+			config.Config.RunbookServerLlmInitialBackoffSeconds = 1
+			defer func() { config.Config.LlmServerUrl = oldURL }()
+
+			sc, _, _ := newTestSecurityContext(t)
+			ctx := security.NewRequestContext(context.Background(), sc, nil, nil, nil)
+
+			_, err := ProcessRequest(ctx, LLMRequest{Message: "hi", AccountId: uuid.NewString()})
+
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "conversation was "+strings.ToLower(status)+" before it answered")
+			assert.NotContains(t, err.Error(), "max retry attempts reached", "a stopped conversation must not be polled to the end of the budget")
+			assert.Equal(t, 2, callCount, "one chat + one poll: the run ends on the first poll that sees the stop")
+		})
+	}
 }
