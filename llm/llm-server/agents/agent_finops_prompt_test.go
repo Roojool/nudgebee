@@ -46,6 +46,7 @@ func TestFinOpsPrompt_MentionsOnlyRealTools(t *testing.T) {
 		tools.ToolRecommendationApply:                  true,
 		tools.ToolRecommendationExecuteCli:             true,
 		tools.ToolRecommendationRecordTicketResolution: true,
+		tools.ToolRecommendationSetDismissal:           true,
 		tools.TicketMasterToolNameV2:                   true,
 	}
 	// Referenced in prose as data fields / sub-agent internals, not as tools

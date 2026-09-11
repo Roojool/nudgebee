@@ -65,6 +65,7 @@ func TestWriteConfirmationRequired_RecommendationWriteTools(t *testing.T) {
 	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationApply))
 	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationExecuteCli))
 	assert.True(t, confirms(rt(toolcore.ToolRequestTypeCreate), tools.ToolRecommendationRecordTicketResolution))
+	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationSetDismissal))
 }
 
 // confirmStubTool / confirmScopedStubTool exercise confirmationKeyForAction's two paths.

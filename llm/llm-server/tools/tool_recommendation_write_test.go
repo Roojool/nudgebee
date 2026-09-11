@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
@@ -360,6 +362,121 @@ func TestRecommendationTicketResolutionTool(t *testing.T) {
 	})
 }
 
+func TestRecommendationDismissalTool(t *testing.T) {
+	t.Run("requires recommendation_id and a known action", func(t *testing.T) {
+		resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"action": "dismiss"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
+
+		resp, err = RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"recommendation_id": "rec-1", "action": "archive"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
+	})
+
+	t.Run("dismisses through the same endpoint as Optimise, with the reason", func(t *testing.T) {
+		var gotAction string
+		var gotInput map[string]any
+		cleanup := startRPCStub(t, "/rpc/recommendation", func(action string, input map[string]any) (int, string) {
+			gotAction = action
+			gotInput = input
+			return http.StatusOK, `{"status":"Dismissed","applied":true}`
+		})
+		defer cleanup()
+
+		resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"recommendation_id": "rec-1", "action": "dismiss", "reason": "accepted risk"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		assert.Equal(t, "recommendations_update_dismissal", gotAction)
+
+		object, ok := gotInput["object"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "acc-7", object["account_id"])
+		assert.Equal(t, "rec-1", object["recommendation_id"])
+		assert.Equal(t, true, object["dismissed"])
+		assert.Equal(t, "accepted risk", object["reason"])
+		_, hasSnooze := object["snoozed_until"]
+		assert.False(t, hasSnooze)
+	})
+
+	t.Run("snoozes until a future RFC3339 date honouring snooze_days", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startRPCStub(t, "/rpc/recommendation", func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"status":"Dismissed","applied":true}`
+		})
+		defer cleanup()
+
+		before := time.Now().UTC()
+		resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"recommendation_id": "rec-1", "action": "snooze", "snooze_days": float64(7)},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+
+		object := gotInput["object"].(map[string]any)
+		assert.Equal(t, true, object["dismissed"])
+		until, err := time.Parse(time.RFC3339, object["snoozed_until"].(string))
+		require.NoError(t, err)
+		assert.WithinDuration(t, before.Add(7*24*time.Hour), until, 2*time.Minute)
+	})
+
+	t.Run("rejects a snooze outside one day to a year", func(t *testing.T) {
+		for _, days := range []any{float64(0), float64(400), "soon"} {
+			resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+				Arguments: map[string]any{"recommendation_id": "rec-1", "action": "snooze", "snooze_days": days},
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, core.NBToolResponseStatusError, resp.Status, "snooze_days=%v", days)
+		}
+	})
+
+	t.Run("reactivates with dismissed=false", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startRPCStub(t, "/rpc/recommendation", func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"status":"Open","applied":true}`
+		})
+		defer cleanup()
+
+		resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"recommendation_id": "rec-1", "action": "reactivate"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		assert.Equal(t, false, gotInput["object"].(map[string]any)["dismissed"])
+	})
+
+	t.Run("reports a refused change instead of claiming success", func(t *testing.T) {
+		cleanup := startRPCStub(t, "/rpc/recommendation", func(action string, input map[string]any) (int, string) {
+			return http.StatusOK, `{"status":"InProgress","applied":false,"message":"only an Open recommendation can be dismissed"}`
+		})
+		defer cleanup()
+
+		resp, err := RecommendationDismissalTool{}.Call(newTriageToolContext("acc-7"), core.NBToolCallRequest{
+			Arguments: map[string]any{"recommendation_id": "rec-1", "action": "dismiss"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
+		assert.Contains(t, fmt.Sprint(resp.Data), "was not dismissed")
+		assert.Contains(t, fmt.Sprint(resp.Data), "only an Open recommendation")
+	})
+
+	t.Run("classifies as write and confirms per action", func(t *testing.T) {
+		rt, err := RecommendationDismissalTool{}.InferToolRequestType(nil, "", "")
+		assert.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeUpdate, rt)
+		assert.NotEqual(t,
+			RecommendationDismissalTool{}.ConfirmationKey(`{"recommendation_id":"rec-1","action":"dismiss"}`),
+			RecommendationDismissalTool{}.ConfirmationKey(`{"recommendation_id":"rec-1","action":"snooze"}`))
+	})
+}
+
 // The approval card must describe the actual change in operator terms — a raw
 // recommendation id tells the approver nothing.
 func TestRecommendationWriteToolConfirmationQuestions(t *testing.T) {
@@ -435,6 +552,21 @@ func TestRecommendationWriteToolConfirmationQuestions(t *testing.T) {
 		assert.Contains(t, long, "Execute 7 cloud CLI commands")
 		assert.Contains(t, long, "…and 2 more")
 		assert.NotContains(t, long, "- c6")
+	})
+
+	t.Run("dismissal states the effect on the list and the snooze date", func(t *testing.T) {
+		q := RecommendationDismissalTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","action":"dismiss","reason":"accepted risk"}`)
+		assert.Contains(t, q, "Dismiss recommendation rec-1 (reason: accepted risk)")
+		assert.Contains(t, q, "stops counting toward savings")
+
+		q = RecommendationDismissalTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","action":"snooze","snooze_days":14}`)
+		assert.Contains(t, q, "Snooze recommendation rec-1 for 14 days, until")
+		assert.Contains(t, q, "comes back on that date")
+
+		q = RecommendationDismissalTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1","action":"reactivate"}`)
+		assert.Contains(t, q, "Reactivate recommendation rec-1")
+
+		assert.Equal(t, "", RecommendationDismissalTool{}.ConfirmationQuestion(`{"recommendation_id":"rec-1"}`))
 	})
 
 	t.Run("ticket linkage states the status effect", func(t *testing.T) {
