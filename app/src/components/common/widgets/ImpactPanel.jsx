@@ -98,6 +98,23 @@ const relationLabel = (relation, seedName) => {
 
 const shortName = (item) => (item.subject ? item.subject.split('|').pop() : '') || item.title || 'unknown';
 
+// A config change can be an edit to a ConfigMap or an Ingress the workload
+// merely reads, not a rollout of the workload itself. Saying "was deployed"
+// about a ConfigMap edit is what made the cause card unreadable: three
+// different objects all reported as the workload being redeployed.
+const WORKLOAD_SUBJECT_TYPES = new Set(['deployment', 'statefulset', 'daemonset', 'rollout', 'replicaset', 'job', 'cronjob']);
+const KIND_LABELS = {
+  configmap: 'ConfigMap',
+  secret: 'Secret',
+  ingress: 'Ingress',
+  service: 'Service',
+};
+const changeLabel = (item) => {
+  const t = (item.subject_type || '').toLowerCase();
+  if (!t || WORKLOAD_SUBJECT_TYPES.has(t)) return 'was deployed / changed';
+  return `${KIND_LABELS[t] || t} was changed`;
+};
+
 const AggChip = ({ label }) => (
   <Box
     component='span'
@@ -138,7 +155,7 @@ const TierRow = ({ item, color, goTo, showRarity, isChange, folded, seedName }) 
     >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
         <Typography sx={{ fontWeight: 620, fontSize: 13.5 }}>{shortName(item)}</Typography>
-        {isChange && <AggChip label='was deployed / changed' />}
+        {isChange && <AggChip label={changeLabel(item)} />}
         {item.occurrence_count > 1 && (
           <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: 'var(--ds-gray-500)' }}>happened {item.occurrence_count} times</Typography>
         )}
