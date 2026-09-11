@@ -1702,6 +1702,23 @@ func resolveResourceIdentity(
 		"AWS", accountNumber, region, serviceName, resourceType, canonicalId, "")
 }
 
+// findLookupMatch picks the item a ListResources lookup actually asked for. For
+// services without a targeted fetch, ListResources falls back to a region scan
+// filtered by strings.Contains(resource.Arn, key) (main.go), so a name key like
+// "web" also returns "web-2". Taking Items[0] blindly would stamp the event — a
+// Delete included — onto that other resource. Accept only an item whose Id,
+// Name or Arn equals the key, or whose Arn the key qualifies (a Lambda
+// "<function-arn>:PROD" resolved by GetFunction to the base function).
+func findLookupMatch(items []providers.Resource, key string) (providers.Resource, bool) {
+	for _, item := range items {
+		if item.Id == key || item.Name == key || item.Arn == key ||
+			(item.Arn != "" && strings.HasPrefix(key, item.Arn+":")) {
+			return item, true
+		}
+	}
+	return providers.Resource{}, false
+}
+
 // updateCloudResource updates a resource in the cloud_resourses table based on EventBridge event
 func (p *TemplatedEventBridgeProcessor) updateCloudResource(
 	pCtx providers.CloudProviderContext,
@@ -1717,6 +1734,18 @@ func (p *TemplatedEventBridgeProcessor) updateCloudResource(
 		"region", params.Region,
 		"newStatus", params.NewStatus,
 		"accountNumber", awsAccount.AccountNumber)
+
+	// A blank resource_id means the rule's template couldn't extract an identifier
+	// from this event (e.g. Classic ELB Create/DeleteLoadBalancer only carries
+	// loadBalancerName, no ARN). Without a real ID, the ListResources fallback
+	// filter below would match every resource in the region via
+	// strings.Contains(resource.Arn, ""), and Items[0] would silently update an
+	// unrelated resource. Skip instead of guessing.
+	if strings.TrimSpace(params.ResourceId) == "" {
+		logger.Warn("eventprocessor: skipping update_cloud_resource — empty resource_id",
+			"serviceName", params.ServiceName, "resourceType", params.ResourceType)
+		return nil, nil
+	}
 
 	// The account UUID is already on the resolved account; only its tenant needs
 	// looking up, keyed by that UUID so two tenants sharing one AWS account
@@ -1792,8 +1821,7 @@ func (p *TemplatedEventBridgeProcessor) updateCloudResource(
 			}
 			// Use resourceId as fallback external_resource_id
 			resourceArn = params.ResourceId
-		} else if len(resourceResp.Items) > 0 {
-			resource := resourceResp.Items[0]
+		} else if resource, found := findLookupMatch(resourceResp.Items, params.ResourceId); found {
 			logger.Info("eventprocessor: fetched resource details before upsert",
 				"resourceId", resource.Id,
 				"arn", resource.Arn,

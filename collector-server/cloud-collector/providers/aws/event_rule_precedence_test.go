@@ -60,6 +60,15 @@ var precedenceCases = []struct {
 		ec2StateSample("running")},
 	{"alarm back to OK", "CloudWatch_Alarm_State_Change_Generic",
 		alarmSample("prod-cluster-checkout-HighCPUUtilization-Auto", "OK", "AWS/ECS", "CPUUtilization", `"ClusterName": "prod-cluster", "ServiceName": "checkout"`)},
+	{"ELB deleted", "ELB_CloudTrail_Events",
+		`{"id": "evt-elb-delete", "detail-type": "AWS API Call via CloudTrail", "source": "aws.elasticloadbalancing", "account": "123456789012", "time": "2026-09-28T10:00:00Z", "region": "us-east-1",
+		  "detail": {"eventSource": "elasticloadbalancing.amazonaws.com", "eventName": "DeleteLoadBalancer", "requestParameters": {"loadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/50dc6c495c0c9188"}}}`},
+	{"SQS queue deleted", "SQS_CloudTrail_Events",
+		`{"id": "evt-sqs-delete", "detail-type": "AWS API Call via CloudTrail", "source": "aws.sqs", "account": "123456789012", "time": "2026-09-28T10:00:00Z", "region": "us-east-1",
+		  "detail": {"eventSource": "sqs.amazonaws.com", "eventName": "DeleteQueue", "requestParameters": {"queueUrl": "https://sqs.us-east-1.amazonaws.com/123456789012/orders"}}}`},
+	{"SNS topic deleted", "SNS_CloudTrail_Events",
+		`{"id": "evt-sns-delete", "detail-type": "AWS API Call via CloudTrail", "source": "aws.sns", "account": "123456789012", "time": "2026-09-28T10:00:00Z", "region": "us-east-1",
+		  "detail": {"eventSource": "sns.amazonaws.com", "eventName": "DeleteTopic", "requestParameters": {"topicArn": "arn:aws:sns:us-east-1:123456789012:alerts"}}}`},
 }
 
 func TestRulePrecedence_MostSpecificEmittingRuleWins(t *testing.T) {

@@ -1850,3 +1850,286 @@ rules:
             last_modified_time: "{{ (index .Event \"time\") }}"
             last_modified_by: "{{ safeIndex .Detail \"userIdentity\" \"principalId\" }}"
         description: "Update cloud_resourses table for Lambda function"
+
+########## ELB (aws.elasticloadbalancing) RULES #############
+# ELB (ALB/NLB/Gateway LB) has no native EventBridge state-change events, so
+# lifecycle/config visibility comes entirely from CloudTrail API calls.
+
+  - name: "ELB_CloudTrail_Events"
+    # Visible/incident-worthy subset only. Everything else (create, modify,
+    # register/deregister, listener changes, etc.) is routine and is synced
+    # silently by ELB_CloudTrail_Resource_Sync below instead of alerting.
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.elasticloadbalancing"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "elasticloadbalancing.amazonaws.com" }}'
+          description: "Event source is Elastic Load Balancing"
+        - template: '{{ eq (index .Detail "eventName") "DeleteLoadBalancer" }}'
+          description: "Event name is DeleteLoadBalancer — a load balancer disappearing is incident-worthy"
+    event_template:
+      title:
+        # Classic ELB's DeleteLoadBalancer has no loadBalancerArn, only
+        # loadBalancerName — construct the same ARN format aws_elb.go uses
+        # so Classic deletes get a real, unique identifier instead of "".
+        template: 'ELB DeleteLoadBalancer: {{ default (printf "arn:aws:elasticloadbalancing:%s:%s:loadbalancer/%s" (index .Event "region") (index .Event "account") (safeIndex .Detail "requestParameters" "loadBalancerName")) (safeIndex .Detail "requestParameters" "loadBalancerArn") }}'
+      severity: "Info"
+      description:
+        template: |
+          ELB event {{ (index .Detail "eventName") }} by {{ safeIndex .Detail "userIdentity" "principalId" }} in account {{ (index .Event "account") }} (region {{ (index .Event "region") }}). Detail: {{ toJson .Detail }}
+      status: "Closed"
+      fingerprint:
+        template: '{{ default (printf "arn:aws:elasticloadbalancing:%s:%s:loadbalancer/%s" (index .Event "region") (index .Event "account") (safeIndex .Detail "requestParameters" "loadBalancerName")) (safeIndex .Detail "requestParameters" "loadBalancerArn") }}:{{ (index .Event "region") }}:{{ (index .Event "account") }}'
+      resource_id:
+        template: '{{ default (printf "arn:aws:elasticloadbalancing:%s:%s:loadbalancer/%s" (index .Event "region") (index .Event "account") (safeIndex .Detail "requestParameters" "loadBalancerName")) (safeIndex .Detail "requestParameters" "loadBalancerArn") }}'
+      resource_type:
+        value: "loadbalancer"
+      resource_service_name:
+        value: "AWSELB"
+      resource_region:
+        template: "{{ (index .Event \"region\") }}"
+    actions: []
+
+  - name: "ELB_CloudTrail_Resource_Sync"
+    # Silent inventory sync for load-balancer-level lifecycle/config calls
+    # (including DeleteLoadBalancer, which ELB_CloudTrail_Events above also
+    # matches independently to raise the visible event). Routine activity
+    # like creating a load balancer is not an incident and must not alert.
+    #
+    # Target group and listener events (ModifyTargetGroup*, Register/
+    # DeregisterTargets, Create/Modify/DeleteListener) are deliberately NOT
+    # listed here, even though they're high-frequency (fired constantly by
+    # the AWS LB Controller, ECS, and ASGs) and would otherwise be no-ops:
+    # target groups/listeners aren't inventoried (serviceResourceTypeMap for
+    # AWSELB only knows *loadbalancer types), so there's nothing for
+    # update_cloud_resource to do with them.
+    #
+    # Eligible() (event_eventbridge_processor.go) is derived from exactly
+    # this rule's own event-name filter and runs before Process(), in the
+    # SQS receive loop (event_eventbridge.go:841). No other rule in this
+    # runbook claims "aws.elasticloadbalancing", so an event name listed in
+    # neither ELB rule is ack-deleted there and never reaches any processor,
+    # default included — listing these here would only add a full
+    # filter+action render to reach the same no-op outcome.
+    actions_only: true
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.elasticloadbalancing"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "elasticloadbalancing.amazonaws.com" }}'
+          description: "Event source is Elastic Load Balancing"
+        - template: '{{ $en := (index .Detail "eventName") }}{{ or (eq $en "CreateLoadBalancer") (eq $en "DeleteLoadBalancer") (eq $en "SetSecurityGroups") }}'
+          description: "Event name is one of the tracked ELB lifecycle/config calls"
+    actions:
+      - name: "update_elb_resource"
+        type: "update_cloud_resource"
+        params:
+          # ELBv2 (ALB/NLB/GWLB) events always carry loadBalancerArn, which is the
+          # stored Id (aws_elb.go). Classic ELB events carry only loadBalancerName —
+          # on Create it is in requestParameters, the response is just dNSName — and
+          # Classic rows are stored with Id = name, so the bare name is the key.
+          # Never build an ARN from a possibly-empty name: a bare
+          # "...:loadbalancer/" prefix is non-blank and would match every LB.
+          resource_id: |
+            {{ $en := (index .Detail "eventName") }}{{ $arn := "" }}{{ $name := "" }}{{ if eq $en "CreateLoadBalancer" }}{{ $arn = safeIndex .Detail "responseElements" "loadBalancers" 0 "loadBalancerArn" | str }}{{ $name = safeIndex .Detail "requestParameters" "loadBalancerName" | str }}{{ else if eq $en "DeleteLoadBalancer" }}{{ $arn = safeIndex .Detail "requestParameters" "loadBalancerArn" | str }}{{ $name = safeIndex .Detail "requestParameters" "loadBalancerName" | str }}{{ else if eq $en "SetSecurityGroups" }}{{ $arn = safeIndex .Detail "requestParameters" "loadBalancerArn" | str }}{{ end }}{{ default $name $arn }}
+          service_name: "AWSELB"
+          # aws_elb.go stores Classic ELBs as "loadbalancer" but ALB/NLB/GWLB as
+          # "application_loadbalancer"/"network_loadbalancer"/"gateway_loadbalancer"
+          # (common.go:349, getAwsServiceResourceType). A hardcoded "loadbalancer"
+          # here would miss every non-Classic row in the pre-reconcile's
+          # "type = $4" match and orphan a duplicate row. Modern ARNs encode the
+          # kind as the segment right after "loadbalancer/" (app/net/gwy);
+          # Classic keys are plain names with no "/".
+          resource_type: |
+            {{ $en := (index .Detail "eventName") }}{{ $arn := "" }}{{ $name := "" }}{{ if eq $en "CreateLoadBalancer" }}{{ $arn = safeIndex .Detail "responseElements" "loadBalancers" 0 "loadBalancerArn" | str }}{{ $name = safeIndex .Detail "requestParameters" "loadBalancerName" | str }}{{ else if eq $en "DeleteLoadBalancer" }}{{ $arn = safeIndex .Detail "requestParameters" "loadBalancerArn" | str }}{{ $name = safeIndex .Detail "requestParameters" "loadBalancerName" | str }}{{ else if eq $en "SetSecurityGroups" }}{{ $arn = safeIndex .Detail "requestParameters" "loadBalancerArn" | str }}{{ end }}{{ $parts := splitList "/" (default $name $arn) }}{{ if lt (len $parts) 4 }}loadbalancer{{ else }}{{ $t := index $parts 1 }}{{ if eq $t "app" }}application_loadbalancer{{ else if eq $t "net" }}network_loadbalancer{{ else if eq $t "gwy" }}gateway_loadbalancer{{ else }}loadbalancer{{ end }}{{ end }}
+          region: "{{ (index .Event \"region\") }}"
+          new_status: |
+            {{ $en := (index .Detail "eventName") }}{{ if eq $en "CreateLoadBalancer" }}Active{{ else if eq $en "DeleteLoadBalancer" }}Deleted{{ end }}
+          update_last_seen: true
+          update_meta: true
+          meta_updates:
+            last_api_call: "{{ (index .Detail \"eventName\") }}"
+            last_modified_by: '{{ safeIndex .Detail "userIdentity" "principalId" }}'
+            last_modified_time: "{{ (index .Event \"time\") }}"
+        description: "Update cloud_resourses table for ELB lifecycle/config change"
+
+########## SQS (aws.sqs) RULES #############
+# SQS has no native EventBridge state-change events, so queue lifecycle/config
+# visibility comes entirely from CloudTrail API calls.
+
+  - name: "SQS_CloudTrail_Events"
+    # Visible/incident-worthy subset only: a queue disappearing, its redrive
+    # policy or other attributes changing, or its messages being purged.
+    # CreateQueue is routine and is synced silently by
+    # SQS_CloudTrail_Resource_Sync below instead of alerting.
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.sqs"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "sqs.amazonaws.com" }}'
+          description: "Event source is Simple Queue Service"
+        - template: '{{ $en := (index .Detail "eventName") }}{{ or (eq $en "DeleteQueue") (eq $en "SetQueueAttributes") (eq $en "PurgeQueue") }}'
+          description: "Event name is DeleteQueue, SetQueueAttributes, or PurgeQueue — queue disappearing, redrive/config change, or message loss"
+    event_template:
+      title:
+        # Inventory sync (aws_queueservice.go) stores the queue by name, not
+        # by queueUrl — derive the name (the URL's last path segment) so this
+        # lands on the same identifier as the synced row.
+        template: |
+          {{ $en := (index .Detail "eventName") }}SQS {{ $en }}: {{ safeIndex .Detail "requestParameters" "queueUrl" | str | default "" | splitList "/" | last }}
+      severity: "Info"
+      description:
+        template: |
+          SQS event {{ (index .Detail "eventName") }} by {{ safeIndex .Detail "userIdentity" "principalId" }} in account {{ (index .Event "account") }} (region {{ (index .Event "region") }}). Detail: {{ toJson .Detail }}
+      status: "Closed"
+      fingerprint:
+        template: |
+          {{ safeIndex .Detail "requestParameters" "queueUrl" | str | default "" | splitList "/" | last }}:{{ (index .Event "region") }}:{{ (index .Event "account") }}
+      resource_id:
+        template: |
+          {{ safeIndex .Detail "requestParameters" "queueUrl" | str | default "" | splitList "/" | last }}
+      resource_type:
+        value: "queue"
+      resource_service_name:
+        value: "AWSQueueService"
+      resource_region:
+        template: "{{ (index .Event \"region\") }}"
+    actions: []
+
+  - name: "SQS_CloudTrail_Resource_Sync"
+    # Silent inventory sync for all 4 tracked SQS lifecycle/config calls
+    # (including DeleteQueue/SetQueueAttributes/PurgeQueue, which
+    # SQS_CloudTrail_Events above also matches independently to raise the
+    # visible event). Creating a queue is not an incident and must not alert.
+    actions_only: true
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.sqs"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "sqs.amazonaws.com" }}'
+          description: "Event source is Simple Queue Service"
+        - template: '{{ $en := (index .Detail "eventName") }}{{ or (eq $en "CreateQueue") (eq $en "DeleteQueue") (eq $en "SetQueueAttributes") (eq $en "PurgeQueue") }}'
+          description: "Event name is one of the tracked SQS lifecycle/config calls"
+    actions:
+      - name: "update_sqs_resource"
+        type: "update_cloud_resource"
+        params:
+          resource_id: |
+            {{ $en := (index .Detail "eventName") }}{{ if eq $en "CreateQueue" }}{{ safeIndex .Detail "responseElements" "queueUrl" | str | default "" | splitList "/" | last }}{{ else }}{{ safeIndex .Detail "requestParameters" "queueUrl" | str | default "" | splitList "/" | last }}{{ end }}
+          service_name: "AWSQueueService"
+          resource_type: "queue"
+          region: "{{ (index .Event \"region\") }}"
+          new_status: |
+            {{ $en := (index .Detail "eventName") }}{{ if eq $en "CreateQueue" }}Active{{ else if eq $en "DeleteQueue" }}Deleted{{ end }}
+          update_last_seen: true
+          update_meta: true
+          meta_updates:
+            last_api_call: "{{ (index .Detail \"eventName\") }}"
+            last_modified_by: '{{ safeIndex .Detail "userIdentity" "principalId" }}'
+            last_modified_time: "{{ (index .Event \"time\") }}"
+        description: "Update cloud_resourses table for SQS lifecycle/config change"
+
+########## SNS (aws.sns) RULES #############
+# SNS has no native EventBridge state-change events, so topic lifecycle/
+# config visibility comes entirely from CloudTrail API calls. Subscriptions
+# are not tracked (see SNS_CloudTrail_Resource_Sync below for why).
+
+  - name: "SNS_CloudTrail_Events"
+    # Visible/incident-worthy subset only: a topic disappearing or its
+    # attributes changing. CreateTopic is routine and is synced silently by
+    # SNS_CloudTrail_Resource_Sync below instead of alerting.
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.sns"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "sns.amazonaws.com" }}'
+          description: "Event source is Simple Notification Service"
+        - template: '{{ $en := (index .Detail "eventName") }}{{ or (eq $en "DeleteTopic") (eq $en "SetTopicAttributes") }}'
+          description: "Event name is DeleteTopic or SetTopicAttributes — topic disappearing or config change"
+    event_template:
+      title:
+        template: |
+          {{ $en := (index .Detail "eventName") }}SNS {{ $en }}: {{ safeIndex .Detail "requestParameters" "topicArn" }}
+      severity: "Info"
+      description:
+        template: |
+          SNS event {{ (index .Detail "eventName") }} by {{ safeIndex .Detail "userIdentity" "principalId" }} in account {{ (index .Event "account") }} (region {{ (index .Event "region") }}). Detail: {{ toJson .Detail }}
+      status: "Closed"
+      fingerprint:
+        template: |
+          {{ safeIndex .Detail "requestParameters" "topicArn" }}:{{ (index .Event "region") }}:{{ (index .Event "account") }}
+      resource_id:
+        # Inventory (aws_sns.go) stores topics by name, not ARN — use the same
+        # name extraction as the sync action below so this lines up with the
+        # stored resourse_id for any "view resource" linking.
+        template: |
+          {{ safeIndex .Detail "requestParameters" "topicArn" | str | default "" | splitList ":" | last }}
+      resource_type:
+        value: "topic"
+      resource_service_name:
+        value: "AmazonSNS"
+      resource_region:
+        template: "{{ (index .Event \"region\") }}"
+    actions: []
+
+  - name: "SNS_CloudTrail_Resource_Sync"
+    # Silent inventory sync for topic-level lifecycle/config calls (including
+    # DeleteTopic/SetTopicAttributes, which SNS_CloudTrail_Events above also
+    # matches independently to raise the visible event). Creating a topic is
+    # not an incident and must not alert.
+    #
+    # Subscribe/Unsubscribe are deliberately NOT listed here, even though
+    # subscription lifecycle is otherwise invisible: subscriptions aren't
+    # inventoried (serviceResourceTypeMap for AWSSNS only knows "topic"), so
+    # there's nothing for update_cloud_resource to do with them — a real
+    # lookup would find nothing (or, for pending email/HTTP(S) confirmations,
+    # collapse every one onto a single "PendingConfirmation" row) and
+    # insert/collide on a cloud_resourses row that no bulk sync would ever
+    # own.
+    #
+    # Eligible() (event_eventbridge_processor.go) is derived from exactly
+    # this rule's own event-name filter and runs before Process(), in the
+    # SQS receive loop (event_eventbridge.go:841). No other rule in this
+    # runbook claims "aws.sns", so an event name listed in neither SNS rule
+    # is ack-deleted there and never reaches any processor, default
+    # included — listing Subscribe/Unsubscribe here would only add a full
+    # filter+action render to reach the same no-op outcome.
+    actions_only: true
+    triggers:
+      source: "AWS_EventBridge"
+      alert_name: "aws.sns"
+      event_filters:
+        - template: '{{ eq (index .Event "detailType") "AWS API Call via CloudTrail" }}'
+          description: "CloudTrail API call event"
+        - template: '{{ eq (index .Detail "eventSource") "sns.amazonaws.com" }}'
+          description: "Event source is Simple Notification Service"
+        - template: '{{ $en := (index .Detail "eventName") }}{{ or (eq $en "CreateTopic") (eq $en "DeleteTopic") (eq $en "SetTopicAttributes") }}'
+          description: "Event name is one of the tracked SNS lifecycle/config calls"
+    actions:
+      - name: "update_sns_resource"
+        type: "update_cloud_resource"
+        params:
+          resource_id: |
+            {{ $en := (index .Detail "eventName") }}{{ if eq $en "CreateTopic" }}{{ safeIndex .Detail "responseElements" "topicArn" | str | default "" | splitList ":" | last }}{{ else }}{{ safeIndex .Detail "requestParameters" "topicArn" | str | default "" | splitList ":" | last }}{{ end }}
+          service_name: "AmazonSNS"
+          resource_type: "topic"
+          region: "{{ (index .Event \"region\") }}"
+          new_status: |
+            {{ $en := (index .Detail "eventName") }}{{ if eq $en "CreateTopic" }}Active{{ else if eq $en "DeleteTopic" }}Deleted{{ end }}
+          update_last_seen: true
+          update_meta: true
+          meta_updates:
+            last_api_call: "{{ (index .Detail \"eventName\") }}"
+            last_modified_by: '{{ safeIndex .Detail "userIdentity" "principalId" }}'
+            last_modified_time: "{{ (index .Event \"time\") }}"
+        description: "Update cloud_resourses table for SNS lifecycle/config change"

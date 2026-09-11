@@ -1483,7 +1483,7 @@ func AwsOnboardStatus(ctx *security.RequestContext, req AwsOnboardStatusRequest)
 	}, nil
 }
 
-const latestTemplateVersion = "2"
+const latestTemplateVersion = "4"
 
 func CloudUpdateCloudformationPermissions(context *security.RequestContext, req CloudUpdateCloudformationPermissionsRequest) (CloudUpdateCloudformationPermissionsResponse, error) {
 	err := common.ValidateStruct(req)
