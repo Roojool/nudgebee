@@ -19,7 +19,7 @@ import { ds } from '@utils/colors';
 import { useBrandingConfig } from '@hooks/useTenantBranding';
 import AssignmentIndOutlinedIcon from '@mui/icons-material/AssignmentIndOutlined';
 import { AI_TOOLS_SUB_TABS } from '@components/llm/admin/aiToolsConfig';
-import { useBCortexEnabled } from '@hooks/useBCortexEnabled';
+import { useBCortexEnabled, isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
 import { useFeatureAccess } from '@hooks/useFeatureAccess';
 import withBrandBlue from '@shared/icons/withBrandBlue';
 
@@ -236,6 +236,9 @@ export default function UserManagement() {
         // llmFunctionEnabled directly rather than a per-feature-name map —
         // revisit if a second requiresFeature value is ever added.
         const visibleTabOptions = f.tabOptions.filter((sub) => {
+          if (sub.eeOnly && isOSSDeploymentMode()) {
+            return false;
+          }
           if (sub.legacyOnly && bcortexEnabled !== false) {
             return false;
           }
