@@ -147,6 +147,43 @@ export const toScheduledJob = (job) => {
   };
 };
 
+const ProxyDatasourceExpandedRow = ({ row }) => {
+  const raw = row[row.length - 1]?._raw || {};
+  const entries = Object.entries(raw).filter(([k]) => !['name', 'type', 'proxy_type', 'status', 'last_check', 'error'].includes(k));
+
+  if (entries.length === 0) {
+    return (
+      <Box p={ds.space[3]}>
+        <Typography variant='body2' sx={{ color: ds.gray[500] }}>
+          No additional details
+        </Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      sx={{
+        p: ds.space[3],
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+        gap: ds.space[2],
+      }}
+    >
+      {entries.map(([key, value]) => (
+        <Box key={key}>
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], mb: 0.5, textTransform: 'capitalize' }}>
+            {key.replace(/_/g, ' ')}
+          </Typography>
+          <Typography sx={{ fontSize: ds.text.body, color: ds.gray[800], wordBreak: 'break-all' }}>
+            {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+          </Typography>
+        </Box>
+      ))}
+    </Box>
+  );
+};
+
 const AgentHealth = () => {
   const { selectedCluster } = useData();
   // A self-hosted VM fleet has no in-cluster/cloud agent — the proxy agent is the
@@ -229,6 +266,8 @@ const AgentHealth = () => {
   const [proxyAgentHealthData, setProxyAgentHealthData] = useState([]);
   const [proxyLoading, setProxyLoading] = useState(false);
   const [activeTab, setActiveTab] = useState(null);
+  const [proxyDsPage, setProxyDsPage] = useState(0);
+  const [proxyDsRowsPerPage, setProxyDsRowsPerPage] = useState(10);
 
   const latestVersionsRef = useRef(latestVersions);
   const router = useRouter();
@@ -444,21 +483,10 @@ const AgentHealth = () => {
           { text: datasource.type || '-' },
           { text: datasource.proxy_type || '-' },
           {
-            component: (
-              <Typography
-                variant='body2'
-                sx={{
-                  color: datasource.status === 'healthy' ? ds.green[500] : ds.red[500],
-                  fontWeight: 'var(--ds-font-weight-medium)',
-                  textTransform: 'capitalize',
-                }}
-              >
-                {datasource.status || '-'}
-              </Typography>
-            ),
+            component: <Label tone={datasource.status === 'healthy' ? 'success' : 'critical'} dot text={datasource.status || '-'} />,
           },
           { component: <Datetime value={datasource.last_check} /> },
-          { text: datasource.error || '-' },
+          { text: datasource.error || '-', _raw: datasource },
         ]);
       });
       setProxyDatasourcesData(dsTableData);
@@ -825,6 +853,12 @@ const AgentHealth = () => {
   // problem rather than being silently shown as green.
   const agentStatus = (() => {
     const raw = (agentSummary?.status ?? '').replace(/_/g, ' ');
+    if (!raw) return { text: 'Unknown', tone: 'neutral' };
+    return { text: raw === 'CONNECTED' ? 'Connected' : raw, tone: raw === 'CONNECTED' ? 'success' : 'critical' };
+  })();
+
+  const proxyStatus = (() => {
+    const raw = (proxyData[0]?.status ?? '').replace(/_/g, ' ');
     if (!raw) return { text: 'Unknown', tone: 'neutral' };
     return { text: raw === 'CONNECTED' ? 'Connected' : raw, tone: raw === 'CONNECTED' ? 'success' : 'critical' };
   })();
@@ -1277,35 +1311,83 @@ const AgentHealth = () => {
                 <VmAgents accountId={router.query.accountId} />
               ) : (
                 <ListingLayout id='proxy-agent-health' sx={{ mt: 3 }}>
-                  <ListingLayout.Toolbar title='Proxy Agent Health' />
-                  <ListingLayout.Body>
+                  <ListingLayout.Header
+                    icon={<SafeIcon src={AgentIconBlue} alt='' width={22} height={22} />}
+                    title={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
+                        <Box component='span'>Proxy Agent</Box>
+                        <Label id='proxy-agent-status' size='md' dot tone={proxyStatus.tone} text={proxyStatus.text} />
+                      </Box>
+                    }
+                    description={
+                      proxyData[0]?.last_connected_at ? (
+                        <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1] }}>
+                          Last heartbeat <Datetime value={proxyData[0].last_connected_at} />
+                        </Box>
+                      ) : (
+                        'This proxy agent has not reported a heartbeat yet.'
+                      )
+                    }
+                  />
+                  <ListingLayout.Body sx={{ pt: 'var(--ds-space-4)', pb: 'var(--ds-space-5)' }}>
                     {proxyData[0]?.status === 'NOT_CONNECTED' && (
-                      <Typography color='red' sx={{ p: 2 }}>
-                        The Proxy Agent is not connected
-                      </Typography>
+                      <Banner surface='section' tone='critical' id='proxy-agent-disconnected-banner' message='The Proxy Agent is not connected' />
                     )}
-                    <CustomTable headers={HEADERS_PROXY} tableData={proxyAgentHealthData} loading={proxyLoading} />
-
-                    {/* Same Features block the Agent tab carries. A proxy agent reaches
-                        the platform only through the relay, so its own connection is the
-                        relay's — it reports no separate relayConnection flag. */}
-                    <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mt: 2, mb: 1 }}>
-                      Features
-                    </Typography>
-                    <ul>
-                      <li>
-                        <b>Relay - </b>
-                        {proxyData[0]?.status === 'CONNECTED' ? 'Connected' : 'Disconnected'}
-                      </li>
-                    </ul>
+                    <Box
+                      sx={{
+                        mt: proxyData[0]?.status === 'NOT_CONNECTED' ? 'var(--ds-space-4)' : 0,
+                        display: 'grid',
+                        gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
+                        gap: ds.space[4],
+                      }}
+                    >
+                      <Box>
+                        <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mb: 2 }}>Instances</Typography>
+                        <CustomTable headers={HEADERS_PROXY} tableData={proxyAgentHealthData} loading={proxyLoading} />
+                      </Box>
+                      <Box>
+                        <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], mb: 2 }}>Features</Typography>
+                        <CustomTable
+                          headers={['Component', 'Status']}
+                          tableData={[
+                            [
+                              { text: 'Relay' },
+                              {
+                                component: (
+                                  <Label tone={proxyStatus.tone} dot text={proxyData[0]?.status === 'CONNECTED' ? 'Connected' : 'Disconnected'} />
+                                ),
+                              },
+                            ],
+                          ]}
+                          loading={proxyLoading}
+                        />
+                      </Box>
+                    </Box>
                   </ListingLayout.Body>
                 </ListingLayout>
               )}
               {proxyDatasourcesData.length > 0 && (
                 <ListingLayout id='proxy-datasources' sx={{ mt: 3 }}>
-                  <ListingLayout.Toolbar title='Datasources' />
+                  <ListingLayout.Toolbar title='Datasources'>
+                    <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], lineHeight: '32px' }}>
+                      {proxyDatasourcesData.length} datasources
+                    </Typography>
+                  </ListingLayout.Toolbar>
                   <ListingLayout.Body>
-                    <CustomTable headers={HEADERS_PROXY_DATASOURCES} tableData={proxyDatasourcesData} loading={proxyLoading} />
+                    <CustomTable
+                      id='proxy-datasources-table'
+                      headers={HEADERS_PROXY_DATASOURCES}
+                      tableData={proxyDatasourcesData.slice(proxyDsPage * proxyDsRowsPerPage, (proxyDsPage + 1) * proxyDsRowsPerPage)}
+                      loading={proxyLoading}
+                      rowsPerPage={proxyDsRowsPerPage}
+                      totalRows={proxyDatasourcesData.length}
+                      pageNumber={proxyDsPage + 1}
+                      onPageChange={(page, limit) => {
+                        setProxyDsPage(page - 1);
+                        setProxyDsRowsPerPage(limit);
+                      }}
+                      expandable={{ component: ProxyDatasourceExpandedRow }}
+                    />
                   </ListingLayout.Body>
                 </ListingLayout>
               )}
