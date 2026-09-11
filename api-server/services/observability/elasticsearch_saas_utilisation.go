@@ -199,7 +199,23 @@ type esUtilMetric struct {
 	// list needs a usage figure for each node row, not a cluster figure, and matches
 	// series to rows on the `node` / `instance` label.
 	Breakdown bool
+	// Series picks WHICH number a histogram bucket contributes: the sum across the
+	// pods of the workload (the default, and what every usage metric wants), the
+	// single busiest pod, or how many pods reported at all. All three are read off
+	// one stats_bucket the query always carries, so asking for the busiest pod costs
+	// no extra search — it shares the usage key's body and therefore its response.
+	Series esUtilSeriesRead
 }
+
+// esUtilSeriesRead names the per-bucket reading. The zero value is the summed total,
+// so every existing metric keeps its behaviour without naming it.
+type esUtilSeriesRead string
+
+const (
+	esSeriesTotal esUtilSeriesRead = ""
+	esSeriesMax   esUtilSeriesRead = "max"
+	esSeriesCount esUtilSeriesRead = "count"
+)
 
 const (
 	nanocoresToCores = 1e-9
@@ -461,6 +477,30 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 		return esUtilMetric{Sources: memUsage, Reduce: esReduceP90}, true
 	case "max_usage_mem":
 		return esUtilMetric{Sources: memUsage, Reduce: esReduceMax}, true
+
+	// Per-pod companions to the summed usage metrics, mirroring the Prometheus
+	// builder's pod_count / *_max_pod keys. The evidence chart divides a workload
+	// total by the pod count to put usage on the same axis as a per-pod
+	// recommendation, and draws the busiest pod to show what that average hides.
+	//
+	// Workload and pod scope only. These read GroupBy[0] of the usage sources, which
+	// is the pod there but the NODE at cluster and node scope — answering at those
+	// scopes would silently count nodes and call them pods.
+	case "pod_count":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: memUsage, Series: esSeriesCount}, true
+	case "cpu_usage_max_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: cpuUsage, Series: esSeriesMax}, true
+	case "memory_usage_max_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: memUsage, Series: esSeriesMax}, true
 
 	case "cpu_request", "cpu_request_pod":
 		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request")}, true
@@ -729,6 +769,12 @@ func esSourceAgg(src esMetricSource, meta RequestMetadata, scope esUtilScope, st
 		tsAggs[k] = v
 	}
 	tsAggs["total"] = map[string]any{"sum_bucket": map[string]any{"buckets_path": totalPath}}
+	// One stats_bucket over the same path gives the busiest pod and the pod count for
+	// free. Emitted on every query rather than only when a key asks for it: the
+	// rendered body is the dedup key, so keeping it identical is what lets pod_count
+	// ride memory_usage's search and cpu_usage_max_pod ride cpu_usage's, instead of
+	// forking two more round trips per chart.
+	tsAggs["series"] = map[string]any{"stats_bucket": map[string]any{"buckets_path": totalPath}}
 	if src.Counter {
 		tsAggs["rate"] = map[string]any{"derivative": map[string]any{"buckets_path": "total", "unit": "1s"}}
 	}
@@ -828,6 +874,12 @@ type esUtilBucket struct {
 	Total struct {
 		Value *float64 `json:"value"`
 	} `json:"total"`
+	// stats_bucket over the same per-pod path `total` sums. `count` is how many pods
+	// contributed, `max` is the busiest one.
+	Series struct {
+		Count *float64 `json:"count"`
+		Max   *float64 `json:"max"`
+	} `json:"series"`
 	Rate struct {
 		NormalizedValue *float64 `json:"normalized_value"`
 	} `json:"rate"`
@@ -881,7 +933,25 @@ func (r *esUtilSourceResult) reducedFor(reduce esUtilReduce) json.RawMessage {
 // series, or its per-second derivative for cumulative counters. Counter resets and
 // pod churn make a derivative negative; those are clamped to zero rather than
 // subtracted from the average the caller computes.
-func esUtilBucketValue(b esUtilBucket, counter bool) (float64, bool) {
+//
+// `read` selects the busiest pod or the pod count instead of the sum. Neither is ever
+// asked of a cumulative counter, so both are answered ahead of the counter branch
+// rather than having to compose with a derivative.
+func esUtilBucketValue(b esUtilBucket, counter bool, read esUtilSeriesRead) (float64, bool) {
+	switch read {
+	case esSeriesMax:
+		if b.Series.Max == nil {
+			return 0, false
+		}
+		return *b.Series.Max, true
+	case esSeriesCount:
+		// A bucket with no pods reporting is a gap, not a workload of zero pods:
+		// dividing a usage total by it would be the bug this metric exists to fix.
+		if b.Series.Count == nil || *b.Series.Count <= 0 {
+			return 0, false
+		}
+		return *b.Series.Count, true
+	}
 	if counter {
 		if b.Rate.NormalizedValue == nil {
 			return 0, false
@@ -980,7 +1050,7 @@ func esUtilSourcesByCoverage(m esUtilMetric, decoded []*esUtilSourceResult) []in
 		}
 		counter := m.Sources[i].Counter
 		for _, b := range sr.TS.Buckets {
-			if _, ok := esUtilBucketValue(b, counter); ok {
+			if _, ok := esUtilBucketValue(b, counter, m.Series); ok {
 				coverage[i]++
 			}
 		}
@@ -1072,12 +1142,18 @@ func parseESUtilisationResponse(resp *esUtilAggResponse, m esUtilMetric, meta Re
 		values := make([]float64, 0, len(sr.TS.Buckets))
 		for _, b := range sr.TS.Buckets {
 			truncated += b.G0.SumOtherDocCount
-			v, ok := esUtilBucketValue(b, src.Counter)
+			v, ok := esUtilBucketValue(b, src.Counter, m.Series)
 			if !ok {
 				continue
 			}
 			timestamps = append(timestamps, b.Key/1000)
-			values = append(values, v*src.Scale)
+			// A pod count is a count, never a quantity in the source's units: scaling
+			// it by nanocoresToCores would return 3e-9 pods.
+			if m.Series == esSeriesCount {
+				values = append(values, v)
+			} else {
+				values = append(values, v*src.Scale)
+			}
 		}
 		if len(values) == 0 {
 			continue

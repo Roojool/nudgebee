@@ -131,6 +131,7 @@ var allESUtilKeys = []string{
 	"cpu_total", "mem_total",
 	"network_receive_packet", "network_transmit_packets",
 	"pvc_usage", "pvc_requests",
+	"pod_count", "cpu_usage_max_pod", "memory_usage_max_pod",
 }
 
 // Every key the utilisation panel asks for must resolve. Twelve of these returned
@@ -1106,4 +1107,157 @@ func TestPodJoinOnlyRunsWhenANodelessSourceNeedsIt(t *testing.T) {
 	assert.False(t, esScopeNeedsPodJoin([]esUtilMetric{limit}, RequestMetadata{}, esScopeCluster))
 	assert.False(t, esScopeNeedsPodJoin([]esUtilMetric{limit}, RequestMetadata{Kind: "node"}, esScopeNode),
 		"no node name means nothing to join on")
+}
+
+// --- per-pod companions: pod_count, cpu_usage_max_pod, memory_usage_max_pod ---
+
+// The evidence chart divides a workload total by the pod count to share an axis with
+// a per-pod recommendation. Elasticsearch answers all three from the usage sources it
+// already queries, reading a different number out of the same histogram bucket.
+func TestESUtilisationPerPodKeysResolveAtWorkloadScope(t *testing.T) {
+	podCount, ok := esUtilisationMetric("pod_count", esScopeWorkload, false)
+	require.True(t, ok)
+	assert.Equal(t, esSeriesCount, podCount.Series)
+	// Counted off the working-set documents, like the Prometheus builder's
+	// count(count by (pod) (container_memory_working_set_bytes{...})).
+	assert.Equal(t, "kubernetes.pod.memory.working_set.bytes", podCount.Sources[0].Field)
+
+	cpuMax, ok := esUtilisationMetric("cpu_usage_max_pod", esScopeWorkload, false)
+	require.True(t, ok)
+	assert.Equal(t, esSeriesMax, cpuMax.Series)
+	assert.Equal(t, "kubernetes.pod.cpu.usage.nanocores", cpuMax.Sources[0].Field)
+
+	memMax, ok := esUtilisationMetric("memory_usage_max_pod", esScopeWorkload, false)
+	require.True(t, ok)
+	assert.Equal(t, esSeriesMax, memMax.Series)
+	assert.Equal(t, "kubernetes.pod.memory.working_set.bytes", memMax.Sources[0].Field)
+}
+
+// These read GroupBy[0] of the usage sources. That is the pod at workload and pod
+// scope but the NODE at cluster and node scope, where answering would count nodes and
+// call them pods. Unresolved is the honest answer, and the caller says so.
+func TestESUtilisationPerPodKeysUnsupportedAtNodeScope(t *testing.T) {
+	for _, scope := range []esUtilScope{esScopeNode, esScopeCluster} {
+		for _, key := range []string{"pod_count", "cpu_usage_max_pod", "memory_usage_max_pod"} {
+			_, ok := esUtilisationMetric(key, scope, false)
+			assert.False(t, ok, "%s must not resolve at %s scope", key, scope)
+		}
+	}
+}
+
+// The stats_bucket that answers pod_count and the busiest pod is emitted on every
+// query, so these keys render the SAME body as the usage key they ride along with.
+// Identical bodies are what makes them share one search instead of costing two more
+// round trips per chart — the grouping key in fetchESMetricUtilisation is the
+// rendered body itself.
+func TestBuildESUtilisationAggQueryPerPodKeysShareOneSearch(t *testing.T) {
+	meta := RequestMetadata{Namespace: "shop", Name: "web", Kind: "deployment"}
+	render := func(key string) string {
+		plan, ok := esUtilisationMetric(key, esScopeWorkload, false)
+		require.True(t, ok)
+		raw, err := json.Marshal(buildESUtilisationAggQuery(plan, meta, esScopeWorkload, 1000, 2000, 300))
+		require.NoError(t, err)
+		return string(raw)
+	}
+	assert.Equal(t, render("memory_usage"), render("pod_count"))
+	assert.Equal(t, render("memory_usage"), render("memory_usage_max_pod"))
+	assert.Equal(t, render("cpu_usage"), render("cpu_usage_max_pod"))
+	// And the aggregation really is there to read.
+	body := bodyAsMap(t, buildESUtilisationAggQuery(
+		mustESMetric(t, "pod_count"), meta, esScopeWorkload, 1000, 2000, 300))
+	path := jsonPath(t, body, "aggs", "src_0", "aggs", "ts", "aggs", "series", "stats_bucket", "buckets_path")
+	assert.Equal(t, "g0>v", path)
+}
+
+func mustESMetric(t *testing.T, key string) esUtilMetric {
+	t.Helper()
+	m, ok := esUtilisationMetric(key, esScopeWorkload, false)
+	require.True(t, ok)
+	return m
+}
+
+// Buckets recorded from the dev cluster's own Elasticsearch for nudgebee/services-server.
+// The fourth is a rollout: six pods reporting where the others have three. Dividing
+// that bucket's total by a fixed three would report a phantom doubling of per-pod
+// memory, which is exactly what the measured count exists to prevent.
+const esRealWorkloadBuckets = `[
+ {"key":1788510600000,"total":{"value":400631650.46153843},"series":{"count":3,"max":163606212.92307693}},
+ {"key":1788512400000,"total":{"value":433593821.8666667},"series":{"count":3,"max":177357755.73333332}},
+ {"key":1788514200000,"total":{"value":433103121.0666667},"series":{"count":3,"max":166213495.46666667}},
+ {"key":1788516000000,"total":{"value":792633759.0897304},"series":{"count":6,"max":150690019.55555555}},
+ {"key":1788517800000,"total":{"value":402432409.6},"series":{"count":3,"max":140634385.06666666}}
+]`
+
+func TestParseESUtilisationAggsReadsPodCountAndBusiestPod(t *testing.T) {
+	body := []byte(`{"aggregations":{"src_0":{"doc_count":30259,"ts":{"buckets":` + esRealWorkloadBuckets + `}}}}`)
+	meta := RequestMetadata{Namespace: "nudgebee", Name: "services-server", Kind: "deployment"}
+
+	out, err := parseESUtilisationAggs(body, mustESMetric(t, "pod_count"), meta)
+	require.NoError(t, err)
+	require.Len(t, out.Series, 1)
+	// A count, never scaled into the source's units, and per bucket rather than one
+	// number for the window — the rollout has to show up as six.
+	assert.Equal(t, []float64{3, 3, 3, 6, 3}, out.Series[0].Values)
+
+	out, err = parseESUtilisationAggs(body, mustESMetric(t, "memory_usage_max_pod"), meta)
+	require.NoError(t, err)
+	require.Len(t, out.Series, 1)
+	assert.InDelta(t, 163606212.9, out.Series[0].Values[0], 1)
+	// The busiest pod is a pod's figure, so it must NOT fall when the pod count rises.
+	assert.InDelta(t, 150690019.6, out.Series[0].Values[3], 1)
+
+	// The summed total is untouched by any of this.
+	out, err = parseESUtilisationAggs(body, mustESMetric(t, "memory_usage"), meta)
+	require.NoError(t, err)
+	assert.InDelta(t, 400631650.5, out.Series[0].Values[0], 1)
+}
+
+// nanocores are scaled to cores for the busiest pod exactly as for the total; a count
+// is not a quantity in the source's units and must escape that multiplication.
+func TestParseESUtilisationAggsBusiestPodScalesButCountDoesNot(t *testing.T) {
+	body := []byte(`{"aggregations":{"src_0":{"doc_count":9,"ts":{"buckets":[
+	 {"key":1000,"total":{"value":3000000000},"series":{"count":3,"max":1500000000}}]}}}}`)
+	meta := RequestMetadata{Namespace: "shop", Name: "web", Kind: "deployment"}
+
+	out, err := parseESUtilisationAggs(body, mustESMetric(t, "cpu_usage_max_pod"), meta)
+	require.NoError(t, err)
+	assert.InDelta(t, 1.5, out.Series[0].Values[0], 1e-9)
+
+	out, err = parseESUtilisationAggs(body, mustESMetric(t, "pod_count"), meta)
+	require.NoError(t, err)
+	assert.Equal(t, []float64{3}, out.Series[0].Values)
+}
+
+// A bucket where nothing reported is a gap. Returning zero pods would make the client
+// divide a usage total by zero — or, worse, treat the gap as a workload that had no
+// pods and chart an infinity.
+func TestParseESUtilisationAggsPodCountZeroIsAGap(t *testing.T) {
+	body := []byte(`{"aggregations":{"src_0":{"doc_count":6,"ts":{"buckets":[
+	 {"key":1000,"total":{"value":100},"series":{"count":2,"max":60}},
+	 {"key":2000,"total":{"value":null},"series":{"count":0,"max":null}},
+	 {"key":3000,"total":{"value":120},"series":{"count":2,"max":70}}]}}}}`)
+	meta := RequestMetadata{Namespace: "shop", Name: "web", Kind: "deployment"}
+
+	out, err := parseESUtilisationAggs(body, mustESMetric(t, "pod_count"), meta)
+	require.NoError(t, err)
+	assert.Equal(t, []float64{2, 2}, out.Series[0].Values)
+	assert.Equal(t, []int64{1, 3}, out.Series[0].Timestamps)
+}
+
+// Naming a container promotes the two-level source, where the outer group is still
+// the pod and the inner one the container. The count must follow the OUTER group:
+// counting the inner one would divide a workload total by its container count and
+// call the result per pod.
+func TestBuildESUtilisationAggQueryPodCountCountsPodsWhenContainerNamed(t *testing.T) {
+	meta := RequestMetadata{Namespace: "shop", Name: "web", Kind: "deployment", ContainerName: "api"}
+	plan, ok := esUtilisationMetric("pod_count", esScopeWorkload, true)
+	require.True(t, ok)
+	require.Equal(t, "kubernetes.container.memory.workingset.bytes", plan.Sources[0].Field)
+
+	body := bodyAsMap(t, buildESUtilisationAggQuery(plan, meta, esScopeWorkload, 1000, 2000, 300))
+	ts := jsonPath(t, body, "aggs", "src_0", "aggs", "ts", "aggs").(map[string]any)
+	// stats_bucket walks g0, the pod terms agg — not g1, the container one.
+	assert.Equal(t, "g0>gsum", jsonPath(t, ts, "series", "stats_bucket", "buckets_path"))
+	assert.Equal(t, "kubernetes.pod.name", jsonPath(t, ts, "g0", "terms", "field"))
+	assert.Equal(t, "kubernetes.container.name", jsonPath(t, ts, "g0", "aggs", "g1", "terms", "field"))
 }
