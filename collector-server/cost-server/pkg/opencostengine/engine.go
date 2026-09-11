@@ -121,14 +121,12 @@ func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 	}
 	confManager := occonfig.NewConfigFileManager(nil)
 
-	// Default: reach each cluster's Prometheus through relay-server's /prometheus
-	// facade. When observability-backed metrics are enabled, point OpenCost at the
-	// in-process shim instead, which routes queries through services-server's
-	// observability metrics_query API (see promshim.go).
-	promEndpoint := GetNudgebeeRelayEndpoint() + "/prometheus"
-	if UseObservabilityMetrics() {
-		promEndpoint = "http://" + GetPrometheusShimAddr()
-	}
+	// OpenCost always talks to the in-process shim, which owns the difference
+	// between the two relay facades and their two auth schemes (see promshim.go).
+	// By default it proxies straight through to each cluster's Prometheus; with
+	// observability-backed metrics enabled it answers queries from
+	// services-server instead.
+	promEndpoint := "http://" + GetPrometheusShimAddr()
 	_ = os.Setenv(promenv.PrometheusServerEndpointEnvVar, promEndpoint)
 	prometheusConfig, err := prom.NewOpenCostPrometheusConfigFromEnv()
 	if err != nil {

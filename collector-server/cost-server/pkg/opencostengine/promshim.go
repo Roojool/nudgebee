@@ -66,17 +66,26 @@ type shimMetricsOutput struct {
 // the services-server URL or action token is missing so the misconfiguration
 // surfaces at boot rather than as empty allocations.
 func NewPrometheusShim() (*PrometheusShim, error) {
-	serviceURL := GetServiceApiServerUrl()
-	if serviceURL == "" {
-		return nil, fmt.Errorf("SERVICE_API_SERVER_URL is not set")
-	}
-	token := GetServiceApiServerToken()
-	if token == "" {
-		return nil, fmt.Errorf("ACTION_API_SERVER_TOKEN is not set")
+	// services-server is only needed to answer queries from the observability
+	// backend. In the default passthrough mode the shim just proxies to the
+	// relay, so requiring those two would refuse to start for no reason.
+	var serviceURL, token string
+	if UseObservabilityMetrics() {
+		serviceURL = GetServiceApiServerUrl()
+		if serviceURL == "" {
+			return nil, fmt.Errorf("SERVICE_API_SERVER_URL is not set")
+		}
+		token = GetServiceApiServerToken()
+		if token == "" {
+			return nil, fmt.Errorf("ACTION_API_SERVER_TOKEN is not set")
+		}
 	}
 	fallback, err := newRelayFallback(GetNudgebeeRelayEndpoint(), GetNudgebeeRelayAuthToken())
 	if err != nil {
 		return nil, err
+	}
+	if fallback == nil && serviceURL == "" {
+		return nil, fmt.Errorf("neither RELAY_SERVER_ENDPOINT nor an observability backend is configured")
 	}
 	return newPrometheusShim(serviceURL, token, fallback), nil
 }
@@ -92,10 +101,25 @@ func newPrometheusShim(serviceURL, token string, fallback http.Handler) *Prometh
 	}
 }
 
-// newRelayFallback builds a reverse proxy that forwards Prometheus metadata
-// requests (/api/v1/series, /labels, …) to relay-server's /prometheus facade,
-// re-attaching the relay bearer/secret auth. X-Scope-OrgID set by OpenCost is
-// preserved. Returns nil (fallback disabled) when no relay endpoint is set.
+// newRelayFallback builds a reverse proxy that forwards Prometheus requests to
+// relay-server's /prometheus-v2 facade, which hands them to the agent as a raw
+// HTTP proxy and returns the cluster Prometheus' own response untouched.
+//
+// The alternative facade, /prometheus/api/v1/*, runs the query through the
+// agent's prometheus_queries_enricher instead: the agent reshapes Prometheus'
+// samples into parallel timestamps/values arrays inside a findings envelope and
+// the relay converts them back. OpenCost is a Prometheus client, so that round
+// trip only costs time and bytes. The enricher is still the right thing for
+// alert evidence and for normalising the other metric backends — it is just
+// wrong when the caller already speaks Prometheus.
+//
+// Auth differs between the two: the enricher facade takes `Authorization:
+// Bearer` + `X-Scope-OrgID`, the passthrough takes `X-SECRET-KEY` +
+// `X-NB-ACCOUNT-ID`. OpenCost's client can only send the former pair — its
+// header name is a hardcoded constant upstream — so translate here. That is
+// what this shim is for.
+//
+// Returns nil (fallback disabled) when no relay endpoint is set.
 func newRelayFallback(relayEndpoint, relayToken string) (http.Handler, error) {
 	if relayEndpoint == "" {
 		return nil, nil
@@ -110,13 +134,18 @@ func newRelayFallback(relayEndpoint, relayToken string) (http.Handler, error) {
 			r.URL.Scheme = target.Scheme
 			r.URL.Host = target.Host
 			r.Host = target.Host
-			r.URL.Path = basePath + "/prometheus" + r.URL.Path
+			r.URL.Path = basePath + "/prometheus-v2" + r.URL.Path
 			// Clear RawPath: if the incoming path had escaped characters, Go's
 			// transport would otherwise use the stale RawPath and ignore the
 			// prefix we just added.
 			r.URL.RawPath = ""
+			// The passthrough selects the account from X-NB-ACCOUNT-ID; OpenCost
+			// only knows how to set X-Scope-OrgID. Carry the original across
+			// rather than dropping it, so the relay's own logs stay readable.
+			if org := r.Header.Get("X-Scope-OrgID"); org != "" {
+				r.Header.Set("X-NB-ACCOUNT-ID", org)
+			}
 			if relayToken != "" {
-				r.Header.Set("Authorization", "Bearer "+relayToken)
 				r.Header.Set("X-SECRET-KEY", relayToken)
 			}
 		},
@@ -124,10 +153,17 @@ func newRelayFallback(relayEndpoint, relayToken string) (http.Handler, error) {
 }
 
 // Handler returns the HTTP handler implementing the Prometheus API surface.
+//
+// Without an observability backend configured every path is proxied straight
+// through to the cluster's Prometheus, which is what OpenCost wants. When one
+// is configured, instant and range queries are answered from it instead and
+// everything else — series, labels, label values — still proxies.
 func (s *PrometheusShim) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/query", s.handleQuery(true))
-	mux.HandleFunc("/api/v1/query_range", s.handleQuery(false))
+	if s.serviceURL != "" {
+		mux.HandleFunc("/api/v1/query", s.handleQuery(true))
+		mux.HandleFunc("/api/v1/query_range", s.handleQuery(false))
+	}
 	mux.HandleFunc("/", s.handleFallback)
 	return mux
 }
