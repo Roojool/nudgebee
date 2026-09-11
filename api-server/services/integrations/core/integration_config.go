@@ -693,21 +693,20 @@ func CreateIntegrationConfig(
 			if err != nil {
 				return IntegrationDto{}, err
 			}
-			integrations, err := dbms.Db.Queryx(`
+			// Existence check only — QueryRow releases the pooled connection as
+			// soon as Scan runs, so it needs no defer'd Close (a defer here binds
+			// to the whole function, not this loop iteration).
+			var dupID string
+			dupErr := dbms.Db.QueryRow(`
 				SELECT integration_id
 				FROM integration_config_values
-				WHERE value = $1 AND name = 'token'`, randomToken)
-			if err != nil {
-				return IntegrationDto{}, err
-			}
-			defer func() {
-				err := integrations.Close()
-				if err != nil {
-					slog.Error("Error closing response body", "error", err)
-				}
-			}()
-			if integrations.Next() {
+				WHERE value = $1 AND name = 'token'
+				LIMIT 1`, randomToken).Scan(&dupID)
+			if dupErr == nil {
 				return IntegrationDto{}, errors.New("duplicate token found")
+			}
+			if !errors.Is(dupErr, sql.ErrNoRows) {
+				return IntegrationDto{}, dupErr
 			}
 			integrationConfigValues[i].Value = randomToken
 			value = randomToken
