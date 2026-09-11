@@ -1,13 +1,10 @@
-import json
 import logging
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from opentelemetry import context
-from opentelemetry.propagate import inject
-
+from server.metrics.api_server_metrics import query_metrics_via_api_server
 from server.metrics.metrics import Metrics
 from server.metrics.prometheus_queries import (
     CpuUsage,
@@ -18,11 +15,10 @@ from server.metrics.prometheus_queries import (
     RequestDuration,
 )
 from server.utils.utils import (
-    MetricsServerConfigs,
     generate_hourly_dict,
-    get_http_session_with_retry,
     get_prediction_time_range,
     get_trace,
+    resolve_tenant_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,9 +27,6 @@ BATCH_SIZE = 120
 RETRY_COUNT = 5
 END_TIME = int(time.time())  # Current timestamp
 STEP = 3600  # Step size in seconds (e.g., 5 minutes)
-
-
-headers = {"Content-Type": "application/json", "X-SECRET-KEY": MetricsServerConfigs.secret}
 
 
 def operate_data(
@@ -77,62 +70,39 @@ class PrometheusMetricsHPA(Metrics):
         account_id: str,
         from_time: datetime | None = None,
         end_time: datetime = datetime.now(UTC),
+        tenant_id: str = "",
     ):
-        self.prometheus_url = MetricsServerConfigs.url
         self.time_range = get_prediction_time_range(account_id)
         self.namespace_name = namespace_name
         self.deployment_name = deployment_name
         self.account_id = account_id
+        self.tenant_id = tenant_id or resolve_tenant_id(account_id)
         # If None the the data will come till data is available
         self.start_time = from_time
         self.end_time = end_time
 
-    @staticmethod
-    def parse_evidence(evidence):
-        if "data" in evidence:
-            findings = evidence["data"]
-            if "findings" in findings and len(findings["findings"]) > 0:
-                first_finding = findings["findings"][0]
-                if "evidence" in first_finding and len(first_finding["evidence"]) > 0:
-                    first_evidence = first_finding["evidence"][0]
-                    if "data" in first_evidence:
-                        data = json.loads(first_evidence["data"])
-                    else:
-                        logger.error(f"Failed to fetch metrics from server. evidence: {first_evidence}")
-                        raise ValueError("Failed to fetch metrics from server. response data evidence is empty")
-                else:
-                    logger.error(f"Failed to fetch metrics from server. evidence: {first_finding}")
-                    raise ValueError("Failed to fetch metrics from server. response data findings is empty")
-            else:
-                logger.error(f"Failed to fetch metrics from server. findings: {findings}")
-                raise ValueError("Failed to fetch metrics from server. response data findings is empty")
-        else:
-            logger.error(f"Failed to fetch metrics from server. response: {evidence}")
-            raise ValueError("Failed to fetch metrics from server. response data is empty")
-        if data and len(data) > 0 and "data" in data[0] and "series_list_result" in data[0]["data"]:
-            data_list: List[MetricsInput] = [MetricsInput(**i) for i in data[0]["data"]["series_list_result"]]
-        else:
-            logger.error(f"Failed to fetch metrics from server. data: {data}")
-            raise ValueError("Failed to fetch metrics from server. data list is empty")
-        return data_list
+    def _fetch_window(
+        self,
+        query: str,
+        start_at: datetime,
+        end_time: datetime,
+    ) -> List[MetricsInput]:
+        """One window of the backward walk.
 
-    def get_prometheus_payload(self, start_at: datetime, end_time: datetime, query: str):
-        return {
-            "no_sinks": True,
-            "body": {
-                "account_id": self.account_id,
-                "action_name": "prometheus_enricher",
-                "action_params": {
-                    "promql_query": query,
-                    "duration": {
-                        "starts_at": start_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                        "ends_at": end_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                    },
-                    "step": STEP,
-                },
-            },
-            "cache": False,
-        }
+        Any failure propagates, because that is what this path has always done. The
+        caller turns it into a ValueError so the queue message fails loudly rather than
+        recording a forecast built from no data.
+        """
+        entries = query_metrics_via_api_server(
+            account_id=str(self.account_id),
+            tenant_id=self.tenant_id,
+            query=query,
+            start_time=start_at,
+            end_time=end_time,
+            step=STEP,
+            instant=False,
+        )
+        return [MetricsInput(**e) for e in entries]
 
     def fetch_metrics(
         self,
@@ -145,10 +115,6 @@ class PrometheusMetricsHPA(Metrics):
                     start_time = self.start_time.replace(tzinfo=timezone.utc, minute=0, second=0, microsecond=0)
                 end_time = self.end_time.replace(tzinfo=timezone.utc, minute=0, second=0, microsecond=0)
 
-                headers_with_context = headers.copy()
-                current_context = context.get_current()
-                if current_context:
-                    inject(headers_with_context, current_context)
                 main_data = []
                 logger.info(f"executing {len(queries_obj)} queries")
                 for query_obj in queries_obj:
@@ -172,22 +138,11 @@ class PrometheusMetricsHPA(Metrics):
                             current_start_time = start_time
                         if current_end_time == start_time:
                             break
-                        payload = json.dumps(
-                            self.get_prometheus_payload(
-                                start_at=current_start_time, end_time=current_end_time, query=query
-                            )
+                        data_list = self._fetch_window(
+                            query=query,
+                            start_at=current_start_time,
+                            end_time=current_end_time,
                         )
-                        response = get_http_session_with_retry().request(
-                            "POST", self.prometheus_url, headers=headers_with_context, data=payload, timeout=10
-                        )
-                        if response.status_code != 200:
-                            msg = f"""Failed to fetch metrics from server.
-                            status: {response.status_code}:
-                            response: {response.text}"""
-                            logger.error(msg)
-                            raise ValueError(msg)
-                        data = response.json()
-                        data_list = self.parse_evidence(evidence=data)
                         if not data_list:
                             break
                         else:

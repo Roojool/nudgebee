@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from enum import Enum
 from server.metrics.prometheus_metrics import fetch_metrics
 from datetime import datetime, timedelta
-from server.utils.utils import MetricsServerConfigs
 import json
 from server.exception import CancelPrediction
 
@@ -292,6 +291,9 @@ class AnomalyAlgoAbstractConfig(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     account_id: UUID
+    # Carried so metric queries can reach api-server, which scopes by tenant. Optional
+    # because it is resolved from the account when a caller does not supply it.
+    tenant_id: str | None = None
     namespace: str
     deployment: str
     anomaly_type: str = "memory"
@@ -328,7 +330,7 @@ class AnomalyAlgoAbstract:
     _MEM_SUSTAINED_FACTOR = 1.5  # "elevated" = value > train_p99 * this.
 
     def load_data_from_prometheus(
-        self, account_id: str, query: str, start_time=None, end_time=None, step=None
+        self, account_id: str, query: str, start_time=None, end_time=None, step=None, tenant_id: str = ""
     ) -> tuple[pd.Series | None, dict]:
         """Load data from Prometheus and return both data and labels.
 
@@ -342,13 +344,13 @@ class AnomalyAlgoAbstract:
             end_time = pd.Timestamp.now()
 
         response = fetch_metrics(
-            MetricsServerConfigs.url,
             [query],
             start_time=start_time,
             end_time=end_time,
             step=step,
             account_id=account_id,
             duration=None,
+            tenant_id=tenant_id,
         )
         if response is None or len(response) == 0:
             logger.warning(
@@ -474,6 +476,7 @@ class AnomalyAlgoAbstract:
             start_time=config.start_time,
             end_time=config.end_time,
             step=config.step,
+            tenant_id=str(config.tenant_id or ""),
         )
         if data is None:
             logger.warning(f"anomaly :got no data for config {config.model_dump_json()} aborting")

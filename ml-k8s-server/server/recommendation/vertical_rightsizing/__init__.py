@@ -94,6 +94,7 @@ async def generate_recommendations(
     datadog_app_key: Optional[str] = None,
     datadog_site: Optional[str] = None,
     elasticsearch: Optional[Dict[str, Any]] = None,
+    tenant_id: str = "",
 ):
     config = Config(
         namespaces=None if namespace is None else [namespace],
@@ -116,6 +117,7 @@ async def generate_recommendations(
         datadog_app_key=datadog_app_key,
         datadog_site=datadog_site,
         elasticsearch=elasticsearch,
+        tenant_id=tenant_id,
     )
     return await runner.run()
 
@@ -1539,6 +1541,7 @@ async def generate_and_process_recommendation(
                     datadog_app_key=datadog_app_key,
                     datadog_site=datadog_site,
                     elasticsearch=elasticsearch,
+                    tenant_id=tenant_id,
                 )
                 gen_span.set_attribute("rightsizing.recommendations_generated", len(rightsizing_recommendations.scans))
             except Exception as e:

@@ -466,3 +466,53 @@ def test_split_train_eval_handles_tz_mismatch():
     assert not train.empty and not det.empty
     assert len(train) + len(det) == len(s)
     assert train.index.max() < det.index.min()
+
+
+# --- 1e. Tenant reaches the metrics transport ---------------------------------------------
+# The api-server metrics transport is refused without a tenant, and these two endpoints are
+# the only places the tenant can come from. Pin that it actually arrives.
+
+
+@patch("server.anomaly.anomaly_algo.abstract.fetch_metrics")
+def test_anomaly_endpoint_passes_tenant_to_fetch_metrics(mock_fetch, client, synthetic_generator):
+    data, _gt, _train_end, _eval_start = _make_spike(synthetic_generator)
+    mock_fetch.return_value = [_metrics_input(data)]
+    tenant = str(uuid.uuid4())
+
+    resp = client.post(
+        "/anomaly",
+        json={
+            "namespace": "test-ns",
+            "deployment": "test-dep",
+            "tenant": tenant,
+            "account": str(uuid.uuid4()),
+            "type": "memory",
+            "evaluation_period": 60,
+            "algo": "ISOLATION_TREE",
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert mock_fetch.call_args.kwargs["tenant_id"] == tenant
+
+
+@patch("server.anomaly.anomaly_algo.abstract.fetch_metrics")
+def test_detect_endpoint_passes_tenant_to_fetch_metrics(mock_fetch, client, synthetic_generator):
+    data, _gt, _train_end, _eval_start = _make_spike(synthetic_generator)
+    mock_fetch.return_value = [_metrics_input(data)]
+    tenant = str(uuid.uuid4())
+
+    resp = client.post(
+        "/anomaly/detect",
+        json={
+            "account": str(uuid.uuid4()),
+            "tenant": tenant,
+            "query": "container_memory_working_set_bytes{ __CLUSTER__ }",
+            "analysis_start_time": data.index[-10].strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "analysis_end_time": data.index[-1].strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "historical_window_hours": 24,
+        },
+    )
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert mock_fetch.call_args.kwargs["tenant_id"] == tenant

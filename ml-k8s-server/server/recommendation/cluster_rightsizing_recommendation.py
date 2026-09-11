@@ -328,7 +328,9 @@ class ClusterRightSizingRecommendation:
         return total_cpu_request, total_memory_request
 
     def get_historical_pod_allocation(self):
-        prometheus = Prometheus(account_id=self.account_id, namespace_name="", deployment_name="")
+        prometheus = Prometheus(
+            account_id=self.account_id, namespace_name="", deployment_name="", tenant_id=self.tenant_id
+        )
         start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
         cpu_requests: list[list[float]] = prometheus.query_metrics(
             query='sum(kube_pod_container_resource_requests{  __CLUSTER__  resource="cpu"} * on (pod, namespace)'
