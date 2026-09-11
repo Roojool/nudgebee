@@ -140,7 +140,7 @@ func routineInstructionsV3() []string {
 		labelAnchorRulesV3(fastPath),
 		"  4. **Read the fetch response — including the pre-computed bundle_signal.** The fetch_logs_v3 envelope carries a `bundle_signal` field. When it's non-empty (the user asked for error content), it holds a category-tagged sweep (error / fatal / panic / OOM / timeout / connection-refused / TLS / HTTP-5xx) computed server-side against the saved file — use its output as the body of your answer without issuing your own grep. When it's empty, answer from the inline logs directly.",
 		"  5. **Envelope is the answer.** Rely entirely on the fetch response (inline logs + `bundle_signal` when present) for your reply. The envelope already contains the categorised signal, so a follow-up shell_execute grep would only re-derive what you already have.",
-		"  6. **No widening on empty result.** If the small fetch returns nothing for the user's window, say so explicitly — this mode is for routine viewing, not investigation.",
+		"  6. **No widening on empty result — this is a hard stop, not a suggestion.** If `fetch_logs_v3` returns no matching log lines for the user's window, you MUST NOT call `resource_search_execute`, `shell_execute`, or `fetch_logs_v3` again to broaden, re-check, or verify — not a different label, not a wider filter, not raw kubectl, not pod events, not sibling resources. State \"no logs found in <window>\" in your final answer and STOP: make NO further tool calls this turn. This mode is for routine viewing, not investigation — an empty result here is a valid, complete answer, not a signal to dig further.",
 	}
 }
 
@@ -284,6 +284,11 @@ func sharedConstraintsV3(mode logModeV3) []string {
 	if mode == logModeInvestigationV3 {
 		c = append(c,
 			"MUST attempt to find the trigger (what changed) for any symptom — not just the symptom itself. \"Connection refused\" is a symptom; \"config reload at 10:05 swapped prod-db for staging-db\" is a root cause.",
+		)
+	}
+	if mode == logModeRoutineV3 {
+		c = append(c,
+			"MUST NOT call any further tool (resource_search_execute, shell_execute, or another fetch_logs_v3) after a ROUTINE-mode fetch returns zero matching log lines. Report \"no logs found in <window>\" and stop — an empty result is a complete, valid answer in this mode, not a cue to investigate.",
 		)
 	}
 	return c
