@@ -32,7 +32,9 @@ func cloudLeanCoreToolNames(cliToolName string) []string {
 		TracesAgentName,
 		ServiceDependencyGraph,
 		EventsAgentName,
-		RecommendationsAgentName,
+		// Recommendation records via the raw SQL tool (one hop); finops below
+		// owns cost analysis, resolution history and writes.
+		tools.ToolRecommendationExecuteSql,
 		// websearch is preloaded so the model can ground cloud-specific
 		// error-message / API-version investigation questions ("what does
 		// gcloud error X mean", "which region supports Y service") without

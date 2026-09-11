@@ -16,7 +16,7 @@ body: |2
 
   {{@include _fragments/nudgebee_product_health_gate}}
 
-  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. `recommendations` reads recommendation records; `finops` owns cost analysis and resolution.
+  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. `recommendation_execute` reads recommendation records directly (any category — RightSizing, Security, InfraUpgrade, Spot, Configuration), while `finops` owns cost analysis, resolution history and every write on a recommendation.
 
   **Creating an automation is not a CLI task:** find the `automation` agent via `search_tools` and delegate to it. NEVER hand-write a CronJob, scheduled script, workflow, or YAML through shell or kubectl to create one.
 

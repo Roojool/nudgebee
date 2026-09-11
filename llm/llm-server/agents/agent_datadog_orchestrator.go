@@ -208,20 +208,21 @@ func getDatadogPlannerSupportedTools(ctx *security.RequestContext, accountId str
 		// Re-homed here when the resource_search agent was removed (#32503 Phase 2) —
 		// Datadog data is live (not in the DB inventory), so it stays platform-owned.
 		tools.ToolDatadogResourceSearchExecute,
-		DatadogLogAgentName,             // For logs
-		DatadogMetricsAgentName,         // For metrics
-		DatadogEventsAgentName,          // For Events
-		DatadogContainersAgentName,      // For Containers, Pods, Nodes, Workloads
-		DatadogTracesAgentName,          // For Traces
-		DatadogIncidentAgentName,        // For Incidents
-		AgentDatadogHostsName,           // For Hosts
-		AgentDatadogSoftwareCatalogName, // For Software Catalog
-		getTicketAgentName(),            // For JIRA/Ticketing
-		WorkflowAgentName,               // For Workflows
-		GithubAgentName,                 // For Github
-		WebSearchAgentName,              // For Web Search
-		NudgebeeAgentName,               // Nudgebee product docs and authorized configuration state
-		RecommendationsAgentName,        // For Recommendations
+		DatadogLogAgentName,                          // For logs
+		DatadogMetricsAgentName,                      // For metrics
+		DatadogEventsAgentName,                       // For Events
+		DatadogContainersAgentName,                   // For Containers, Pods, Nodes, Workloads
+		DatadogTracesAgentName,                       // For Traces
+		DatadogIncidentAgentName,                     // For Incidents
+		AgentDatadogHostsName,                        // For Hosts
+		AgentDatadogSoftwareCatalogName,              // For Software Catalog
+		getTicketAgentName(),                         // For JIRA/Ticketing
+		WorkflowAgentName,                            // For Workflows
+		GithubAgentName,                              // For Github
+		WebSearchAgentName,                           // For Web Search
+		NudgebeeAgentName,                            // Nudgebee product docs and authorized configuration state
+		tools.ToolRecommendationExecuteSql,           // Recommendation records (SQL rules on the tool)
+		tools.ToolRecommendationResolutionExecuteSql, // Their resolution history
 		EventsAgentName,
 		PostgresAgentName, // For PostgreSQL
 		MySQLAgentName,    // For MySQL
