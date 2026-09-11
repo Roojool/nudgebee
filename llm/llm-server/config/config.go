@@ -1912,3 +1912,13 @@ func LogSecurityWarnings() {
 		}
 	}
 }
+
+// EffectivePIIBackend is shared by runtime routing and settings capabilities.
+// Unknown values preserve the historical HTTP fallback; the configured default
+// remains inprocess.
+func EffectivePIIBackend() string {
+	if strings.EqualFold(strings.TrimSpace(Config.LlmServerEgressFilterPIIBackend), "inprocess") {
+		return "inprocess"
+	}
+	return "http"
+}
