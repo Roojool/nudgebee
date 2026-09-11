@@ -346,5 +346,52 @@ class TestMemoryLimitInsightDirection(unittest.TestCase):
         self.assertNotIn("recommendation", insights[0])
 
 
+class TestCorrelatedChangeTitles(unittest.TestCase):
+    """Each attached change must say which object it is about.
+
+    LastDeploymentCard falls back to the literal "Last Deployment Change" when
+    no title is supplied. That was accurate while exactly one change was ever
+    attached and it was always the workload's own deploy; with a ConfigMap edit
+    and an Ingress annotation attached alongside it, the reader gets several
+    identically-titled rows and cannot tell them apart.
+    """
+
+    @staticmethod
+    def _block(resource_name, started):
+        diff = {"resource_name": resource_name, "updated_paths": [], "updated_values": []}
+        row = (1, "sessions/sessions-api", [{"type": "diff", "data": diff}], started)
+        return eh.get_config_change_data(row, "pod_oom_killer_enricher")
+
+    def test_names_the_changed_object(self):
+        started = datetime(2026, 9, 11, 14, 5, 0)
+        self.assertEqual(
+            self._block("configmap/sessions/sessions-config.yaml", started)["additional_info"]["title"],
+            "ConfigMap sessions-config changed · 14:05 UTC",
+        )
+        self.assertEqual(
+            self._block("ingress/sessions/sessions-public.yaml", started)["additional_info"]["title"],
+            "Ingress sessions-public changed · 14:05 UTC",
+        )
+        self.assertEqual(
+            self._block("deployment/sessions/sessions-api.yaml", started)["additional_info"]["title"],
+            "Deployment sessions-api changed · 14:05 UTC",
+        )
+
+    def test_repeat_edits_to_one_object_stay_distinguishable(self):
+        first = self._block("configmap/sessions/sessions-config.yaml", datetime(2026, 9, 11, 8, 57, 0))
+        second = self._block("configmap/sessions/sessions-config.yaml", datetime(2026, 9, 11, 9, 6, 0))
+        self.assertNotEqual(first["additional_info"]["title"], second["additional_info"]["title"])
+
+    def test_unusable_resource_name_adds_no_title(self):
+        # Better the card's own fallback than a title built from nothing.
+        started = datetime(2026, 9, 11, 14, 5, 0)
+        self.assertNotIn("additional_info", self._block("", started))
+        self.assertNotIn("additional_info", self._block("bare-name", started))
+
+    def test_missing_timestamp_still_names_the_object(self):
+        block = self._block("configmap/sessions/sessions-config.yaml", None)
+        self.assertEqual(block["additional_info"]["title"], "ConfigMap sessions-config changed")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2212,7 +2212,53 @@ def get_config_change_data(config_change_event, aggregation_key):
     # now reach here in the tail rather than only when every row was null.
     starts_at = config_change_event[3]
     config_data["start_at"] = starts_at.isoformat() if starts_at is not None else None
+    # Name the object this diff is about. LastDeploymentCard falls back to the
+    # literal string "Last Deployment Change" when no title is supplied, which
+    # was accurate while exactly one change was ever attached and it was always
+    # the workload's own deploy. Now that a ConfigMap edit and an Ingress
+    # annotation can be attached alongside it, that fallback renders several
+    # identically-titled rows and the reader cannot tell which is which — or
+    # that any of them concern a different object at all.
+    title = _change_block_title(config_data.get("data"), starts_at)
+    if title:
+        config_data["additional_info"] = {"title": title}
     return config_data
+
+
+def _change_block_title(diff_data, starts_at) -> str:
+    """ "ConfigMap sessions-config changed · 14:05 UTC", from the diff block.
+
+    resource_name is "<kind>/<namespace>/<name>.yaml" with the kind lowercased
+    (see BuildKubernetesDiffBlock in the agent). The time disambiguates repeat
+    edits to one object, which otherwise produce two rows with the same title.
+    """
+    if not isinstance(diff_data, dict):
+        return ""
+    resource_name = diff_data.get("resource_name") or ""
+    parts = [p for p in str(resource_name).split("/") if p]
+    if len(parts) < 2:
+        return ""
+    kind, name = parts[0], parts[-1]
+    if name.endswith(".yaml"):
+        name = name[: -len(".yaml")]
+    title = "{} {} changed".format(_DIFF_KIND_LABELS.get(kind.lower(), kind.title()), name)
+    if starts_at is not None:
+        try:
+            title += " · {} UTC".format(starts_at.strftime("%H:%M"))
+        except Exception:
+            pass
+    return title
+
+
+# Kubernetes spellings for the lowercased kind carried in resource_name.
+_DIFF_KIND_LABELS = {
+    "configmap": "ConfigMap",
+    "deployment": "Deployment",
+    "daemonset": "DaemonSet",
+    "statefulset": "StatefulSet",
+    "ingress": "Ingress",
+    "rollout": "Rollout",
+}
 
 
 def get_change_insights(config_data, aggregation_key) -> List[Dict[str, Any]]:
