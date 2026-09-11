@@ -91,16 +91,23 @@ func memoryTrendInsight(entry podMetricEntry) (playbooks.PlaybookActionResponseI
 		prev = mb
 	}
 
+	// The series is a sum: every provider's utilisation query wraps in sum()
+	// with no `by (pod)`, so a multi-replica workload — or a single one caught
+	// mid-restart with two incarnations alive — returns the total across pods,
+	// and the limits come back summed to match. Say so, rather than implying
+	// one container's curve.
 	subject := "Working set"
 	if container, ok := entry.Metric["container"].(string); ok && container != "" {
-		subject = fmt.Sprintf("Container %s: working set", container)
+		subject = fmt.Sprintf("Container %s: working set across the workload's pods", container)
 	}
 	summary := fmt.Sprintf("%s went %.0fMiB → %.0fMiB (peak %.0fMiB)", subject, first, last, peak)
 	if span := seriesSpan(entry.Timestamps); span > 0 {
 		summary += fmt.Sprintf(" over %s", span.Round(time.Minute))
 	}
 	if limitMiB := limitMiB(entry.Metric); limitMiB > 0 {
-		summary += fmt.Sprintf(", against a %.0fMiB limit", limitMiB)
+		// Summed to match the series, so it is the workload's combined ceiling,
+		// not the per-container limit an operator would recognise from the spec.
+		summary += fmt.Sprintf(", against a combined %.0fMiB limit", limitMiB)
 	}
 
 	switch {
@@ -111,8 +118,15 @@ func memoryTrendInsight(entry podMetricEntry) (playbooks.PlaybookActionResponseI
 			Severity: "High",
 		}, true
 	case dropped:
+		// Deliberately not "the workload releases memory". On a total summed
+		// across pods a fall can simply be a pod leaving — restarted, evicted,
+		// scaled in — which says nothing about any container giving memory
+		// back. Reading it as a release inverts the conclusion on precisely the
+		// case this insight exists for: a container that grew until it was
+		// OOMKilled drops out of the sum at the moment it dies.
 		return playbooks.PlaybookActionResponseInsight{
-			Message:  summary + ". It rose and fell back within the window, so the workload does release memory.",
+			Message: summary + ". The total fell back within the window — either a container released " +
+				"memory or a pod left the set, which this series cannot tell apart.",
 			Severity: "Info",
 		}, true
 	default:

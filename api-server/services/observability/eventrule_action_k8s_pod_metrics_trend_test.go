@@ -71,11 +71,42 @@ func TestMemoryTrend_SawtoothIsNotUnbounded(t *testing.T) {
 	if strings.Contains(got.Message, "without ever falling back") {
 		t.Errorf("a series that falls back must not read as unbounded; got %q", got.Message)
 	}
-	if !strings.Contains(got.Message, "does release memory") {
-		t.Errorf("expected the release reading; got %q", got.Message)
+	if !strings.Contains(got.Message, "cannot tell apart") {
+		t.Errorf("expected the honest fall-back reading; got %q", got.Message)
 	}
 	if got.Severity != "Info" {
-		t.Errorf("severity = %q; a workload that releases memory is not the alarming case", got.Severity)
+		t.Errorf("severity = %q; a fall-back is not the alarming case", got.Severity)
+	}
+}
+
+// Caught by running scenario 3 end-to-end: the OOMKilled container had grown
+// 9MiB → 185MiB and was killed, but the reported series was summed across two
+// pod incarnations during the restart, so the dying pod leaving the sum read as
+// "the workload does release memory" — the exact inverse, on the exact case
+// this insight exists for. Every provider's utilisation query wraps in sum()
+// with no `by (pod)`, so the series can never be attributed to one pod.
+func TestMemoryTrend_FallBackDoesNotClaimTheWorkloadReleasedMemory(t *testing.T) {
+	entry := memorySeries("api", 384, 20, 9, 16) // climbs to ~313MiB
+	entry = appendSamples(entry, 160, 168, 176, 184, 192)
+	got := onlyInsight(t, entry)
+	if strings.Contains(got.Message, "does release memory") {
+		t.Errorf("a drop in a pod-summed series must not be read as a release; got %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "a pod left the set") {
+		t.Errorf("the alternative explanation must be stated; got %q", got.Message)
+	}
+}
+
+// The numbers are a total across pods and the limit is summed to match; saying
+// otherwise invites an operator to compare them against a pod spec that reads
+// half as large.
+func TestMemoryTrend_LabelsTheSeriesAsAWorkloadTotal(t *testing.T) {
+	got := onlyInsight(t, memorySeries("api", 384, 30, 30, 5))
+	if !strings.Contains(got.Message, "across the workload's pods") {
+		t.Errorf("the summing must be stated; got %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "combined 384MiB limit") {
+		t.Errorf("the limit must be marked as combined; got %q", got.Message)
 	}
 }
 
@@ -90,20 +121,20 @@ func TestMemoryTrend_RestartDropIsNotRelease(t *testing.T) {
 	}
 }
 
-// A slow release — a GC handing memory back over several scrapes — never
-// drops 10% between two adjacent samples. Comparing against the previous
-// sample read this as unbroken growth, which is the one conclusion that
-// must not be produced by accident: it is what says "no limit is large
-// enough".
-func TestMemoryTrend_GradualDeclineIsARelease(t *testing.T) {
+// A slow decline — a GC handing memory back over several scrapes, or replicas
+// draining away — never drops 10% between two adjacent samples. Comparing
+// against the previous sample read this as unbroken growth, which is the one
+// conclusion that must not be produced by accident: it is what says "no limit
+// is large enough".
+func TestMemoryTrend_GradualDeclineIsAFallBack(t *testing.T) {
 	entry := memorySeries("api", 512, 12, 200, 0) // flat at the peak
 	entry = appendSamples(entry, 195, 190, 185, 180, 175, 170, 165, 160)
 	got := onlyInsight(t, entry)
 	if strings.Contains(got.Message, "without ever falling back") {
 		t.Errorf("a steady decline is a release, not unbounded growth; got %q", got.Message)
 	}
-	if !strings.Contains(got.Message, "does release memory") {
-		t.Errorf("expected the release reading; got %q", got.Message)
+	if !strings.Contains(got.Message, "fell back within the window") {
+		t.Errorf("expected the fall-back reading; got %q", got.Message)
 	}
 }
 
