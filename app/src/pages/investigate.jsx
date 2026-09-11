@@ -350,19 +350,30 @@ const Investigate = () => {
 
       if (status === RCA_STATUS.COMPLETED) {
         card.rcaData = {
+          ...response,
           file_details: {},
           status: response.status,
           summary: response.summary,
           analysis: response.analysis,
           outdated: response.outdated,
           format_source: response.format_source,
+          generated_at: response.generated_at,
         };
         card.insightData = card.insightData.filter((i) => i.message !== 'RCA is underway — check back shortly for results');
         card.insightData.push({ message: 'RCA report is ready', severity: 'Info' });
       } else if (status === RCA_STATUS.FAILED) {
-        card.rcaData = { status: response.status };
+        card.rcaData = {
+          ...response,
+          status: response.status,
+          status_reason: response.status_reason,
+          analysis: response.analysis,
+          generated_at: response.generated_at,
+        };
         card.insightData = card.insightData.filter((i) => i.message !== 'RCA is underway — check back shortly for results');
-        card.insightData.push({ message: 'RCA hit a snag — try re-triggering or check back later', severity: 'Error' });
+        card.insightData.push({
+          message: response.status_reason || 'RCA hit a snag — try re-triggering or check back later',
+          severity: 'Error',
+        });
       }
 
       card.refreshRenderId = (card.refreshRenderId || 0) + 1;
@@ -1743,20 +1754,28 @@ const Investigate = () => {
         if (responseStatus === RCA_STATUS.COMPLETED) {
           // Already completed (re-trigger of existing RCA) — show results directly
           rcaCard.rcaData = {
+            ...response,
             file_details: {},
             status: response.status,
             summary: response.summary,
             analysis: response.analysis,
             outdated: response.outdated,
             format_source: response.format_source,
+            generated_at: response.generated_at,
           };
           rcaCard.insightData = [{ message: 'RCA report is ready', severity: 'Info' }];
         } else if (responseStatus === RCA_STATUS.FAILED) {
-          rcaCard.rcaData = { status: response.status };
-          rcaCard.insightData = [{ message: 'RCA hit a snag — try re-triggering or check back later', severity: 'Error' }];
+          rcaCard.rcaData = {
+            ...response,
+            status: response.status,
+            status_reason: response.status_reason,
+            analysis: response.analysis,
+            generated_at: response.generated_at,
+          };
+          rcaCard.insightData = [{ message: response.status_reason || 'RCA hit a snag — try re-triggering or check back later', severity: 'Error' }];
         } else {
           // IN_PROGRESS — start polling
-          rcaCard.rcaData = { status: RCA_STATUS.IN_PROGRESS };
+          rcaCard.rcaData = { ...response, status: RCA_STATUS.IN_PROGRESS };
           rcaCard.insightData = [{ message: 'RCA is underway — check back shortly for results', severity: 'Info' }];
           startRcaPolling();
         }

@@ -1,5 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Select } from '@ui/Select';
 import { Box, Typography, CircularProgress } from '@mui/material';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import apiKubernetes from '@api1/kubernetes';
 import RCAIcon from '@assets/investigation/rca-icon.svg';
@@ -8,14 +11,27 @@ import { Button } from '@ui/Button';
 import { Chip } from '@ui/Chip';
 import { toast as snackbar } from '@ui/Toast';
 
+dayjs.extend(relativeTime);
+
+// Renders "<label> 3 hours ago" with the absolute timestamp on hover. Returns
+// null for a missing or unparseable value so callers can render nothing.
+const Timestamp = ({ label, value }) => {
+  if (!value) return null;
+  const parsed = dayjs(value);
+  if (!parsed.isValid()) return null;
+  return (
+    <Typography component='span' title={parsed.format('YYYY-MM-DD HH:mm:ss')} sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>
+      {label} {parsed.fromNow()}
+    </Typography>
+  );
+};
+
 const RCAInProgress = () => {
   return (
     <Box
       sx={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100%',
-        minHeight: ds.space.mul(0, 120),
         p: 'var(--ds-space-6)',
       }}
     >
@@ -57,7 +73,7 @@ const RCAInProgress = () => {
               mb: 'var(--ds-space-1)',
             }}
           >
-            Root cause analysis in progress
+            Generating RCA report
           </Typography>
           <Typography
             sx={{
@@ -66,8 +82,7 @@ const RCAInProgress = () => {
               lineHeight: 1.6,
             }}
           >
-            We're correlating signals around this event to identify the root cause. This typically takes a minute or two — results will update
-            automatically.
+            We're generating the report from the collected evidence. The report will appear here automatically when it's ready.
           </Typography>
         </Box>
       </Box>
@@ -75,14 +90,13 @@ const RCAInProgress = () => {
   );
 };
 
-const RCAFailed = () => {
+// Failure notices describe the attempt; the report and its timestamp render separately.
+const RCAFailed = ({ statusReason, failedAt }) => {
   return (
     <Box
       sx={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100%',
-        minHeight: ds.space.mul(0, 100),
         p: 'var(--ds-space-6)',
       }}
     >
@@ -137,9 +151,12 @@ const RCAFailed = () => {
               lineHeight: 1.6,
             }}
           >
-            The root cause analysis ran into an issue and couldn't finish. This can happen if the event data is incomplete or a timeout occurred. Try
-            re-triggering the analysis — if it keeps failing, the team can look into it.
+            {statusReason ||
+              "The root cause analysis ran into an issue and couldn't finish. This can happen if the event data is incomplete or a timeout occurred. Try re-triggering the analysis — if it keeps failing, the team can look into it."}
           </Typography>
+          <Box sx={{ mt: 'var(--ds-space-1)' }}>
+            <Timestamp label='Last attempt' value={failedAt} />
+          </Box>
         </Box>
       </Box>
     </Box>
@@ -214,6 +231,23 @@ const RCANoData = () => {
   );
 };
 
+// Reports are occasionally stored wrapped in a fence; strip it so the markdown
+// renders as a document instead of one big code block. Explicit markdown/md
+// wrappers are safe to strip; a bare wrapper is stripped only when it is the
+// sole fence pair, so reports bounded by two real code blocks stay intact.
+const REPORT_FENCE = /^```([\w+#-]*)\s*([\s\S]*?)\s*```$/;
+
+const normalizeReport = (value) => {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const match = trimmed.match(REPORT_FENCE);
+  if (!match) return value;
+
+  const language = match[1].toLowerCase();
+  const fenceCount = trimmed.match(/```/g)?.length || 0;
+  return language === 'markdown' || language === 'md' || (language === '' && fenceCount === 2) ? match[2] : value;
+};
+
 const FORMAT_SOURCE_LABELS = {
   rule: 'Rule format',
   account: 'Account format',
@@ -222,7 +256,7 @@ const FORMAT_SOURCE_LABELS = {
 
 // Action row above the completed report: which format level applies, plus
 // copy-as-markdown, download and (write access only) regenerate.
-const RCAReportToolbar = ({ report, formatSource, onRegenerate, eventId }) => {
+const RCAReportToolbar = ({ report, formatSource, generatedAt, onRegenerate, eventId }) => {
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(report);
@@ -246,13 +280,16 @@ const RCAReportToolbar = ({ report, formatSource, onRegenerate, eventId }) => {
   };
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', mb: 'var(--ds-space-3)' }}>
-      {formatSource ? (
-        <Chip size='sm' tone='neutral'>
-          {FORMAT_SOURCE_LABELS[formatSource] || formatSource}
-        </Chip>
-      ) : null}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', ml: 'auto' }}>
+    <Box sx={{ display: 'flex', flex: '1 1 auto', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--ds-space-3)', minWidth: 0 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+        {formatSource ? (
+          <Chip size='sm' tone='neutral'>
+            {FORMAT_SOURCE_LABELS[formatSource] || formatSource}
+          </Chip>
+        ) : null}
+        <Timestamp label='Generated' value={generatedAt} />
+      </Box>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--ds-space-2)', ml: 'auto' }}>
         <Button tone='secondary' size='xs' onClick={handleCopy} data-testid='rca-copy-btn'>
           Copy
         </Button>
@@ -297,39 +334,89 @@ const RCAOutdatedBanner = ({ onRegenerate }) => (
 
 // Component to render the RCA report content
 // Polling is handled at page level (useRcaPolling in investigate.jsx)
-const RCAReport = ({ data = {}, onRegenerate, eventId }) => {
+export const RCAReport = ({ data = {}, onRegenerate, eventId }) => {
+  const [selectedId, setSelectedId] = useState('live');
+  const versions = data.rca_versions || [];
+  const historicalVersions = versions.filter((version) => version.id !== data.rca_report_id);
+  const historical = versions.find((version) => version.id === selectedId && version.id !== data.rca_report_id);
   const status = data?.status?.toUpperCase();
+  const report = normalizeReport(historical ? historical.analysis : data.analysis);
+  const generatedAt = historical ? historical.generated_at : status === 'FAILED' && !versions.length ? undefined : data.generated_at;
+  const isBusy = status === 'IN_PROGRESS';
 
-  if (status === 'IN_PROGRESS') {
-    return <RCAInProgress />;
-  } else if (status === 'COMPLETED') {
-    if (!data?.analysis) {
-      return <RCANoData />;
-    }
-  } else if (status === 'FAILED') {
-    return <RCAFailed />;
-  }
-
-  try {
-    let summary = data.analysis;
-    if (typeof summary === 'string' && summary.startsWith('```') && summary.endsWith('```')) {
-      summary = summary.slice(3, -3).trim();
-    }
-    return (
-      <Box sx={{ width: '100%' }}>
-        <RCAReportToolbar report={summary} formatSource={data?.format_source} onRegenerate={onRegenerate} eventId={eventId} />
-        {data?.outdated ? <RCAOutdatedBanner onRegenerate={onRegenerate} /> : null}
-        <MarkDowns data={summary} sx={{ maxHeight: '100%', width: '100%', overflowY: 'auto' }} />
+  return (
+    <Box sx={{ width: '100%', minWidth: 0 }}>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--ds-space-4)', mb: 'var(--ds-space-4)' }}>
+        {(report?.trim() || versions.length > 0) && (
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--ds-space-2)',
+              flexWrap: 'wrap',
+              flex: '0 1 auto',
+              minWidth: 0,
+              maxWidth: '100%',
+            }}
+          >
+            <Typography
+              component='label'
+              htmlFor='rca-version-select'
+              sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], whiteSpace: 'nowrap' }}
+            >
+              RCA version
+            </Typography>
+            <Box sx={{ width: '14rem', minWidth: 0 }}>
+              <Select
+                id='rca-version-select'
+                size='sm'
+                value={historical ? selectedId : 'live'}
+                onChange={setSelectedId}
+                clearable={false}
+                disabled={historicalVersions.length === 0}
+                options={[
+                  { value: 'live', label: 'Latest report' },
+                  ...historicalVersions.map((version) => ({
+                    value: version.id,
+                    label: version.generated_at ? new Date(version.generated_at).toLocaleString() : 'Previous report · Date unavailable',
+                  })),
+                ]}
+              />
+            </Box>
+            {historicalVersions.length === 0 && (
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>History unavailable</Typography>
+            )}
+          </Box>
+        )}
+        {report?.trim() && (
+          <RCAReportToolbar
+            report={report}
+            formatSource={historical ? undefined : data.format_source}
+            generatedAt={generatedAt}
+            onRegenerate={isBusy || historical ? undefined : onRegenerate}
+            eventId={eventId}
+          />
+        )}
       </Box>
-    );
-  } catch (error) {
-    console.error('Error parsing RCA data:', error);
-    return (
-      <Box sx={{ p: ds.space[4], color: 'error.main' }}>
-        <Typography>Error parsing analysis data. Please try again later.</Typography>
-      </Box>
-    );
-  }
+      {!historical && isBusy && <RCAInProgress />}
+      {!historical && status === 'FAILED' && (
+        <RCAFailed statusReason={data.status_reason} failedAt={data.attempted_at || (versions.length ? undefined : data.generated_at)} />
+      )}
+      {report?.trim() ? (
+        <Box data-testid={!historical && status === 'FAILED' ? 'rca-retained-report' : 'rca-report'}>
+          {!historical && (
+            <>
+              {(isBusy || status === 'FAILED') && <Typography>Showing the previous successful report</Typography>}
+              {data.outdated && !isBusy && <RCAOutdatedBanner onRegenerate={onRegenerate} />}
+            </>
+          )}
+          <MarkDowns data={report} sx={{ maxHeight: '100%', width: '100%', overflowY: 'auto' }} />
+        </Box>
+      ) : !isBusy && status !== 'FAILED' ? (
+        <RCANoData />
+      ) : null}
+    </Box>
+  );
 };
 
 class RCACard {
@@ -369,7 +456,7 @@ class RCACard {
           message: 'RCA is underway — check back shortly for results',
           severity: 'Info',
         });
-        this.rcaData = { status: rcaData.status };
+        this.rcaData = { ...rcaData };
       } else if (rcaData?.status.toUpperCase() === 'COMPLETED') {
         try {
           this.insightData.push({
@@ -377,12 +464,14 @@ class RCACard {
             severity: 'Info',
           });
           this.rcaData = {
+            ...rcaData,
             file_details: {},
             status: rcaData.status,
             summary: rcaData.summary,
             analysis: rcaData.analysis,
             outdated: rcaData.outdated,
             format_source: rcaData.format_source,
+            generated_at: rcaData.generated_at,
           };
         } catch (error) {
           console.error('Error parsing RCA summary for insights:', error);
@@ -393,10 +482,18 @@ class RCACard {
         }
       } else if (rcaData?.status.toUpperCase() === 'FAILED') {
         this.insightData.push({
-          message: 'RCA hit a snag — try re-triggering or check back later',
+          message: rcaData.status_reason || 'RCA hit a snag — try re-triggering or check back later',
           severity: 'Error',
         });
-        this.rcaData = { status: rcaData.status };
+        // Keep the failure reason and any report retained from an earlier
+        // successful run — the card renders both instead of a generic notice.
+        this.rcaData = {
+          ...rcaData,
+          status: rcaData.status,
+          status_reason: rcaData.status_reason,
+          analysis: rcaData.analysis,
+          generated_at: rcaData.generated_at,
+        };
       }
     });
 
