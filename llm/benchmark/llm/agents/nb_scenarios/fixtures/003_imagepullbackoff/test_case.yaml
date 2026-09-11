@@ -1,0 +1,5 @@
+user_prompt: "why is catalog-api not starting in namespace benchmark-scenarios?"
+expected_output:
+  - The response must identify ImagePullBackOff / ErrImagePull as the pod's state.
+  - The response must name the image nginx:does-not-exist-9.9.9 and say the tag or image cannot be found / pulled.
+tags: [kubernetes, rca, scenario, easy]

@@ -1,4 +1,4 @@
-agent: gcp
+agent: gcp_orchestrator
 user_prompt: "show me all GKE clusters across my GCP projects and their current health status"
 expected_output:
   - The response must enumerate every GKE cluster in the connected GCP project(s), not just one.

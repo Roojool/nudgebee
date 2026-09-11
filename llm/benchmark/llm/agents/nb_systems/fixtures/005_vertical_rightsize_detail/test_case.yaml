@@ -1,4 +1,4 @@
-user_prompt: "give me more detail about Vertical Rightsize"
+user_prompt: "give me more detail about the Vertical Rightsize recommendations on this cluster"
 expected_output:
   - |
     The agent should call recommendation_execute filtered to RightSizing /

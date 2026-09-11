@@ -1,4 +1,4 @@
-agent: aws
+agent: aws_orchestrator
 user_prompt: "show me all RDS instances across my accounts — which ones are up and which are stopped?"
 expected_output:
   - The response must enumerate every RDS instance found across the connected AWS account(s).

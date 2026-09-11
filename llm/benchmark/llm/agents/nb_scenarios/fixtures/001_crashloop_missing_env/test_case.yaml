@@ -1,0 +1,5 @@
+user_prompt: "the payment-worker pod in namespace benchmark-scenarios keeps crashing — why?"
+expected_output:
+  - The response must identify that the payment-worker container exits (exit code 1, CrashLoopBackOff) because the DB_URL environment variable is not set.
+  - The response must cite the container's own log line ("FATAL: DB_URL is not set, cannot connect to payments database") or the missing env var as the mechanism, not a generic guess.
+tags: [kubernetes, rca, scenario, easy]

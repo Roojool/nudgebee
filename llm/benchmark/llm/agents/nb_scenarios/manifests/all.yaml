@@ -1,0 +1,241 @@
+# Ten deterministic failure scenarios for the nb_scenarios benchmark.
+# Apply with: kubectl apply -f all.yaml   (namespace is created here)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmark-scenarios
+  labels:
+    benchmark: "true"
+---
+# S1 — crash loop: container exits because DB_URL is not set
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-worker
+  namespace: benchmark-scenarios
+  labels: {app: payment-worker, scenario: s1-crashloop-missing-env}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: payment-worker}}
+  template:
+    metadata: {labels: {app: payment-worker}}
+    spec:
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "echo 'payment-worker starting'; if [ -z \"$DB_URL\" ]; then echo 'FATAL: DB_URL is not set, cannot connect to payments database'; exit 1; fi; sleep 3600"]
+---
+# S2 — OOMKilled: allocates ~200Mi against a 64Mi limit
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-hog
+  namespace: benchmark-scenarios
+  labels: {app: memory-hog, scenario: s2-oomkilled}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: memory-hog}}
+  template:
+    metadata: {labels: {app: memory-hog}}
+    spec:
+      containers:
+      - name: hog
+        image: polinux/stress:1.0.4
+        command: ["stress", "--vm", "1", "--vm-bytes", "200M", "--vm-hang", "0"]
+        resources:
+          requests: {memory: "32Mi", cpu: "50m"}
+          limits: {memory: "64Mi", cpu: "200m"}
+---
+# S3 — ImagePullBackOff: tag does not exist
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-api
+  namespace: benchmark-scenarios
+  labels: {app: catalog-api, scenario: s3-imagepull}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: catalog-api}}
+  template:
+    metadata: {labels: {app: catalog-api}}
+    spec:
+      containers:
+      - name: api
+        image: nginx:does-not-exist-9.9.9
+---
+# S4 — Pending: unschedulable CPU request
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-analytics
+  namespace: benchmark-scenarios
+  labels: {app: batch-analytics, scenario: s4-unschedulable}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: batch-analytics}}
+  template:
+    metadata: {labels: {app: batch-analytics}}
+    spec:
+      containers:
+      - name: job
+        image: busybox:1.36
+        command: ["sleep", "3600"]
+        resources:
+          # 64 cores exceeds the largest dev node (48 vCPU) so the pod stays Pending; the 004 fixture
+          # and the live namespace both say 64. Raise it (and the fixture) only if a bigger node pool appears.
+          requests: {cpu: "64", memory: "64Mi"}
+---
+# S5 — Service with no endpoints: selector mismatch
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  namespace: benchmark-scenarios
+  labels: {app: orders-api-v2, scenario: s5-selector-mismatch}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: orders-api-v2}}
+  template:
+    metadata: {labels: {app: orders-api-v2}}
+    spec:
+      containers:
+      - name: api
+        image: nginx:1.27-alpine
+        ports: [{containerPort: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-svc
+  namespace: benchmark-scenarios
+  labels: {scenario: s5-selector-mismatch}
+spec:
+  selector: {app: orders-api}
+  ports: [{port: 80, targetPort: 80}]
+---
+# S6 — Running but never Ready: readiness probe on the wrong port
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: benchmark-scenarios
+  labels: {app: checkout-api, scenario: s6-readiness-wrong-port}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: checkout-api}}
+  template:
+    metadata: {labels: {app: checkout-api}}
+    spec:
+      containers:
+      - name: api
+        image: nginx:1.27-alpine
+        ports: [{containerPort: 80}]
+        readinessProbe:
+          httpGet: {path: /, port: 8081}
+          periodSeconds: 5
+---
+# S7 — application errors in logs: connection refused to inventory-db:5432
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-api
+  namespace: benchmark-scenarios
+  labels: {app: inventory-api, scenario: s7-log-errors}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: inventory-api}}
+  template:
+    metadata: {labels: {app: inventory-api}}
+    spec:
+      containers:
+      - name: api
+        image: busybox:1.36
+        command: ["sh", "-c", "i=0; while true; do i=$((i+1)); echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) INFO inventory-api serving /healthz 200\"; echo \"$(date -u +%Y-%m-%dT%H:%M:%SZ) ERROR failed to connect to inventory-db:5432: connection refused (attempt $i)\"; sleep 10; done"]
+---
+# S8 — CreateContainerConfigError: ConfigMap key LOG_LEVEL missing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shipping-config
+  namespace: benchmark-scenarios
+  labels: {scenario: s8-configmap-missing-key}
+data:
+  REGION: eu-west-1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipping-api
+  namespace: benchmark-scenarios
+  labels: {app: shipping-api, scenario: s8-configmap-missing-key}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: shipping-api}}
+  template:
+    metadata: {labels: {app: shipping-api}}
+    spec:
+      containers:
+      - name: api
+        image: busybox:1.36
+        command: ["sleep", "3600"]
+        env:
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef: {name: shipping-config, key: LOG_LEVEL}
+---
+# S9 — CronJob whose every run fails: permission denied writing /data
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-report
+  namespace: benchmark-scenarios
+  labels: {scenario: s9-cronjob-failing}
+spec:
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: report
+            image: busybox:1.36
+            command: ["sh", "-c", "echo 'nightly-report: generating report'; echo 'ERROR: report generation failed: cannot write /data/report.csv: permission denied'; exit 2"]
+---
+# S10 — Pending PVC: StorageClass does not exist
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: analytics-data
+  namespace: benchmark-scenarios
+  labels: {scenario: s10-pvc-missing-storageclass}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: fast-ssd-v9
+  resources:
+    requests: {storage: 1Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-db
+  namespace: benchmark-scenarios
+  labels: {app: analytics-db, scenario: s10-pvc-missing-storageclass}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: analytics-db}}
+  template:
+    metadata: {labels: {app: analytics-db}}
+    spec:
+      containers:
+      - name: db
+        image: busybox:1.36
+        command: ["sleep", "3600"]
+        volumeMounts: [{name: data, mountPath: /var/lib/analytics}]
+      volumes:
+      - name: data
+        persistentVolumeClaim: {claimName: analytics-data}

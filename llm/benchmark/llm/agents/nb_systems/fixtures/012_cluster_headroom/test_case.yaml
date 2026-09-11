@@ -1,4 +1,4 @@
-user_prompt: "how much headroom do I have left on the cluster? if I need to deploy something big, is there room?"
+user_prompt: "how much CPU and memory headroom do I have left on the cluster? if I need to deploy something big, is there room?"
 expected_output:
   - |
     The agent should query real cluster capacity (e.g. kubectl describe nodes

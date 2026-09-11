@@ -1,0 +1,5 @@
+user_prompt: "traffic to orders-svc in benchmark-scenarios is failing. is the service wired to its pods?"
+expected_output:
+  - The response must state that orders-svc has no endpoints.
+  - The response must identify the cause as a selector mismatch, the Service selects app=orders-api while the orders-api pods are labelled app=orders-api-v2.
+tags: [kubernetes, rca, scenario, medium]

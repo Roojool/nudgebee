@@ -1,0 +1,9 @@
+# NB Scenarios benchmark: ten Kubernetes failure scenarios with known ground
+# truth, deployed once into the `benchmark-scenarios` namespace on the target
+# cluster (manifests/all.yaml) and left running. Fixtures carry no
+# before_test/after_test on purpose: the infrastructure is shared, persistent
+# and verified by hand before a run (see manifests/README.md).
+agent: k8s_orchestrator
+tool_names: []
+prefix_query: true
+max_retries: 2

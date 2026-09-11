@@ -1,4 +1,4 @@
-user_prompt: "give me the numbers, how many anomaly detects in last 24 hrs"
+user_prompt: "how many anomalies were detected in the last 24 hours? give me the total count"
 expected_output:
   - |
     The agent should call anomaly_execute with a query against the 'anomaly'

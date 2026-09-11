@@ -1,0 +1,4 @@
+user_prompt: "shipping-api pod in benchmark-scenarios is stuck in CreateContainerConfigError. what is wrong?"
+expected_output:
+  - The response must identify that the container references key LOG_LEVEL in ConfigMap shipping-config and that key does not exist (the ConfigMap only has REGION).
+tags: [kubernetes, rca, scenario, easy]

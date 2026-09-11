@@ -1,0 +1,5 @@
+user_prompt: "memory-hog in benchmark-scenarios restarts all the time. what is killing it and what is its memory limit?"
+expected_output:
+  - The response must state that the memory-hog container is being OOMKilled (last termination reason OOMKilled) and is in a restart / CrashLoopBackOff cycle.
+  - The response must report the memory limit of 64Mi (and may note the workload tries to allocate about 200M).
+tags: [kubernetes, rca, scenario, easy]
