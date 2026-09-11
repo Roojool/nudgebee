@@ -152,4 +152,35 @@ describe('KubernetesRightSizingUpdateForm — resource tuning', () => {
     await waitFor(() => expect(screen.getByTestId('raise-pr-analysis-gate')).toBeInTheDocument());
     expect(screen.getByTestId('raise-pr-analysis-gate')).toHaveTextContent('Log analysis is still running');
   });
+
+  // The stage that produces the diff finishes long before the investigation does. Judged by the
+  // overall status, a PR that is ready to raise stays blocked for the rest of the run.
+  it('opens Raise PR once the log-analysis stage completes, even mid-investigation', async () => {
+    renderForm({
+      updateResourceType: 'raise-pr',
+      data: {
+        ...baseData,
+        card_id: 'AskAiCard',
+        aiData: {
+          status: 'IN_PROGRESS',
+          task_statuses: { log_analysis: 'COMPLETED' },
+          source_updates: { gitDiff: 'diff --git a/x b/x' },
+          source_details: {},
+        },
+      },
+    });
+
+    await waitFor(() => expect(mockListTicketConfigsForCreate).toHaveBeenCalled());
+    expect(screen.queryByTestId('raise-pr-analysis-gate')).not.toBeInTheDocument();
+  });
+
+  // Responses predating task_statuses must keep working off the overall status.
+  it('falls back to the overall status when the response carries no task_statuses', async () => {
+    renderForm({
+      updateResourceType: 'raise-pr',
+      data: { ...baseData, card_id: 'AskAiCard', aiData: { status: 'IN_PROGRESS', source_details: {} } },
+    });
+
+    await waitFor(() => expect(screen.getByTestId('raise-pr-analysis-gate')).toBeInTheDocument());
+  });
 });
