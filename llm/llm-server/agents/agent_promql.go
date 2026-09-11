@@ -101,7 +101,7 @@ func (l *PromqlAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 
 	// otel metrices
 	if !l.externalHostsCached {
-		l.externalHosts = tools.GetCurrentOtelHosts(query.AccountId)
+		l.externalHosts = tools.GetCurrentOtelHosts(ctx, query.AccountId)
 		l.externalHostsCached = true
 	}
 

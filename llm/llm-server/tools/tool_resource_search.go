@@ -2078,7 +2078,14 @@ func GetCurrentK8sAccountState(accountId string, limit int) map[string][]string 
 	return response
 }
 
-func GetCurrentOtelHosts(accountId string) map[string]string {
+// GetCurrentOtelHosts discovers the OTel-reporting hosts for an account. ctx is
+// required: the query goes to services-server, which needs the caller's security
+// context. A nil ctx yields no hosts rather than a panic — the hosts only enrich a
+// prompt, so losing them must never fail the request that asked for it.
+func GetCurrentOtelHosts(ctx *security.RequestContext, accountId string) map[string]string {
+	if ctx == nil {
+		return map[string]string{}
+	}
 	discoveryQuery := `sum by (host.name, host.ip) (system.memory.utilization{host.name!=""})`
 	toolProm := PrometheusExecuteTool{}
 
@@ -2086,6 +2093,7 @@ func GetCurrentOtelHosts(accountId string) map[string]string {
 	startTime := endTime.Add(-1 * time.Hour)
 
 	response, err := toolProm.executePromQl(core.NbToolContext{
+		Ctx:       ctx,
 		AccountId: accountId,
 	}, discoveryQuery, accountId, map[string]any{
 		"end_time":   endTime.UTC().Format(time.RFC3339),

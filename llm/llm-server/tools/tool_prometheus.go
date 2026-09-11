@@ -482,6 +482,13 @@ func (m PrometheusExecuteTool) executePromQl(nbRequestContext core.NbToolContext
 	// queried over HTTP and an agent-backed one still goes through the relay —
 	// the same path the logs and traces tools already take.
 	slog.Debug("prometheus query", "query", query, "start_time", startTime, "end_time", endTime, "step_seconds", stepSeconds)
+	// A caller that builds an NbToolContext by hand can leave Ctx nil, and this
+	// dereference then takes the whole request down rather than failing one tool
+	// call — GetCurrentOtelHosts did exactly that, panicking every prompt build
+	// that reached it. Fail as an error so the caller can carry on without it.
+	if nbRequestContext.Ctx == nil {
+		return nil, fmt.Errorf("executePromQl: nil request context")
+	}
 	response, err := services_server.QueryMetrics(*nbRequestContext.Ctx, core.ObservabilityMetricsQueryRequest{
 		AccountId:    accountId,
 		Queries:      map[string]string{"query": query},

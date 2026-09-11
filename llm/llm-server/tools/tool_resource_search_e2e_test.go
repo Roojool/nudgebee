@@ -15,7 +15,7 @@ func TestGetCurrentPrometheusOtelHosts(t *testing.T) {
 	if os.Getenv("TEST_ACCOUNT") == "" {
 		t.Skip("requires a live services backend; set TEST_ACCOUNT to run")
 	}
-	data := GetCurrentOtelHosts(os.Getenv("TEST_ACCOUNT"))
+	data := GetCurrentOtelHosts(security.NewRequestContextForSuperAdmin(), os.Getenv("TEST_ACCOUNT"))
 	assert.NotEmpty(t, data)
 }
 

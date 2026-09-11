@@ -713,3 +713,23 @@ func TestSeriesFromMetricsResponse_EmptyIsEmptyNotNil(t *testing.T) {
 		t.Fatalf("expected an empty list, got %v (%v)", got, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// executePromQl — nil request context
+// ---------------------------------------------------------------------------
+
+// TestExecutePromQl_NilRequestContextReturnsError guards the regression that
+// broke promql_query entirely: executePromQl dereferences nbRequestContext.Ctx
+// to reach services-server, so an internal caller that hand-builds an
+// NbToolContext without one took the whole agent run down with a nil pointer
+// dereference instead of failing a single tool call. A nil Ctx must surface as
+// an error the caller can handle.
+func TestExecutePromQl_NilRequestContextReturnsError(t *testing.T) {
+	tool := PrometheusExecuteTool{}
+
+	assert.NotPanics(t, func() {
+		data, err := tool.executePromQl(core.NbToolContext{}, "up", "acct-1", map[string]any{})
+		assert.Error(t, err)
+		assert.Nil(t, data)
+	})
+}
