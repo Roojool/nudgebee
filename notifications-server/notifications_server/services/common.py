@@ -67,6 +67,22 @@ MSG_DM_SENT_SUCCESS = "Direct message sent successfully"
 # surrounding conversation. Callers that need the question alone split on this.
 THREAD_CONTEXT_MARKER = "\n--- context ---"
 
+EVENT_CONVERSATION_PREFIX = "event-"
+# The RCA-report session prefix ("event-rca-"), layered on the plain "event-"
+# every other session uses -- must be checked first, or "rca-" leaks into the
+# extracted fingerprint.
+EVENT_RCA_CONVERSATION_PREFIX = "event-rca-"
+
+
+def extract_event_fingerprint(conversation_id: str) -> str:
+    """Recover the alert fingerprint from an llm-server event-conversation
+    session id ("event-<fingerprint>" or "event-rca-<fingerprint>")."""
+    if conversation_id.startswith(EVENT_RCA_CONVERSATION_PREFIX):
+        return conversation_id[len(EVENT_RCA_CONVERSATION_PREFIX) :]
+    if conversation_id.startswith(EVENT_CONVERSATION_PREFIX):
+        return conversation_id[len(EVENT_CONVERSATION_PREFIX) :]
+    return conversation_id
+
 
 class CommonService:
     def __init__(self, engine, slack_app, teams_app):
@@ -1089,33 +1105,62 @@ class CommonService:
         else:
             return {"error": {"message": f"Failed: {error_msg}"}}
 
-    def get_incident_details_and_reply_on_channel(self, incident_uuid, payload):
+    def resolve_incident_channel_and_thread(self, incident_uuid):
+        """Fallback for channels bound via slack.join_channel's
+        bind_session_id, which sent_notifications never sees (#37885). Lazily
+        posts a one-time anchor message to get a real thread_ts, since a
+        fresh channel has no thread yet; later calls reuse it. Small race if
+        two first-responses land at once -- accepted, not locked."""
         try:
             incident = cache.get_event_entry(incident_uuid)
             if not incident:
                 LOG.warning(f"No cached incident found for UUID: {incident_uuid}")
-                return
+                return None, None, None, None
 
             platform = incident.get("platform", "slack")
+            if platform != "slack":
+                LOG.warning(f"Unsupported platform: {platform} for incident {incident_uuid}")
+                return None, None, None, None
+
             tenant_id = incident.get("tenant_id")
             team_id = incident.get("team_id")
             channel_id = incident.get("channel_id")
-            message = payload.response
+            account_id = incident.get("account_id")
 
-            if not all([tenant_id, team_id, channel_id, message]):
+            if not all([tenant_id, team_id, channel_id]):
                 LOG.error(
                     f"Missing required fields for incident {incident_uuid}: "
-                    f"tenant_id={tenant_id}, team_id={team_id}, channel_id={channel_id}, has_message={bool(message)}"
+                    f"tenant_id={tenant_id}, team_id={team_id}, channel_id={channel_id}"
                 )
-                return
+                return None, None, None, None
 
-            if platform == "slack":
-                self.send_channel_message(platform, tenant_id, channel_id, incident_uuid, message, team_id=team_id)
-            else:
-                LOG.warning(f"Unsupported platform: {platform} for incident {incident_uuid}")
+            thread_ts = incident.get("thread_ts")
+            if thread_ts:
+                return channel_id, thread_ts, team_id, account_id
+
+            result = self.send_channel_message(
+                platform,
+                tenant_id,
+                channel_id,
+                incident_uuid,
+                "🧵 Investigation updates for this event will appear in this thread.",
+                team_id=team_id,
+            )
+            new_thread_ts = (result or {}).get("data", {}).get("message_ts")
+            if not new_thread_ts:
+                LOG.error(f"Failed to post anchor message for incident {incident_uuid}: {result}")
+                return None, None, None, None
+
+            # update_event_entry's own key-param is itself named thread_ts, which
+            # collides with a thread_ts= kwarg -- overwrite via the already-fetched
+            # dict instead of that merge helper.
+            incident["thread_ts"] = new_thread_ts
+            cache.cache_event_entry(incident_uuid, incident)
+            return channel_id, new_thread_ts, team_id, account_id
 
         except Exception as e:
-            LOG.exception(f"Error replying to incident channel for {incident_uuid}: {e}")
+            LOG.exception(f"Error resolving incident channel/thread for {incident_uuid}: {e}")
+            return None, None, None, None
 
     @staticmethod
     def _check_error_msg(error_msg, scope):
@@ -2049,8 +2094,7 @@ class CommonService:
         if not conversation_id or not isinstance(conversation_id, str):
             return None, None, None, None
 
-        parts = conversation_id.split("-", 1)
-        fingerprint = parts[1] if len(parts) > 1 else parts[0]
+        fingerprint = extract_event_fingerprint(conversation_id)
         try:
             # A tenant can have Slack, Discord, and MS Teams all enabled at once;
             # send_finding_notification writes one sent_notifications row per

@@ -88,6 +88,12 @@ LLM_OFFLINE_MESSAGES: List[str] = [
     "Couldn't connect to Nubi at the moment. Please try again!",
 ]
 
+# Distinct from LLM_BUSY_MESSAGES: stalled on the user, not "still thinking".
+# Fixed (not a random-pick list like the others) -- the scenario is unambiguous.
+LLM_PENDING_FOLLOWUP_MESSAGE = (
+    "I'm still waiting on your answer to an earlier question in this thread — mind replying to that one first?"
+)
+
 GENERIC_ERROR_MESSAGES: List[str] = [
     "Oops! Something went sideways. Mind trying that again?",
     "Hmm, I hit a snag there. Could you try again?",
@@ -269,6 +275,12 @@ def get_llm_offline_message() -> str:
     return get_random_message(LLM_OFFLINE_MESSAGES)
 
 
+def get_llm_pending_followup_message() -> str:
+    """Message for when a new message is rejected because an earlier
+    follow-up question in the same conversation is still unanswered."""
+    return LLM_PENDING_FOLLOWUP_MESSAGE
+
+
 def get_generic_error_message() -> str:
     """Get a random generic error message."""
     return get_random_message(GENERIC_ERROR_MESSAGES)
@@ -339,6 +351,16 @@ def is_conversation_in_progress_error(error_response: Optional[dict]) -> bool:
 
     error_msg = str(error_response).lower()
     return "conversation" in error_msg and ("in progress" in error_msg or "already" in error_msg)
+
+
+def is_conversation_pending_followup_error(error_response: Optional[dict]) -> bool:
+    """True if llm-server rejected the turn with ErrConversationPendingFollowup
+    (an earlier follow-up is unanswered) -- distinct from "in progress"."""
+    if not error_response:
+        return False
+
+    error_msg = str(error_response).lower()
+    return "waiting on a followup" in error_msg or "waiting on a follow-up" in error_msg
 
 
 def is_budget_exceeded_error(error_response: Optional[dict]) -> bool:

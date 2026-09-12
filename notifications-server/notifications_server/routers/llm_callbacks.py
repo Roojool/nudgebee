@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from notifications_server import sync_engine, slack_app, teams_app
 from notifications_server.routers.common import verify_action_token
-from notifications_server.services.common import CommonService
+from notifications_server.services.common import CommonService, extract_event_fingerprint
 from notifications_server.services.events import Events
 from notifications_server.services.cache import Cache
 from notifications_server.models.models import MessagingPlatform
@@ -64,6 +64,7 @@ async def get_cached_or_fallback_entry(
             "channel_id": channel_id,
             "team_id": team_id,
             "account_id": account_id,
+            "tenant_id": payload.tenant_id,
             "session_id": conversation_id,
             "is_thread": False,
         }
@@ -112,16 +113,11 @@ def _parse_conversation(common_service: CommonService, conversation_id: str, pay
 
 def _handle_event_conversation(common_service: CommonService, conversation_id: str, payload: LLMResponse):
     # A bound incident channel reuses this same conversation_id for every future
-    # @mention (see CommonService._persist_channel_account_mapping), so it alone
-    # can't tell which physical Slack thread a given response belongs to.
-    # get_channel_and_ts_from_sent_notifications remains the source for
-    # team_id/account_id — stable properties of the bound channel that don't
-    # change per-question, unlike channel_id/thread_ts. reply_ref, the
-    # per-question correlator events.py:build_llm_payload attaches to the
-    # original request, overrides channel_id/thread_ts when present and gates
-    # skipping the channel-wide announce path below, which is only correct for
-    # the original investigation's own one-time completion (that request never
-    # goes through _process_event, so it never sets reply_ref).
+    # @mention, so it alone can't tell which physical Slack thread a response
+    # belongs to. reply_ref (per-question, set only for a real @mention) wins
+    # when present; sent_notifications wins for finding-alert channels; the
+    # incident cache below covers channels bound only via slack.join_channel,
+    # which sent_notifications never sees.
     channel_id, thread_ts, team_id, account_id = common_service.get_channel_and_ts_from_sent_notifications(
         conversation_id, tenant_id=payload.tenant_id
     )
@@ -145,10 +141,23 @@ def _handle_event_conversation(common_service: CommonService, conversation_id: s
     elif payload.tenant_id and payload.type != "watch_registered":
         with Session(sync_engine) as session:
             if is_feature_enabled(session, "EVENT_ANALYSIS_ON_CHANNEL", payload.tenant_id):
-                parts = conversation_id.split("-", 1)
-                if len(parts) == 2 and parts[1]:
-                    incident_uuid = parts[1]
-                    common_service.get_incident_details_and_reply_on_channel(incident_uuid, payload)
+                incident_uuid = extract_event_fingerprint(conversation_id)
+                if incident_uuid:
+                    # Only overrides on success, so a sent_notifications hit above
+                    # (a normal finding-alert channel) isn't wiped out by a miss here.
+                    incident_channel_id, incident_thread_ts, incident_team_id, incident_account_id = (
+                        common_service.resolve_incident_channel_and_thread(incident_uuid)
+                    )
+                    if incident_channel_id and incident_thread_ts:
+                        # account_id isn't in resolve_incident_channel_and_thread's own
+                        # required-fields check, so a cache entry missing it must not
+                        # clobber a valid account_id already found via sent_notifications.
+                        channel_id, thread_ts, team_id, account_id = (
+                            incident_channel_id,
+                            incident_thread_ts,
+                            incident_team_id,
+                            incident_account_id or account_id,
+                        )
                 else:
                     LOG.warning(
                         "Could not extract incident_uuid from conversation_id for incident reply",

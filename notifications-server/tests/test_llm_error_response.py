@@ -18,10 +18,26 @@ import inspect
 import pytest
 
 from notifications_server.services import events as events_module
-from notifications_server.services.bot_messages import GENERIC_ERROR_MESSAGES
+from notifications_server.services.bot_messages import (
+    GENERIC_ERROR_MESSAGES,
+    LLM_BUSY_MESSAGES,
+    LLM_PENDING_FOLLOWUP_MESSAGE,
+)
 from notifications_server.services.events import Events
 
 RAW_ERROR = "llm: bedrock InvokeModel failed: ThrottlingException (arn:aws:bedrock:us-east-1:1234:model/x)"
+
+# llm-server's ErrConversationPendingFollowup / ErrConversationInProgress text,
+# reaching this webhook as payload.response when the async chat worker's turn
+# is rejected. Every notifications-server chat request is async with no
+# conversation_id (see events.py:build_llm_payload), so llm-server always
+# answers the initial POST with 202 regardless of what happens inside — these
+# two guards only ever reach Slack via this webhook's type:"error", not via
+# the synchronous _llm_error_reply path.
+PENDING_FOLLOWUP_ERROR = (
+    "conversation: previous turn is waiting on a followup answer; answer or cancel it before starting a new turn"
+)
+IN_PROGRESS_ERROR = "conversation: conversation is already in progress"
 
 # (handler name, params after self) per platform, mirroring the router's dispatch:
 # Slack is called with (payload, cached_entry, channel_id, thread_ts, team_id);
@@ -83,6 +99,20 @@ def test_slack_error_posts_generic_copy(svc):
 
     assert len(svc.common_service.slack_messages) == 1
     assert any(copy in svc.common_service.slack_messages[0] for copy in GENERIC_ERROR_MESSAGES)
+
+
+def test_slack_pending_followup_error_gets_specific_message(svc):
+    svc.handle_error_response(_Payload(response=PENDING_FOLLOWUP_ERROR), {}, "C123", "1779952241.483549", "T123")
+
+    assert len(svc.common_service.slack_messages) == 1
+    assert svc.common_service.slack_messages[0] == LLM_PENDING_FOLLOWUP_MESSAGE
+
+
+def test_slack_in_progress_error_gets_busy_message(svc):
+    svc.handle_error_response(_Payload(response=IN_PROGRESS_ERROR), {}, "C123", "1779952241.483549", "T123")
+
+    assert len(svc.common_service.slack_messages) == 1
+    assert svc.common_service.slack_messages[0] in LLM_BUSY_MESSAGES
 
 
 def test_slack_error_mentions_the_asker(svc):

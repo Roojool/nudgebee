@@ -37,6 +37,7 @@ from notifications_server.services.bot_messages import (
     get_user_not_found_message,
     get_llm_busy_message,
     get_llm_offline_message,
+    get_llm_pending_followup_message,
     get_session_expired_message,
     get_empty_message_response,
     get_followup_confirmation,
@@ -46,6 +47,7 @@ from notifications_server.services.bot_messages import (
     get_feedback_thanks_message,
     get_exit_message,
     is_conversation_in_progress_error,
+    is_conversation_pending_followup_error,
     is_budget_exceeded_error,
     get_budget_exceeded_message,
 )
@@ -844,6 +846,31 @@ class Events:
             self.reply(channel_id, team_id, thread_ts, get_session_expired_message())
             return
 
+        # A bound event-investigation channel's own follow-up has no human
+        # user_id to start with (nobody answers a question that hasn't been
+        # asked yet), and the button-click path -- unlike execute_event's
+        # free-text path -- never resolves one either. Do it now, from
+        # whoever is actually answering, before build_llm_payload/headers
+        # below need cached_entry["user_id"] unconditionally.
+        if not cached_entry.get("user_id") and slack_user_id:
+            try:
+                email = self.common_service.get_user_info("slack", team_id, slack_user_id)
+                user_id, _ = validate_and_get_user_tenants(email)
+            except Exception as e:
+                LOG.warning(f"Could not resolve replying user for followup: {e}")
+                user_id = None
+            if user_id:
+                self.cache.update_event_entry(thread_ts, user_id=user_id)
+                cached_entry["user_id"] = user_id
+
+        if not (cached_entry.get("user_id") and cached_entry.get("tenant_id")):
+            LOG.error(
+                "Cannot submit followup for %s: missing user_id/tenant_id on cached entry",
+                thread_ts,
+            )
+            self.reply(channel_id, team_id, thread_ts, get_generic_error_message())
+            return
+
         is_event_followup = bool(cached_entry.get("event_analysis_followup"))
         payload = self.build_llm_payload(cached_entry, thread_ts, query_override=response_option)
         payload.update(
@@ -1102,9 +1129,11 @@ class Events:
 
         Budget exhaustion is detected primarily by HTTP status (429), mirroring
         the web app's ``mapUpstreamError``; the body sniff is a fallback for when
-        the status code is unavailable. Otherwise: a busy notice for an
-        in-progress conversation, else the generic offline fallback.
+        the status code is unavailable. Pending-followup gets its own message,
+        not "in progress" -- it's stalled on the user, not busy.
         """
+        if is_conversation_pending_followup_error(error_response):
+            return get_llm_pending_followup_message()
         if is_conversation_in_progress_error(error_response):
             return get_llm_busy_message()
         if status == 429 or is_budget_exceeded_error(error_response):
@@ -1678,11 +1707,18 @@ class Events:
                 LOG.error(f"Failed to send fallback error message to Slack: {reply_err}", exc_info=True)
 
     def handle_error_response(self, payload, cached_entry, channel_id: str, thread_ts: str, team_id: str):
-        """Tell the thread the run failed. ``payload.response`` is a raw upstream
-        error string, so it is logged by the caller and never posted."""
+        """Tell the thread the run failed. ``payload.response`` is a raw
+        upstream error string, never posted verbatim -- sniffed here for the
+        pending-followup/in-progress guards to pick an accurate message
+        instead of the generic one."""
         slack_progress.stop_progress_stream(self.common_service, cached_entry, channel_id, team_id, thread_ts)
 
-        message = get_generic_error_message()
+        if is_conversation_pending_followup_error(payload.response):
+            message = get_llm_pending_followup_message()
+        elif is_conversation_in_progress_error(payload.response):
+            message = get_llm_busy_message()
+        else:
+            message = get_generic_error_message()
         slack_user_id = cached_entry.get("slack_user_id") if cached_entry else None
         if slack_user_id:
             message = f"<@{slack_user_id}> {message}"
