@@ -283,6 +283,7 @@ interface AutoSuggestTextareaProps {
   popupInitial?: boolean;
   imageSupport?: ImageSupport;
   imageDraft?: { id: string; text?: string; images: OutgoingImage[] };
+  onDraftChange?: (hasDraft: boolean) => void;
   onDraftSubmitted?: (id: string) => void;
   externalAgentsLoading?: boolean;
   submitOnModEnter?: boolean;
@@ -973,6 +974,7 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
     imageSupport,
     imageDraft,
     onDraftSubmitted,
+    onDraftChange,
     externalAgentsLoading = false,
     submitOnModEnter = false,
   },
@@ -1069,6 +1071,10 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
   // and the outgoing payload stay consistent.
   const sendingRef = useRef(false);
   const [isSending, setIsSending] = useState(false);
+  useEffect(() => {
+    onDraftChange?.(Boolean(text.trim() || attachedImages.length));
+  }, [text, attachedImages, onDraftChange]);
+
   const handleSend = async () => {
     if (sendingRef.current) return;
     sendingRef.current = true;

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import QueuedMessagesBanner from '@components/llm/common/QueuedMessagesBanner';
 
 jest.mock('@utils/colors');
@@ -38,6 +38,39 @@ describe('QueuedMessagesBanner', () => {
     rerender(<QueuedMessagesBanner {...props} />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(screen.getByTestId('queued-message-edit-qm-1')).toBeEnabled();
+  });
+
+  it('shows delete progress until the request settles and blocks duplicate actions', async () => {
+    let finish!: () => void;
+    const onDelete = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    render(
+      <QueuedMessagesBanner
+        queuedMessages={defaultMessages}
+        isExpanded
+        onToggleExpanded={jest.fn()}
+        onSendNow={jest.fn()}
+        onEdit={jest.fn()}
+        onDelete={onDelete}
+      />
+    );
+    fireEvent.click(screen.getByTestId('queued-message-delete-qm-1'));
+    expect(screen.getByRole('status')).toHaveTextContent('Deleting…');
+    expect(screen.getByTestId('queued-message-item-qm-1')).toBeInTheDocument();
+    for (const id of ['qm-1', 'qm-2']) {
+      for (const action of ['edit', 'delete', 'send-now']) expect(screen.getByTestId(`queued-message-${action}-${id}`)).toBeDisabled();
+    }
+    fireEvent.click(screen.getByTestId('queued-message-delete-qm-1'));
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finish();
+    });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByTestId('queued-message-delete-qm-1')).toBeEnabled();
   });
 
   it('renders nothing when queuedMessages is empty', () => {

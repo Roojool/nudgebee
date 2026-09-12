@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Box, Typography, IconButton, CircularProgress } from '@mui/material';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
@@ -13,17 +13,21 @@ import { QueuedMessage } from '@hooks/useQueuedMessages';
 export interface QueuedMessagesBannerProps {
   queuedMessages: QueuedMessage[];
   editingMessageId?: string;
+  onRefresh?: () => void;
+  onRestore?: (id: string) => void;
   isExpanded: boolean;
   maxQueuedMessages?: number;
   onToggleExpanded: () => void;
   onSendNow: (id: string) => void;
   onEdit: (id: string) => void;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => Promise<void> | void;
 }
 
 export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
   queuedMessages,
   editingMessageId,
+  onRefresh,
+  onRestore,
   isExpanded,
   maxQueuedMessages,
   onToggleExpanded,
@@ -31,11 +35,20 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
   onEdit,
   onDelete,
 }) => {
+  const [deletingMessageId, setDeletingMessageId] = useState<string>();
+  const isDeleting = queuedMessages?.some((message) => message.id === deletingMessageId);
+
   if (!queuedMessages || queuedMessages.length === 0) {
     return null;
   }
 
-  const count = queuedMessages.length;
+  const count = queuedMessages.filter((message) => !message.saveError).length;
+  const waiting = queuedMessages.filter((message) => !message.saving && !message.saveError).length;
+  const saving = queuedMessages.filter((message) => message.saving).length;
+  const unconfirmed = queuedMessages.filter((message) => message.saveError).length;
+  const summary = [waiting ? `${waiting} waiting` : '', saving ? `${saving} saving` : '', unconfirmed ? `${unconfirmed} need attention` : '']
+    .filter(Boolean)
+    .join(' · ');
   const isFull = maxQueuedMessages !== undefined && count >= maxQueuedMessages;
 
   return (
@@ -89,7 +102,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
               lineHeight: 1.4,
             }}
           >
-            {count} waiting
+            {summary}
           </Typography>
           <Box
             component='span'
@@ -217,10 +230,30 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   </Box>
                 </Tooltip>
 
-                {editingMessageId === msg.id && (
+                {(editingMessageId === msg.id || deletingMessageId === msg.id) && (
                   <Box role='status' sx={{ display: 'flex', alignItems: 'center', gap: 1, mr: 1 }}>
                     <CircularProgress size={14} />
-                    <Typography variant='caption'>Moving to composer…</Typography>
+                    <Typography variant='caption'>{deletingMessageId === msg.id ? 'Deleting…' : 'Moving to composer…'}</Typography>
+                  </Box>
+                )}
+                {msg.saving && (
+                  <Typography role='status' sx={{ fontSize: 'var(--ds-text-caption)' }}>
+                    Saving…
+                  </Typography>
+                )}
+                {msg.saveError && (
+                  <Box>
+                    <Typography role='alert'>{msg.saveError}</Typography>
+                    {!msg.notAdmitted && (
+                      <button type='button' onClick={onRefresh}>
+                        Refresh history
+                      </button>
+                    )}
+                    {msg.notAdmitted && (
+                      <button type='button' onClick={() => onRestore?.(msg.id)}>
+                        Move to composer
+                      </button>
+                    )}
                   </Box>
                 )}
                 {/* Actions: Send now, Edit, Delete */}
@@ -228,7 +261,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   <Tooltip title='Send now' placement='top'>
                     <IconButton
                       size='small'
-                      disabled={Boolean(editingMessageId)}
+                      disabled={Boolean(editingMessageId) || isDeleting || msg.saving || Boolean(msg.saveError)}
                       aria-label='Send now'
                       data-testid={`queued-message-send-now-${msg.id}`}
                       onClick={(e) => {
@@ -248,7 +281,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   <Tooltip title='Edit message' placement='top'>
                     <IconButton
                       size='small'
-                      disabled={Boolean(editingMessageId)}
+                      disabled={Boolean(editingMessageId) || isDeleting || msg.saving || Boolean(msg.saveError)}
                       aria-label='Edit message'
                       data-testid={`queued-message-edit-${msg.id}`}
                       onClick={(e) => {
@@ -268,12 +301,17 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   <Tooltip title='Delete message' placement='top'>
                     <IconButton
                       size='small'
-                      disabled={Boolean(editingMessageId)}
+                      disabled={Boolean(editingMessageId) || isDeleting || msg.saving || Boolean(msg.saveError)}
                       aria-label='Delete message'
                       data-testid={`queued-message-delete-${msg.id}`}
-                      onClick={(e) => {
+                      onClick={async (e) => {
                         e.stopPropagation();
-                        onDelete(msg.id);
+                        setDeletingMessageId(msg.id);
+                        try {
+                          await onDelete(msg.id);
+                        } finally {
+                          setDeletingMessageId(undefined);
+                        }
                       }}
                       sx={{
                         p: '4px',

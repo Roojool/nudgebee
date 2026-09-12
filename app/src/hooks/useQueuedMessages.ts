@@ -18,6 +18,9 @@ export interface QueuedMessage {
   user?: string;
   userId?: string;
   isServer?: boolean;
+  saving?: boolean;
+  saveError?: string;
+  notAdmitted?: boolean;
 }
 
 export const DEFAULT_MAX_QUEUED_MESSAGES = 5;
@@ -31,6 +34,7 @@ export interface UseQueuedMessagesOptions {
   maxQueuedMessages?: number;
   onDispatch: (message: QueuedMessage) => Promise<void> | void;
   onStop?: () => Promise<void> | void;
+  onRefresh?: () => Promise<unknown>;
 }
 
 export interface UseQueuedMessagesReturn {
@@ -57,6 +61,7 @@ export const useQueuedMessages = ({
   maxQueuedMessages = DEFAULT_MAX_QUEUED_MESSAGES,
   onDispatch,
   onStop,
+  onRefresh,
 }: UseQueuedMessagesOptions): UseQueuedMessagesReturn => {
   const [localQueuedMessages, setLocalQueuedMessages] = useState<QueuedMessage[]>([]);
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
@@ -134,12 +139,24 @@ export const useQueuedMessages = ({
       setError(null);
       if (target?.isServer) {
         if (!accountId || !conversationId) throw new Error('Conversation is unavailable.');
-        await apiAskNudgebee.deleteQueuedMessage({ accountId, conversationId, messageId: id });
+        try {
+          await apiAskNudgebee.deleteQueuedMessage({ accountId, conversationId, messageId: id });
+        } catch (error) {
+          if ((error as { upstreamStatus?: number })?.upstreamStatus === 409) {
+            // Refresh only: never retry deletion or treat a conflict as success.
+            try {
+              await onRefresh?.();
+            } catch {
+              /* Keep the original operation error. */
+            }
+          }
+          throw error;
+        }
         setRemovedIds((prev) => [...prev, id]);
       }
       setLocalQueuedMessages((prev) => prev.filter((msg) => msg.id !== id));
     },
-    [accountId, conversationId]
+    [accountId, conversationId, onRefresh]
   );
 
   const edit = useCallback(

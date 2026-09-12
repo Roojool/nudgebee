@@ -1193,10 +1193,12 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   }, []);
 
   const fetchConversation = useCallback(
-    async (sessionId, conversationId, source, isNewChat) => {
+    async (sessionId, conversationId, source, isNewChat, forceFull = false) => {
       if ((!sessionId && !conversationId) || (isNewChat && source === 'poll')) {
         return;
       }
+
+      if (forceFull) conversationFetcherRef.current?.reset();
 
       // Abort previous in-flight request when starting a new non-poll fetch
       if (source !== 'poll' && abortControllerRef.current) {
@@ -1496,6 +1498,14 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         const error = new Error(errors?.[0]?.message || 'Unable to queue message. Please try again.');
         error.queueNotReady =
           getUpstreamStatus(res?.data) === 409 && error.message === 'Conversation is not ready to queue a message. Please retry your message.';
+        // Only explicit queue-admission rejections prove nothing was saved.
+        error.notAdmitted =
+          getUpstreamStatus(res?.data) === 409 &&
+          [
+            'Conversation is not ready to queue a message. Please retry your message.',
+            'history: conversation is no longer running; retry your message',
+            'history: queued message capacity reached',
+          ].includes(error.message);
         throw error;
       }
       if (isMountedRef.current && currentSessionRef.current === sessionKey && result.data.status === 'QUEUED' && result.data.message_id) {

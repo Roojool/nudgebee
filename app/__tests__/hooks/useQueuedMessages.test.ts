@@ -535,3 +535,48 @@ describe('useQueuedMessages', () => {
     expect(onDispatch).not.toHaveBeenCalled();
   });
 });
+
+it('handles delete rejection inline and preserves the queue row', async () => {
+  (apiAskNudgebee.deleteQueuedMessage as jest.Mock).mockRejectedValueOnce(new Error('Already started'));
+  const message = { id: 'delete-rejected', text: 'keep me', createdAt: 1, isServer: true };
+  const { result } = renderHook(() =>
+    useQueuedMessages({
+      accountId: 'a',
+      conversationId: 'c',
+      isConversationInProgress: true,
+      conversationStatus: 'IN_PROGRESS',
+      serverQueuedMessages: [message],
+      onDispatch: jest.fn(),
+    })
+  );
+  await act(async () => {
+    await result.current.remove(message.id);
+  });
+  expect(result.current.error).toBe('Already started');
+  expect(result.current.queuedMessages).toEqual([message]);
+});
+
+it('refreshes history after a delete conflict without retrying the mutation', async () => {
+  const del = apiAskNudgebee.deleteQueuedMessage as jest.Mock;
+  del.mockClear();
+  del.mockRejectedValueOnce(Object.assign(new Error('Already removed'), { upstreamStatus: 409 }));
+  const refresh = jest.fn().mockResolvedValue(undefined);
+  const message = { id: 'conflict', text: 'hello', createdAt: 1, isServer: true };
+  const { result } = renderHook(() =>
+    useQueuedMessages({
+      accountId: 'a',
+      conversationId: 'c',
+      isConversationInProgress: true,
+      conversationStatus: 'IN_PROGRESS',
+      serverQueuedMessages: [message],
+      onDispatch: jest.fn(),
+      onRefresh: refresh,
+    })
+  );
+  await act(async () => {
+    await result.current.remove(message.id);
+  });
+  expect(refresh).toHaveBeenCalledTimes(1);
+  expect(del).toHaveBeenCalledTimes(1);
+  expect(result.current.error).toBe('Already removed');
+});

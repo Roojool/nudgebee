@@ -2067,24 +2067,21 @@ const api = {
         }
       }
     `;
-    try {
-      const response = await queryGraphQL(DELETE_QUEUED_MESSAGE, 'AiDeleteQueuedMessage', {
-        request: {
-          account_id: data.accountId,
-          conversation_id: data.conversationId,
-          message_id: data.messageId,
-        },
+    const response = await queryGraphQL(DELETE_QUEUED_MESSAGE, 'AiDeleteQueuedMessage', {
+      request: {
+        account_id: data.accountId,
+        conversation_id: data.conversationId,
+        message_id: data.messageId,
+      },
+    });
+    const result = response?.data?.data?.ai_delete_conversation_queued_message;
+    const errors = response?.data?.errors?.length ? response.data.errors : result?.errors;
+    if ((Array.isArray(errors) && errors.length > 0) || !result?.data) {
+      throw Object.assign(new Error(errors?.[0]?.message || 'Queued message operation failed. Refresh and try again.'), {
+        upstreamStatus: response?.data?.errors?.[0]?.extensions?.upstream?.status,
       });
-      const result = response?.data?.data?.ai_delete_conversation_queued_message;
-      const errors = response?.data?.errors?.length ? response.data.errors : result?.errors;
-      if ((Array.isArray(errors) && errors.length > 0) || !result?.data) {
-        throw new Error(errors?.[0]?.message || 'Queued message operation failed. Refresh and try again.');
-      }
-      return response;
-    } catch (error) {
-      console.error('failed to delete queued message', error);
-      throw error;
     }
+    return response;
   },
 
   async updateQueuedMessage(data: UpdateQueuedMessageRequest) {

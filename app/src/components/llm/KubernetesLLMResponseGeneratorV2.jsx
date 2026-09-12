@@ -1,3 +1,4 @@
+import { useOptimisticQueue } from '@hooks/useOptimisticQueue';
 import { ArrowRightYellowIcon, ChatRoundedIcon, ListIcon, SaveIconOutlinelight, SaveIconOutlineselect, ShareIconBlue, UsersIcon } from '@assets';
 import { useTenantBranding, getNubiIconUrl } from '@hooks/useTenantBranding';
 import { useBrowserNotification } from '@hooks/useBrowserNotification';
@@ -660,7 +661,7 @@ const KubernetesLLMResponseGenerator = ({
     sendNow: sendNowQueuedMessage,
     clear: clearQueuedMessages,
     maxQueuedMessages,
-    isMaxQueueReached,
+    isMaxQueueReached: isServerMaxQueueReached,
     error: queueActionError,
   } = useQueuedMessages({
     isConversationInProgress,
@@ -673,12 +674,20 @@ const KubernetesLLMResponseGenerator = ({
       await executeInvestigation(msg.text, msg.images);
     },
     onStop: handleStopInvestigation,
+    onRefresh: async () => {
+      if (queueScopeRef.current !== `${accountId}:${conversationIdAtDb}:${selectedSessionId}`) return;
+      await fetchConversation(selectedSessionId, conversationIdAtDb, 'poll', false, true);
+    },
   });
 
+  const composerHasDraftRef = useRef(false);
+  const trackComposerDraft = useCallback((hasDraft) => {
+    composerHasDraftRef.current = hasDraft;
+  }, []);
   const [queueImageDraft, setQueueImageDraft] = useState(undefined);
   const [pendingQueueEdit, setPendingQueueEdit] = useState(null);
   const [queueSubmitError, setQueueSubmitError] = useState(null);
-  const [pendingQueueSubmission, setPendingQueueSubmission] = useState(null);
+
   const queueScope = `${accountId}:${conversationIdAtDb}:${selectedSessionId}`;
   const queueScopeRef = useRef(queueScope);
   queueScopeRef.current = queueScope;
@@ -686,7 +695,6 @@ const KubernetesLLMResponseGenerator = ({
     setQueueImageDraft(undefined);
     setPendingQueueEdit(null);
     setQueueSubmitError(null);
-    setPendingQueueSubmission(null);
   }, [queueScope]);
 
   const handleEditQueuedMessage = useCallback(
@@ -711,6 +719,12 @@ const KubernetesLLMResponseGenerator = ({
 
   const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled;
 
+  const optimisticQueue = useOptimisticQueue(queueScope, maxQueuedMessages, queuedMessages.length);
+  const displayedQueue = [...queuedMessages, ...optimisticQueue.entries];
+
+  const isMaxQueueReached =
+    isServerMaxQueueReached || queuedMessages.length + optimisticQueue.entries.filter((entry) => entry.saving).length >= maxQueuedMessages;
+
   const handleGenerateInvestigation = useCallback(
     async (text, images) => {
       if (!text || !text.trim()) {
@@ -722,62 +736,19 @@ const KubernetesLLMResponseGenerator = ({
         if (!canQueueMessages || isMaxQueueReached) {
           return false;
         }
-        // The server owns dispatch. Never create a local auto-dispatch copy
-        // while the enqueue request or history poll is still in flight.
         const scope = queueScopeRef.current;
-        setPendingQueueSubmission({ scope, text });
-        setQueueSubmitError(null);
-        try {
+        const accepted = optimisticQueue.submit(text, images, async () => {
           await queueInvestigationMessage({ text, images });
-          if (scope !== queueScopeRef.current) return false;
-          setGenerateQuestionText((current) => (current === text ? '' : current));
-          setQueueSubmitError(null);
-          return true;
-        } catch (e) {
-          if (scope !== queueScopeRef.current) return false;
-          if (e?.queueNotReady) {
-            // This specific rejection guarantees no message was admitted. Refresh
-            // the stale status before retrying once against the current turn.
-            const refreshed = await fetchConversation(selectedSessionId, conversationIdAtDb, 'poll', false);
-            if (scope !== queueScopeRef.current) return false;
-            const conversation = refreshed?.data?.at(-1);
-            if (conversation?.status === 'IN_PROGRESS') {
-              try {
-                await queueInvestigationMessage({ text, images });
-                if (scope !== queueScopeRef.current) return false;
-                setGenerateQuestionText((current) => (current === text ? '' : current));
-                setQueueSubmitError(null);
-                return true;
-              } catch (retryError) {
-                if (scope === queueScopeRef.current)
-                  setQueueSubmitError(retryError instanceof Error ? retryError.message : 'Unable to queue message. Please retry.');
-                return false;
-              }
-            }
-            if (
-              conversation &&
-              ['COMPLETED', 'FAILED', 'TERMINATED'].includes(conversation.status) &&
-              !(conversation.llm_conversation_messages || []).some(
-                (message) =>
-                  message.message_type !== 'followup' && ['IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING'].includes(message.status)
-              )
-            ) {
-              setQueueSubmitError(null);
-              const sent = await executeInvestigation(text, images, true);
-              if (!sent) setQueueSubmitError('Unable to send message. Your draft has been kept; please retry.');
-              return sent === true;
-            }
-          }
-          setQueueSubmitError(e instanceof Error ? e.message : 'Unable to queue message. Please try again.');
-          return false;
-        } finally {
-          if (scope === queueScopeRef.current) setPendingQueueSubmission(null);
-        }
+          if (scope === queueScopeRef.current) setQueueSubmitError(null);
+        });
+        if (accepted) setGenerateQuestionText('');
+        return accepted;
       }
 
       return await executeInvestigation(text, images, true);
     },
     [
+      optimisticQueue.submit,
       isConversationInProgress,
       isMaxQueueReached,
       canQueueMessages,
@@ -1947,6 +1918,7 @@ const KubernetesLLMResponseGenerator = ({
                         <AutoSuggestTextarea
                           functionSuggestions={allFunctions}
                           ref={textareaRef}
+                          onDraftChange={trackComposerDraft}
                           value={generateQuestionText}
                           fontSize='var(--ds-text-body-lg)'
                           fontWeight='var(--ds-font-weight-regular)'
@@ -2282,28 +2254,20 @@ const KubernetesLLMResponseGenerator = ({
                   {queueSubmitError || queueActionError}
                 </Typography>
               )}
-              {pendingQueueSubmission?.scope === queueScope && (
-                <Box
-                  role='status'
-                  aria-live='polite'
-                  sx={{
-                    p: 2,
-                    mb: ds.space[2],
-                    backgroundColor: 'var(--ds-background-100)',
-                    border: '1px solid',
-                    borderColor: 'divider',
-                    borderRadius: 2,
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <CircularProgress size={14} />
-                    <Typography variant='body2'>Adding to queue…</Typography>
-                  </Box>
-                  <Typography sx={{ mt: 1, overflowWrap: 'anywhere' }}>{pendingQueueSubmission.text}</Typography>
-                </Box>
-              )}
               <QueuedMessagesBanner
-                queuedMessages={queuedMessages}
+                queuedMessages={displayedQueue}
+                onRefresh={() => fetchConversation(selectedSessionId, conversationIdAtDb, 'poll', false)}
+                onRestore={(id) => {
+                  if (composerHasDraftRef.current || textareaRef.current?.value?.trim()) {
+                    setQueueSubmitError('Send or clear your current draft before moving this message to the composer.');
+                    return;
+                  }
+                  const msg = optimisticQueue.takeDraft(id);
+                  if (msg) {
+                    setGenerateQuestionText(msg.text);
+                    setQueueImageDraft({ id: msg.id, text: msg.text, images: msg.images || [] });
+                  }
+                }}
                 editingMessageId={pendingQueueEdit?.scope === queueScope ? pendingQueueEdit.id : undefined}
                 isExpanded={isQueueExpanded}
                 maxQueuedMessages={maxQueuedMessages}
@@ -2357,6 +2321,7 @@ const KubernetesLLMResponseGenerator = ({
                   <AutoSuggestTextarea
                     functionSuggestions={allFunctions}
                     ref={textareaRef}
+                    onDraftChange={trackComposerDraft}
                     fontSize='var(--ds-text-body)'
                     fontWeight='var(--ds-font-weight-regular)'
                     value={generateQuestionText}
