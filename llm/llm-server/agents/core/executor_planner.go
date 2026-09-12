@@ -1000,7 +1000,7 @@ func (e *plannerExecutor) doIteration(
 		needsSequential := false
 		sequentialFallbackReason := ""
 		for _, action := range actions {
-			tool, ok := nameToTool[strings.ToUpper(action.Tool)]
+			tool, ok := lookupToolForPlanner(nameToTool, e.agentRequest.AccountId, action.Tool)
 			if !ok {
 				continue
 			}
@@ -1331,7 +1331,10 @@ func (e *plannerExecutor) doIterationParallel(
 			// always missed — the dedup loop became a silent no-op, allowing
 			// parallel goroutines to race into GenerateFollowup and create
 			// duplicate followup messages for the same tool.
-			tool, exists := nameToTool[strings.ToUpper(toolName)]
+			//
+			// Also lookup dynamic/custom tools via lookupToolForPlanner when not
+			// in static nameToTool (e.g. tools discovered at runtime via search_tools).
+			tool, exists := lookupToolForPlanner(nameToTool, e.agentRequest.AccountId, toolName)
 			if !exists {
 				continue
 			}
@@ -1989,17 +1992,38 @@ func confirmationKeyForAction(tool toolcore.NBTool, action NBAgentPlannerToolAct
 	return action.Tool
 }
 
+// lookupToolForPlanner resolves a tool from the static nameToTool map, falling back
+// to dynamic tool lookup via toolcore.GetNBTool (handling aliases like "shell").
+func lookupToolForPlanner(nameToTool map[string]toolcore.NBTool, accountId, toolName string) (toolcore.NBTool, bool) {
+	trimmed := strings.TrimSpace(toolName)
+	if tool, ok := nameToTool[strings.ToUpper(trimmed)]; ok && tool != nil {
+		return tool, true
+	}
+	resolvedToolName := trimmed
+	if strings.EqualFold(resolvedToolName, "shell") {
+		resolvedToolName = toolcore.ToolExecuteShellCommand
+	}
+	if tool, found := toolcore.GetNBTool(accountId, resolvedToolName); found && tool != nil {
+		return tool, true
+	}
+	return nil, false
+}
+
 // confirmationApprovedForAction mirrors isToolConfirmationApproved but resolves
 // the per-action confirmation key when the tool is available, so resume paths
 // agree with the doAction gate about which entry an approval lives under.
-func confirmationApprovedForAction(confirmations map[string]string, nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction) bool {
-	return isToolConfirmationApproved(confirmations, resumeConfirmationKey(nameToTool, action))
+func confirmationApprovedForAction(confirmations map[string]string, nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId ...string) bool {
+	return isToolConfirmationApproved(confirmations, resumeConfirmationKey(nameToTool, action, accountId...))
 }
 
 // resumeConfirmationKey is the key a resume looks an approval up under: the
 // per-action key when the tool scopes its confirmations, else the tool name.
-func resumeConfirmationKey(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction) string {
-	if tool, ok := nameToTool[strings.ToUpper(strings.TrimSpace(action.Tool))]; ok && tool != nil {
+func resumeConfirmationKey(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId ...string) string {
+	var accId string
+	if len(accountId) > 0 {
+		accId = accountId[0]
+	}
+	if tool, ok := lookupToolForPlanner(nameToTool, accId, action.Tool); ok && tool != nil {
 		return confirmationKeyForAction(tool, action)
 	}
 	return action.Tool
@@ -4157,7 +4181,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					executor.steps = append(executor.steps, step)
 					executor.stepKeys[action.ToolID] = true
 					ctx.GetLogger().Info("plannerexecutor: recovered terminal client tool result from DB", "toolId", toolId, "status", status)
-				} else if errors.Is(err, sql.ErrNoRows) && !isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) && !confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action) {
+				} else if errors.Is(err, sql.ErrNoRows) && !isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) && !confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId) {
 					// No row found in DB for this tool AND neither a config nor a write-confirmation
 					// was resolved. This means the tool was waiting for a config selection that never
 					// arrived. A confirmation-gated tool whose confirmation was just approved is NOT
@@ -4171,7 +4195,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					// message above sends triage down the wrong path.
 					ctx.GetLogger().Error("plannerexecutor: no tool record found in DB and config not resolved, failing fast to avoid running with wrong credentials",
 						"tool", action.Tool, "toolId", toolId, "error", err,
-						"expectedConfirmationKey", resumeConfirmationKey(resumeNameToTool, action),
+						"expectedConfirmationKey", resumeConfirmationKey(resumeNameToTool, action, executor.agentRequest.AccountId),
 						"presentConfirmationKeys", slices.Sorted(maps.Keys(executor.agentRequest.QueryConfig.ToolConfirmations)))
 					step := NBAgentPlannerToolActionStep{
 						Action:      action,
@@ -4217,7 +4241,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					}
 					ctx.GetLogger().Info("plannerexecutor: using completed child agent response for WAITING parent tool_call",
 						"toolId", toolId, "tool", action.Tool, "childStatus", childOut.status)
-				} else if request.Query != "" && (strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusWaiting)) || (errors.Is(err, sql.ErrNoRows) && (isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) || confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action)))) {
+				} else if request.Query != "" && (strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusWaiting)) || (errors.Is(err, sql.ErrNoRows) && (isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) || confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId)))) {
 					// [Changed for TicketV2] Tool is still waiting — execute it IMMEDIATELY so the planner starts with the result.
 					// Previously, the user's response always replaced tool input. But for tool_config followups
 					// (e.g., user selecting a Jira integration), the user's response is the config choice, not
@@ -4233,7 +4257,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					// we ensure doAction runs again with the newly resolved config — triggering the next
 					// config step (e.g., project selection after integration selection).
 					isConfigResolved := isToolConfigResolved(request.QueryConfig.ToolConfigs, action.Tool)
-					isConfirmationApproved := confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action)
+					isConfirmationApproved := confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId)
 					if isConfigResolved || isConfirmationApproved {
 						// The user's answer was a config/confirmation choice, not the tool input — keep the original command.
 						ctx.GetLogger().Info("plannerexecutor: resuming tool after config/confirmation, keeping original input",

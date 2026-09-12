@@ -1911,7 +1911,10 @@ func (chat *ConversationDao) UpdateConversationMessage(id, response string, stat
 	// COALESCE keeps it write-once within a single terminal run. Post-response background
 	// jobs (memory/summary/suggestions) go through other DAOs and never touch it.
 	isTerminal := IsTerminalConversationStatus(status)
-	query := `UPDATE llm_conversation_messages SET response = $2, updated_at = now(), status = $3, worker_name = $4, responded_at = CASE WHEN $5::boolean THEN COALESCE(responded_at, now()) ELSE NULL END WHERE id = $1 AND (status NOT IN ('TERMINATED', 'KILLED') OR $3 IN ('TERMINATED', 'KILLED'))`
+	// Cast the shared status parameter: otherwise PostgreSQL infers text from the
+	// IN literals in the WHERE clause before resolving the enum assignment in SET,
+	// causing "column status is of type llm_conversation_status but expression is of type text".
+	query := `UPDATE llm_conversation_messages SET response = $2, updated_at = now(), status = $3::public.llm_conversation_status, worker_name = $4, responded_at = CASE WHEN $5::boolean THEN COALESCE(responded_at, now()) ELSE NULL END WHERE id = $1 AND (status NOT IN ('TERMINATED', 'KILLED') OR $3::public.llm_conversation_status IN ('TERMINATED', 'KILLED'))`
 	_, err := chat.dbManager.Db.Exec(query, id, response, string(status), config.Config.ServerName, isTerminal)
 	if err != nil {
 		return fmt.Errorf("history: failed to update message: %w", err)
