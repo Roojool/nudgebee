@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"sync"
 	"testing"
+	"time"
 
 	"nudgebee/llm-gateway/common"
 
@@ -30,6 +32,10 @@ func sha256hex(s string) string {
 
 func TestUserAuthsValidator_ValidToken(t *testing.T) {
 	v, mock := mockValidator(t)
+	var recordedHash string
+	v.recordAccess = func(db *common.DatabaseManager, hash string) {
+		recordedHash = hash
+	}
 	raw := "abcdef0123456789" // stand-in raw PAT
 	mock.ExpectQuery("FROM user_auths").
 		WithArgs(sha256hex(raw)).
@@ -41,6 +47,86 @@ func TestUserAuthsValidator_ValidToken(t *testing.T) {
 	assert.Equal(t, "tenant-1", id.TenantID)
 	assert.Equal(t, "user-1", id.UserID)
 	assert.Equal(t, "my-cli-token", id.TokenID)
+	assert.Equal(t, sha256hex(raw), recordedHash)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAuthsValidator_RecordTokenAccessQuery(t *testing.T) {
+	v, mock := mockValidator(t)
+	raw := "token-for-access-check"
+	hash := sha256hex(raw)
+
+	mock.ExpectExec("UPDATE user_auths").
+		WithArgs(hash).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	db, err := v.db()
+	require.NoError(t, err)
+
+	updateQuery := `
+		UPDATE user_auths
+		SET accessed_at = now()
+		WHERE ` + tokenHashColumn + ` = $1
+		  AND (accessed_at IS NULL OR accessed_at < now() - interval '1 minute')`
+	_, err = db.Db.Exec(updateQuery, hash)
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAuthsValidator_RecordTokenAccess_InMemoryThrottling(t *testing.T) {
+	v, mock := mockValidator(t)
+	var wg sync.WaitGroup
+	v.wg = &wg
+	raw := "throttled-token"
+	hash := sha256hex(raw)
+
+	// First access executes update query
+	mock.ExpectExec("UPDATE user_auths").
+		WithArgs(hash).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	db, err := v.db()
+	require.NoError(t, err)
+
+	v.recordTokenAccess(db, hash)
+
+	// Second access within 1 minute should be throttled in-memory (no DB query expected)
+	v.recordTokenAccess(db, hash)
+
+	wg.Wait()
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAuthsValidator_RecordTokenAccess_Sweeping(t *testing.T) {
+	v, mock := mockValidator(t)
+	var wg sync.WaitGroup
+	v.wg = &wg
+	v.lastUpdated = make(map[string]time.Time)
+	now := time.Now()
+	// Populate 1005 entries older than 1 minute
+	for i := 0; i < 1005; i++ {
+		v.lastUpdated[string(rune(i))] = now.Add(-2 * time.Minute)
+	}
+	v.lastSweep = now.Add(-6 * time.Minute)
+
+	db, err := v.db()
+	require.NoError(t, err)
+
+	// Expect the update query for the new token we are about to record
+	newHash := sha256hex("new-token")
+	mock.ExpectExec("UPDATE user_auths").
+		WithArgs(newHash).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	v.recordTokenAccess(db, newHash)
+
+	wg.Wait()
+
+	v.mu.Lock()
+	remaining := len(v.lastUpdated)
+	v.mu.Unlock()
+
+	assert.Equal(t, 1, remaining)
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
