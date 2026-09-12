@@ -888,15 +888,17 @@ type appConfig struct {
 	DailyDefaultCountLimitTenant int `mapstructure:"llm_default_daily_count_limit_tenant"`
 
 	// Budget max caps - admins cannot exceed these values
-	MaxMonthlyCostLimitTenant     float64 `mapstructure:"llm_max_monthly_cost_limit_tenant"`
-	MaxMonthlyCostLimitAccount    float64 `mapstructure:"llm_max_monthly_cost_limit_account"`
-	MaxDailyCostLimitTenant       float64 `mapstructure:"llm_max_daily_cost_limit_tenant"`
-	MaxDailyCostLimitAccount      float64 `mapstructure:"llm_max_daily_cost_limit_account"`
-	MaxMonthlyCountLimit          int     `mapstructure:"llm_max_monthly_count_limit"`
-	MaxDailyCountLimit            int     `mapstructure:"llm_max_daily_count_limit"`
-	MaxMemoryFactsPerConversation int     `mapstructure:"max_memory_facts_per_conversation"`
-	ProductivityMetricsEnabled    bool    `mapstructure:"llm_server_productivity_metrics_enabled"`
-	TicketV2Enabled               bool    `mapstructure:"llm_server_ticket_v2_enabled"`
+	MaxMonthlyCostLimitTenant        float64 `mapstructure:"llm_max_monthly_cost_limit_tenant"`
+	MaxMonthlyCostLimitAccount       float64 `mapstructure:"llm_max_monthly_cost_limit_account"`
+	MaxDailyCostLimitTenant          float64 `mapstructure:"llm_max_daily_cost_limit_tenant"`
+	MaxDailyCostLimitAccount         float64 `mapstructure:"llm_max_daily_cost_limit_account"`
+	MaxMonthlyCountLimit             int     `mapstructure:"llm_max_monthly_count_limit"`
+	MaxDailyCountLimit               int     `mapstructure:"llm_max_daily_count_limit"`
+	MaxMemoryFactsPerConversation    int     `mapstructure:"max_memory_facts_per_conversation"`
+	QueuedMessagesEnabled            bool    `mapstructure:"llm_server_queued_messages_enabled"`
+	MaxQueuedMessagesPerConversation int     `mapstructure:"llm_server_max_queued_messages_per_conversation"`
+	ProductivityMetricsEnabled       bool    `mapstructure:"llm_server_productivity_metrics_enabled"`
+	TicketV2Enabled                  bool    `mapstructure:"llm_server_ticket_v2_enabled"`
 	// EventsV2Enabled gates the events_v2 agent (deterministic structured
 	// tools fronting raw SQL — see docs/architecture-decisions.md). Unlike
 	// TicketV2Enabled, this does not redirect any existing alias to v2 —
@@ -1497,6 +1499,8 @@ func init() {
 	viper.SetDefault("llm_max_monthly_count_limit", 5000)
 	viper.SetDefault("llm_max_daily_count_limit", 500)
 	viper.SetDefault("max_memory_facts_per_conversation", 30)
+	viper.SetDefault("llm_server_queued_messages_enabled", false)
+	viper.SetDefault("llm_server_max_queued_messages_per_conversation", 5)
 	viper.SetDefault("llm_memory_ttl_never_used_days", 90)
 	viper.SetDefault("llm_memory_ttl_stale_days", 180)
 	viper.SetDefault("llm_memory_ttl_cleanup_interval_hours", 24)

@@ -42,6 +42,10 @@ const (
 )
 
 var ErrConversationNotFound = errors.New("history: conversation not found")
+var ErrQueueFull = errors.New("history: queued message capacity reached")
+var ErrQueueInactive = errors.New("history: conversation is no longer running; retry your message")
+
+var ErrQueuedMessageNotFoundOrLocked = errors.New("history: queued message not found, already started, or permission denied")
 
 type Conversation struct {
 	TenantID         uuid.UUID                  `json:"tenant_id,omitempty" db:"tenant_id"`
@@ -231,6 +235,7 @@ type LongTermMemory struct {
 }
 
 type IConversationDao interface {
+	FinalizeConversationMessage(conversationID, messageID, response string, status ConversationStatus) (bool, error)
 	SaveConversationAgentCall(conversationId, messageId, accountId, userId, agentName, parentAgentId, query, thought, response, queryContext string, queryConfig toolcore.NBQueryConfig) (uuid.UUID, error)
 	SaveCompletedConversationAgentCall(id uuid.UUID, conversationId, messageId, accountId, userId, agentName, parentAgentId, query, thought, response, queryContext string, queryConfig toolcore.NBQueryConfig, status AgentExecutionStatus, responseSummary string) (uuid.UUID, error)
 	UpdateConversationAgentResponse(agenId, response string, agentStatus AgentExecutionStatus, state string, responseSummary string, agentStepResponse string, references string) error
@@ -356,6 +361,11 @@ type IConversationDao interface {
 	SaveAgentReferences(accountId, conversationId, messageId, agentId string, references []AgentReference) error
 	ListAgentReferences(accountId, conversationId string, messageIds []string, agentId string, limit int) ([]ConversationReference, error)
 	SaveConversationContextReference(accountId, conversationId, messageId string, unifiedExtraction *LlmUnifiedExtraction) error
+	ClaimNextQueuedMessage(ctx context.Context, conversationID string) (*ConversationMessage, error)
+	ClaimQueuedMessageById(ctx *security.RequestContext, accountID, conversationID, messageID, userID string, isAdmin bool) (*ConversationMessage, error)
+	DeleteQueuedMessage(id string, accountID string, userID string, isAdmin bool) error
+	UpdateQueuedMessage(id string, accountID string, userID string, message string, isAdmin bool) error
+	GetQueuedConversationMessages(conversationID string) ([]ConversationMessage, error)
 }
 
 type AgentReferenceType string
@@ -971,16 +981,47 @@ func SetConversationDao(dao IConversationDao) {
 }
 
 func (chat *ConversationDao) UpdateConversationStatus(conversationId string, status ConversationStatus) error {
-	query := `
-    update llm_conversations
-	set status = $2, updated_at = now()
-	where id = $1;
-	`
-	_, err := chat.dbManager.Db.Exec(query, conversationId, status)
+	_, err := chat.dbManager.Db.Exec(`UPDATE llm_conversations SET status = $2, updated_at = now() WHERE id = $1`, conversationId, status)
 	if err != nil {
 		return fmt.Errorf("history: failed to update status: %w", err)
 	}
 	return nil
+}
+
+// FinalizeConversationMessage serializes save-back with queued claims and
+// interruption. Old turns cannot overwrite the status of a forced/new turn.
+func (chat *ConversationDao) FinalizeConversationMessage(conversationID, messageID, response string, status ConversationStatus) (bool, error) {
+	tx, err := chat.dbManager.Db.Beginx()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var conversationStatus, messageStatus ConversationStatus
+	if err = tx.Get(&conversationStatus, `SELECT status FROM llm_conversations WHERE id = $1 FOR UPDATE`, conversationID); err != nil {
+		return false, err
+	}
+	if err = tx.Get(&messageStatus, `SELECT status FROM llm_conversation_messages WHERE id = $1 AND conversation_id = $2 FOR UPDATE`, messageID, conversationID); err != nil {
+		return false, err
+	}
+	if conversationStatus == ConversationStatusKilled || messageStatus == ConversationStatusTerminated || messageStatus == ConversationStatusKilled {
+		return false, nil
+	}
+	_, err = tx.Exec(`UPDATE llm_conversation_messages SET response = $2, updated_at = now(), status = $3, worker_name = $4, responded_at = CASE WHEN $5::boolean THEN COALESCE(responded_at, now()) ELSE NULL END WHERE id = $1`, messageID, response, status, config.Config.ServerName, IsTerminalConversationStatus(status))
+	if err != nil {
+		return false, err
+	}
+	// Cast the shared status parameter in the predicate: otherwise PostgreSQL
+	// infers text from NOT IN before resolving the enum assignment in SET.
+	_, err = tx.Exec(`UPDATE llm_conversations SET status = $2, updated_at = now() WHERE id = $1 AND NOT EXISTS (
+		SELECT 1 FROM llm_conversation_messages WHERE conversation_id = $1 AND id <> $3 AND status IN ('IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING')
+ AND ($2::public.llm_conversation_status NOT IN ('WAITING', 'WAITING_FOR_CLIENT_TOOL') OR message_type = 'generation'))`, conversationID, status, messageID)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UpdateConversationTitle updates the title of a conversation
@@ -1802,7 +1843,59 @@ func (chat *ConversationDao) SaveConversationMessage(id, conversationId, account
 	query := `INSERT INTO llm_conversation_messages (id, account_id, user_id, conversation_id, role, message, response, message_type, status, worker_name, agent_name, parent_agent_id, message_config, message_context, llm_provider, llm_model) 
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING llm_conversation_messages.id;`
 	var lastId uuid.UUID
-	err := chat.dbManager.Db.QueryRow(query, id, accountID, userIdSql, conversationId, role, message, response, messageType, status, config.Config.ServerName, agentName, parentAgentId, string(messageConfigJson), messageContext, llmProviderSql, llmModelSql).Scan(&lastId)
+	var err error
+	if status == ConversationStatusQueued {
+		tx, beginErr := chat.dbManager.Db.Beginx()
+		if beginErr != nil {
+			return uuid.Nil, fmt.Errorf("history: begin queue insert: %w", beginErr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		var currentStatus ConversationStatus
+		if err = tx.Get(&currentStatus, `SELECT status FROM llm_conversations WHERE id = $1 AND account_id = $2 FOR UPDATE`, conversationId, accountID); err != nil {
+			return uuid.Nil, fmt.Errorf("history: lock queue conversation: %w", err)
+		}
+		if currentStatus != ConversationStatusInProgress {
+			return uuid.Nil, ErrQueueInactive
+		}
+		var count int
+		if err = tx.Get(&count, `SELECT count(*) FROM llm_conversation_messages WHERE conversation_id = $1 AND status = 'QUEUED'`, conversationId); err != nil {
+			return uuid.Nil, err
+		}
+		limit := config.Config.MaxQueuedMessagesPerConversation
+		if limit <= 0 {
+			limit = 5
+		}
+		if count >= limit {
+			return uuid.Nil, ErrQueueFull
+		}
+		err = tx.QueryRow(query, id, accountID, userIdSql, conversationId, role, message, response, messageType, status, config.Config.ServerName, agentName, parentAgentId, string(messageConfigJson), messageContext, llmProviderSql, llmModelSql).Scan(&lastId)
+		if err == nil {
+			err = tx.Commit()
+		}
+	} else if config.Config.QueuedMessagesEnabled && status == ConversationStatusInProgress && role == MessageRoleHuman && messageType == MessageTypeGeneration && parentAgentId == uuid.Nil {
+		tx, beginErr := chat.dbManager.Db.Beginx()
+		if beginErr != nil {
+			return uuid.Nil, beginErr
+		}
+		defer func() { _ = tx.Rollback() }()
+		var currentStatus ConversationStatus
+		if err = tx.Get(&currentStatus, `SELECT status FROM llm_conversations WHERE id = $1 AND account_id = $2 FOR UPDATE`, conversationId, accountID); err != nil {
+			return uuid.Nil, err
+		}
+		var busy bool
+		if err = tx.Get(&busy, `SELECT EXISTS (SELECT 1 FROM llm_conversation_messages WHERE conversation_id = $1 AND status IN ('IN_PROGRESS', 'QUEUED', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING'))`, conversationId); err != nil {
+			return uuid.Nil, err
+		}
+		if busy {
+			return uuid.Nil, errors.New("history: conversation already has active or queued messages; retry after the current turn")
+		}
+		err = tx.QueryRow(query, id, accountID, userIdSql, conversationId, role, message, response, messageType, status, config.Config.ServerName, agentName, parentAgentId, string(messageConfigJson), messageContext, llmProviderSql, llmModelSql).Scan(&lastId)
+		if err == nil {
+			err = tx.Commit()
+		}
+	} else {
+		err = chat.dbManager.Db.QueryRow(query, id, accountID, userIdSql, conversationId, role, message, response, messageType, status, config.Config.ServerName, agentName, parentAgentId, string(messageConfigJson), messageContext, llmProviderSql, llmModelSql).Scan(&lastId)
+	}
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("history: failed to save message: %w", err)
 	}
@@ -1818,7 +1911,7 @@ func (chat *ConversationDao) UpdateConversationMessage(id, response string, stat
 	// COALESCE keeps it write-once within a single terminal run. Post-response background
 	// jobs (memory/summary/suggestions) go through other DAOs and never touch it.
 	isTerminal := IsTerminalConversationStatus(status)
-	query := `UPDATE llm_conversation_messages SET response = $2, updated_at = now(), status = $3, worker_name = $4, responded_at = CASE WHEN $5::boolean THEN COALESCE(responded_at, now()) ELSE NULL END WHERE id = $1`
+	query := `UPDATE llm_conversation_messages SET response = $2, updated_at = now(), status = $3, worker_name = $4, responded_at = CASE WHEN $5::boolean THEN COALESCE(responded_at, now()) ELSE NULL END WHERE id = $1 AND (status NOT IN ('TERMINATED', 'KILLED') OR $3 IN ('TERMINATED', 'KILLED'))`
 	_, err := chat.dbManager.Db.Exec(query, id, response, string(status), config.Config.ServerName, isTerminal)
 	if err != nil {
 		return fmt.Errorf("history: failed to update message: %w", err)
@@ -1859,6 +1952,108 @@ func (chat *ConversationDao) UpdateConversationMessageMetadata(id string, metada
 		return fmt.Errorf("history: failed to update message metadata: %w", err)
 	}
 	return nil
+}
+
+func (chat *ConversationDao) ClaimNextQueuedMessage(ctx context.Context, conversationID string) (*ConversationMessage, error) {
+	tx, err := chat.dbManager.Db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("history: begin queue claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var status ConversationStatus
+	if err := tx.GetContext(ctx, &status, `SELECT status FROM llm_conversations WHERE id = $1 FOR UPDATE`, conversationID); err != nil {
+		return nil, err
+	}
+	if status != ConversationStatusCompleted {
+		return nil, nil
+	}
+	var msg ConversationMessage
+	err = tx.GetContext(ctx, &msg, `UPDATE llm_conversation_messages SET status = 'IN_PROGRESS', updated_at = now(), worker_name = $2
+		WHERE id = (SELECT id FROM llm_conversation_messages WHERE conversation_id = $1 AND status = 'QUEUED'
+		AND NOT EXISTS (SELECT 1 FROM llm_conversation_messages WHERE conversation_id = $1 AND status IN ('IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING'))
+		ORDER BY created_at, id LIMIT 1 FOR UPDATE)
+		RETURNING id, conversation_id, message, created_at, response, role, account_id, user_id, message_type, updated_at, responded_at, status, worker_name, agent_name, message_config, message_context, suggestions, llm_provider, llm_model`, conversationID, config.Config.ServerName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("history: claim queue message: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE llm_conversations SET status = 'IN_PROGRESS', updated_at = now() WHERE id = $1`, conversationID); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+func (chat *ConversationDao) ClaimQueuedMessageById(ctx *security.RequestContext, accountID, conversationID, messageID, userID string, isAdmin bool) (*ConversationMessage, error) {
+	return chat.terminateConversation(ctx, accountID, conversationID, messageID, userID, isAdmin)
+}
+
+func (chat *ConversationDao) DeleteQueuedMessage(id string, accountID string, userID string, isAdmin bool) error {
+	var query string
+	var res sql.Result
+	var err error
+	if isAdmin {
+		query = `DELETE FROM llm_conversation_messages WHERE id = $1 AND status = $2 AND account_id = $3`
+		res, err = chat.dbManager.Db.Exec(query, id, string(ConversationStatusQueued), accountID)
+	} else {
+		query = `DELETE FROM llm_conversation_messages WHERE id = $1 AND status = $2 AND user_id = $3 AND account_id = $4`
+		res, err = chat.dbManager.Db.Exec(query, id, string(ConversationStatusQueued), userID, accountID)
+	}
+	if err != nil {
+		return fmt.Errorf("history: failed to delete queued message: %w", err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("history: failed to check rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrQueuedMessageNotFoundOrLocked
+	}
+	return nil
+}
+
+func (chat *ConversationDao) UpdateQueuedMessage(id string, accountID string, userID string, message string, isAdmin bool) error {
+	var query string
+	var res sql.Result
+	var err error
+	if isAdmin {
+		query = `UPDATE llm_conversation_messages SET message = $1, updated_at = now() WHERE id = $2 AND status = $3 AND account_id = $4`
+		res, err = chat.dbManager.Db.Exec(query, message, id, string(ConversationStatusQueued), accountID)
+	} else {
+		query = `UPDATE llm_conversation_messages SET message = $1, updated_at = now() WHERE id = $2 AND status = $3 AND user_id = $4 AND account_id = $5`
+		res, err = chat.dbManager.Db.Exec(query, message, id, string(ConversationStatusQueued), userID, accountID)
+	}
+	if err != nil {
+		return fmt.Errorf("history: failed to update queued message: %w", err)
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("history: failed to check rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return ErrQueuedMessageNotFoundOrLocked
+	}
+	return nil
+}
+
+func (chat *ConversationDao) GetQueuedConversationMessages(conversationID string) ([]ConversationMessage, error) {
+	query := `
+		SELECT id, conversation_id, message, created_at, response, role, account_id,
+		       user_id, message_type, updated_at, responded_at, status, worker_name,
+		       agent_name, message_config, message_context, suggestions, llm_provider, llm_model
+		FROM llm_conversation_messages
+		WHERE conversation_id = $1 AND status = $2
+		ORDER BY created_at ASC`
+	var messages []ConversationMessage
+	err := chat.dbManager.Db.Select(&messages, query, conversationID, string(ConversationStatusQueued))
+	if err != nil {
+		return nil, fmt.Errorf("history: failed to get queued conversation messages: %w", err)
+	}
+	return messages, nil
 }
 
 var (
@@ -1931,38 +2126,61 @@ func (chat *ConversationDao) UpdateMessageCompactResponse(context *security.Requ
 	return nil
 }
 
-func (chat *ConversationDao) TerminateConversation(context *security.RequestContext, accountId, conversationId string) error {
+func (chat *ConversationDao) TerminateConversation(ctx *security.RequestContext, accountId, conversationId string) error {
+	_, err := chat.terminateConversation(ctx, accountId, conversationId, "", "", false)
+	return err
+}
+
+func (chat *ConversationDao) terminateConversation(ctx *security.RequestContext, accountId, conversationId, messageID, userID string, isAdmin bool) (*ConversationMessage, error) {
 	tx, err := chat.dbManager.Db.Beginx()
 	if err != nil {
-		return fmt.Errorf("history: failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("history: failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var conversationStatus ConversationStatus
+	if err = tx.Get(&conversationStatus, `SELECT status FROM llm_conversations WHERE id = $1 AND account_id = $2 FOR UPDATE`, conversationId, accountId); err != nil {
+		return nil, err
+	}
+	var claimed *ConversationMessage
+	if messageID != "" {
+		if conversationStatus == ConversationStatusKilled {
+			return nil, ErrQueuedMessageNotFoundOrLocked
+		}
+		claimed = &ConversationMessage{}
+		err = tx.Get(claimed, `SELECT id, conversation_id, message, created_at, response, role, account_id, user_id, message_type, updated_at, responded_at, status, worker_name, agent_name, message_config, message_context, suggestions, llm_provider, llm_model FROM llm_conversation_messages WHERE id = $1 AND account_id = $2 AND conversation_id = $3 AND status = 'QUEUED' AND ($4 OR user_id::text = $5) FOR UPDATE`, messageID, accountId, conversationId, isAdmin, userID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrQueuedMessageNotFoundOrLocked
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Update the message status to TERMINATED and capture affected message IDs so
 	// we can invalidate their termination cache entries after commit.
 	messageQuery := `UPDATE llm_conversation_messages SET updated_at = now(), status = $2, response = $4 WHERE conversation_id = $1 AND account_id = $3 AND status in ('IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING') RETURNING id`
 	rows, err := tx.Queryx(messageQuery, conversationId, string(ConversationStatusTerminated), accountId, "Conversation terminated by user")
 	if err != nil {
-		return fmt.Errorf("history: failed to terminate message: %w", err)
+		return nil, fmt.Errorf("history: failed to terminate message: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var terminatedMessageIds []string
 	for rows.Next() {
 		var id string
 		if scanErr := rows.Scan(&id); scanErr != nil {
-			return fmt.Errorf("history: failed to scan terminated message id: %w", scanErr)
+			return nil, fmt.Errorf("history: failed to scan terminated message id: %w", scanErr)
 		}
 		terminatedMessageIds = append(terminatedMessageIds, id)
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return fmt.Errorf("history: failed to iterate terminated messages: %w", rowsErr)
+		return nil, fmt.Errorf("history: failed to iterate terminated messages: %w", rowsErr)
 	}
 
 	// Update the associated conversation status to TERMINATED
 	conversationQuery := `UPDATE llm_conversations SET status = $2, updated_at = now() WHERE id = $1 AND account_id = $3`
 	_, err = tx.Exec(conversationQuery, conversationId, string(ConversationStatusTerminated), accountId)
 	if err != nil {
-		return fmt.Errorf("history: failed to terminate conversation associated with message: %w", err)
+		return nil, fmt.Errorf("history: failed to terminate conversation associated with message: %w", err)
 	}
 
 	// Terminate any sub-agent and tool-call rows still in-progress (or waiting)
@@ -1982,7 +2200,7 @@ func (chat *ConversationDao) TerminateConversation(context *security.RequestCont
 		terminatedResponse,
 		accountId)
 	if err != nil {
-		return fmt.Errorf("history: failed to terminate in-progress agents: %w", err)
+		return nil, fmt.Errorf("history: failed to terminate in-progress agents: %w", err)
 	}
 
 	toolQuery := `UPDATE llm_conversation_tool_calls SET status = $2, response = $5, updated_at = now() WHERE conversation_id = $1 AND account_id = $6 AND status IN ($3, $4)`
@@ -1993,11 +2211,20 @@ func (chat *ConversationDao) TerminateConversation(context *security.RequestCont
 		terminatedResponse,
 		accountId)
 	if err != nil {
-		return fmt.Errorf("history: failed to terminate in-progress tool calls: %w", err)
+		return nil, fmt.Errorf("history: failed to terminate in-progress tool calls: %w", err)
 	}
 
+	if claimed != nil {
+		if _, err = tx.Exec(`UPDATE llm_conversation_messages SET status = 'IN_PROGRESS', updated_at = now(), worker_name = $2 WHERE id = $1`, messageID, config.Config.ServerName); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(`UPDATE llm_conversations SET status = 'IN_PROGRESS', updated_at = now() WHERE id = $1`, conversationId); err != nil {
+			return nil, err
+		}
+		claimed.Status = ConversationStatusInProgress
+	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Prime the termination cache so running executors observe termination on
@@ -2012,7 +2239,7 @@ func (chat *ConversationDao) TerminateConversation(context *security.RequestCont
 		}
 	}
 
-	return nil
+	return claimed, nil
 }
 
 func (chat *ConversationDao) UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error {
@@ -2440,7 +2667,7 @@ func (chat *ConversationDao) LoadConversationMessages(accountID, conversationID,
 	args = append(args, conversationID, accountID)
 
 	query := `SELECT role, message, response, id::text, message_type FROM llm_conversation_messages 
-		WHERE conversation_id = $1 AND account_id = $2`
+		WHERE conversation_id = $1 AND account_id = $2 AND status <> 'QUEUED'`
 
 	if userID != "" {
 		args = append(args, userID)

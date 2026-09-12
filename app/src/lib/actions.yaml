@@ -436,6 +436,57 @@ actions:
       - role: k8s_namespace_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: ai_delete_conversation_queued_message
+    comment: Delete a queued message in an investigation
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_delete'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+  - name: ai_update_conversation_queued_message
+    comment: Update a queued message text in an investigation
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_update'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+  - name: ai_execute_queued_message
+    comment: Force execute a queued message immediately
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_force'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: ai_generate_log_query
     comment: Generate and validate a log query for the account's configured log backend, from a natural-language request
     definition:

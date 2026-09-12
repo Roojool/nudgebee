@@ -1,0 +1,297 @@
+import React from 'react';
+import { Box, Typography, IconButton, CircularProgress } from '@mui/material';
+import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
+import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import ImageIcon from '@mui/icons-material/Image';
+import Tooltip from '@ui/Tooltip';
+import { ds } from '@utils/colors';
+import { QueuedMessage } from '@hooks/useQueuedMessages';
+
+export interface QueuedMessagesBannerProps {
+  queuedMessages: QueuedMessage[];
+  editingMessageId?: string;
+  isExpanded: boolean;
+  maxQueuedMessages?: number;
+  onToggleExpanded: () => void;
+  onSendNow: (id: string) => void;
+  onEdit: (id: string) => void;
+  onDelete: (id: string) => void;
+}
+
+export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
+  queuedMessages,
+  editingMessageId,
+  isExpanded,
+  maxQueuedMessages,
+  onToggleExpanded,
+  onSendNow,
+  onEdit,
+  onDelete,
+}) => {
+  if (!queuedMessages || queuedMessages.length === 0) {
+    return null;
+  }
+
+  const count = queuedMessages.length;
+  const isFull = maxQueuedMessages !== undefined && count >= maxQueuedMessages;
+
+  return (
+    <Box
+      data-testid='queued-messages-banner'
+      sx={{
+        width: '100%',
+        backgroundColor: 'var(--ds-background-100)',
+        border: `1px solid ${ds.gray[200]}`,
+        borderRadius: 'var(--ds-radius-lg)',
+        boxShadow: `0 1px 3px ${ds.gray.alpha[100]}`,
+        overflow: 'hidden',
+        mb: ds.space[2],
+        boxSizing: 'border-box',
+        transition: 'all 0.2s ease',
+      }}
+    >
+      {/* Header */}
+      <Box
+        role='button'
+        tabIndex={0}
+        onClick={onToggleExpanded}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggleExpanded();
+          }
+        }}
+        data-testid='queued-messages-header'
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: ds.space[3],
+          py: '6px',
+          cursor: 'pointer',
+          userSelect: 'none',
+          backgroundColor: 'var(--ds-background-200)',
+          '&:hover': {
+            backgroundColor: ds.gray[100],
+          },
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], minWidth: 0 }}>
+          <Typography
+            sx={{
+              fontFamily: ds.font.sans,
+              fontWeight: 'var(--ds-font-weight-medium)',
+              fontSize: 'var(--ds-text-caption)',
+              color: ds.gray[700],
+              lineHeight: 1.4,
+            }}
+          >
+            {count} waiting
+          </Typography>
+          <Box
+            component='span'
+            data-testid='queued-messages-count'
+            sx={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              px: '6px',
+              py: '1px',
+              borderRadius: '999px',
+              backgroundColor: isFull ? ds.amber[100] : ds.gray[200],
+              color: isFull ? ds.amber[700] : ds.gray[700],
+              fontSize: '11px',
+              fontWeight: 'var(--ds-font-weight-medium)',
+              lineHeight: 1,
+            }}
+          >
+            {maxQueuedMessages ? `${count}/${maxQueuedMessages}` : count}
+          </Box>
+          <Typography
+            sx={{
+              fontFamily: ds.font.sans,
+              fontSize: 'var(--ds-text-caption)',
+              color: isFull ? ds.amber[700] : ds.gray[500],
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {isFull ? 'Queue full (wait for tasks to finish or delete a message)' : 'Runs after the current response'}
+          </Typography>
+        </Box>
+
+        <IconButton
+          size='small'
+          aria-label={isExpanded ? 'Collapse queued messages' : 'Expand queued messages'}
+          sx={{
+            p: 0.5,
+            color: ds.gray[500],
+            '&:hover': { color: ds.gray[700] },
+          }}
+        >
+          {isExpanded ? <KeyboardArrowUpIcon fontSize='small' /> : <KeyboardArrowDownIcon fontSize='small' />}
+        </IconButton>
+      </Box>
+
+      {/* Message List */}
+      {isExpanded && (
+        <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+          {queuedMessages.map((msg, index) => {
+            const hasImages = msg.images && msg.images.length > 0;
+            return (
+              <Box
+                key={msg.id}
+                data-testid={`queued-message-item-${msg.id}`}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  px: ds.space[3],
+                  py: '6px',
+                  borderTop: `1px solid ${ds.gray[200]}`,
+                  backgroundColor: 'var(--ds-background-100)',
+                  '&:hover': {
+                    backgroundColor: 'var(--ds-background-200)',
+                  },
+                }}
+              >
+                <Tooltip title={msg.text} placement='top-start'>
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: ds.space[1],
+                      flex: 1,
+                      minWidth: 0,
+                      mr: ds.space[2],
+                    }}
+                  >
+                    {hasImages && (
+                      <Box
+                        sx={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          color: ds.gray[500],
+                          flexShrink: 0,
+                        }}
+                      >
+                        <ImageIcon sx={{ fontSize: 16 }} />
+                      </Box>
+                    )}
+                    {msg.user && msg.user !== 'You' && (
+                      <Typography
+                        component='span'
+                        sx={{
+                          fontFamily: ds.font.sans,
+                          fontSize: '11px',
+                          fontWeight: 'var(--ds-font-weight-medium)',
+                          color: ds.gray[700],
+                          backgroundColor: ds.gray[200],
+                          borderRadius: '4px',
+                          px: '4px',
+                          py: '1px',
+                          flexShrink: 0,
+                          lineHeight: 1.2,
+                        }}
+                      >
+                        {msg.user}
+                      </Typography>
+                    )}
+                    <Typography
+                      sx={{
+                        fontFamily: ds.font.sans,
+                        fontSize: 'var(--ds-text-body-sm)',
+                        color: ds.gray[700],
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {msg.text || (hasImages ? 'Attached image' : `Message ${index + 1}`)}
+                    </Typography>
+                  </Box>
+                </Tooltip>
+
+                {editingMessageId === msg.id && (
+                  <Box role='status' sx={{ display: 'flex', alignItems: 'center', gap: 1, mr: 1 }}>
+                    <CircularProgress size={14} />
+                    <Typography variant='caption'>Moving to composer…</Typography>
+                  </Box>
+                )}
+                {/* Actions: Send now, Edit, Delete */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                  <Tooltip title='Send now' placement='top'>
+                    <IconButton
+                      size='small'
+                      disabled={Boolean(editingMessageId)}
+                      aria-label='Send now'
+                      data-testid={`queued-message-send-now-${msg.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSendNow(msg.id);
+                      }}
+                      sx={{
+                        p: '4px',
+                        color: ds.gray[600],
+                        '&:hover': { color: ds.brand[500], backgroundColor: ds.gray[100] },
+                      }}
+                    >
+                      <ArrowForwardIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Tooltip title='Edit message' placement='top'>
+                    <IconButton
+                      size='small'
+                      disabled={Boolean(editingMessageId)}
+                      aria-label='Edit message'
+                      data-testid={`queued-message-edit-${msg.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEdit(msg.id);
+                      }}
+                      sx={{
+                        p: '4px',
+                        color: ds.gray[600],
+                        '&:hover': { color: ds.gray[700], backgroundColor: ds.gray[100] },
+                      }}
+                    >
+                      <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Tooltip title='Delete message' placement='top'>
+                    <IconButton
+                      size='small'
+                      disabled={Boolean(editingMessageId)}
+                      aria-label='Delete message'
+                      data-testid={`queued-message-delete-${msg.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(msg.id);
+                      }}
+                      sx={{
+                        p: '4px',
+                        color: ds.gray[500],
+                        '&:hover': { color: ds.red[500] || '#EF4444', backgroundColor: ds.gray[100] },
+                      }}
+                    >
+                      <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+    </Box>
+  );
+};
+
+export default QueuedMessagesBanner;

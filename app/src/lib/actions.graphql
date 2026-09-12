@@ -443,6 +443,24 @@ type Mutation {
 }
 
 type Mutation {
+  ai_delete_conversation_queued_message(
+    request: AiDeleteQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
+  ai_update_conversation_queued_message(
+    request: AiUpdateQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
+  ai_execute_queued_message(
+    request: AiForceExecuteQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
   ai_update_function(
     account_id: String!
     function_id: String!
@@ -4340,6 +4358,25 @@ input DeleteLlmConversationByIdRequest {
   conversation_id: uuid!
 }
 
+input AiDeleteQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+}
+
+input AiUpdateQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+  message: String!
+}
+
+input AiForceExecuteQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+}
+
 input AiGetConversationV3Request {
   account_id: uuid!
   conversation_id: uuid
@@ -5437,6 +5474,7 @@ input ListAIReferencesRequest {
 }
 
 input AITriggerInvestigationRequest {
+  queue_only: Boolean
   account_id: String!
   query: String!
   user_id: String
@@ -7859,6 +7897,11 @@ type DeleteLLMConversationResponse {
 
 type DeleteResponse {
   success: Boolean!
+}
+
+type AiQueuedMessageResponse {
+  data: jsonb
+  errors: jsonb
 }
 
 type DeleteLlmConversationByIdResponse {

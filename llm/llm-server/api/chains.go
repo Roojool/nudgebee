@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,6 +40,8 @@ type ActionRequest struct {
 }
 
 type ConversationApiRequest struct {
+	// QueueOnly forbids falling through to foreground async execution.
+	QueueOnly      bool                       `json:"queue_only"`
 	Query          string                     `json:"query" mapstructure:"required" validate:"required"`
 	ConversationId string                     `json:"conversation_id"`
 	SessionId      string                     `json:"session_id"`
@@ -225,8 +228,251 @@ func rejectIfConversationLocked(c *gin.Context, endpoint string, conversation co
 	return true
 }
 
+func isSecurityContextAdmin(sc *security.SecurityContext, accountID string) bool {
+	if sc == nil {
+		return false
+	}
+	return sc.IsSuperAdmin() || sc.IsTenantAdmin() || sc.HasScopedRole(security.AUTH_ACCOUNT_ADMIN_ROLE, accountID)
+}
+
+type QueuedMessageDeleteRequest struct {
+	AccountId      string `json:"account_id"`
+	ConversationId string `json:"conversation_id"`
+	MessageId      string `json:"message_id"`
+	UserId         string `json:"user_id"`
+}
+
+type QueuedMessageUpdateRequest struct {
+	AccountId      string `json:"account_id"`
+	ConversationId string `json:"conversation_id"`
+	MessageId      string `json:"message_id"`
+	Message        string `json:"message"`
+	UserId         string `json:"user_id"`
+}
+
+type QueuedMessageForceRequest struct {
+	AccountId      string `json:"account_id"`
+	ConversationId string `json:"conversation_id"`
+	MessageId      string `json:"message_id"`
+	UserId         string `json:"user_id"`
+}
+
+func queueConversationMessage(
+	conversation core.Conversation,
+	request *ConversationApiRequest,
+	agentName string,
+) (uuid.UUID, error) {
+	effectiveAgent := agentName
+	if len(request.ClientTools) > 0 {
+		request.Config.ClientTools = request.ClientTools
+	}
+	if !request.Capabilities.IsEmpty() {
+		request.Config.Capabilities = request.Capabilities
+	}
+	queuedMessageId := uuid.New()
+	// Attachment refs intentionally have no message FK. Persist them before
+	// publishing QUEUED so a completion cannot claim a partially saved request.
+	if len(request.Images) > 0 {
+		dao := core.GetAttachmentDAO()
+		if dao == nil {
+			return uuid.Nil, errors.New("attachment storage unavailable")
+		}
+		if _, err := dao.SaveAttachments(queuedMessageId.String(), conversation.ID.String(), conversation.AccountID.String(), request.Images); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	_, err := core.GetConversationDao().SaveConversationMessage(
+		queuedMessageId.String(),
+		conversation.ID.String(),
+		conversation.AccountID.String(),
+		request.UserId,
+		core.MessageRoleHuman,
+		core.MessageTypeGeneration,
+		request.Query,
+		"",
+		effectiveAgent,
+		uuid.Nil,
+		request.Config,
+		request.ChannelContext,
+		"",
+		"",
+		core.ConversationStatusQueued,
+	)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return queuedMessageId, nil
+}
+
+// Called after authorized queue admission: a queue-only request must never
+// become an independent asynchronous foreground request when status changes.
+func rejectUnfulfilledQueueRequest(c *gin.Context, request *ConversationApiRequest) bool {
+	if !request.QueueOnly {
+		return false
+	}
+	c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: "Conversation is not ready to queue a message. Please retry your message."}}))
+	return true
+}
+
+func tryQueueConversationMessage(
+	c *gin.Context,
+	conversation core.Conversation,
+	request *ConversationApiRequest,
+	agentName string,
+) bool {
+	// Text-only admission needs no preliminary read: capacity is checked
+	// atomically by the DAO. Keep the image preflight to avoid unnecessary uploads.
+	if len(request.Images) > 0 {
+		maxQueued := config.Config.MaxQueuedMessagesPerConversation
+		if maxQueued <= 0 {
+			maxQueued = 5
+		}
+		existingQueued, err := core.GetConversationDao().GetQueuedConversationMessages(conversation.ID.String())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{common.Error{Message: "unable to read queued messages"}}))
+			return true
+		}
+		if len(existingQueued) >= maxQueued {
+			slog.Warn("chains: maximum queued messages limit reached",
+				"conversation_id", conversation.ID.String(),
+				"queued_count", len(existingQueued),
+				"max_limit", maxQueued,
+			)
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{
+				common.Error{
+					Message: fmt.Sprintf("Maximum queued messages limit reached (max: %d). Please wait for queued messages to process or cancel an existing queued message.", maxQueued),
+				},
+			}))
+			return true
+		}
+
+	}
+
+	queuedMessageId, err := queueConversationMessage(conversation, request, agentName)
+	if err != nil {
+		if errors.Is(err, core.ErrQueueFull) || errors.Is(err, core.ErrQueueInactive) {
+			c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return true
+		}
+		slog.Error("chains: failed to queue message", "error", err, "conversation_id", conversation.ID.String())
+		c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{
+			common.Error{Message: "failed to queue message: " + err.Error()},
+		}))
+		return true
+	}
+	slog.Info("chains: message queued for in-progress conversation", "conversation_id", conversation.ID.String(), "message_id", queuedMessageId.String())
+	c.JSON(http.StatusAccepted, buildApiResponse(core.NBAgentResponse{
+		Response:       []string{"Your request has been queued and will be processed after the current task finishes."},
+		Query:          request.Query,
+		ConversationId: conversation.ID.String(),
+		SessionId:      conversation.SessionID,
+		MessageId:      queuedMessageId.String(),
+		Status:         core.ConversationStatusQueued,
+	}, nil))
+	return true
+}
+
+// dispatchQueuedMessage is shared by FIFO completion and explicit Send Now.
+// Persist failures as terminal messages so a live worker never strands a claim.
+func dispatchQueuedMessage(parent *security.RequestContext, conversation core.Conversation, msg core.ConversationMessage) error {
+	fail := func(err error) {
+		parent.GetLogger().Error("chains: queued execution failed", "error", err, "message_id", msg.ID)
+		if _, saveErr := core.GetConversationDao().FinalizeConversationMessage(msg.ConversationID.String(), msg.ID.String(), "Queued message could not be executed. Please retry this message.", core.ConversationStatusFailed); saveErr != nil {
+			parent.GetLogger().Error("chains: failed to persist queue failure", "error", saveErr)
+		}
+	}
+	submissionCtx, cancel := context.WithTimeout(context.Background(), time.Duration(config.Config.AsyncApiTimeoutSeconds)*time.Second)
+	defer cancel()
+	workerQueue := asyncUserOperationWorkerPool
+	if msg.UserID == uuid.Nil {
+		workerQueue = asyncOperationWorkerPool
+	}
+	err := workerQueue.Submit(submissionCtx, func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				fail(fmt.Errorf("queued execution panic: %v", recovered))
+			}
+		}()
+		sc, err := security.NewSecurityContext(conversation.TenantID.String(), msg.UserID.String())
+		if err != nil {
+			fail(err)
+			return
+		}
+		if sc == nil || (!sc.HasAccountAccess(msg.AccountID.String(), security.SecurityAccessTypeRead) && !grantedRun(sc, msg.AccountID.String(), moduleAiMisc)) {
+			fail(errors.New(errorUserAccessMessage))
+			return
+		}
+		logger := slog.With("account_id", msg.AccountID, "conversation_id", msg.ConversationID, "message_id", msg.ID, "user_id", msg.UserID)
+		ctx := security.NewRequestContext(context.Background(), sc, logger, parent.GetTracer(), parent.GetMeter())
+		module := budget.ModuleUserInvestigation
+		if strings.HasPrefix(conversation.SessionID, events.SessionIdPrefixEvent) {
+			module = budget.ModuleInvestigation
+		}
+		if exceeded, reason := budget.CheckBudgetLimits(sc.GetTenantId(), msg.AccountID.String(), module, logger); exceeded {
+			fail(errors.New(reason))
+			return
+		}
+		var msgConfig toolcore.NBQueryConfig
+		if msg.MessageConfig != nil && *msg.MessageConfig != "" {
+			if err := json.Unmarshal([]byte(*msg.MessageConfig), &msgConfig); err != nil {
+				fail(err)
+				return
+			}
+		}
+		source := core.ConversationSourceUserInvestigation
+		if conversation.Source != nil && *conversation.Source != "" {
+			source = *conversation.Source
+		}
+		var agent core.NBAgent
+		if msg.AgentName != nil && *msg.AgentName != "" {
+			agent, _ = core.GetNBAgent(ctx, *msg.AgentName, msg.AccountID.String(), core.AgentStatusEnabled)
+		} else {
+			agent, err = agents.InferAgentOrHelp(ctx, msg.UserID.String(), msg.AccountID.String(), msg.ConversationID.String(), msg.Message, core.ConversationSessionRequestWithSource(source), core.ConversationSessionRequestWithConfig(msgConfig))
+		}
+		if err != nil || agent == nil {
+			fail(fmt.Errorf("queued message agent unavailable: %v", err))
+			return
+		}
+		var images []core.ImageAttachment
+		if dao := core.GetAttachmentDAO(); dao != nil {
+			attachments, loadErr := dao.LoadAttachments(msg.ID.String(), msg.AccountID.String())
+			if loadErr != nil {
+				fail(loadErr)
+				return
+			}
+			for _, attachment := range attachments {
+				images = append(images, core.ImageAttachment{Data: attachment.Data, MIMEType: attachment.MIMEType})
+			}
+		}
+		channelContext := ""
+		if msg.MessageContext != nil {
+			channelContext = *msg.MessageContext
+		}
+		_, err = core.HandleConversationSessionRequest(ctx, agent, msg.UserID.String(), msg.AccountID.String(), conversation.SessionID, msg.Message,
+			core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: msg.ConversationID, Valid: true}),
+			core.ConversationSessionRequestWithMessageId(uuid.NullUUID{UUID: msg.ID, Valid: true}),
+			// The atomic queue claim already reserved IN_PROGRESS for this message.
+			core.ConversationSessionRequestWithQueuedDispatch(),
+			core.ConversationSessionRequestWithSource(source), core.ConversationSessionRequestWithConfig(msgConfig),
+			core.ConversationSessionRequestWithImages(images), core.ConversationSessionRequestWithChannelContext(channelContext))
+		if err != nil {
+			fail(err)
+		}
+	})
+	if err != nil {
+		fail(err)
+	}
+	return err
+}
+
 func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) {
 	groupV2 := r.Group("/v1/completions")
+
+	core.SetQueuedMessageDispatcher(func(ctx *security.RequestContext, _ core.NBAgent, conversation core.Conversation, msg core.ConversationMessage) {
+		if err := dispatchQueuedMessage(ctx, conversation, msg); err != nil {
+			slog.Error("chains: queued message dispatch failed", "error", err, "message_id", msg.ID)
+		}
+	})
 
 	groupV2.POST("/chat", func(c *gin.Context) {
 		common.MetricsApiRequestsTotal("chains_chat")
@@ -354,7 +600,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			// lets through — must not be blocked here just because the parent
 			// conversation was swept to KILLED in the meantime.
 			isFollowupCompletion := request.Resolution != "" || request.AgentId != ""
-			if rejectIfConversationLocked(c, "/v1/completions/chat", conversation, isFollowupCompletion) {
+			if conversation.Status != core.ConversationStatusInProgress && rejectIfConversationLocked(c, "/v1/completions/chat", conversation, isFollowupCompletion) {
 				return
 			}
 
@@ -449,9 +695,6 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
 			return
 		}
-		if agentContext.GetSecurityContext().IsSuperAdmin() {
-			request.UserId = security.GetSystemUserId()
-		}
 
 		// Check if user has access to account
 		if !agentContext.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeRead) &&
@@ -479,6 +722,35 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		}
 
 		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, module, logger) {
+			return
+		}
+
+		// Queue only after identity, account access, and budget validation. Reload
+		// here so session-based requests follow the same path as explicit IDs.
+		if request.ConversationId != "" && request.AgentId == "" && request.Resolution == "" {
+			if conversation, err := core.GetConversationDao().GetConversation(request.ConversationId); err == nil {
+				if conversation.AccountID.String() != request.AccountId {
+					c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+					return
+				}
+				if config.Config.QueuedMessagesEnabled && conversation.Status == core.ConversationStatusInProgress {
+					if tryQueueConversationMessage(c, conversation, &request, "") {
+						return
+					}
+				}
+				if rejectIfConversationLocked(c, "chat", conversation, false) {
+					return
+				}
+			}
+		}
+
+		// Queued dispatch needs the authenticated author to reload permissions.
+		// Apply legacy system attribution only to immediate execution.
+		if agentContext.GetSecurityContext().IsSuperAdmin() {
+			request.UserId = security.GetSystemUserId()
+		}
+
+		if rejectUnfulfilledQueueRequest(c, &request) {
 			return
 		}
 
@@ -822,7 +1094,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			// See the matching comment in /v1/completions/chat: agentId-resume of a
 			// pending followup must stay allowed on a KILLED conversation.
 			isFollowupCompletion := request.AgentId != ""
-			if rejectIfConversationLocked(c, "/v1/completions/chat/auto", conversation, isFollowupCompletion) {
+			if conversation.Status != core.ConversationStatusInProgress && rejectIfConversationLocked(c, "/v1/completions/chat/auto", conversation, isFollowupCompletion) {
 				return
 			}
 
@@ -893,6 +1165,29 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		}
 
 		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, module, logger) {
+			return
+		}
+
+		// Queue only after identity, account access, and budget validation. Reload
+		// here so session-based requests follow the same path as explicit IDs.
+		if request.ConversationId != "" && request.AgentId == "" && request.Resolution == "" {
+			if conversation, err := core.GetConversationDao().GetConversation(request.ConversationId); err == nil {
+				if conversation.AccountID.String() != request.AccountId {
+					c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+					return
+				}
+				if config.Config.QueuedMessagesEnabled && conversation.Status == core.ConversationStatusInProgress {
+					if tryQueueConversationMessage(c, conversation, &request, "") {
+						return
+					}
+				}
+				if rejectIfConversationLocked(c, "chat", conversation, false) {
+					return
+				}
+			}
+		}
+
+		if rejectUnfulfilledQueueRequest(c, &request) {
 			return
 		}
 
@@ -3012,5 +3307,247 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		handleRequestExecution(c, agentContext, request.Async, agentContext.GetSecurityContext().GetUserId(), "chains_client_tool_result", logger, func(ctx *security.RequestContext) (core.NBAgentResponse, error) {
 			return core.HandleConversationMessageRequest(request.AccountId, request.ConversationId, request.MessageId, request.AgentId)
 		}, map[string]string{"status": "in_progress"})
+	})
+
+	// Queued Message Management
+	groupV2.POST("/queued_message_delete", func(c *gin.Context) {
+		requestMap := make(map[string]any)
+		if err := c.ShouldBindJSON(&requestMap); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		var req QueuedMessageDeleteRequest
+		var actionRequest ActionRequest
+		_ = common.DecodeMapToStruct(requestMap, &actionRequest)
+		actionPayload := actionRequest.Input
+		if reqVal, ok := actionPayload["request"].(map[string]any); ok {
+			actionPayload = reqVal
+		}
+		if actionPayload == nil {
+			actionPayload = requestMap
+		}
+		if err := common.DecodeMapToStruct(actionPayload, &req); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		if req.MessageId == "" || req.AccountId == "" {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: account_id and message_id are required"}}))
+			return
+		}
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if !agentContext.GetSecurityContext().HasAccountAccess(req.AccountId, security.SecurityAccessTypeRead) &&
+			!grantedWrite(agentContext.GetSecurityContext(), req.AccountId, moduleAiConversations) {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+		isAdmin := isSecurityContextAdmin(agentContext.GetSecurityContext(), req.AccountId)
+		userId := agentContext.GetSecurityContext().GetUserId()
+		if err := core.GetConversationDao().DeleteQueuedMessage(req.MessageId, req.AccountId, userId, isAdmin); err != nil {
+			if errors.Is(err, core.ErrQueuedMessageNotFoundOrLocked) {
+				c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+				return
+			}
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return
+		}
+		c.JSON(http.StatusOK, buildApiResponse(map[string]any{"status": "deleted", "id": req.MessageId}, nil))
+	})
+
+	groupV2.DELETE("/queued_message/:id", func(c *gin.Context) {
+		messageId := c.Param("id")
+		accountId := c.Query("account_id")
+
+		if messageId == "" || accountId == "" {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: account_id and id are required"}}))
+			return
+		}
+		var actionRequest ActionRequest
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if !agentContext.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeRead) &&
+			!grantedWrite(agentContext.GetSecurityContext(), accountId, moduleAiConversations) {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+		isAdmin := isSecurityContextAdmin(agentContext.GetSecurityContext(), accountId)
+		userId := agentContext.GetSecurityContext().GetUserId()
+		if err := core.GetConversationDao().DeleteQueuedMessage(messageId, accountId, userId, isAdmin); err != nil {
+			if errors.Is(err, core.ErrQueuedMessageNotFoundOrLocked) {
+				c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+				return
+			}
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return
+		}
+		c.JSON(http.StatusOK, buildApiResponse(map[string]any{"status": "deleted", "id": messageId}, nil))
+	})
+
+	groupV2.POST("/queued_message_update", func(c *gin.Context) {
+		requestMap := make(map[string]any)
+		if err := c.ShouldBindJSON(&requestMap); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		var req QueuedMessageUpdateRequest
+		var actionRequest ActionRequest
+		_ = common.DecodeMapToStruct(requestMap, &actionRequest)
+		actionPayload := actionRequest.Input
+		if reqVal, ok := actionPayload["request"].(map[string]any); ok {
+			actionPayload = reqVal
+		}
+		if actionPayload == nil {
+			actionPayload = requestMap
+		}
+		if err := common.DecodeMapToStruct(actionPayload, &req); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		if req.MessageId == "" || req.AccountId == "" || strings.TrimSpace(req.Message) == "" {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: account_id, message_id, and non-empty message are required"}}))
+			return
+		}
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if !agentContext.GetSecurityContext().HasAccountAccess(req.AccountId, security.SecurityAccessTypeRead) &&
+			!grantedWrite(agentContext.GetSecurityContext(), req.AccountId, moduleAiConversations) {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+		isAdmin := isSecurityContextAdmin(agentContext.GetSecurityContext(), req.AccountId)
+		userId := agentContext.GetSecurityContext().GetUserId()
+		if err := core.GetConversationDao().UpdateQueuedMessage(req.MessageId, req.AccountId, userId, strings.TrimSpace(req.Message), isAdmin); err != nil {
+			if errors.Is(err, core.ErrQueuedMessageNotFoundOrLocked) {
+				c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+				return
+			}
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return
+		}
+		c.JSON(http.StatusOK, buildApiResponse(map[string]any{"status": "updated", "id": req.MessageId, "message": strings.TrimSpace(req.Message)}, nil))
+	})
+
+	groupV2.PATCH("/queued_message/:id", func(c *gin.Context) {
+		messageId := c.Param("id")
+		requestMap := make(map[string]any)
+		if err := c.ShouldBindJSON(&requestMap); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		var req QueuedMessageUpdateRequest
+		var actionRequest ActionRequest
+		_ = common.DecodeMapToStruct(requestMap, &actionRequest)
+		actionPayload := actionRequest.Input
+		if reqVal, ok := actionPayload["request"].(map[string]any); ok {
+			actionPayload = reqVal
+		}
+		if actionPayload == nil {
+			actionPayload = requestMap
+		}
+		_ = common.DecodeMapToStruct(actionPayload, &req)
+		if req.MessageId == "" {
+			req.MessageId = messageId
+		}
+		if req.AccountId == "" {
+			req.AccountId = c.Query("account_id")
+		}
+		if req.MessageId == "" || req.AccountId == "" || strings.TrimSpace(req.Message) == "" {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: account_id, message_id, and non-empty message are required"}}))
+			return
+		}
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if !agentContext.GetSecurityContext().HasAccountAccess(req.AccountId, security.SecurityAccessTypeRead) &&
+			!grantedWrite(agentContext.GetSecurityContext(), req.AccountId, moduleAiConversations) {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+		isAdmin := isSecurityContextAdmin(agentContext.GetSecurityContext(), req.AccountId)
+		userId := agentContext.GetSecurityContext().GetUserId()
+		if err := core.GetConversationDao().UpdateQueuedMessage(req.MessageId, req.AccountId, userId, strings.TrimSpace(req.Message), isAdmin); err != nil {
+			if errors.Is(err, core.ErrQueuedMessageNotFoundOrLocked) {
+				c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+				return
+			}
+			c.JSON(http.StatusInternalServerError, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return
+		}
+		c.JSON(http.StatusOK, buildApiResponse(map[string]any{"status": "updated", "id": req.MessageId, "message": strings.TrimSpace(req.Message)}, nil))
+	})
+
+	groupV2.POST("/queued_message_force", func(c *gin.Context) {
+		requestMap := make(map[string]any)
+		if err := c.ShouldBindJSON(&requestMap); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		var req QueuedMessageForceRequest
+		var actionRequest ActionRequest
+		_ = common.DecodeMapToStruct(requestMap, &actionRequest)
+		actionPayload := actionRequest.Input
+		if reqVal, ok := actionPayload["request"].(map[string]any); ok {
+			actionPayload = reqVal
+		}
+		if actionPayload == nil {
+			actionPayload = requestMap
+		}
+		if err := common.DecodeMapToStruct(actionPayload, &req); err != nil {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		if req.MessageId == "" || req.AccountId == "" || req.ConversationId == "" {
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{common.Error{Message: "api: account_id, conversation_id, and message_id are required"}}))
+			return
+		}
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if !agentContext.GetSecurityContext().HasAccountAccess(req.AccountId, security.SecurityAccessTypeRead) &&
+			!grantedRun(agentContext.GetSecurityContext(), req.AccountId, moduleAiMisc) {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+
+		conversation, err := core.GetConversationDao().GetConversation(req.ConversationId)
+		if err != nil {
+			c.JSON(http.StatusNotFound, buildApiResponse(nil, []error{common.Error{Message: "api: conversation not found"}}))
+			return
+		}
+
+		if conversation.AccountID.String() != req.AccountId {
+			c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), req.AccountId, budget.ModuleUserInvestigation, slog.Default()) {
+			return
+		}
+		// Validation, interruption and claim are one transaction. An invalid or
+		// already-dispatched target must not terminate the current investigation.
+		claimedMsg, err := core.GetConversationDao().ClaimQueuedMessageById(agentContext, req.AccountId, req.ConversationId, req.MessageId,
+			agentContext.GetSecurityContext().GetUserId(), isSecurityContextAdmin(agentContext.GetSecurityContext(), req.AccountId))
+		if err != nil || claimedMsg == nil {
+			c.JSON(http.StatusConflict, buildApiResponse(nil, []error{common.Error{Message: "api: queued message unavailable or permission denied"}}))
+			return
+		}
+		if err := dispatchQueuedMessage(agentContext, conversation, *claimedMsg); err != nil {
+			c.JSON(http.StatusServiceUnavailable, buildApiResponse(nil, []error{common.Error{Message: "api: unable to dispatch queued message"}}))
+			return
+		}
+
+		c.JSON(http.StatusOK, buildApiResponse(map[string]any{"status": "executing", "message_id": req.MessageId}, nil))
 	})
 }

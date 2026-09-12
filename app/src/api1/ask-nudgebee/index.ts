@@ -15,7 +15,9 @@ import type {
   CreateAgentExtensionRequest,
   CreateRagDataRequest,
   DeleteConversationRequest,
+  DeleteQueuedMessageRequest,
   DeleteSavedConversationRequest,
+  ForceExecuteQueuedMessageRequest,
   FollowupRequest,
   FeedbackForSessionRequest,
   GenerateQueryRequest,
@@ -30,6 +32,7 @@ import type {
   ToolDefinition,
   UpdateAgentExtensionRequest,
   UpdateFunctionData,
+  UpdateQueuedMessageRequest,
 } from '../../types/ask-nudgebee';
 
 const EVENT_DETAILS_RETRIEVAL_TITLE = 'Event details retrieval by ID';
@@ -259,6 +262,7 @@ export type ConversationFetcher = {
 
 export function createConversationFetcher(): ConversationFetcher {
   let bound: { accountId?: string; conversationId?: string; sessionId?: string } = {};
+  let generation = 0;
   let cursor: string | null = null;
   let shell: ConversationV3Shell | null = null;
   const messages = new Map<string, ConversationV3Message>();
@@ -266,6 +270,7 @@ export function createConversationFetcher(): ConversationFetcher {
   const toolCalls = new Map<string, ConversationV3ToolCall>();
 
   const reset = () => {
+    generation += 1;
     bound = {};
     cursor = null;
     shell = null;
@@ -281,15 +286,35 @@ export function createConversationFetcher(): ConversationFetcher {
       bound = { accountId: opts.accountId, conversationId: opts.conversationId, sessionId: opts.sessionId };
     }
 
-    const { rawResponse, payload } = await _callConversationV3({ ...opts, since: cursor });
+    const requestGeneration = ++generation;
+    let { rawResponse, payload } = await _callConversationV3({ ...opts, since: cursor });
+    if (requestGeneration !== generation) return rawResponse;
+    const wasDelta = Boolean(cursor);
     if (payload) {
       if (payload.conversation) shell = payload.conversation;
       payload.messages.forEach((m) => messages.set(m.id, m));
       payload.agents.forEach((a) => agents.set(a.id, a));
       payload.tool_calls.forEach((t) => toolCalls.set(t.id, t));
-      // Server returns max(updated_at) across the full snapshot it pinned for
-      // this call (REPEATABLE READ), so the cursor reflects everything we've
-      // now consumed — including unchanged rows already in our state.
+      // Parallel delta queries can miss an update behind their shared cursor.
+      // Reconcile a terminal shell with cached active rows from a full snapshot
+      // so a missed completion cannot keep the composer running indefinitely.
+      if (
+        wasDelta &&
+        ['COMPLETED', 'FAILED', 'KILLED', 'TERMINATED'].includes(shell?.status || '') &&
+        [...messages.values()].some((m) => ['IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'QUEUED'].includes(m.status))
+      ) {
+        const full = await _callConversationV3({ ...opts, since: null });
+        if (requestGeneration !== generation || !full.payload?.conversation) return full.rawResponse;
+        rawResponse = full.rawResponse;
+        payload = full.payload;
+        shell = payload.conversation;
+        messages.clear();
+        agents.clear();
+        toolCalls.clear();
+        payload.messages.forEach((m) => messages.set(m.id, m));
+        payload.agents.forEach((a) => agents.set(a.id, a));
+        payload.tool_calls.forEach((t) => toolCalls.set(t.id, t));
+      }
       if (payload.cursor) cursor = payload.cursor;
     }
     return _assembleConversationLegacyEnvelope(rawResponse, shell, messages, agents, toolCalls);
@@ -447,13 +472,20 @@ const api = {
               response
               query
               chain_name
+              message_id
+              conversation_id
+              status
             }
+            errors
           }
         }
         `;
     const query: any = {};
     query.account_id = data.account_id;
     query.query = data.query;
+    if (data.queue_only) {
+      query.queue_only = true;
+    }
     if (data.session_id) {
       query.session_id = data.session_id;
     }
@@ -2024,6 +2056,94 @@ const api = {
       // need to switch on response shape.
       returning: data.watch_id ? [{ id: data.watch_id, status: data.status }] : [],
     };
+  },
+
+  async deleteQueuedMessage(data: DeleteQueuedMessageRequest) {
+    const DELETE_QUEUED_MESSAGE = `
+      mutation AiDeleteQueuedMessage($request: AiDeleteQueuedMessageRequest!) {
+        ai_delete_conversation_queued_message(request: $request) {
+          data
+          errors
+        }
+      }
+    `;
+    try {
+      const response = await queryGraphQL(DELETE_QUEUED_MESSAGE, 'AiDeleteQueuedMessage', {
+        request: {
+          account_id: data.accountId,
+          conversation_id: data.conversationId,
+          message_id: data.messageId,
+        },
+      });
+      const result = response?.data?.data?.ai_delete_conversation_queued_message;
+      const errors = response?.data?.errors?.length ? response.data.errors : result?.errors;
+      if ((Array.isArray(errors) && errors.length > 0) || !result?.data) {
+        throw new Error(errors?.[0]?.message || 'Queued message operation failed. Refresh and try again.');
+      }
+      return response;
+    } catch (error) {
+      console.error('failed to delete queued message', error);
+      throw error;
+    }
+  },
+
+  async updateQueuedMessage(data: UpdateQueuedMessageRequest) {
+    const UPDATE_QUEUED_MESSAGE = `
+      mutation AiUpdateQueuedMessage($request: AiUpdateQueuedMessageRequest!) {
+        ai_update_conversation_queued_message(request: $request) {
+          data
+          errors
+        }
+      }
+    `;
+    try {
+      const response = await queryGraphQL(UPDATE_QUEUED_MESSAGE, 'AiUpdateQueuedMessage', {
+        request: {
+          account_id: data.accountId,
+          conversation_id: data.conversationId,
+          message_id: data.messageId,
+          message: data.message,
+        },
+      });
+      const result = response?.data?.data?.ai_update_conversation_queued_message;
+      const errors = response?.data?.errors?.length ? response.data.errors : result?.errors;
+      if ((Array.isArray(errors) && errors.length > 0) || !result?.data) {
+        throw new Error(errors?.[0]?.message || 'Queued message operation failed. Refresh and try again.');
+      }
+      return response;
+    } catch (error) {
+      console.error('failed to update queued message', error);
+      throw error;
+    }
+  },
+
+  async forceExecuteQueuedMessage(data: ForceExecuteQueuedMessageRequest) {
+    const FORCE_EXECUTE_QUEUED_MESSAGE = `
+      mutation AiForceExecuteQueuedMessage($request: AiForceExecuteQueuedMessageRequest!) {
+        ai_execute_queued_message(request: $request) {
+          data
+          errors
+        }
+      }
+    `;
+    try {
+      const response = await queryGraphQL(FORCE_EXECUTE_QUEUED_MESSAGE, 'AiForceExecuteQueuedMessage', {
+        request: {
+          account_id: data.accountId,
+          conversation_id: data.conversationId,
+          message_id: data.messageId,
+        },
+      });
+      const result = response?.data?.data?.ai_execute_queued_message;
+      const errors = response?.data?.errors?.length ? response.data.errors : result?.errors;
+      if ((Array.isArray(errors) && errors.length > 0) || !result?.data) {
+        throw new Error(errors?.[0]?.message || 'Queued message operation failed. Refresh and try again.');
+      }
+      return response;
+    } catch (error) {
+      console.error('failed to force execute queued message', error);
+      throw error;
+    }
   },
 };
 

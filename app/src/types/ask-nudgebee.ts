@@ -110,6 +110,7 @@ export interface GenerateQueryRequest {
 }
 
 export interface InvestigateRequest {
+  queue_only?: boolean;
   account_id: string;
   query: string;
   session_id?: string;
@@ -303,4 +304,23 @@ export interface UpdateFunctionData {
 export interface StopInvestigateRequest {
   accountId: string;
   conversationId: string;
+}
+
+export interface DeleteQueuedMessageRequest {
+  accountId: string;
+  conversationId: string;
+  messageId: string;
+}
+
+export interface UpdateQueuedMessageRequest {
+  accountId: string;
+  conversationId: string;
+  messageId: string;
+  message: string;
+}
+
+export interface ForceExecuteQueuedMessageRequest {
+  accountId: string;
+  conversationId: string;
+  messageId: string;
 }

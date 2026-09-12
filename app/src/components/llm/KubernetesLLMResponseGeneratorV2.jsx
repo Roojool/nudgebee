@@ -42,6 +42,8 @@ import FollowupSheet from './common/FollowupSheet';
 import MessageStream from './MessageStream';
 import TroubleshootList from './TroubleshootList';
 import SafeIcon from '@shared/icons/SafeIcon';
+import { useQueuedMessages } from '@hooks/useQueuedMessages';
+import QueuedMessagesBanner from './common/QueuedMessagesBanner';
 
 // --- Component-level state reducer ---
 
@@ -296,6 +298,10 @@ const KubernetesLLMResponseGenerator = ({
     isLoading: isConversationLoading,
     messages,
     setMessages,
+    queuedMessages: serverQueuedMessages,
+    queueInvestigationMessage,
+    queueSupport = { enabled: false, maxMessages: 5 },
+    needsConversationRefresh,
     conversationStatus,
     setConversationStatus,
     conversationTitle,
@@ -541,16 +547,20 @@ const KubernetesLLMResponseGenerator = ({
     navigateTo: notifyNavigateTo,
   });
 
-  const handleGenerateInvestigation = useCallback(
-    async (text, images) => {
-      if (conversationStatus === 'IN_PROGRESS' || !text) {
-        return;
+  const handleStopInvestigation = useCallback(() => {
+    stopInvestigation(conversationIdAtDb, conversationStatus, clearSuggestions);
+  }, [conversationIdAtDb, conversationStatus, stopInvestigation, clearSuggestions]);
+
+  const executeInvestigation = useCallback(
+    async (text, images, preserveDraftOnFailure = false) => {
+      if (!text) {
+        return false;
       }
 
       // Verify user has access to the account before starting investigation
       if (accountId && !hasReadAccess(accountId)) {
         snackbar.error('You do not have permission to perform this action');
-        return;
+        return false;
       }
 
       let processedText = text;
@@ -564,14 +574,10 @@ const KubernetesLLMResponseGenerator = ({
       }
 
       // Add optimistic question message immediately so user sees their question right away.
-      // Skip for workflow mode: handleWorkflowGeneration appends the question itself via
-      // buildWorkflowConversationMessages, so an optimistic add here would produce a
-      // duplicate question (one with user 'You', one with the real userName) once the
-      // workflow API returns. querySuffix alone is not a reliable workflow indicator
-      // because follow-up calls in workflow mode don't carry a suffix.
+      const optimisticMessageId = `optimistic-${Date.now()}`;
       if (apiMode !== 'workflow') {
         const optimisticQuestionMessage = {
-          id: `optimistic-${Date.now()}`,
+          id: optimisticMessageId,
           text: processedText,
           type: 'question',
           created_at: new Date().toISOString(),
@@ -585,8 +591,9 @@ const KubernetesLLMResponseGenerator = ({
       }
 
       // Call Hook with both IDs (one or both might be empty)
-      await startInvestigation({
+      return await startInvestigation({
         text: processedText,
+        optimisticMessageId,
         queryPrefix,
         querySuffix,
         selectedSessionId,
@@ -615,7 +622,9 @@ const KubernetesLLMResponseGenerator = ({
         },
         onFailure: () => {
           setConversationStatus('FAILED');
-          if (!popup) {
+          setMessages((previous) => previous.filter((message) => message.id !== optimisticMessageId));
+          if (preserveDraftOnFailure) setGenerateQuestionText(text);
+          if (!popup && !preserveDraftOnFailure) {
             applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
           }
         },
@@ -623,7 +632,6 @@ const KubernetesLLMResponseGenerator = ({
     },
     [
       accountId,
-      conversationStatus,
       queryPrefix,
       querySuffix,
       selectedSessionId,
@@ -643,6 +651,144 @@ const KubernetesLLMResponseGenerator = ({
     ]
   );
 
+  const {
+    queuedMessages,
+    isExpanded: isQueueExpanded,
+    toggleExpanded: toggleQueueExpanded,
+    remove: removeQueuedMessage,
+    edit: editQueuedMessage,
+    sendNow: sendNowQueuedMessage,
+    clear: clearQueuedMessages,
+    maxQueuedMessages,
+    isMaxQueueReached,
+    error: queueActionError,
+  } = useQueuedMessages({
+    isConversationInProgress,
+    conversationStatus,
+    conversationId: conversationIdAtDb,
+    accountId,
+    maxQueuedMessages: queueSupport.maxMessages,
+    serverQueuedMessages,
+    onDispatch: async (msg) => {
+      await executeInvestigation(msg.text, msg.images);
+    },
+    onStop: handleStopInvestigation,
+  });
+
+  const [queueImageDraft, setQueueImageDraft] = useState(undefined);
+  const [pendingQueueEdit, setPendingQueueEdit] = useState(null);
+  const [queueSubmitError, setQueueSubmitError] = useState(null);
+  const [pendingQueueSubmission, setPendingQueueSubmission] = useState(null);
+  const queueScope = `${accountId}:${conversationIdAtDb}:${selectedSessionId}`;
+  const queueScopeRef = useRef(queueScope);
+  queueScopeRef.current = queueScope;
+  useEffect(() => {
+    setQueueImageDraft(undefined);
+    setPendingQueueEdit(null);
+    setQueueSubmitError(null);
+    setPendingQueueSubmission(null);
+  }, [queueScope]);
+
+  const handleEditQueuedMessage = useCallback(
+    async (id) => {
+      const scope = queueScopeRef.current;
+      setPendingQueueEdit({ scope, id });
+      try {
+        const msg = await editQueuedMessage(id);
+        if (msg && scope === queueScopeRef.current) {
+          setGenerateQuestionText(msg.text);
+          setQueueImageDraft({ id: msg.id, text: msg.text, images: (msg.images || []).filter((image) => image.data && image.mime_type) });
+          setTimeout(() => {
+            textareaRef.current?.focus();
+          }, 0);
+        }
+      } finally {
+        if (scope === queueScopeRef.current) setPendingQueueEdit(null);
+      }
+    },
+    [editQueuedMessage]
+  );
+
+  const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled;
+
+  const handleGenerateInvestigation = useCallback(
+    async (text, images) => {
+      if (!text || !text.trim()) {
+        return;
+      }
+
+      // If an investigation is actively running, queue the message
+      if (isConversationInProgress) {
+        if (!canQueueMessages || isMaxQueueReached) {
+          return false;
+        }
+        // The server owns dispatch. Never create a local auto-dispatch copy
+        // while the enqueue request or history poll is still in flight.
+        const scope = queueScopeRef.current;
+        setPendingQueueSubmission({ scope, text });
+        setQueueSubmitError(null);
+        try {
+          await queueInvestigationMessage({ text, images });
+          if (scope !== queueScopeRef.current) return false;
+          setGenerateQuestionText((current) => (current === text ? '' : current));
+          setQueueSubmitError(null);
+          return true;
+        } catch (e) {
+          if (scope !== queueScopeRef.current) return false;
+          if (e?.queueNotReady) {
+            // This specific rejection guarantees no message was admitted. Refresh
+            // the stale status before retrying once against the current turn.
+            const refreshed = await fetchConversation(selectedSessionId, conversationIdAtDb, 'poll', false);
+            if (scope !== queueScopeRef.current) return false;
+            const conversation = refreshed?.data?.at(-1);
+            if (conversation?.status === 'IN_PROGRESS') {
+              try {
+                await queueInvestigationMessage({ text, images });
+                if (scope !== queueScopeRef.current) return false;
+                setGenerateQuestionText((current) => (current === text ? '' : current));
+                setQueueSubmitError(null);
+                return true;
+              } catch (retryError) {
+                if (scope === queueScopeRef.current)
+                  setQueueSubmitError(retryError instanceof Error ? retryError.message : 'Unable to queue message. Please retry.');
+                return false;
+              }
+            }
+            if (
+              conversation &&
+              ['COMPLETED', 'FAILED', 'TERMINATED'].includes(conversation.status) &&
+              !(conversation.llm_conversation_messages || []).some(
+                (message) =>
+                  message.message_type !== 'followup' && ['IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING'].includes(message.status)
+              )
+            ) {
+              setQueueSubmitError(null);
+              const sent = await executeInvestigation(text, images, true);
+              if (!sent) setQueueSubmitError('Unable to send message. Your draft has been kept; please retry.');
+              return sent === true;
+            }
+          }
+          setQueueSubmitError(e instanceof Error ? e.message : 'Unable to queue message. Please try again.');
+          return false;
+        } finally {
+          if (scope === queueScopeRef.current) setPendingQueueSubmission(null);
+        }
+      }
+
+      return await executeInvestigation(text, images, true);
+    },
+    [
+      isConversationInProgress,
+      isMaxQueueReached,
+      canQueueMessages,
+      queueInvestigationMessage,
+      executeInvestigation,
+      fetchConversation,
+      selectedSessionId,
+      conversationIdAtDb,
+    ]
+  );
+
   useEffect(() => {
     if (previousAccountIdRef.current !== accountId) {
       previousAccountIdRef.current = accountId; // Handle Account Switching
@@ -651,6 +797,7 @@ const KubernetesLLMResponseGenerator = ({
       uiDispatch({ type: 'NEW_CHAT' });
       resetTokenMetrics();
       clearSuggestions();
+      clearQueuedMessages();
       resetInvestigationState();
       previousConversationStatusRef.current = '';
 
@@ -682,7 +829,7 @@ const KubernetesLLMResponseGenerator = ({
             }
             return;
           }
-          setGenerateQuestionText('');
+          // Refreshing history must not erase an unsent or restored edit draft.
           // Pass both IDs to fetchConversation
           fetchConversation(selectedSessionId, selectedConversationId, 'selected', false);
         }
@@ -881,7 +1028,7 @@ const KubernetesLLMResponseGenerator = ({
 
     runAutoCheck();
 
-    const shouldStopPolling = ['COMPLETED', 'FAILED', 'KILLED', 'TERMINATED'].includes(conversationStatus);
+    const shouldStopPolling = ['COMPLETED', 'FAILED', 'KILLED', 'TERMINATED'].includes(conversationStatus) && !serverQueuedMessages?.length;
     if (shouldStopPolling) {
       setAllowStop(false);
 
@@ -906,15 +1053,6 @@ const KubernetesLLMResponseGenerator = ({
     } else {
       setAllowStop(true);
     }
-
-    if ((selectedSessionId !== '' || selectedConversationId !== '') && conversationStatus && !isNewChat) {
-      const id = setInterval(async () => {
-        // Pass both to poll
-        await fetchConversation(selectedSessionId, selectedConversationId, 'poll', false);
-      }, 5000);
-
-      return () => clearInterval(id);
-    }
   }, [
     popup,
     query,
@@ -936,7 +1074,32 @@ const KubernetesLLMResponseGenerator = ({
     handleGenerateInvestigation,
     setConversationStatus,
     checkConversationExists,
+    serverQueuedMessages?.length,
   ]);
+
+  // Keep the polling clock independent of message renders and draft edits.
+  // Serialize requests so a slow poll cannot overlap and invalidate its predecessor.
+  const shouldPollConversation =
+    !!conversationStatus &&
+    !isNewChat &&
+    (needsConversationRefresh || !INVESTIGATION_TERMINAL_STATUSES.includes(conversationStatus) || !!serverQueuedMessages?.length);
+  useEffect(() => {
+    if (!shouldPollConversation || (!selectedSessionId && !selectedConversationId)) return;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        await fetchConversation(selectedSessionId, selectedConversationId, 'poll', false);
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 1000);
+      }
+    };
+    timer = setTimeout(poll, needsConversationRefresh ? 0 : 1000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [shouldPollConversation, needsConversationRefresh, selectedSessionId, selectedConversationId, fetchConversation]);
 
   useEffect(() => {
     if (conversationStatus === 'IN_PROGRESS') {
@@ -1099,6 +1262,7 @@ const KubernetesLLMResponseGenerator = ({
     setConversationStatus('');
     setCurrentlyProcessingQuestion(null);
     clearSuggestions();
+    clearQueuedMessages();
     resetInvestigationState();
     previousConversationStatusRef.current = '';
     if (!popup) {
@@ -1117,6 +1281,7 @@ const KubernetesLLMResponseGenerator = ({
     setConversationStatus,
     setCurrentlyProcessingQuestion,
     clearSuggestions,
+    clearQueuedMessages,
     resetInvestigationState,
   ]);
 
@@ -1176,6 +1341,7 @@ const KubernetesLLMResponseGenerator = ({
         }
         setMessages([]);
         clearSuggestions();
+        clearQueuedMessages();
         resetTokenMetrics();
         previousConversationStatusRef.current = '';
       }
@@ -1190,16 +1356,10 @@ const KubernetesLLMResponseGenerator = ({
       setConversationStatus,
       setCurrentlyProcessingQuestion,
       clearSuggestions,
+      clearQueuedMessages,
       resetTokenMetrics,
     ]
   );
-
-  const handleStopInvestigation = useCallback(() => {
-    stopInvestigation(conversationIdAtDb, conversationStatus, () => {
-      setConversationStatus('TERMINATING');
-      clearSuggestions();
-    });
-  }, [conversationIdAtDb, conversationStatus, stopInvestigation, setConversationStatus, clearSuggestions]);
 
   const handleTokenUsageHover = useCallback(async () => {
     // Usage metrics resolve by either key — session_id (normal chats) or conversation_id
@@ -1790,13 +1950,21 @@ const KubernetesLLMResponseGenerator = ({
                           value={generateQuestionText}
                           fontSize='var(--ds-text-body-lg)'
                           fontWeight='var(--ds-font-weight-regular)'
-                          placeholder={popup ? 'Ask a question...' : 'Ask me about troubleshooting, error logs, resource usage, or optimizations.'}
+                          placeholder={
+                            isConversationInProgress && canQueueMessages
+                              ? isMaxQueueReached
+                                ? `Queue limit reached (max ${maxQueuedMessages}). Wait for tasks to complete or remove a queued message.`
+                                : 'Queue a follow-up message...'
+                              : popup
+                              ? 'Ask a question...'
+                              : 'Ask me about troubleshooting, error logs, resource usage, or optimizations.'
+                          }
                           maxRows={popup ? 4 : 3}
                           minRows={popup ? 1 : 3}
                           maxLength={500000}
                           suggestionsAt={enabledAgents}
                           showBorderleft={false}
-                          disabled={isConversationLoading || isConversationInProgress}
+                          disabled={isConversationLoading || (isConversationInProgress && (!canQueueMessages || isMaxQueueReached))}
                           credentials={availableCredentials}
                           models={availableModels}
                           defaultModel={defaultModel}
@@ -1808,13 +1976,15 @@ const KubernetesLLMResponseGenerator = ({
                           onConfigSelect={setSelectedConfig}
                           onConfigClear={clearModelConfig}
                           imageSupport={imageSupport}
+                          imageDraft={queueImageDraft}
+                          onDraftSubmitted={(id) => setQueueImageDraft((current) => (current?.id === id ? undefined : current))}
                           isFollowUp={popup}
                           submitOnModEnter
                           buttonProperties={{
                             show: true,
-                            enable: !isConversationLoading,
+                            enable: !isConversationLoading && (!isConversationInProgress || (canQueueMessages && !isMaxQueueReached)),
                             onClick: (text, _config, images) => {
-                              handleGenerateInvestigation(text, images);
+                              return handleGenerateInvestigation(text, images);
                             },
                           }}
                         />
@@ -2066,7 +2236,9 @@ const KubernetesLLMResponseGenerator = ({
                   left: ds.space.mul(1, 25),
                   right: 0,
                   zIndex: 10,
-                  backgroundColor: 'transparent',
+                  backgroundColor: 'var(--ds-background-100)',
+                  borderRadius: 'var(--ds-radius-lg) var(--ds-radius-lg) 0 0',
+                  pt: ds.space[2],
                   px: 0,
                   transform: isConversationListVisible ? 'translateX(125px)' : 'translateX(0)',
                   transition: 'transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -2105,6 +2277,41 @@ const KubernetesLLMResponseGenerator = ({
                   />
                 </Box>
               )}
+              {(queueSubmitError || queueActionError) && (
+                <Typography role='alert' color='error'>
+                  {queueSubmitError || queueActionError}
+                </Typography>
+              )}
+              {pendingQueueSubmission?.scope === queueScope && (
+                <Box
+                  role='status'
+                  aria-live='polite'
+                  sx={{
+                    p: 2,
+                    mb: ds.space[2],
+                    backgroundColor: 'var(--ds-background-100)',
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    borderRadius: 2,
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <CircularProgress size={14} />
+                    <Typography variant='body2'>Adding to queue…</Typography>
+                  </Box>
+                  <Typography sx={{ mt: 1, overflowWrap: 'anywhere' }}>{pendingQueueSubmission.text}</Typography>
+                </Box>
+              )}
+              <QueuedMessagesBanner
+                queuedMessages={queuedMessages}
+                editingMessageId={pendingQueueEdit?.scope === queueScope ? pendingQueueEdit.id : undefined}
+                isExpanded={isQueueExpanded}
+                maxQueuedMessages={maxQueuedMessages}
+                onToggleExpanded={toggleQueueExpanded}
+                onSendNow={sendNowQueuedMessage}
+                onEdit={handleEditQueuedMessage}
+                onDelete={removeQueuedMessage}
+              />
               {!showFollowupSheet && (
                 <SummaryBlock
                   hideTitle
@@ -2153,11 +2360,17 @@ const KubernetesLLMResponseGenerator = ({
                     fontSize='var(--ds-text-body)'
                     fontWeight='var(--ds-font-weight-regular)'
                     value={generateQuestionText}
-                    placeholder='Ask a question...'
+                    placeholder={
+                      isConversationInProgress && canQueueMessages
+                        ? isMaxQueueReached
+                          ? `Queue limit reached (max ${maxQueuedMessages}). Wait for tasks to complete or remove a queued message.`
+                          : 'Queue a follow-up message...'
+                        : 'Ask a question...'
+                    }
                     maxRows={popup ? 20 : 8}
                     minRows={popup ? 1 : undefined}
                     maxLength={500000}
-                    disabled={isConversationLoading || isConversationInProgress}
+                    disabled={isConversationLoading || (isConversationInProgress && (!canQueueMessages || isMaxQueueReached))}
                     suggestionsAt={enabledAgents}
                     credentials={availableCredentials}
                     models={availableModels}
@@ -2170,12 +2383,14 @@ const KubernetesLLMResponseGenerator = ({
                     onConfigSelect={setSelectedConfig}
                     onConfigClear={clearModelConfig}
                     imageSupport={imageSupport}
+                    imageDraft={queueImageDraft}
+                    onDraftSubmitted={(id) => setQueueImageDraft((current) => (current?.id === id ? undefined : current))}
                     externalAgentsLoading={loadingAgents}
                     buttonProperties={{
                       show: true,
-                      enable: !isConversationLoading && !isConversationInProgress,
+                      enable: !isConversationLoading && (!isConversationInProgress || (canQueueMessages && !isMaxQueueReached)),
                       onClick: (text, _config, images) => {
-                        handleGenerateInvestigation(text, images);
+                        return handleGenerateInvestigation(text, images);
                       },
                       onClickStop: () => {
                         handleStopInvestigation();
