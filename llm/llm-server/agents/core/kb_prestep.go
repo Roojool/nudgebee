@@ -25,7 +25,7 @@ const (
 	// kbPrestepDefaultTimeoutSeconds is the fallback for
 	// LlmServerKBPrestepTimeoutSeconds. Covers embedding, retrieval and
 	// cross-encoder reranking; completed results survive this deadline.
-	kbPrestepDefaultTimeoutSeconds = 3
+	kbPrestepDefaultTimeoutSeconds = 5
 	// kbRefSnippetMaxChars caps the retrieved-text snippet stamped onto a KB
 	// reference's metadata for the Additional Contexts panel.
 	kbRefSnippetMaxChars = 700

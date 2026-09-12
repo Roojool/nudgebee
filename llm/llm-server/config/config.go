@@ -633,7 +633,7 @@ type appConfig struct {
 	// orchestrators: establish the subject/scope/symptom from existing context,
 	// clarify genuinely ambiguous requests, prefer bounded discovery, and treat an
 	// asserted symptom as a claim rather than a fact. Each orchestrator keeps its
-	// own provider-specific evidence recipe. Dark/default-off global deploy flag.
+	// own provider-specific evidence recipe. Enabled by default; deployments may opt out.
 	OrchestratorGroundingEnabled bool `mapstructure:"llm_orchestrator_grounding_enabled"`
 	// ClaimCritiqueFeedbackEnabled lets captured claim gaps use the existing refinement budget.
 	ClaimCritiqueFeedbackEnabled bool `mapstructure:"llm_claim_critique_feedback_enabled"`
@@ -643,7 +643,7 @@ type appConfig struct {
 	// "there's a surge") as a claim to VERIFY; if behavioural evidence disproves it, the
 	// honest "not occurring" answer is accepted (not forced into a root cause), and if the
 	// confirming tool FAILS/returns nothing the agent must say "cannot confirm" rather than
-	// fabricate an RCA on an unconfirmed symptom. Dark/default-off flag for A/B.
+	// fabricate an RCA on an unconfirmed symptom. Enabled by default; deployments may opt out.
 
 	PremiseVerificationEnabled bool `mapstructure:"llm_premise_verification_enabled"`
 	// TraceAgentV2Enabled gates the canonical, provider-independent traces agent
@@ -1219,7 +1219,7 @@ func init() {
 	viper.SetDefault("llm_server_agent_max_tracesrows", 10)
 	viper.SetDefault("llm_server_agent_max_scratchpad_chars", 200000)
 	viper.SetDefault("llm_server_max_skill_content_length", 5000)
-	viper.SetDefault("llm_server_kb_prestep_timeout_seconds", 3)
+	viper.SetDefault("llm_server_kb_prestep_timeout_seconds", 5)
 	// Bootstrap: only `think` gets schema-authoritative treatment (renderer +
 	// validator). Other tools stay text-description-only until their schema
 	// is reconciled with their Call() acceptance shape. See
@@ -1398,9 +1398,9 @@ func init() {
 	// k8s_orchestrator mode: lean (default) | native. Cloud orchestrators are
 	// lean-only after the #32503 Phase 1 collapse — no per-cloud mode setting.
 	viper.SetDefault("llm_server_k8s_orchestrator_mode", "lean")
-	viper.SetDefault("llm_orchestrator_grounding_enabled", false)
-	viper.SetDefault("llm_premise_verification_enabled", false)
-	viper.SetDefault("llm_claim_critique_feedback_enabled", false)
+	viper.SetDefault("llm_orchestrator_grounding_enabled", true)
+	viper.SetDefault("llm_premise_verification_enabled", true)
+	viper.SetDefault("llm_claim_critique_feedback_enabled", true)
 	viper.SetDefault("llm_server_workspace_port", 8080)
 	viper.SetDefault("llm_server_workspace_local_url", "")   // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_local_token", "") // must match NB_WORKSPACE_TOKEN on the local code-analysis process

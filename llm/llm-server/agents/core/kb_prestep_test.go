@@ -581,15 +581,15 @@ func TestKBPrestepTimeoutConfigurable(t *testing.T) {
 	prev := config.Config.LlmServerKBPrestepTimeoutSeconds
 	defer func() { config.Config.LlmServerKBPrestepTimeoutSeconds = prev }()
 
-	config.Config.LlmServerKBPrestepTimeoutSeconds = 5
-	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
+	config.Config.LlmServerKBPrestepTimeoutSeconds = 7
+	assert.Equal(t, 7*time.Second, kbPrestepTimeout())
 
 	// Unset / invalid values fall back to the default instead of a zero
 	// timeout (which would make every retrieval fail open instantly).
 	config.Config.LlmServerKBPrestepTimeoutSeconds = 0
-	assert.Equal(t, 3*time.Second, kbPrestepTimeout())
+	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
 	config.Config.LlmServerKBPrestepTimeoutSeconds = -3
-	assert.Equal(t, 3*time.Second, kbPrestepTimeout())
+	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
 }
 
 // TestClassifyCollection pins the collection-name contract rag-server reports on

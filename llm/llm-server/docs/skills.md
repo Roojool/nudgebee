@@ -141,7 +141,7 @@ that cannot execute them.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
-| `llm_server_kb_prestep_timeout_seconds` | `3` | Shared RAG deadline for account-wide and mapped discovery. Completed results are retained; unfinished HTTP calls are cancelled. Mapping/attribution are outside this budget. |
+| `llm_server_kb_prestep_timeout_seconds` | `5` | Shared RAG deadline for account-wide and mapped discovery. Completed results are retained; unfinished HTTP calls are cancelled. Mapping/attribution are outside this budget. |
 | `llm_server_max_skill_content_length` | `5000` | Caps each load_skills content page and relevant content supplied to an auto-chunk custom agent. |
 | `llm_server_skill_selection_top_k` | `0` | Legacy/code-analysis-specific mapped-skill selection. It no longer controls executor-wide discovery. |
 
@@ -150,8 +150,8 @@ the same account policy. Existing ENV timeout overrides remain effective.
 
 ### Performance acceptance and remaining work
 
-The end-to-end target is p50 30 seconds. The initial automatic RAG budget is
-3 seconds, not a claim that the SLA is met. Earlier port-forwarded integration
+The end-to-end target is p50 30 seconds. The automatic RAG budget is
+5 seconds, not a claim that the SLA is met. Earlier port-forwarded integration
 runs measured 14–17 seconds for combined KB/memory preparation with the former
 12-second RAG budget; those are not production percentiles or pure RAG timings.
 

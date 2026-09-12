@@ -53,10 +53,11 @@ func (m LoadSkillsTool) Name() string {
 }
 
 func (m LoadSkillsTool) Description() string {
+	const procedureReadGuidance = " For a potentially relevant SOP/procedure, finish reading its applicability, scope and prerequisites before dependent investigation or delegation; do not launch those actions in parallel with this load. If it does not apply, proceed without following it; a title match alone does not establish applicability."
 	if config.Config.LlmServerKnowledgeWorkspaceEnabled {
-		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.`
+		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.` + procedureReadGuidance + " Continue truncated reads as needed using keyword or start_line."
 	}
-	return `Loads discovered knowledge candidates by candidate id, or active account knowledge bases by exact name. Unknown names are not searched or substituted; use search_skills for discovery. You MUST use the 'skill_name' parameter. For multiple entries, provide ids or names as a single comma-separated string.`
+	return `Loads discovered knowledge candidates by candidate id, or active account knowledge bases by exact name. Unknown names are not searched or substituted; use search_skills for discovery. You MUST use the 'skill_name' parameter. For multiple entries, provide ids or names as a single comma-separated string.` + procedureReadGuidance + " If the excerpt omits scope or prerequisites and the full document is unavailable, report that applicability is unverified; do not repeatedly reload the same excerpt or assume the procedure applies."
 }
 
 func (m LoadSkillsTool) GetType() core.NBToolType {
@@ -551,7 +552,7 @@ type SearchSkillsTool struct{}
 func (s SearchSkillsTool) Name() string { return SearchSkillsToolName }
 
 func (s SearchSkillsTool) Description() string {
-	return `Searches knowledge bases and skills by a natural language query. Returns candidate snippets from manual (DB-stored) and external (Confluence, ServiceNow) knowledge bases. Use load_skills with the returned candidate id or exact manual KB name to read a selected result. Candidate ids are valid only in the current turn. Search matches may be weak; select only results relevant to the task.`
+	return `Searches knowledge bases and skills by a natural language query. Returns candidate snippets from manual (DB-stored) and external (Confluence, ServiceNow) knowledge bases. Use load_skills with the returned candidate id or exact manual KB name to read a selected result. Candidate ids are valid only in the current turn. Search matches may be weak; select only results relevant to the task. When searching for investigation guidance, finish this search before launching dependent investigation or delegation; do not run those actions in parallel with discovery. If a potentially relevant SOP/procedure is returned, load it and assess its applicability, scope and prerequisites before dependent work. If no applicable procedure is found, continue the investigation normally; do not force a weak match or repeatedly search for a mandatory SOP.`
 }
 
 func (s SearchSkillsTool) GetType() core.NBToolType { return core.NBToolTypeTool }
