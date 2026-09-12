@@ -308,6 +308,11 @@ export type ForwardOptions = {
   clientAuthorization?: string;
   traceparent: string;
   requestId: string;
+  // Aborts the upstream fetch (and the body read) when the caller is gone.
+  // The HTTP handlers wire it to the response's close event: a browser that
+  // gave up on a slow panel otherwise leaves this process buffering an answer
+  // nobody will read, and a burst of those is what OOM-kills the pod.
+  signal?: AbortSignal;
 };
 
 // Shown when a session carries no roles at all (e.g. the user switched to a
@@ -322,6 +327,9 @@ export type ForwardError =
   | { kind: 'no_tenant_role'; method: string }
   | { kind: 'forbidden'; method: string; role: string; allowedRoles: string[] }
   | { kind: 'upstream_unreachable'; method: string; url: string; detail: string }
+  // The caller disconnected (opts.signal aborted) before the upstream answered.
+  // Nobody reads the response, so this is logged at info, not as an error.
+  | { kind: 'client_disconnected'; method: string; url: string }
   | { kind: 'upstream_parse_failed'; method: string; url: string; detail: string }
   | { kind: 'upstream_error'; method: string; url: string; status: number; payload: unknown };
 
@@ -444,8 +452,10 @@ export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult
       method: 'POST',
       headers: upstreamHeaders,
       body: JSON.stringify(upstreamBody),
+      signal: opts.signal,
     });
   } catch (err: unknown) {
+    if (opts.signal?.aborted) return { ok: false, error: { kind: 'client_disconnected', method: opts.method, url: upstreamUrl } };
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, error: { kind: 'upstream_unreachable', method: opts.method, url: upstreamUrl, detail } };
   }
@@ -455,6 +465,7 @@ export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult
   try {
     rawBody = await upstream.text();
   } catch (err: unknown) {
+    if (opts.signal?.aborted) return { ok: false, error: { kind: 'client_disconnected', method: opts.method, url: upstreamUrl } };
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, error: { kind: 'upstream_unreachable', method: opts.method, url: upstreamUrl, detail } };
   }
@@ -646,6 +657,8 @@ export async function tryBypassGraphQL(opts: {
   // path threads this; the HTTP path leaves it undefined and relies on
   // the cookie JWT's tenant binding.
   tenantOverride?: string;
+  // See ForwardOptions.signal.
+  signal?: AbortSignal;
 }): Promise<GraphQLBypassResult> {
   const parsed = parseOperation(opts.query, opts.variables);
   if (!parsed.ok) return { handled: false, reason: parsed.reason };
@@ -684,6 +697,7 @@ export async function tryBypassGraphQL(opts: {
         clientAuthorization: opts.clientAuthorization,
         traceparent: opts.traceparent,
         requestId: opts.requestId,
+        signal: opts.signal,
       })
     )
   );
@@ -795,6 +809,9 @@ function forwardErrorMessage(err: ForwardError): string {
     case 'upstream_unreachable':
       console.error('%s', `[graphql-gateway] upstream_unreachable method=${err.method} url=${err.url} detail=${err.detail}`);
       return `Upstream unreachable for ${err.method}`;
+    case 'client_disconnected':
+      console.log(`[graphql-gateway] client_disconnected method=${err.method} url=${err.url}`);
+      return `Client disconnected before ${err.method} answered`;
     case 'upstream_parse_failed':
       console.error('%s', `[graphql-gateway] upstream_parse_failed method=${err.method} url=${err.url} detail=${err.detail}`);
       return `Upstream response parse failed for ${err.method}`;

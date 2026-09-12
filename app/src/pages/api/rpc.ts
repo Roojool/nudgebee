@@ -2,6 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import crypto from 'crypto';
 import { context, propagation, trace, SpanStatusCode } from '@opentelemetry/api';
 import { authenticateRequest, buildSessionVariables, forwardAction, NO_TENANT_ROLE_MESSAGE } from '@lib/rpcGateway';
+import { clientGone } from '@lib/graphqlGatewayHandler';
 
 // JSON-RPC 2.0 gateway. Thin protocol shell — auth, route lookup, envelope
 // construction and upstream forwarding live in @lib/rpcGateway, shared with
@@ -149,6 +150,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         clientAuthorization: auth.token ? `Bearer ${auth.token}` : undefined,
         traceparent: traceParent,
         requestId,
+        signal: clientGone(res),
       });
       timing.upstream_ms = Math.round(performance.now() - tFetch);
 
@@ -183,6 +185,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
               `[rpc-proxy] upstream_unreachable method=${result.error.method} url=${result.error.url} detail=${result.error.detail}`
             );
             res.status(502).json(rpcError(rpcId, RPC_UPSTREAM_ERROR, 'upstream_unreachable', { method: result.error.method }));
+            return;
+          case 'client_disconnected':
+            // The socket is gone; there is nobody to answer.
+            console.log(`[rpc-proxy] client_disconnected method=${result.error.method} url=${result.error.url}`);
+            res.end();
             return;
           case 'upstream_parse_failed':
             console.error(

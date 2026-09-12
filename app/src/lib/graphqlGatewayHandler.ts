@@ -39,6 +39,24 @@ export type GatewayHandlerOptions = {
 };
 
 // Shared GraphQL→RPC gateway request handler used by /api/graphql.
+/**
+ * A signal that aborts when the client stops waiting: the browser cancelled
+ * (a panel's 30s deadline), or nginx cut the upstream read at its timeout.
+ * `res` closes in both cases; `writableFinished` separates them from the
+ * normal close that follows a sent response.
+ */
+export function clientGone(res: NextApiResponse): AbortSignal {
+  const controller = new AbortController();
+  // Already gone (left during auth or rate limiting): 'close' has fired and
+  // will not fire again, so abort now.
+  if (res.destroyed) controller.abort();
+  else
+    res.on('close', () => {
+      if (!res.writableFinished) controller.abort();
+    });
+  return controller.signal;
+}
+
 export async function handleGatewayRequest(req: NextApiRequest, res: NextApiResponse, opts: GatewayHandlerOptions) {
   const t0 = performance.now();
   const tracer = trace.getTracer(opts.tracerName);
@@ -138,6 +156,7 @@ export async function handleGatewayRequest(req: NextApiRequest, res: NextApiResp
         clientAuthorization: token ? `Bearer ${token}` : undefined,
         traceparent: traceParent,
         requestId,
+        signal: clientGone(res),
       });
       timing.gateway_ms = Math.round(performance.now() - tGateway);
 
