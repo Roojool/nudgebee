@@ -146,20 +146,7 @@ const CustomDateTimePicker = ({
                   '& .MuiIconButton-root': {
                     height: Heights[size] || ds.space.mul(0, 18),
                     width: Heights[size] || ds.space.mul(0, 18),
-                    color: 'var(--ds-brand-600)',
-                    backgroundColor: 'var(--ds-background-100)',
-                    border: '1px solid var(--ds-brand-200)',
-                    borderRadius: 'var(--ds-radius-md)',
-                    transition: `border-color var(--ds-motion-micro), background-color var(--ds-motion-micro)`,
-                    '&:hover': {
-                      color: 'var(--ds-brand-600)',
-                      backgroundColor: 'var(--ds-brand-100)',
-                      borderColor: 'var(--ds-brand-300)',
-                    },
-                    '&:active': {
-                      backgroundColor: 'var(--ds-brand-200)',
-                      borderColor: 'var(--ds-brand-300)',
-                    },
+                    color: disabled ? ds.gray[400] : ds.gray[500],
                   },
                 }}
               >
