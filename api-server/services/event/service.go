@@ -2266,6 +2266,25 @@ func normalizeSubjectNode(subjectNode string) string {
 	return subjectNode
 }
 
+// isPointInTime reports whether an event describes a moment that has already
+// passed rather than a condition that can recover. Pure so the rule can be
+// tested without a database; the feature flag is checked by the caller.
+//
+// Two shapes qualify:
+//   - configuration_change, which has no end time of its own, and
+//   - any event whose producer sent ends_at at or before starts_at, i.e. an
+//     explicitly zero-length (or inverted) interval.
+//
+// An event with ends_at AFTER starts_at is a condition that ran and stopped.
+// Its producer owns that lifecycle and sends its own resolve, so it is not
+// point-in-time and is left alone here.
+func isPointInTime(findingType string, startsAt, endsAt *time.Time) bool {
+	if findingType == "configuration_change" {
+		return true
+	}
+	return startsAt != nil && endsAt != nil && !endsAt.After(*startsAt)
+}
+
 func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	var cfg insertConfig
 	for _, o := range opts {
@@ -2301,10 +2320,32 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	// the one place that decides it at ingestion instead of re-deriving it
 	// per call site. Centralized in InsertEvent (not InvestigateEvent) so
 	// every insert path gets it automatically.
-	isPointInTimeEvent := config.Config.FeatureEventPointInTimeCloseEnabled && event.FindingType == "configuration_change"
+	//
+	// The same reasoning covers any event that ARRIVES ALREADY ENDED -- one whose
+	// producer sets ends_at at or before starts_at. A cloud notification like
+	// "ECS Task State Change", "GKE Resource Upgrade Started" or "Kubernetes
+	// Secret Modified" describes an instant, and the webhook says so by sending a
+	// zero-length interval. Storing that FIRING asserts an ongoing condition the
+	// producer never claimed, and nothing will ever close it: these sources send
+	// no resolve for a moment that has already passed. Measured on the Rackspace
+	// estate, 18,357 `ECS Task State Change` events sat FIRING at a median age of
+	// 52 days, every one of them carrying ends_at == starts_at, and they were 69%
+	// of everything stuck open there.
+	//
+	// Only ends_at <= starts_at qualifies. A genuine interval (ends_at AFTER
+	// starts_at) is a condition that ran and stopped, which the producer's own
+	// resolve path owns, so it is left alone.
+	isConfigChange := event.FindingType == "configuration_change"
+	isPointInTimeEvent := config.Config.FeatureEventPointInTimeCloseEnabled &&
+		isPointInTime(event.FindingType, event.StartsAt, event.EndsAt)
 	if isPointInTimeEvent {
 		event.Status = EventStatusClosed
-		event.EndsAt = event.StartsAt
+		if isConfigChange {
+			// configuration_change carries no end time of its own; stamp one so the
+			// row does not read as an open-ended incident. An already-ended event
+			// keeps the producer's timestamps untouched.
+			event.EndsAt = event.StartsAt
+		}
 	}
 
 	query := `INSERT INTO events ("id", "finding_id", "title", "description", "source", "aggregation_key", "priority", "subject_type", "subject_name", "subject_namespace", "subject_node", "service_key", "fingerprint", "evidences", "tenant", "cloud_account_id", "status", "finding_type","cluster", "starts_at", "labels", "updated_at", "ends_at", "cloud_resource_id", "category", "created_at", "urgency", "subject_owner", "subject_owner_kind", "nb_status")
