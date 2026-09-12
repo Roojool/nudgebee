@@ -325,7 +325,22 @@ export function selectComponents(payload: StatusPayload, ids: string[]): { paylo
   const byId = new Map(payload.components.map((c) => [c.id, c]));
   const missing = ids.filter((id) => !byId.has(id));
   const components = ids.flatMap((id) => byId.get(id) ?? []);
-  return { payload: { ...payload, status: rollup(components), components }, missing };
+  const { notice, ...rest } = payload;
+  const narrowed: StatusPayload = { ...rest, status: rollup(components), components };
+
+  // A notice scoped to specific components only belongs in the answer when at
+  // least one of them was asked for; a system-wide notice (no components)
+  // always applies. Otherwise a healthy subset would carry someone else's banner.
+  if (notice) {
+    const scope = notice.components ?? [];
+    if (scope.length === 0) {
+      narrowed.notice = notice;
+    } else {
+      const relevant = scope.filter((id) => ids.includes(id));
+      if (relevant.length > 0) narrowed.notice = { ...notice, components: relevant };
+    }
+  }
+  return { payload: narrowed, missing };
 }
 
 /**

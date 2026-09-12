@@ -60,6 +60,24 @@ describe('selectComponents', () => {
   });
 });
 
+describe('selectComponents with a notice', () => {
+  const notice = { state: 'maintenance' as const, message: 'API maintenance', components: ['api', 'ai'] };
+  const withNotice: StatusPayload = { ...payload, notice };
+
+  it('keeps a scoped notice, trimmed to the requested components', () => {
+    expect(selectComponents(withNotice, ['api', 'dashboard']).payload.notice).toEqual({ ...notice, components: ['api'] });
+  });
+
+  it('drops a scoped notice when none of its components were requested', () => {
+    expect(selectComponents(withNotice, ['dashboard']).payload.notice).toBeUndefined();
+  });
+
+  it('keeps a system-wide notice for any subset', () => {
+    const systemWide: StatusPayload = { ...payload, notice: { state: 'investigating', message: 'Looking into it' } };
+    expect(selectComponents(systemWide, ['dashboard']).payload.notice).toEqual(systemWide.notice);
+  });
+});
+
 describe('httpStatusFor', () => {
   it('answers 200 only for operational and planned maintenance', () => {
     expect(httpStatusFor('operational')).toBe(200);
