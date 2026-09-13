@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Typography, LinearProgress } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { ProgressBar } from '@ui/ProgressBar';
 import SummarySkeletonLoader from '@shared/SummarySkeletonLoader';
 import { formatMemory } from '@lib/formatter';
 import apiCloudAccount from '@api1/cloud-account';
@@ -145,16 +146,7 @@ const TopConsumers = React.memo(({ apps }: { apps: any[] }) => {
                 {app.memMB} MB &middot; {app.instances}i
               </Typography>
             </Box>
-            <LinearProgress
-              variant='determinate'
-              value={(app.memMB / maxMem) * 100}
-              sx={{
-                height: 3,
-                borderRadius: ds.radius.md,
-                backgroundColor: ds.gray[100],
-                '& .MuiLinearProgress-bar': { backgroundColor: ds.blue[500], borderRadius: ds.radius.md },
-              }}
-            />
+            <ProgressBar value={app.memMB} max={maxMem} size='sm' />
           </Box>
         </Box>
       ))}

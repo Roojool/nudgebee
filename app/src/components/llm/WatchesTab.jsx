@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import PropTypes from 'prop-types';
-import { Box, Typography, IconButton, LinearProgress } from '@mui/material';
+import { Box, Typography, IconButton } from '@mui/material';
+import { ProgressLinear } from '@ui/ProgressLinear';
 import Label from '@ui/Label';
 import Tooltip from '@ui/Tooltip';
 import CancelOutlinedIcon from '@mui/icons-material/CancelOutlined';
@@ -323,7 +324,7 @@ export default function WatchesTab({ conversationId }) {
           </IconButton>
         </Tooltip>
       </Box>
-      {hasNonTerminal && <LinearProgress variant='indeterminate' sx={{ height: 2, bgcolor: 'var(--ds-gray-100)' }} />}
+      {hasNonTerminal && <ProgressLinear surface='section' aria-label='Polling active watches' />}
       {watches.map((w) => (
         <WatchRow key={w.id} watch={w} onCancel={handleCancel} />
       ))}
