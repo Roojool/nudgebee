@@ -26,11 +26,8 @@ import (
 //     the explicit fallback, instead of presenting NL phrasing as the default
 //     the way v1's routineInstructions does (v1 has no canonical-JSON path at
 //     all, so NL-first is correct there).
-//   - investigationInstructionsV3 / enumerationInstructionsV3 /
-//     outputFormatInstructionsV3 / sharedConstraintsV3 are currently
-//     byte-identical to their agent_log.go originals (mode names, tool name)
-//     — kept as separate copies so they can diverge later without touching
-//     v1, not because they differ today.
+//   - Analysis and output instructions batch Python/shell work, parse time
+//     bounds without assuming file order, and avoid duplicating raw excerpts.
 
 // logModeV3 mirrors agent_log.go's logMode — the deterministic intent bucket
 // the Go classifier emits, so logs_v3's prompt carries a single authoritative
@@ -99,8 +96,8 @@ func sharedHeaderAndWorkflowV3() []string {
 		"     Skip resource_search_execute ONLY when either (1) the framework-generated `<resolved_targets>` block carries `status=\"confirmed\"`, exact pod member names, and their namespace, or (2) the question itself already carries one or more exact resolved pod names — each has the hash suffix described above, OR follows a StatefulSet ordinal pattern (`<sts-name>-<integer>`, e.g. `kafka-0`, `mysql-0`) — together with their namespace. A `candidate` target alone never suppresses discovery. Reuse every confirmed/supplied pod directly; do not rediscover a workload the parent already resolved. If a direct fetch later reports not found, Step 2a remains mandatory and safely re-resolves stale pods.",
 		"     Call it with structured JSON matching its own schema — `{\"resource_name\": \"<name>\", \"namespace\": \"<ns>\", \"search_type\": \"suggestions\"}` — not a free-text command string. `suggestions` is the right mode for this workflow — it resolves a workload to its live pods (and their owner references) in one lookup — and it is also what the tool falls back to when `search_type` is absent, so a call that omits it still behaves correctly. Pass it explicitly anyway. Omit `namespace` only when the user genuinely didn't give one.",
 		step2,
-		"  2b. **Read the response metadata before you shell out.** The inline logs end in one of two bracketed markers, and the `logs_complete` field says the same thing machine-readably. `[... complete — all matching lines are shown above ...]` (`logs_complete: true`) means `file_ref` holds nothing you have not been given: answer from the inline logs, and do NOT call shell_execute. `[... N more bytes truncated ...]` (`logs_complete: false`) means `file_ref` has more — and the inline portion is the FIRST lines of that same file in EXACTLY the same format. Follow `logs_format_hint`: for `timestamp_tab_message`, read line-by-line and split once on TAB; never JSON-decode the whole file. You never need a separate `head` call to discover the layout.",
-		"  2c. **Surface `kubectl_disclosure` when present.** It means the kubectl result was narrowed to one pod and/or a server-side filter. State that limitation explicitly rather than treating the slice as complete workload coverage.",
+		"  2b. **Read the response metadata before you shell out.** The inline logs end in one of two bracketed markers, and the `logs_complete` field says the same thing machine-readably. `[... complete — all matching lines are shown above ...]` (`logs_complete: true`) means all fetched lines are visible: a simple listing needs no shell call. For requested counts, grouping, correlation, or investigation sweeps not already fully supplied with counts and coverage by the response, process the saved file with Python or shell instead of estimating from inline text. `[... N more bytes truncated ...]` (`logs_complete: false`) means `file_ref` has more — and the inline portion is the FIRST lines of that same file in EXACTLY the same format. Follow `logs_format_hint`: for `timestamp_tab_message`, read line-by-line and split once on TAB; never JSON-decode the whole file. You never need a separate `head` call to discover the layout.",
+		"  2c. **Surface `kubectl_disclosure` when present.** On the kubectl backend, the fetch response may carry a `kubectl_disclosure` field — it means what you're seeing was narrowed: a multi-pod workload was read from only one pod, and/or a filter/line-cap was applied server-side. When it's non-empty, state that caveat explicitly in your final answer (which pod(s) went unread, any filter applied) rather than reporting on the narrowed slice as if it were the whole picture. Empty or absent means nothing was narrowed.",
 		"  2a. **Recovery from name resolution failure.** If `fetch_logs_v3` returns an error containing \"pod not found\", \"(NotFound)\", \"no resources found\", or similar — the resource name didn't resolve. You MUST:",
 		"     - Call `resource_search_execute` with the original name and namespace: `{\"resource_name\": \"<name>\", \"namespace\": \"<ns>\", \"search_type\": \"suggestions\"}`.",
 		"     - Take the resolved pod name (with hash suffix) from the search result.",
@@ -139,7 +136,7 @@ func routineInstructionsV3() []string {
 		step3,
 		labelAnchorRulesV3(fastPath),
 		"  4. **Read the fetch response — including the pre-computed bundle_signal.** The fetch_logs_v3 envelope carries a `bundle_signal` field. When it's non-empty (the user asked for error content), it holds a category-tagged sweep (error / fatal / panic / OOM / timeout / connection-refused / TLS / HTTP-5xx) computed server-side against the saved file — use its output as the body of your answer without issuing your own grep. When it's empty, answer from the inline logs directly.",
-		"  5. **Envelope is the answer.** Rely entirely on the fetch response (inline logs + `bundle_signal` when present) for your reply. The envelope already contains the categorised signal, so a follow-up shell_execute grep would only re-derive what you already have.",
+		"  5. **Use the envelope for simple listings.** For requested calculations or grouping absent from the envelope, process the saved file once with Python or shell. Otherwise rely on the fetch response (inline logs + `bundle_signal` when present) for your reply. The envelope already contains the categorised signal, so a follow-up shell_execute grep would only re-derive what you already have.",
 		"  6. **No widening on empty result — this is a hard stop, not a suggestion.** If `fetch_logs_v3` returns no matching log lines for the user's window, you MUST NOT call `resource_search_execute`, `shell_execute`, or `fetch_logs_v3` again to broaden, re-check, or verify — not a different label, not a wider filter, not raw kubectl, not pod events, not sibling resources. State \"no logs found in <window>\" in your final answer and STOP: make NO further tool calls this turn. This mode is for routine viewing, not investigation — an empty result here is a valid, complete answer, not a signal to dig further.",
 	}
 }
@@ -161,22 +158,20 @@ func investigationInstructionsV3() []string {
 
 	if config.Config.LogsStandardGrepEnabled {
 		out = append(out,
-			"  4a. **Read `bundle_signal` first (fastest path).** The fetch_logs_v3 envelope carries a `bundle_signal` field with a pre-computed server-side sweep across error / fatal / panic / OOM / timeout / connection-refused / TLS / HTTP-5xx categories against the saved file. When it's non-empty and shows a clear signal (matches concentrated in one category with a visible transition timestamp), skip step 4 below and go straight to the WHEN report. When it's empty (bundle didn't fire — query wording wasn't error-adjacent) or thin (matches scattered across categories, no clear timestamp cluster), fall through to step 4 for the manual Sweep A+B pass and any domain-aware patterns. Use the provided bundle output directly — the server has already run the sweep.",
+			"  4a. **Read `bundle_signal` first.** It contains at most 20 example lines per diagnostic pattern, not complete counts or computed time bounds. Reuse those examples as evidence. A clear error category alone does not establish the incident window or trigger: continue with step 4 for missing counts, parsed bounds, and trigger context. Skip only work already supplied with sufficient coverage by the fetch response or previous analysis; never infer complete coverage from a short bundle.",
 		)
 	}
 	out = append(out,
-		"  4. **Mandatory diagnostic sweep (NOT optional for this mode).** When `fetch_logs_v3` returns a non-empty `file_ref`, you MUST sweep the file before producing a final answer — as **exactly ONE `shell_execute` call whose command chains every pattern you want**. Do NOT emit one `shell_execute` per pattern: each extra action costs a full planning turn (~5s) to run work the shell finishes in milliseconds, and patterns split across actions reliably end up in separate turns rather than one. One command, one round trip, every result in a single observation:",
-		"     **Never batch a `fetch_logs_v3` call together with a `shell_execute` grep on the file_ref it is expected to return — not here, not anywhere else in this workflow.** `file_ref` only exists once `fetch_logs_v3` actually finishes; a grep queued in the same iteration cannot know the real value and will target a file that hasn't been written yet, producing `No such file or directory` even though your command is otherwise correct. Always let a `fetch_logs_v3` call finish and observe its `file_ref` before grepping it, in the NEXT iteration.",
-		"     The sweep has two halves. Chain them in ONE command with a separator so you can tell the outputs apart:",
-		"       `grep -nE \"ERROR|FATAL|PANIC|exception|traceback\" <file_ref> | head -20; echo '--- TRIGGER ---'; grep -nE \"reload|reconfigur|deploy|rollout|secret.rotat|config.changed|started|loaded|env|config\" <file_ref> | head -20`",
-		"     Sweep A (before the separator) — the error transition: note the timestamp on the first matching line, that is the transition point.",
-		"     Sweep B (after the separator) — the trigger: it usually lives in WARN/INFO/CONFIG lines that Sweep A skipped. Pick the trigger line that immediately precedes Sweep A's transition point.",
-		"     **Tailor both pattern sets to the question actually asked** — the defaults above target generic crash-shaped failures and are a STARTING POINT, not a fixed list. A latency question wants `timeout|deadline|slow|context.deadline|elapsed`; an auth question wants `401|403|token|expired|unauthorized`; a question naming a specific id, host, or endpoint should grep for that literal. Add, replace, or drop patterns as the question warrants — but keep it to the SAME single command.",
+		"  4. **Complete the diagnostic evidence.** Reuse evidence already available with sufficient coverage. If error bounds/counts or trigger context are missing and file_ref is non-empty, compute the missing evidence in exactly ONE shell_execute call using Python or a shell pipeline. Do not run a separate action for each pattern or repeat completed calculations.",
+		"     Wait for fetch_logs_v3 to finish and use its actual file_ref; never batch analysis with the fetch that creates its input file.",
+		"     In that execution, scan all fetched records, parsing them according to logs_format_hint. Sweep A: match the question-relevant error patterns, count matches, and compute parsed earliest/latest timestamps across all matches. Sweep B: search for relevant trigger context preceding the earliest observed error. Keep exact representative lines and their line numbers; bound displayed examples only AFTER computing counts and time bounds. Return these results together. The saved file may be newest-first or unordered; do not derive bounds from head/tail samples.",
+		"     Use the earliest observed match as T for any antecedent fetch. If the fetched window or limit cuts off earlier records, disclose that true onset is unknown. Trigger evidence often lives in WARN/INFO/CONFIG lines; temporal proximity alone does not prove causation.",
+		"     **Tailor both pattern sets to the question actually asked** — starting patterns for Sweep A are `error|fatal|panic|exception|traceback`, and for Sweep B `reload|reconfigur|deploy|rollout|secret.rotat|config.changed|started|loaded`; use case-insensitive matching. These are starting points, not a fixed list. A latency question wants `timeout|deadline|slow|context.deadline|elapsed`; an auth question wants `401|403|token|expired|unauthorized`; a question naming a specific id, host, or endpoint should grep for that literal. Add, replace, or drop patterns as the question warrants — but keep it to the SAME single command.",
 		"  5. **Second-pass targeted antecedent fetch (only if Sweep A finds an error timestamp).** Call fetch_logs_v3 again with `\"all logs for <pod> in <namespace> from <T-5min> to <T>, limit 500, in chronological forward order\"`. This pulls the trigger context (config reload, deploy, secret rotation) immediately preceding the error — bounded by explicit `start_time`/`end_time`, so forward+limit is safe. Wait for this call to complete and observe its `file_ref`, THEN re-run Sweep B's grep on it as a separate, later iteration — never in the same batch as this fetch_logs_v3 call. Skip if Sweep B already found a clear trigger.",
 		"  6. **Empty-result recovery (MANDATORY two-step — DO NOT skip):**",
 		"     Step E1 — re-grep with case-insensitive + broader keywords on the SAME file:",
 		"       `grep -inE \"error|fail|fatal|panic|exception|traceback|connection.refused|connectionerror|cannot.connect|timed.out|timeout|denied|unreachable\" <file_ref> | head -20`",
-		"       The default Sweep A pattern is case-sensitive and misses mixed-case wording (e.g. `ConnectionError`, `Connection refused`) and protocol idioms (`timed out`, `unreachable`).",
+		"       If the broader case-insensitive patterns were already checked across the full fetched file in step 4, reuse that result. Otherwise check them now; a narrower pattern set can miss protocol idioms such as `timed out` or `unreachable`.",
 		"     Step E2 — only if Step E1 is also empty, widen the fetch:",
 		"       Re-call fetch_logs_v3 with `\"all logs for <pod> in <namespace> last 7d, limit 5000\"` (widen the *window*, not the limit — 5000 is the recommended max across providers). Wait for it to complete, THEN re-run the Step E1 grep on the new file_ref in a later iteration — never in the same batch as this fetch_logs_v3 call.",
 		"       If the user's question or any earlier observation mentions a specific timestamp, ALSO issue a narrower targeted fetch around that timestamp.",
@@ -185,8 +180,8 @@ func investigationInstructionsV3() []string {
 		"       - Do NOT substitute kubectl events, deployment status, or rollout history for a wider log fetch. Events ≠ logs. The critic rejects \"no issues\" answers based on event checks alone.",
 		"       - Do NOT call `think` to conclude \"no issues\" without completing Step E1 AND (if E1 empty) Step E2 AND (if E2 empty) Step E3.",
 		"       - Only after Sweep A + Step E1 + Step E2 + Step E3 all return empty may you state \"no errors found in last 7d\".",
-		"  Do NOT produce a final answer without Sweep A AND (Sweep B succeeding OR a documented second-pass attempt OR a documented widened-window attempt). The critic will reject answers that skip this step.",
-		"  **Report WHEN (MANDATORY).** Your final answer MUST state the incident time window — the `timestamp` field of the FIRST and LAST matching error line from Sweep A. Naming the failure and its cause without \"between <T1> and <T2>\" is incomplete. Do NOT conflate live pod status with incident timing: a pod that is `Running` now can have had a bounded PAST incident — phrase it as \"errors occurred between <T1> and <T2>\", never \"currently failing\" when the error timestamps are in the past.",
+		"  Before answering, establish the error evidence and attempt the relevant trigger search, using either sufficiently complete existing results or step 4. If trigger evidence is missing, make the required follow-up attempt and report any unresolved cause. A sampled bundle alone does not satisfy these requirements.",
+		"  **Report WHEN (MANDATORY).** When matching errors have usable timestamps, state their observed window using parsed earliest/latest timestamps from complete existing results or Sweep A, with coverage limits disclosed. If no matches or usable timestamps exist, say that no error window could be established; do not invent bounds. Report available bounds explicitly. Do NOT conflate live pod status with incident timing: a pod that is `Running` now can have had a bounded PAST incident — phrase it as \"errors occurred between <T1> and <T2>\", never \"currently failing\" when the error timestamps are in the past.",
 
 		"**Domain-aware grep patterns (use when the default Sweep B is empty, or when the question points at one of these areas — add them to the SAME single command as extra chained greps, never as extra shell_execute actions):**",
 		"  - Crashes / restarts:  `OOM|Killed|exit.code|CrashLoop|restart|signal|SIGTERM|SIGKILL`",
@@ -200,7 +195,7 @@ func investigationInstructionsV3() []string {
 		"  - Shape & frequency:  `wc -l FILE; grep -c \"ERROR\\|WARN\\|FATAL\" FILE`",
 		"  - Context ±5 lines:   `grep -n -B5 -A5 \"SPECIFIC\" FILE`",
 		"  - Frequency table:    `grep -oE \"PATTERN\" FILE | sort | uniq -c | sort -rn | head -20`",
-		"  - Time bookends:      `head -5 FILE; tail -5 FILE`",
+		"  - Time bounds: parse timestamps across matching records and compute min/max; head/tail only sample file order.",
 		"  - Window slice:       `awk '/HH:MM:SS/,/HH:MM:SS/' FILE` to slice a time range",
 	)
 	return out
@@ -220,18 +215,21 @@ func enumerationInstructionsV3() []string {
 
 	if config.Config.LogsStandardGrepEnabled {
 		out = append(out,
-			"  3a. **Read `bundle_signal` first (fastest path for enumeration).** The fetch_logs_v3 envelope carries a `bundle_signal` field with a pre-computed server-side category sweep against the saved file. When it's non-empty, present those categories directly in your final answer using their tag names (error / fatal / panic / OOM / timeout / connection-refused / TLS / HTTP-5xx). Then run step 4 below only for signatures the bundle didn't cover (custom application errors, service-specific tokens) — focus step 4 exclusively on the tail patterns absent from the bundle output. When `bundle_signal` is empty (bundle didn't fire — query wording wasn't error-adjacent) start with step 4.",
+			"  3a. **Read `bundle_signal` first.** It contains a pre-computed category sweep against the saved file. Reuse it when it fully supplies the requested result. Category examples alone do not establish all distinct signatures or their counts: for those requests, compute the complete requested grouping in step 4, including categories already illustrated in the bundle. Avoid repeating a calculation already supplied with complete counts and coverage.",
 		)
 	}
 	out = append(out,
-		"  4. **Per-signature aggregation pipeline (MANDATORY — without this you miss error categories):**",
+		"  4. **Per-signature aggregation pipeline (MANDATORY unless the requested grouping and complete counts are already fully supplied by bundle_signal):**",
 		"     ```",
 		"     grep -iE 'error|fail|warn|exception|fatal|timeout|refused|denied' <file_ref> \\",
 		"       | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+Z?//g; s/[0-9a-f]{8}-[0-9a-f-]+//g; s/[0-9]+(ms|s|MB|KB|GB)//g; s/\\b[0-9]+\\b/N/g' \\",
-		"       | sort | uniq -c | sort -rn | head -20",
+		"       | sort | uniq -c | sort -rn > \"grouped-errors.txt\"",
+		"     awk '{groups++; occurrences += $1} END {printf \"distinct=%d occurrences=%d\\n\", groups, occurrences}' \"grouped-errors.txt\"",
+		"     head -20 \"grouped-errors.txt\"",
+		"     # Use a distinct output artifact path for each input file; link the complete grouped file.",
 		"     ```",
-		"     Step 1 (grep) filters to error-class lines. Step 2 (sed) normalises timestamps, UUIDs/hex IDs, and digit runs so messages that differ only by timestamp or request-id collapse to one signature. Step 3 (sort | uniq -c | sort -rn) ranks the distinct signatures by frequency. The pipeline operates on the saved log file directly — it does NOT need a JSON-aware extractor (the file is one entry per line, with the message field as part of the line text).",
-		"  5. **Output:** lead with `\"Found N distinct error categories across M occurrences\"`, then list each signature with its count and a verbatim example line. Include EVERY distinct signature from the pipeline output — do NOT drop any. Do NOT speculate about root cause. Do NOT recommend fixes.",
+		"     Step 1 (grep) filters to error-class lines. Step 2 (sed) normalises timestamps, UUIDs/hex IDs, and digit runs so messages that differ only by timestamp or request-id collapse to one signature. Step 3 (sort | uniq -c | sort -rn) ranks the distinct signatures by frequency. For plain-text messages, save the complete normalized frequency table before display limiting; retain the original file for verbatim examples. For JSON messages, use Python to extract the message and requested fields before normalizing; follow logs_format_hint rather than grouping host/agent metadata as error signatures. Compute totals before applying a top-N display limit.",
+		"  5. **Output:** lead with `\"Found N distinct error categories across M occurrences\"`, then list each signature with its count and a verbatim example line. State the total distinct-signature count before display limiting. If showing only the top signatures, label that subset and link the full grouped artifact; include one verbatim example for each displayed signature. Do NOT speculate about root cause. Do NOT recommend fixes.",
 	)
 	return out
 }
@@ -241,16 +239,13 @@ func enumerationInstructionsV3() []string {
 func outputFormatInstructionsV3(mode logModeV3) []string {
 	out := []string{
 		"**Output format:**",
-		"  Concise markdown. Lead with the answer. Cite specific evidence from the logs (exact lines, timestamps, error signatures). Prefer log fragments over prose paraphrase — the user wants the actual evidence.",
+		"  Concise markdown. Lead with the answer. Cite specific evidence from the logs (exact lines, timestamps, error signatures). Show each log excerpt once, not both a table and a repeated raw block. Include bulky host/cloud/agent metadata only when relevant or explicitly requested. Preserve exact evidence and link the full saved artifact; label any abbreviated excerpt and never present rewritten JSON as the original raw record.",
 	}
 	if mode == logModeInvestigationV3 {
 		out = append(out,
 			"  Include a short Causality Chain explaining symptom → why → root cause.",
 			"  **Time-window framing (mandatory when error timestamps cluster):** if the error lines you cite span a contiguous window (typically a few minutes — i.e. an `HH:MM–HH:MM` span of 1-15 minutes), state the window explicitly in your answer (\"errors occurred between HH:MM and HH:MM\").",
-			"  How to determine the window bounds — all three in ONE `shell_execute` call, chained (the saved file is sorted newest-first because Loki's default direction is backward, so `head` gives newest and `tail` gives oldest):",
-			"    `grep -nE \"<error pattern>\" <file_ref> | head -1; grep -nE \"<error pattern>\" <file_ref> | tail -1; grep -cE \"<error pattern>\" <file_ref>`",
-			"    That yields, in order: window END (most recent error), window START (earliest error in the matched set), and the total count that tells you \"cluster\" vs \"isolated\".",
-			"  You MUST have BOTH bounds before reporting a window — do not issue them as three separate actions, and do not report from `head` alone. A single `head -20` only shows the newest end of the cluster, which lets the user think the issue is recent when it actually started minutes or hours earlier. Cite the START and END timestamps verbatim from the grep output — do not round or approximate. If the errors are scattered (no contiguous cluster — i.e. the head/tail span is hours instead of minutes), say so and list the distinct timestamps.",
+			"  Reuse the earliest/latest matching timestamps and count from your diagnostic pass. If missing, compute all three together in ONE Python script or shell pipeline; parse timestamps instead of assuming file order. You MUST have BOTH bounds before reporting a window, with exact source timestamps and the matched count. A limited head sample cannot establish the full window. If errors are scattered rather than clustered, say so and show their distribution.",
 		)
 	}
 	return out
@@ -292,4 +287,15 @@ func sharedConstraintsV3(mode logModeV3) []string {
 		)
 	}
 	return c
+}
+
+// Python and shell are interchangeable execution choices; evidence and
+// recovery obligations are unchanged by the choice of parser.
+func logAnalysisExecutionInstructionsV3() []string {
+	return []string{
+		"**Analyze with code, then explain the evidence:** First reuse any requested result already fully supplied with counts and coverage by the fetch response or previous analysis. Only for missing aggregation, distinct signatures, time bounds, or correlation, use `shell_execute` to run one Python script or one shell pipeline over the saved `file_ref`. Prefer Python for structured JSON messages, timestamp parsing, grouping, and multi-field correlations; use grep/awk for simple text matching. A Python pass may replace the active mode's grep commands. Only INVESTIGATION mode requires its diagnostic sweep, trigger search, and empty-result recovery; do not add these to routine listings/counts or enumeration. A complete inline routine listing needs no extra tool call.",
+		"Wait for fetch_logs_v3 to finish and use its actual file_ref. Follow logs_format_hint: timestamp_tab_message is read line-by-line and split once on TAB, then JSON-decode only the message when appropriate; JSONL is decoded one record at a time. Do not JSON-decode a whole TSV file. Treat log text as data, never interpolate it into shell commands or eval it. Quote file paths.",
+		"Compute only the outputs needed for the current question and active mode, together in the SAME execution: processed and matched row counts, counts per signature, earliest/latest matching timestamps, relevant trigger context, and a few exact example lines with line numbers. Determine time bounds from parsed timestamps, not assumed file order. Reuse computed results instead of separate head, count, grep and timestamp tool turns. Additional execution is justified by a new hypothesis, missing evidence, or a failed command, not reformatting the same data.",
+		"Return compact structured statistics and bounded representative excerpts to the model, not the entire file or repeated per-row infrastructure metadata. Save full grouped results to an artifact and link it when the user needs all groups or raw records. Report malformed/skipped records and fetched-window/limit/truncation coverage; never turn a parse failure into a zero count or claim sampled counts cover all matching backend logs.",
+	}
 }
