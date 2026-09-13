@@ -79,6 +79,9 @@ var ragClient = &http.Client{
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ResponseHeaderTimeout: 120 * time.Second,
+		IdleConnTimeout:       10 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
 	},
 }
 

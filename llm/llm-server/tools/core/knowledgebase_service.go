@@ -1466,7 +1466,7 @@ func createKBVectorCollection(accountId, kbId, data, format, triggeredBy, trigge
 	req.Header.Set("Content-Type", "application/json")
 	addRAGAuth(req)
 
-	client := common.HttpClient()
+	client := ragClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to process knowledgebase for semantic search: %w", err)
@@ -1511,7 +1511,7 @@ func deleteKBVectorCollection(accountId, kbId string) error {
 	}
 	addRAGAuth(req)
 
-	client := common.HttpClient()
+	client := ragClient
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to remove knowledgebase from search index: %w", err)
@@ -1561,7 +1561,7 @@ func triggerIntegrationKBSync(ctx context.Context, accountId, integrationID, kbS
 	req.Header.Set("Content-Type", "application/json")
 	addRAGAuth(req)
 
-	resp, err := common.HttpClient().Do(req)
+	resp, err := ragClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("kb: failed to reach rag-server for integration sync: %w", err)
 	}
@@ -1592,7 +1592,7 @@ func deleteRAGCollection(collectionName string) error {
 	}
 	addRAGAuth(req)
 
-	resp, err := common.HttpClient().Do(req)
+	resp, err := ragClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to remove collection from search index: %w", err)
 	}

@@ -131,7 +131,7 @@ The server runs as a **single Uvicorn worker** to avoid file locking issues with
 | `VECTOR_DB` | Vector database to use (`qdrant` or `chromadb`) | `qdrant` | No |
 | `RAGSERVER_PORT` | Port for the FastAPI server | `9999` | No |
 | `UVICORN_WORKERS` | Number of Uvicorn workers (use 1 for Qdrant) | `1` | No |
-| `UVICORN_TIMEOUT` | Keep-alive timeout in seconds | `180` | No |
+| `UVICORN_TIMEOUT` | Keep-alive timeout in seconds | `15` | No |
 | `LOGGING_CONFIG_FILE` | Path to custom logging config JSON | `config/logging.json` | No |
 
 ### Embedding Configuration
