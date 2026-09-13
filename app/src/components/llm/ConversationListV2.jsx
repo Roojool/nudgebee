@@ -25,7 +25,7 @@ import { toast as snackbar } from '@ui/Toast';
 import { Button } from '@ui/Button';
 import SearchInput from '@ui/SearchInput';
 import { DropdownMenu } from '@ui/DropdownMenu';
-import ToggleButtons from '@components/workflow/NewToggleButtons';
+import { Toggle } from '@ui/Toggle';
 import { useRouter } from 'next/router';
 import { getUserSession } from '@lib/auth';
 
@@ -607,7 +607,7 @@ const ConversationList = ({
 
           {/* Row 1: scope (Mine/Everyone) */}
           <Box sx={{ px: ds.space[3] }}>
-            <ToggleButtons
+            <Toggle
               options={[
                 { value: 'Mine', label: 'Mine', icon: UserIconOutline },
                 { value: 'Everyone', label: 'Everyone', icon: LogEventsIcon },

@@ -10,7 +10,7 @@ import apiWorkflow from '@api1/workflow';
 import type { WorkflowCreateRequest } from '@api1/workflow/types';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import { ds } from 'src/utils/colors';
-import NewToggleButtons from '../NewToggleButtons';
+import { Toggle } from '@ui/Toggle';
 
 type CodeFormat = 'json' | 'yaml';
 
@@ -195,7 +195,7 @@ const CreateWorkflowFromCodeModal: React.FC<CreateWorkflowFromCodeModalProps> = 
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)', padding: 'var(--ds-space-4) 0' }}>
         <Box id='wf-code-format-tabs' sx={{ display: 'flex', justifyContent: 'flex-start' }}>
-          <NewToggleButtons options={formatOptions} activeValue={format} onChange={handleFormatChange} size='sm' width='180px' />
+          <Toggle options={formatOptions} activeValue={format} onChange={handleFormatChange} size='sm' width='180px' />
         </Box>
 
         {parseError && (

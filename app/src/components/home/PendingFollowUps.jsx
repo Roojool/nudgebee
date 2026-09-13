@@ -13,7 +13,7 @@ import { Button } from '@ui/Button';
 import Tooltip from '@ui/Tooltip';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
-import ToggleButtons from '@components/workflow/NewToggleButtons';
+import { Toggle } from '@ui/Toggle';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import { getUserSession } from '@lib/auth';
 import { useTenantBranding } from '@hooks/useTenantBranding';
@@ -223,7 +223,7 @@ const PendingFollowUps = ({ accountId }) => {
   return (
     <Card size='sm' elevation='flat' header={header} sx={{ minHeight: ds.space.mul(0, 45), overflow: 'hidden' }}>
       <Box sx={{ mb: 'var(--ds-space-2)' }}>
-        <ToggleButtons options={toggleOptions} activeValue={activeTab} onChange={setActiveTab} size='sm' noShadow width='100%' />
+        <Toggle options={toggleOptions} activeValue={activeTab} onChange={setActiveTab} size='sm' noShadow width='100%' />
       </Box>
 
       {loading && (

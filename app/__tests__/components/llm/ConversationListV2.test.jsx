@@ -20,8 +20,8 @@ jest.mock('@lib/auth', () => ({
 
 jest.mock('@ui/Toast', () => ({ toast: { success: jest.fn(), error: jest.fn() } }));
 
-jest.mock('@components/workflow/NewToggleButtons', () => {
-  return function MockToggleButtons({ options, onChange }) {
+jest.mock('@ui/Toggle', () => {
+  function MockToggle({ options, onChange }) {
     return (
       <div>
         {options.map((option) => (
@@ -31,7 +31,8 @@ jest.mock('@components/workflow/NewToggleButtons', () => {
         ))}
       </div>
     );
-  };
+  }
+  return { __esModule: true, default: MockToggle, Toggle: MockToggle };
 });
 
 const deferred = () => {
