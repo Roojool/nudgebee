@@ -121,9 +121,9 @@ const (
 // generic "not overridable" message, because both look like ordinary theme.json
 // fields and an operator would otherwise assume a typo.
 var rejectedKeys = map[string]string{
-	"isWhiteLabel": "isWhiteLabel is derived from which brand kit resolved for the host, not stored; " +
-		"overriding it would let a host claim or disclaim white-label independently of its kit and " +
-		"desynchronise the Nudgebee mascot suppression",
+	"isWhiteLabel": "isWhiteLabel is derived, not stored: a host is white-label when its brand kit is a " +
+		"partner kit or when the override sets title or logoUrl; setting it directly would let a host " +
+		"claim or disclaim white-label independently of its brand and desynchronise the Nudgebee mascot suppression",
 	"email": "email branding is read from the mounted theme file by notifications-server at process " +
 		"start, which has no request host to key on; an override here would silently never apply",
 }

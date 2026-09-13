@@ -208,8 +208,10 @@ lives where.
 
 Two fields are refused, each with its own reason in the error:
 
-- `isWhiteLabel` — derived from _which kit resolved_ for the host. A row that could flip it would
-  desynchronise Nudgebee mascot suppression from the actual brand.
+- `isWhiteLabel` — derived, never stored. A host is white-label when its kit is a partner kit **or**
+  its row sets `title` or `logoUrl` (a rename or re-logo is a different brand, so the Nudgebee
+  mascots are suppressed). A colour-only row stays a retint. A row that could set the flag directly
+  would desynchronise mascot suppression from the actual brand.
 - `email` — notifications-server reads `theme.email.*` from the mounted file at process start and has
   no request host to key on, so an override would silently never apply.
 
