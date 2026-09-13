@@ -245,8 +245,7 @@ const toProvider = (cloudProvider: string): Provider => {
 
 export function transformApiToInsight(
   apiRec: any,
-  accountsMap: Record<string, { account_name: string; cloud_provider: string; account_env?: string }>,
-  currencySymbols?: Record<string, string>
+  accountsMap: Record<string, { account_name: string; cloud_provider: string; account_env?: string }>
 ): InsightItem {
   const { category, subCategory } = mapCategoryAndSubCategory(apiRec.category, apiRec.rule_name);
   const severity = (apiRec.severity || 'medium').toLowerCase();
@@ -278,7 +277,7 @@ export function transformApiToInsight(
     provider,
     env: deriveEnvironment(acct?.account_env, acct?.account_name || ''),
     region: apiRec.resource_k8s_namespace || apiRec.cloud_resourse?.meta?.region || '',
-    impactValue: savings > 0 ? `${currencySymbols?.[apiRec.account_id] || '$'}${savings.toLocaleString()}/mo` : '',
+    impactValue: savings > 0 ? `$${savings.toLocaleString()}/mo` : '',
     impactLabel: savings > 0 ? 'savings potential' : '',
     dollarImpact: savings,
     title,
