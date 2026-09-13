@@ -42,6 +42,11 @@ const (
 	// CategoryListing (app/src/components/audits/common.ts) or the rows are
 	// written but cannot be filtered.
 	EventCategoryKnowledgeGraph EventCategory = "KNOWLEDGE_GRAPH"
+	// Runtime branding overrides (tenant_branding_override). Writes are
+	// super-admin-only, and audit.LogChange skips super-admin actors, so these
+	// rows appear only for a non-super-admin actor; recovery does not depend on
+	// them (see tenant_branding_override.previous_overrides).
+	EventCategoryBranding EventCategory = "BRANDING"
 )
 
 type EventType string
@@ -51,6 +56,10 @@ const (
 	EventTypeOwnershipDelete     EventType = "OWNERSHIP_DELETE"
 	EventTypeOwnershipRuleUpsert EventType = "OWNERSHIP_RULE_UPSERT"
 	EventTypeOwnershipRuleDelete EventType = "OWNERSHIP_RULE_DELETE"
+
+	EventTypeBrandingOverrideUpsert  EventType = "BRANDING_OVERRIDE_UPSERT"
+	EventTypeBrandingOverrideDelete  EventType = "BRANDING_OVERRIDE_DELETE"
+	EventTypeBrandingOverrideRestore EventType = "BRANDING_OVERRIDE_RESTORE"
 
 	EventTypeUserCreate EventType = "USER_CREATE"
 	EventTypeUserUpdate EventType = "USER_UPDATE"

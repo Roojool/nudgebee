@@ -96,7 +96,7 @@ const NOTICE_TONE: Record<NoticeState, CardTone> = {
 };
 
 export default function StatusPage() {
-  const { title: baseTitle } = useBrandingConfig();
+  const { title: baseTitle, loading: brandingLoading } = useBrandingConfig();
   const [payload, setPayload] = React.useState<StatusPayload | null>(null);
   const [failed, setFailed] = React.useState(false);
 
@@ -139,7 +139,10 @@ export default function StatusPage() {
   return (
     <>
       <Head>
-        <title>{`${baseTitle} Status`}</title>
+        {/* Gated on the branding config: until /api/public/app_config answers
+            there is no brand name to print, and the house-brand default put
+            "Nudgebee" in a partner's tab until it repainted. */}
+        {!brandingLoading && <title>{`${baseTitle} Status`}</title>}
         <meta name='robots' content='noindex' />
       </Head>
 

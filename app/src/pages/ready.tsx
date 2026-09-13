@@ -17,9 +17,13 @@ const BaseTemplate = ({ children }: any) => {
   return (
     <>
       <Head>
-        {!branding.loading && <link rel='icon' href={branding.faviconUrl} />}
-        <title>{branding.title}: Signup</title>
-        <meta property='og:title' content={`${branding.title} - Signup`} key='title' />
+        {!branding.loading && branding.faviconUrl && <link rel='icon' href={branding.faviconUrl} />}
+        {/* Gated on the branding config, like the favicon: until
+            /api/public/app_config answers there is no brand name to print, and
+            printing the house-brand default meant a partner deployment showed
+            "Nudgebee" in the tab and then repainted to its own name. */}
+        {!branding.loading && <title>{`${branding.title}: Signup`}</title>}
+        {!branding.loading && <meta property='og:title' content={`${branding.title} - Signup`} key='title' />}
       </Head>
       <AuthTemplate>{children}</AuthTemplate>
     </>

@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useTenantBranding, DEFAULT_LOGO, DEFAULT_FAVICON } from '@hooks/useTenantBranding';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 import Box from '@mui/material/Box';
 import { Button, Container, Typography, Menu, MenuItem, IconButton, Popover } from '@mui/material';
 import { useRouter } from 'next/router';
@@ -352,15 +352,17 @@ const PageLayout = ({ children }) => {
   const { selectedCluster } = useData();
   const { baseTitle, logoUrl: brandingLogoUrl, faviconUrl: brandingFaviconUrl, loading: brandingLoading } = useTenantBranding();
 
-  // Logo: derived inline from branding. The `!brandingLoading` gate on the <img> below holds the
-  // render until the config resolves, so logoSrc is only ever read with the final value — branded
-  // logo when set, DEFAULT_LOGO only for the default tenant (empty logoUrl). No mirrored state
-  // (which lagged a render and flashed the default logo) and no onError fallback to DEFAULT_LOGO
-  // (on a branded tenant that would leak the Nudgebee logo; a broken URL should surface, not swap).
-  const logoSrc = brandingLogoUrl || DEFAULT_LOGO;
-
-  // Favicon from config, fallback to default
-  const favicon = brandingFaviconUrl || DEFAULT_FAVICON;
+  // Logo and favicon come from the branding config, with no house-brand fallback.
+  // The `!brandingLoading` gates below hold both until the config resolves, so
+  // these are only ever read with the final value; when the config resolves
+  // without one, nothing renders rather than the Nudgebee asset. Every
+  // theme.json — including branding/default — supplies both, so a configured
+  // deployment always has a value here; a blank means the config genuinely has
+  // none, and painting Nudgebee over that is how a partner's favicon silently
+  // became the house one. Also no onError fallback, for the same reason: a
+  // broken URL should surface, not swap to another brand.
+  const logoSrc = brandingLogoUrl;
+  const favicon = brandingFaviconUrl;
 
   const avatarSubMenu = useMemo(() => {
     return generateMenuItems(session?.hasMultipleTenantAccess || false);
@@ -738,8 +740,16 @@ const PageLayout = ({ children }) => {
       {isPlainLayout ? (
         <>
           <Head>
-            {!brandingLoading && <link rel='icon' href={favicon} />}
-            <title>{baseTitle}</title>
+            {!brandingLoading && favicon && <link rel='icon' href={favicon} />}
+            {
+              /* Gated like the favicon and the logo above. Ungated, this painted
+                DEFAULT_TITLE ("Nudgebee") for the frames before the branding
+                config resolved, so a partner deployment visibly flashed the
+                Nudgebee name in the browser tab on every page load. No title
+                until it resolves is the intended trade — the tab shows the URL
+                for an instant instead of the wrong brand. */
+              !brandingLoading && <title>{baseTitle}</title>
+            }
           </Head>
           {/* Mounted here too so the AccountGuard "Switch Tenant" CTA works
               on plain-layout pages (e.g. ask-nudgebee). */}
@@ -749,8 +759,8 @@ const PageLayout = ({ children }) => {
       ) : (
         <>
           <Head>
-            {!brandingLoading && <link rel='icon' href={favicon} />}
-            <title>{baseTitle}</title>
+            {!brandingLoading && favicon && <link rel='icon' href={favicon} />}
+            {/* Gated for the same reason as the plain-layout branch above. */ !brandingLoading && <title>{baseTitle}</title>}
           </Head>
           {/* Rendered outside <Head> — next/head only walks immediate children
               for tag extraction, so a slot returning a wrapper Component (vs.
@@ -769,7 +779,7 @@ const PageLayout = ({ children }) => {
                     <Link href={homeUrl} passHref>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       {/* oxlint-disable nextjs/no-img-element -- dynamic branding URL; next/image requires static domain allowlist */}
-                      {!brandingLoading && (
+                      {!brandingLoading && logoSrc && (
                         <img
                           src={logoSrc}
                           alt={baseTitle}

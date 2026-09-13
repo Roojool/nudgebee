@@ -75,10 +75,11 @@ The app supports per-deployment white-labeling — logo, favicon, app title, AI 
 
 ### How it works
 
-1. The runtime endpoint [`/api/public/app_config`](src/pages/api/public/app_config.js) reads the file pointed to by the `TENANT_BRANDING_FILE` env var (falling back to `branding/default/theme.json`).
-2. On the client, [`useBrandingConfig`](src/hooks/useTenantBranding.js) fetches `/api/public/app_config` once per page load and caches it.
-3. [`useThemeProvider`](src/hooks/useThemeProvider.ts) applies `theme` to MUI and writes `colorTokens` to `:root` as CSS variables. Critical above-the-fold tokens are inlined during SSR to prevent FOUC.
-4. The notifications-server reads the **same** `TENANT_BRANDING_FILE` env to brand outbound emails — keep one file per partner, used by both services.
+1. The runtime endpoint [`/api/public/app_config`](src/pages/api/public/app_config.js) resolves branding for the **request's hostname** via [`resolveServerBranding`](src/lib/serverBranding.ts). The EE provider ([`serverInit.ts`](src/ee/branding/serverInit.ts)) picks the theme file: `TENANT_BRANDING_HOST_MAP` (JSON `{host: slug}`) → `branding/<slug>/theme.json`, else `TENANT_BRANDING_FILE`, else `branding/default/theme.json`.
+2. A per-host **runtime override** from the `tenant_branding_override` table is merged on top of that file — see [Runtime overrides](#runtime-overrides-no-deploy) below.
+3. On the client, [`useBrandingConfig`](src/hooks/useTenantBranding.js) fetches `/api/public/app_config` once per page load and caches it.
+4. [`useThemeProvider`](src/hooks/useThemeProvider.ts) applies `theme` to MUI and writes `colorTokens` to `:root` as CSS variables. Critical above-the-fold tokens are inlined during SSR to prevent FOUC.
+5. The notifications-server reads the **same** `TENANT_BRANDING_FILE` env to brand outbound emails — keep one file per partner, used by both services. Note it does **not** read runtime overrides (see below).
 
 ### Onboarding a new partner
 
@@ -179,6 +180,71 @@ Set the same value on the notifications-server deployment so emails match the UI
 
 **Inline overrides** (skip editing the file — useful for hot-patching a single field): set `TENANT_THEME_CONFIG` or `TENANT_COLOR_TOKENS` to a JSON-encoded object. These take precedence over the file's `theme` / `colorTokens` blocks respectively. Invalid JSON is silently ignored.
 
+### Runtime overrides (no deploy)
+
+Everything above ships a partner's brand as **files in a mounted ConfigMap**, which means onboarding
+and every subsequent tweak costs an infra PR plus a deploy (and prod deploys are `workflow_dispatch`
+only). The `tenant_branding_override` table removes the deploy from the part that actually churns.
+
+The split is by **churn rate**, not storage type:
+
+|                                                               | Lives in                       | Changed by                           |
+| ------------------------------------------------------------- | ------------------------------ | ------------------------------------ |
+| Asset kit (SVGs, favicon) + base `theme.json`                 | ConfigMap mount                | infra PR + deploy (once per partner) |
+| `title`, `assistantName`, `theme`, `colorTokens`, `fontRemap` | `tenant_branding_override` row | RPC action, takes effect in ≤30s     |
+
+**The override is strictly additive.** No row, a row with `enabled=false`, or an unreachable
+services-server all leave the mounted kit's branding exactly as it was — the file is always the
+floor. This is deliberate: branding used to consult `hasLicenseFeature('branding.custom')`, so a
+transient services-server failure at boot silently repainted a partner's UI as Nudgebee until the
+next restart (see [`docs/ee/licensing-design.md`](../docs/ee/licensing-design.md) and migration V826).
+Nothing in this layer may reintroduce that.
+
+**The allow-list tracks `theme.json`.** Anything a mounted kit can express, an override can express
+too — copy (`title`, `assistantName`), every asset URL (`logoUrl`, `faviconUrl`, `loaderUrl`, the
+signin imagery, the nubi/bee illustration set, `carouselSlides`), and styling (`theme`,
+`colorTokens`, `fontRemap`). A subset would force operators to remember which half of the brand
+lives where.
+
+Two fields are refused, each with its own reason in the error:
+
+- `isWhiteLabel` — derived from _which kit resolved_ for the host. A row that could flip it would
+  desynchronise Nudgebee mascot suppression from the actual brand.
+- `email` — notifications-server reads `theme.email.*` from the mounted file at process start and has
+  no request host to key on, so an override would silently never apply.
+
+**Asset URLs must be same-origin root-relative paths** (`/branding/acme/logo.svg`, or `""` to clear
+back to the bundled default). Absolute and scheme-relative URLs are rejected: a stored row that could
+point at another host is brand hijack and a tracking pixel on every page, neither of which shows up in
+a diff. The _files_ still come from the mount — what an override buys is re-pointing a slot at a
+different file the kit already ships, with no deploy. A path that resolves to nothing is just a broken
+image: visible immediately, and undone with `branding_apply_previous_override`.
+
+Merge semantics ([`mergeOverride.ts`](src/ee/branding/mergeOverride.ts)): `title`/`assistantName` and
+asset URLs replace, `colorTokens` merge per key, `theme` merges one level deep (so setting `palette`
+keeps `typography`), `fontRemap` and `carouselSlides` replace wholesale.
+
+Managing overrides — super-admin only, because rows are keyed by hostname and carry no tenant column
+(branding resolves before authentication, so there is no tenant scope to constrain a `tenant_admin`):
+
+```
+branding_list_overrides            list every row, including disabled
+branding_get_override              { host }
+branding_upsert_override           { host, overrides, enabled? }
+branding_apply_previous_override   { host }   # one-step undo
+branding_delete_override           { host }   # host falls back to its kit
+```
+
+`branding_upsert_override` validates against the allow-list and rejects CSS-injection payloads in
+`colorTokens` / `fontRemap`. Each write stores the outgoing value in `previous_overrides`, which is
+what `branding_apply_previous_override` restores — moving a brand out of git costs the `git revert`
+the ConfigMap kit gets for free, and audit rows do not close that gap because `audit.LogChange`
+skips super-admin actors.
+
+**Email branding is out of scope for this layer.** notifications-server reads `theme.email.*` from
+the file at process start and has no request host to key on, so overrides do not reach outbound
+email. A partner whose palette is changed at runtime will have emails that still match the kit.
+
 ### Local development
 
 ```bash
@@ -205,7 +271,8 @@ npm run dev
 ### Pitfalls
 
 - **Asset paths must start with `/branding/<partner>/`** — assets outside `public/branding/` won't pick up the default-fallback behavior in `SafeIcon`.
-- **The branding file is read once per process** ([`loadBrandingFile.js`](src/lib/loadBrandingFile.js)). Editing `theme.json` while the dev server runs requires a restart.
+- **The branding file is cached per path after a successful read** ([`loadBrandingFile.ts`](src/ee/branding/loadBrandingFile.ts)). Editing `theme.json` while the dev server runs requires a restart. Failed reads are not cached for an operator-configured path, so a transient miss self-heals.
+- **Runtime overrides are per-replica and eventually consistent.** `app` runs 2 replicas, each refreshing on its own 30s clock, so an edit can take up to ~30s to appear everywhere. That is why overrides are limited to presentation fields — the divergence is a colour, never a missing asset.
 - **MUI palette colors must be hex strings**, not CSS variable references — the MUI theme is built at module load, before CSS variables are applied.
 - **Keep email branding in sync** — `theme.email` is consumed by notifications-server. A partner with mismatched UI/email colors looks broken.
 - **Don't commit partner secrets** to the public branding folder. For customer-specific deployments, ship `theme.json` via a Helm value or a ConfigMap mounted at `TENANT_BRANDING_FILE`.
