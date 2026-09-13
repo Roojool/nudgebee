@@ -52,6 +52,32 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The rule above only covers the CRD *definition* object — it does not
+  # grant access to instances of the CRD's own group. Without this,
+  # `kubectl apply` on the CR instances themselves is denied ("cannot get
+  # resource whalewatchers in API group ocean.io"), even after the CRD
+  # write rule above and after waiting for the CRD to report Established —
+  # reproduced live on 96_no_matching_runbook, whose manifest applies both
+  # the CRD and two instances of it. `monitoring.coreos.com` is the other
+  # custom group scenario manifests use (Alertmanager/ServiceMonitor/
+  # PrometheusRule in fixtures 07 and 44) — that CRD is pre-installed by
+  # the cluster's kube-prometheus-stack, not defined by the fixture, but
+  # instances of it need the same apply access. Named explicitly (not
+  # wildcarded) rather than opening every apiGroup, per the audit trail on
+  # this file: two prior narrower patches (NB-34844's CRD+RBAC-object grant,
+  # then the CRD-establishment-race fix) each solved a different sub-problem
+  # without covering this one, so cover every group scenario fixtures
+  # currently use, not just this fixture's. Split per apiGroup rather than
+  # one rule listing both groups and all four resources — a single RBAC
+  # rule cross-products its apiGroups and resources lists, so combining
+  # them would also (unintentionally) grant ocean.io/alertmanagers and
+  # monitoring.coreos.com/whalewatchers.
+  - apiGroups: ["ocean.io"]
+    resources: ["whalewatchers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["alertmanagers", "servicemonitors", "prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
