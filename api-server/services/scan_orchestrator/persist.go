@@ -237,7 +237,7 @@ func persistUpsertRecommendations(tx *sqlx.Tx, recs []Recommendation, vulnIDs ma
 			"vulnerability_id":       vulnerabilityID,
 		}
 		// finops_score / finops_band / finops_score_breakdown are inserted as zero
-		// values and filled by the 6h score-recompute cron — computing them inline
+		// values and filled by the score-recompute crons — computing them inline
 		// would create an import cycle with services/recommendation. They are NOT
 		// in the ON CONFLICT update below: overwriting on re-scan wiped real
 		// scores back to zero until the next cron pass.

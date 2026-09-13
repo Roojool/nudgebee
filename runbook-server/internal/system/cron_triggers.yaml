@@ -454,7 +454,10 @@
   comment: Cloud account events every 10 minutes
 - name: finops-score-recompute
   webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
-  schedule: '0 */6 * * *'
+  # Full pass over every Open recommendation. New rows are covered hourly by
+  # finops-score-recompute-recent; api-server skips a tick that lands while a
+  # pass is still running.
+  schedule: '0 3 * * *'
   payload: {}
   headers:
     - name: X-ACTION-TOKEN
@@ -464,7 +467,22 @@
     retry_interval_seconds: 10
     timeout_seconds: 300
     tolerance_seconds: 21600
-  comment: Recompute FinOps scores for all open recommendations every 6 hours
+  comment: Recompute FinOps scores and blast radius for all open recommendations daily
+- name: finops-score-recompute-recent
+  webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
+  # Only recommendations created since the last daily full pass, retried hourly
+  # until the knowledge graph can resolve them.
+  schedule: '15 * * * *'
+  payload: {}
+  headers:
+    - name: X-ACTION-TOKEN
+      value_from_env: ACTION_API_SERVER_TOKEN
+  retry_conf:
+    num_retries: 0
+    retry_interval_seconds: 10
+    timeout_seconds: 300
+    tolerance_seconds: 3600
+  comment: Recompute FinOps scores and blast radius for recommendations created in the last 24 hours
 - name: pr-lifecycle-check
   webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
   # Backstop only. Primary trigger is /api/webhooks/github (GitHub App

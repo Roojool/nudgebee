@@ -87,7 +87,7 @@ func resolveCloudResourceNodeID(kg *core.Service, tenantID, accountID, resourceI
 // name), so the stored prefix is the most relevant slice of a large blast
 // radius; dependent_count remains the authoritative total. Bounding the list
 // keeps finops_score_breakdown small even for a high-fan-out resource (e.g. a
-// shared database with hundreds of callers) that the cron rewrites every 6h.
+// shared database with hundreds of callers) that the cron rewrites daily.
 const maxStoredDependents = 50
 
 // dependentRef is the compact, persisted identity of one blast-radius dependent.

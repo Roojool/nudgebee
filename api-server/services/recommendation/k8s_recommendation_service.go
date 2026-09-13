@@ -107,7 +107,7 @@ func upsertRecommendationData(ctx *security.RequestContext, dbms *database.Datab
 	}
 	// Compute finops score for the INSERT case only. On conflict finops_* are
 	// deliberately not overwritten: this path scores recency from now(), which
-	// inflated re-upserted old rows until the next cron pass. The 6h recompute
+	// inflated re-upserted old rows until the next cron pass. The daily recompute
 	// cron owns score refresh for existing rows.
 	for _, d := range data {
 		ComputeAndSetFinOpsScoreFields(d)
