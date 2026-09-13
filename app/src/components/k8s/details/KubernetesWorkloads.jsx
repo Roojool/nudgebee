@@ -20,7 +20,8 @@ import ScaleIcon from '@assets/application/scale-new.svg';
 import KubernetesScaleUpdateForm from '@components/recommendations/KubernetesScaleUpdateForm';
 import ReactLink from 'next/link';
 import { DeleteIconRed as DeleteIcon } from '@assets';
-import { Typography, Box, Grid, Divider, CircularProgress, IconButton } from '@mui/material';
+import { Typography, Box, Grid, CircularProgress, IconButton } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { Input } from '@ui/Input';
 import { Switch } from '@ui/Switch';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
@@ -2177,7 +2178,7 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                       {applicationSummary?.count || '-'}
                     </Typography>
                   </Box>
-                  <Divider orientation='vertical' flexItem />
+                  <Divider orientation='vertical' sx={{ mx: 0 }} />
 
                   <Box>
                     <Box display={'flex'} alignItems={'center'} justifyContent={'space-between'}>
@@ -2243,7 +2244,7 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                       {applicationSummary?.error_count ?? 0}
                     </Typography>
                   </Box>
-                  <Divider orientation='vertical' />
+                  <Divider orientation='vertical' sx={{ mx: 0 }} />
                   <Box>
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 400, color: ds.gray[500] }}>Events</Typography>
                     <Typography variant='h4' sx={{ fontSize: 'var(--ds-text-heading)', fontWeight: 500, color: ds.gray[700] }}>
@@ -2612,7 +2613,7 @@ function WorkloadDetails({ accountId, drilldownQuery }) {
                 {mapLabels(drilldownQuery?.data?.meta?.config?.labels ?? drilldownQuery?.data?.meta?.job_data?.labels ?? {})}
               </Box>
             </Box>
-            <Divider sx={{ mb: ds.space.mul(1, 7) }} />
+            <Divider sx={{ mt: 0, mb: ds.space.mul(1, 7) }} />
             <Box marginBottom={ds.space.mul(1, 7)}>
               <Heading value={'Annotations'} borderWidth='md' borderColor='var(--ds-blue-500)' />
               <Box
@@ -2627,7 +2628,7 @@ function WorkloadDetails({ accountId, drilldownQuery }) {
                 {mapLabels(drilldownQuery?.data?.meta?.config?.annotations ?? drilldownQuery?.data?.meta?.job_data?.annotations ?? {})}
               </Box>
             </Box>
-            <Divider sx={{ mb: ds.space.mul(1, 7) }} />
+            <Divider sx={{ mt: 0, mb: ds.space.mul(1, 7) }} />
             <Box marginBottom={ds.space.mul(1, 7)}>
               <Heading value={'Containers'} borderWidth='md' borderColor='var(--ds-blue-500)' />
               <Box sx={{ padding: `${ds.space.mul(1, 5)} ${ds.space.mul(1, 5)} 0 ${ds.space.mul(1, 5)}` }}>
@@ -2638,7 +2639,7 @@ function WorkloadDetails({ accountId, drilldownQuery }) {
             </Box>
             {drilldownQuery?.data?.meta?.config?.volumes?.length > 0 && (
               <>
-                <Divider sx={{ mb: ds.space.mul(1, 7) }} />
+                <Divider sx={{ mt: 0, mb: ds.space.mul(1, 7) }} />
                 <Box marginBottom={ds.space.mul(1, 7)}>
                   <Heading value={'Volumes'} borderWidth='md' borderColor='var(--ds-blue-500)' />
                   <Box sx={{ padding: `${ds.space.mul(1, 5)} ${ds.space.mul(1, 5)} 0 ${ds.space.mul(1, 5)}` }}>

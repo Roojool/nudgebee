@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Box, Stack, Typography, Grid, Divider } from '@mui/material';
+import { Box, Stack, Typography, Grid } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import DSModal from '@ui/Modal';
 import ClusterNode from './common/ClusterNode';
 import { formatNumber } from '@lib/formatter';
@@ -290,7 +291,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
               size='md'
               onClick={() => router.push(`/kubernetes/details/${accountId}?accountId=${accountId}#kubernetes/nodes`)}
             />
-            <Divider orientation='vertical' flexItem />
+            <Divider orientation='vertical' sx={{ mx: 0 }} />
             <ClusterNode
               largeVariant
               node={{
@@ -306,7 +307,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
             <></>
           </Box>
         </Box>
-        <Divider sx={{ backgroundColor: 'var(--ds-gray-200)', mt: 'var(--ds-space-1)' }} />
+        <Divider sx={{ mt: 'var(--ds-space-1)', mb: 0 }} />
         <Box
           sx={{
             borderRadius: 'var(--ds-radius-sm)',
@@ -332,7 +333,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
               size='md'
               onClick={() => router.push(`/kubernetes/details/${accountId}?accountId=${accountId}#kubernetes/applications`)}
             />
-            <Divider orientation='vertical' flexItem />
+            <Divider orientation='vertical' sx={{ mx: 0 }} />
             <Box display={'grid'} gridTemplateColumns={'1fr 1fr'} width={'100%'} gap={'calc(var(--ds-space-0) * 10)'} rowGap={'var(--ds-space-0)'}>
               {kindArray && kindArray.length > 0 ? (
                 kindArray.map((kind) => (
@@ -383,7 +384,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
             </Box>
           </Box>
         </Box>
-        <Divider sx={{ backgroundColor: 'var(--ds-gray-200)', mt: 'var(--ds-space-1)' }} />
+        <Divider sx={{ mt: 'var(--ds-space-1)', mb: 0 }} />
 
         <Box
           sx={{
@@ -410,7 +411,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
               size='md'
               onClick={() => router.push(`/kubernetes/details/${accountId}?accountId=${accountId}#kubernetes/pods`)}
             />
-            <Divider orientation='vertical' flexItem />
+            <Divider orientation='vertical' sx={{ mx: 0 }} />
             <Box
               display={'grid'}
               gridTemplateColumns={'1fr 1fr'}
@@ -481,7 +482,7 @@ const ClusterSummary = ({ clusterSummary = {}, accountId }) => {
             </Box>
           </Box>
         </Box>
-        <Divider sx={{ backgroundColor: 'var(--ds-gray-100)', mt: 'var(--ds-space-1)' }} />
+        <Divider sx={{ mt: 'var(--ds-space-1)', mb: 0 }} />
 
         <Box
           sx={{
