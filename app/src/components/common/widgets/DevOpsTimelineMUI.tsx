@@ -112,23 +112,37 @@ const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+
     const fetchTimelineData = async () => {
       setIsLoading(true);
       setError(null);
       try {
         const response: any = await apiKubernetes1.getTimelineData(eventId);
+        if (cancelled) {
+          return;
+        }
         setTimelineData(response?.data?.data?.event_get_timeline || {});
       } catch (err) {
+        if (cancelled) {
+          return;
+        }
         console.error(err);
         setError('Failed to load timeline data.');
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     if (eventId) {
       fetchTimelineData();
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [eventId]);
 
   // Memoize sorted timeline to prevent re-sorting on every render

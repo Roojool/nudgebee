@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import apiKubernetes from '@api1/kubernetes';
 import MarkDowns from '@shared/viewers/MarkDowns';
 
-const KnowledgeBase = ({ troubleShootingEvent, preLoadedKnowledgeBase = [] }) => {
+const EMPTY_KNOWLEDGE_BASE = [];
+
+const KnowledgeBase = ({ troubleShootingEvent, preLoadedKnowledgeBase = EMPTY_KNOWLEDGE_BASE }) => {
   const [knowledgeBase, setKnowledgeBase] = useState(preLoadedKnowledgeBase);
   const [, setLoading] = useState(false);
 
@@ -10,6 +12,8 @@ const KnowledgeBase = ({ troubleShootingEvent, preLoadedKnowledgeBase = [] }) =>
     if (preLoadedKnowledgeBase?.length > 0) {
       return;
     }
+    let cancelled = false;
+
     const fetchKB = async () => {
       if (!troubleShootingEvent?.aggregation_key) {
         return;
@@ -18,17 +22,26 @@ const KnowledgeBase = ({ troubleShootingEvent, preLoadedKnowledgeBase = [] }) =>
       try {
         setLoading(true);
         const res = await apiKubernetes.getKnowledgeBase(troubleShootingEvent.aggregation_key);
+        if (cancelled) {
+          return;
+        }
         if (res?.data) {
           setKnowledgeBase(res.data);
         }
       } catch (e) {
         console.error(e);
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     };
 
     fetchKB();
+
+    return () => {
+      cancelled = true;
+    };
   }, [troubleShootingEvent, preLoadedKnowledgeBase]);
 
   if (!knowledgeBase.length) {
