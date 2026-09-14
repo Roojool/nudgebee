@@ -19,6 +19,7 @@ import NBStatusBadge from '@shared/widgets/NBStatusBadge';
 import ScoreDisplay from '@shared/widgets/ScoreDisplay';
 import PriorityPinControl from '@shared/widgets/PriorityPinControl';
 import InvestigateDropdown from '@components/k8s/investigate/InvestigateDropdown';
+import { EventStateRows, LinkedEventState } from '@components/k8s/investigate/EventStateRows';
 import k8sApi from '@api1/kubernetes';
 import { hasWriteAccess } from '@lib/auth';
 import { exitCodeMapping, snakeToTitleCase } from 'src/utils/common';
@@ -295,6 +296,7 @@ function InvestigateSidebar({
                 }
               />
             </Box>
+            <EventStateRows row={row} />
             <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
               <Text value={'Severity'} secondaryText />
               <Box>
@@ -352,7 +354,16 @@ function InvestigateSidebar({
             {row?.labels?.nb_duplicate_of && (
               <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
                 <Text value={'Duplicate of'} secondaryText />
-                <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
+                <Box
+                  sx={{
+                    minHeight: ds.space.mul(0, 9),
+                    fontSize: 'var(--ds-text-body)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 'var(--ds-space-2)',
+                  }}
+                >
                   <Link
                     style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
                     href={`/investigate?id=${row.labels.nb_duplicate_of}&accountId=${row?.cloud_account_id}`}
@@ -360,6 +371,7 @@ function InvestigateSidebar({
                   >
                     <Label text={'View Original Event'} margin='0' />
                   </Link>
+                  <LinkedEventState eventId={row.labels.nb_duplicate_of} accountId={row?.cloud_account_id} />
                 </Box>
               </Box>
             )}

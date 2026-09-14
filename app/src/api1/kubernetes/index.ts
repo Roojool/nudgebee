@@ -385,6 +385,8 @@ query ResolveEventRecord($id:String!) {
       id
       subject_name
       starts_at
+      ends_at
+      created_at
       subject_namespace
       cluster
       subject_node
@@ -410,6 +412,20 @@ query ResolveEventRecord($id:String!) {
       score_confidence
       incident_leader_id
       incident_member_count
+    }
+  }
+}
+`;
+
+// Lifecycle fields only — for showing another event's state without loading its evidences.
+export const GET_EVENT_STATE = `
+query GetEventState($id:String!) {
+  events: events_list(where: {id: {_eq:$id}}) {
+    rows {
+      id
+      status
+      starts_at
+      ends_at
     }
   }
 }
@@ -1211,6 +1227,10 @@ const apiKubernetes = {
       console.log('Your Error is', error);
       return error;
     }
+  },
+  async getEventState(id: string): Promise<{ id: string; status: string; starts_at: string; ends_at: string | null } | null> {
+    const response = await queryGraphQL(GET_EVENT_STATE, 'GetEventState', { id });
+    return response?.data?.data?.events?.rows?.[0] ?? null;
   },
   async getEventsSimilarDataAndInsights(aggregation_key: string, service_key: string, id: string, end_date: string | null = null) {
     try {

@@ -10,7 +10,7 @@ const ONE_DAY = 24 * ONE_HOUR;
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const pad2 = (n) => String(n).padStart(2, '0');
 
-function parseDateValue(value) {
+export function parseDateValue(value) {
   if (value instanceof Date) return value;
   if (typeof value === 'string') {
     const timezoneRegex = /([Zz]|[+-]\d{2}:?\d{2})$/;
@@ -34,7 +34,7 @@ function formatDateShort(date, refDate, alwaysShowYear = false) {
   return !alwaysShowYear && date.getFullYear() === refDate.getFullYear() ? base : `${base}-${date.getFullYear()}`;
 }
 
-function formatTooltip(date) {
+export function formatTooltip(date) {
   const hh = pad2(date.getHours());
   const mm = pad2(date.getMinutes());
   const dd = pad2(date.getDate());
