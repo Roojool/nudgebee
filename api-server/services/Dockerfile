@@ -1,4 +1,4 @@
-FROM golang:1.26.6-alpine AS build-stage
+FROM public.ecr.aws/docker/library/golang:1.26.6-alpine AS build-stage
 
 # Use the builder image's bundled Go toolchain, never an auto-downloaded one.
 # Pins the compile to the base's Go and gives the build layer a distinct cache
@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 EXPOSE 8000
 CMD ["/app/services"]
 
-FROM alpine:3.22 AS release-stage
+FROM public.ecr.aws/docker/library/alpine:3.22 AS release-stage
 # OS-package cache-bust: bumping OS_PKG_EPOCH (ISO week) changes this layer's
 # cache key so BuildKit re-runs the apk install and pulls current Alpine security
 # patches — its registry cache (mode=max) otherwise serves a stale package layer

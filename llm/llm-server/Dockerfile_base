@@ -4,7 +4,7 @@
 # Build this image first: docker build -t playwright-base-image -f Dockerfile_base .
 
 # --- Stage 1: Build playwright-go CLI ---
-FROM golang:1.26 AS go-builder
+FROM public.ecr.aws/docker/library/golang:1.26 AS go-builder
 
 ARG TARGETPLATFORM
 ARG TARGETOS
@@ -36,7 +36,7 @@ RUN PWGO_VER=$(go list -m -f '{{.Version}}' github.com/mxschmitt/playwright-go) 
 # 1.26.6 and copy it in — llm-server shells out to `gh` (tools/tool_github.go),
 # so behaviour is unchanged. Same technique as the redis wait-for-port / postgres
 # gosu mirrors. CGO_ENABLED=0 -> a static binary that runs on the ubuntu runtime.
-FROM golang:1.26.6 AS gh-builder
+FROM public.ecr.aws/docker/library/golang:1.26.6 AS gh-builder
 ARG TARGETOS
 ARG TARGETARCH
 ENV GOOS=${TARGETOS:-linux}
@@ -54,7 +54,7 @@ RUN go install github.com/cli/cli/v2/cmd/gh@v2.96.0
 RUN go install gitlab.com/gitlab-org/cli/cmd/glab@v1.112.0
 
 # --- Stage 2: Install Playwright browsers and copy playwright-go CLI ---
-FROM ubuntu:noble AS playwright-installer
+FROM public.ecr.aws/docker/library/ubuntu:noble AS playwright-installer
 
 LABEL maintainer="nudgebee"
 LABEL version="noble-playwright-go-optimized"

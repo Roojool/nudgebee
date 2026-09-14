@@ -1,6 +1,6 @@
 # --- Build Stage ---
 # Use the official Go image to build the application
-FROM golang:1.26.6-alpine AS builder
+FROM public.ecr.aws/docker/library/golang:1.26.6-alpine AS builder
 
 # Use the builder image's bundled Go toolchain, never an auto-downloaded one.
 # Pins the compile to the base's Go and gives the build layer a distinct cache
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # is pinned by version + sha256 (verified against the hash published in the
 # GitHub release notes); curl retries cover the transient-download concern that
 # originally motivated the image copy.
-FROM alpine:3.22 AS powershell
+FROM public.ecr.aws/docker/library/alpine:3.22 AS powershell
 ARG PWSH_VERSION=7.4.19
 ARG PWSH_SHA256=97fb3c56e574436f49b8ee1199711a34a99a702240ef4f9eb8d0cc0aacc73e80
 RUN apk add --no-cache curl \
@@ -57,7 +57,7 @@ RUN apk add --no-cache curl \
 # the entire Go SDK (compiler, stdlib sources) in the runtime image — a large,
 # needless attack surface. A plain alpine base carries only what the service
 # actually needs at runtime.
-FROM alpine:3.22
+FROM public.ecr.aws/docker/library/alpine:3.22
 
 # Install runtime dependencies:
 # - iputils: Provides standard 'ping'

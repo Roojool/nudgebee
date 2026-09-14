@@ -1,4 +1,4 @@
-FROM golang:1.26.6-alpine AS build-stage
+FROM public.ecr.aws/docker/library/golang:1.26.6-alpine AS build-stage
 
 # Use the builder image's bundled Go toolchain, never an auto-downloaded one.
 # Pins the compile to the base's Go and gives the build layer a distinct cache
@@ -23,7 +23,7 @@ EXPOSE 8080
 CMD [ "./nudgebee-relay-server" ]
 
 
-FROM alpine:3.22 AS release-stage
+FROM public.ecr.aws/docker/library/alpine:3.22 AS release-stage
 ARG OS_PKG_EPOCH=2026-W36
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" \
     && apk upgrade --no-cache \
