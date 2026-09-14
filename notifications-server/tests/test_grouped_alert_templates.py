@@ -155,12 +155,48 @@ class TestBatchedFindings:
         text = _text(get_batched_findings_message_template(payload))
         assert "Also seen: CPU throttling (7) · Image pull failure (3)" in text
 
-    def test_single_account_footer_links_events(self):
+    def test_footer_links_troubleshoot_with_no_account_filter(self):
+        # events_url() pointed at "/events", which isn't a real page — /troubleshoot is.
         payload = _findings_payload([_finding(0)])
         buttons = _buttons(get_batched_findings_message_template(payload))
         view_all = [b for b in buttons if b["text"] == "View all findings"]
         assert len(view_all) == 1
-        assert "accountId=acc-1" in view_all[0]["url"]
+        url = view_all[0]["url"]
+        assert "/troubleshoot" in url and "accountIds" not in url
+        assert url.endswith("#all-events/all")
+
+    def test_multi_account_footer_also_has_no_account_filter(self):
+        payload = BatchedFindingsPayload(
+            organization_id="org-1",
+            organization_name="TestOrg",
+            accounts={
+                "data": {
+                    "accounts": [
+                        {"id": "acc-1", "account_name": "prod-aws"},
+                        {"id": "acc-2", "account_name": "prod-gcp"},
+                    ]
+                }
+            },
+            critical_findings=[_finding(0, account_id="acc-1"), _finding(1, account_id="acc-2")],
+            aggregated_findings={},
+            total_findings_count=2,
+            batch_start_time=datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc),
+            batch_end_time=datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc),
+        )
+        buttons = _buttons(get_batched_findings_message_template(payload))
+        view_all = [b for b in buttons if b["text"] == "View all findings"]
+        assert len(view_all) == 1
+        assert "accountIds" not in view_all[0]["url"]
+
+    def test_footer_uses_real_batch_window(self):
+        # Without an explicit range, /troubleshoot falls back to a persisted
+        # date range that can exclude these findings.
+        payload = _findings_payload([_finding(0)])
+        buttons = _buttons(get_batched_findings_message_template(payload))
+        url = [b for b in buttons if b["text"] == "View all findings"][0]["url"]
+        start_ms = int(datetime(2026, 7, 14, 8, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        end_ms = int(datetime(2026, 7, 14, 9, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        assert f"start_time={start_ms}" in url and f"end_time={end_ms}" in url
 
     def test_identity_facts_line(self):
         payload = _findings_payload([_finding(0)])

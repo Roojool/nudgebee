@@ -1,9 +1,8 @@
 """Discord renderer for the proactive FinOps nudge (priority recommendations).
 
 Mirrors message_templates/google_chat/recommendation_proactive_nudge.py: an
-alert summary plus top recommendations per account, with the shared Ask-Nubi
-deep link. Returns the {"content", "embeds"} payload consumed by
-DiscordClient.chat_post.
+alert summary plus top recommendations per account. Returns the
+{"content", "embeds"} payload consumed by DiscordClient.chat_post.
 """
 
 from typing import Any, Dict, List
@@ -15,10 +14,7 @@ from notifications_server.message_templates.slack.recommendation_nudge_digest im
     format_savings,
     format_savings_clause,
 )
-from notifications_server.message_templates.slack.recommendation_proactive_nudge import (
-    ProactiveNudgeParams,
-    build_ask_nubi_url,
-)
+from notifications_server.message_templates.slack.recommendation_proactive_nudge import ProactiveNudgeParams
 
 PROACTIVE_NUDGE_COLOR = 16750848  # orange (#ff9800)
 
@@ -61,12 +57,9 @@ def get_discord_recommendation_proactive_nudge_template(params: ProactiveNudgePa
             }
         )
 
-    links = (
-        f"[View All Recommendations]({base_url}/optimise?utm=discord#cost) · "
-        f"[Ask Nubi]({build_ask_nubi_url(params, base_url, 'discord')})"
-    )
+    link = f"[View All Recommendations]({base_url}/optimise?utm=discord#cost)"
     last = embeds[-1]
-    last["description"] = (last.get("description", "") + f"\n\n{links}").strip()
+    last["description"] = (last.get("description", "") + f"\n\n{link}").strip()
 
     content = (
         f"Priority: {params.total_recommendations} recommendations — "

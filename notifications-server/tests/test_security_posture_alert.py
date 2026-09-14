@@ -74,6 +74,21 @@ def _params(criticals: int, highs: int, critical_count=None, high_count=None):
     )
 
 
+def _multi_account_params():
+    rec = _rec(0, "Critical")
+    return get_security_posture_alert_message_params(
+        organization_id="org-1",
+        organization_name="TestOrg",
+        critical_count=2,
+        high_count=0,
+        recommendations_by_account={
+            "acc-1": {"account_name": "prod-aws", "recommendations": [rec.dict()]},
+            "acc-2": {"account_name": "prod-gcp", "recommendations": [rec.dict()]},
+        },
+        base_url="https://app",
+    )
+
+
 class TestSecurityPostureAlert:
     def test_critical_only_with_true_count_and_badge(self):
         msg = get_security_posture_alert_message_template(_params(criticals=4, highs=3, critical_count=8))
@@ -150,3 +165,11 @@ class TestSecurityPostureAlert:
     def test_headline_is_a_header_block(self):
         msg = get_security_posture_alert_message_template(_params(criticals=1, highs=0))
         assert msg["blocks"][0]["type"] == "header"
+
+    def test_multi_account_view_all_links_first_account_image_scan(self):
+        # No cross-account security view exists — must land on a real page, not Home.
+        msg = get_security_posture_alert_message_template(_multi_account_params())
+        text = _text(msg)
+        assert "View all findings on <" in text
+        assert "acc-1" in text
+        assert "#security/image-scan" in text
