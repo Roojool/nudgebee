@@ -12,14 +12,17 @@ export function useOptimisticQueue(scope: string, capacity: number, serverCount:
     setEntries([]);
   }, [scope]);
   const submit = useCallback(
-    (text: string, images: QueuedMessage['images'], persist: () => Promise<unknown>) => {
-      if (serverCount + [...pending.current.values()].filter((entry) => entry.saving).length >= capacity) return false;
-      const entry: QueuedMessage = { id: crypto.randomUUID(), text, images, createdAt: Date.now(), user: 'You', saving: true };
+    (text: string, images: QueuedMessage['images'], persist: () => Promise<unknown>, isForeground = false) => {
+      if (!isForeground && serverCount + [...pending.current.values()].filter((entry) => entry.saving && !entry.isForeground).length >= capacity)
+        return false;
+      const entry: QueuedMessage = { id: crypto.randomUUID(), text, images, createdAt: Date.now(), user: 'You', saving: true, isForeground };
       pending.current.set(entry.id, entry);
       setEntries((prev) => [...prev, entry]);
       void (async () => {
         try {
-          await persist();
+          // Foreground investigation handlers report failure as false after showing
+          // their error. That is not an acknowledgement, nor proof of non-admission.
+          if ((await persist()) === false) throw new Error('Submission was not confirmed.');
           if (scopeRef.current !== scope || pending.current.get(entry.id) !== entry) return;
           pending.current.delete(entry.id);
           setEntries((prev) => prev.filter((item) => item.id !== entry.id));

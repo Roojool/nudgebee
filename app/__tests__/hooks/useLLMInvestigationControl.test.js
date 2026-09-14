@@ -1,5 +1,6 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useLLMInvestigationControl } from '@hooks/useLLMInvestigationControl';
+import { useOptimisticQueue } from '@hooks/useOptimisticQueue';
 
 jest.mock('@api1/ask-nudgebee', () => ({
   __esModule: true,
@@ -73,6 +74,192 @@ describe('useLLMInvestigationControl', () => {
     // Tests that need model data set their own mockResolvedValue before rendering.
     mockListModels.mockReturnValue(new Promise(() => {}));
     mockGetModelConfig.mockResolvedValue({ data: null });
+  });
+
+  it('ignores a rejected send after resetting to another conversation', async () => {
+    let rejectRequest;
+    mockGenerateInvestigate.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectRequest = reject;
+        })
+    );
+    const onFailure = jest.fn();
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    let submission;
+    act(() => {
+      submission = result.current.startInvestigation({ text: 'old question', selectedSessionId: 'old', onFailure });
+    });
+    act(() => {
+      result.current.resetInvestigationState();
+      result.current.setConversationStatus('IN_PROGRESS');
+      result.current.setCurrentlyProcessingQuestion('new question');
+    });
+    await act(async () => {
+      rejectRequest(new Error('late network failure'));
+      expect(await submission).toBe(false);
+    });
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(result.current.conversationStatus).toBe('IN_PROGRESS');
+    expect(result.current.currentlyProcessingQuestion).toBe('new question');
+  });
+
+  it.each(['investigate', 'workflow'])('ignores a late %s success after a reset with the same session key', async (apiMode) => {
+    let resolveRequest;
+    const api = apiMode === 'workflow' ? mockGenerateWorkflow : mockGenerateInvestigate;
+    api.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve;
+        })
+    );
+    const onSuccess = jest.fn();
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    let submission;
+    act(() => {
+      submission = result.current.startInvestigation({ text: 'old question', selectedSessionId: 'old', apiMode, onSuccess });
+    });
+    act(() => {
+      result.current.resetInvestigationState();
+      result.current.setConversationStatus('COMPLETED');
+      result.current.setMessages([{ id: 'new-message', type: 'question', text: 'new conversation' }]);
+    });
+    await act(async () => {
+      resolveRequest(
+        apiMode === 'workflow'
+          ? { data: { ai_generate_workflow: { data: { query: 'old question', status: 'IN_PROGRESS', conversation_id: 'old-conversation' } } } }
+          : { data: { data: { ai_execute_investigation: { data: { query: 'old question', status: 'QUEUED', message_id: 'old-queued' } } } } }
+      );
+      await submission;
+    });
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(result.current.conversationStatus).toBe('COMPLETED');
+    expect(result.current.messages).toEqual([{ id: 'new-message', type: 'question', text: 'new conversation' }]);
+    expect(result.current.queuedMessages).toEqual([]);
+    expect(result.current.conversationIdAtDb).not.toBe('old-conversation');
+  });
+
+  it.each(['success', 'failure'])('does not let an older request %s overwrite a newer request in the same session', async (outcome) => {
+    let settleOld;
+    mockGenerateInvestigate
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            settleOld = () =>
+              outcome === 'success'
+                ? resolve({ data: { data: { ai_execute_investigation: { data: { query: 'old', status: 'QUEUED', message_id: 'old-id' } } } } })
+                : reject(new Error('old failure'));
+          })
+      )
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const onSuccess = jest.fn();
+    const onFailure = jest.fn();
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    let old;
+    act(() => {
+      old = result.current.startInvestigation({ text: 'old', selectedSessionId: 'same', onSuccess, onFailure });
+    });
+    act(() => {
+      void result.current.startInvestigation({ text: 'new', selectedSessionId: 'same' });
+    });
+    await act(async () => {
+      settleOld();
+      await old;
+    });
+    expect(result.current.currentlyProcessingQuestion).toBe('new');
+    expect(result.current.conversationStatus).not.toBe('FAILED');
+    expect(result.current.queuedMessages).toEqual([]);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it.each(['investigate', 'workflow'])('retains a stale resolved %s error as an unconfirmed submission', async (apiMode) => {
+    let resolveOld;
+    const api = apiMode === 'workflow' ? mockGenerateWorkflow : mockGenerateInvestigate;
+    api
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOld = resolve;
+          })
+      )
+      .mockImplementationOnce(() => new Promise(() => {}));
+    Object.defineProperty(global.crypto, 'randomUUID', { configurable: true, value: () => 'pending-old' });
+    const { result } = renderHook(() => ({
+      control: useLLMInvestigationControl('acc-1'),
+      pending: useOptimisticQueue('same', 1, 0),
+    }));
+    act(() => {
+      result.current.pending.submit(
+        'old',
+        [{ data: 'image', mime_type: 'image/png' }],
+        () => result.current.control.startInvestigation({ text: 'old', selectedSessionId: 'same', apiMode }),
+        true
+      );
+    });
+    act(() => {
+      void result.current.control.startInvestigation({ text: 'new', selectedSessionId: 'same', apiMode });
+    });
+    await act(async () => {
+      resolveOld({ data: { errors: [{ message: 'upstream error' }] } });
+    });
+    expect(result.current.pending.entries[0]).toMatchObject({
+      text: 'old',
+      saving: false,
+      notAdmitted: false,
+      images: [{ data: 'image', mime_type: 'image/png' }],
+    });
+    expect(result.current.control.currentlyProcessingQuestion).toBe('new');
+    expect(api).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a delayed success restart a confirmed stopped investigation', async () => {
+    let resolveOld;
+    mockGenerateInvestigate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        })
+    );
+    mockStopInvestigate.mockResolvedValue({ data: { data: { ai_cancel_investigation: { data: { status: 'terminated' } } } } });
+    const onSuccess = jest.fn();
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    let old;
+    act(() => {
+      old = result.current.startInvestigation({ text: 'old', selectedSessionId: 'same', onSuccess });
+      result.current.setAllowStop(true);
+    });
+    await act(async () => {
+      await result.current.stopInvestigation('existing', 'IN_PROGRESS');
+    });
+    await act(async () => {
+      resolveOld({ data: { data: { ai_execute_investigation: { data: { query: 'old' } } } } });
+      expect(await old).toBe(true);
+    });
+    expect(result.current.conversationStatus).toBe('TERMINATED');
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('uses the existing conversation identity when sending without a selected session', async () => {
+    mockGetConversation.mockResolvedValue({
+      data: { data: { llm_conversations: [{ id: 'existing', status: 'COMPLETED', llm_conversation_messages: [] }] } },
+    });
+    mockGenerateInvestigate.mockImplementation(() => new Promise(() => {}));
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    await act(async () => {
+      await result.current.fetchConversation('', 'existing', 'selected', false);
+    });
+    act(() => {
+      void result.current.startInvestigation({ text: 'first', selectedSessionId: '' });
+    });
+    act(() => {
+      void result.current.queueInvestigationMessage({ text: 'follow-up' });
+    });
+    expect(mockGenerateInvestigate).toHaveBeenNthCalledWith(1, expect.objectContaining({ conversation_id: 'existing', session_id: undefined }));
+    expect(mockGenerateInvestigate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ conversation_id: 'existing', session_id: undefined, queue_only: true })
+    );
   });
 
   it.each([409, 500])('permits the idle refresh retry only for a definite 409 rejection (%s)', async (status) => {

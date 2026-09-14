@@ -82,3 +82,27 @@ it('does not let uncertain submissions permanently consume queue capacity', asyn
   });
   expect(result.current.entries).toHaveLength(2);
 });
+
+it('retains text and attachments when a foreground handler reports failure as false', async () => {
+  const images = [{ data: 'image', mime_type: 'image/png' }];
+  const persist = jest.fn().mockResolvedValue(false);
+  const { result } = renderHook(() => useOptimisticQueue('chat', 1, 0));
+  await act(async () => {
+    expect(result.current.submit('question', images, persist, true)).toBe(true);
+  });
+  expect(result.current.entries[0]).toMatchObject({ text: 'question', images, saving: false, notAdmitted: false });
+  expect(result.current.takeDraft('request-one')).toBeNull();
+  expect(persist).toHaveBeenCalledTimes(1);
+});
+
+it('does not charge the foreground request against the follow-up queue capacity', () => {
+  const persist = () => new Promise(() => {});
+  const { result } = renderHook(() => useOptimisticQueue('chat', 1, 0));
+  act(() => {
+    expect(result.current.submit('foreground', [], persist, true)).toBe(true);
+    (crypto.randomUUID as jest.Mock).mockReturnValue('request-two');
+    expect(result.current.submit('queued', [], persist)).toBe(true);
+    expect(result.current.submit('over capacity', [], persist)).toBe(false);
+  });
+  expect(result.current.entries).toHaveLength(2);
+});

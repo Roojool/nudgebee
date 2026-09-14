@@ -776,6 +776,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   } = state;
 
   const currentSessionRef = useRef('');
+  const investigationGenerationRef = useRef(0);
   const isMountedRef = useRef(true);
   const fetchIdRef = useRef(0);
   const abortControllerRef = useRef(null);
@@ -908,6 +909,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
       }
 
       const sessionKey = currentSessionRef.current;
+      let investigationGeneration = investigationGenerationRef.current;
       try {
         dispatch({ type: 'SET_IS_PROCESSING', payload: true });
 
@@ -916,7 +918,8 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
           conversationId: conversationId,
         });
 
-        if (!isMountedRef.current || currentSessionRef.current !== sessionKey) return;
+        if (!isMountedRef.current || currentSessionRef.current !== sessionKey || investigationGenerationRef.current !== investigationGeneration)
+          return;
 
         const response = res?.data?.data?.ai_cancel_investigation || {};
 
@@ -924,6 +927,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
           // The cancellation response confirms the transaction committed. Retire
           // older polls so they cannot restore an in-progress snapshot afterward.
           fetchIdRef.current++;
+          investigationGeneration = ++investigationGenerationRef.current;
           dispatch({
             type: 'UPDATE_CONVERSATION_META',
             fields: {
@@ -943,11 +947,11 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         }
       } catch (error) {
         console.error('Error stopping investigation:', error);
-        if (isMountedRef.current && currentSessionRef.current === sessionKey) {
+        if (isMountedRef.current && currentSessionRef.current === sessionKey && investigationGenerationRef.current === investigationGeneration) {
           snackbar.error('An error occurred while stopping the investigation');
         }
       } finally {
-        if (isMountedRef.current && currentSessionRef.current === sessionKey) {
+        if (isMountedRef.current && currentSessionRef.current === sessionKey && investigationGenerationRef.current === investigationGeneration) {
           dispatch({ type: 'SET_IS_PROCESSING', payload: false });
         }
       }
@@ -958,6 +962,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   const handleWorkflowGeneration = useCallback(
     async (finalQuery, llmSessionId, workflowId, workflowDefinition, currentCluster, onSuccess) => {
       const sessionKey = currentSessionRef.current;
+      const investigationGeneration = investigationGenerationRef.current;
       const userSession = getUserSession();
       const config = {
         ...(selectedModel && {
@@ -991,9 +996,10 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         true
       );
 
-      if (!isMountedRef.current || currentSessionRef.current !== sessionKey) return;
-
       const response = res?.data?.ai_generate_workflow?.data ?? {};
+      // Settle this submission independently of whether it still owns the conversation UI.
+      if (!isMountedRef.current || currentSessionRef.current !== sessionKey || investigationGenerationRef.current !== investigationGeneration)
+        return Boolean(response.query || response.response);
 
       if (!response?.query && !response?.response) {
         const errorMessage = res?.errors?.[0]?.message;
@@ -1032,10 +1038,12 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   const handleInvestigationGeneration = useCallback(
     async (finalQuery, llmSessionId, onSuccess, categorySource, images, optimisticMessageId) => {
       const sessionKey = currentSessionRef.current;
+      const investigationGeneration = investigationGenerationRef.current;
       const requestPayload = {
         account_id: accountId,
         query: finalQuery,
         session_id: llmSessionId,
+        ...(conversationIdAtDb && { conversation_id: conversationIdAtDb }),
       };
 
       // selectedTierModels is null or non-empty in practice (both the reducer's
@@ -1079,9 +1087,10 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
 
       const res = await apiAskNudgebee.aiGenerateInvestigate(requestPayload);
 
-      if (!isMountedRef.current || currentSessionRef.current !== sessionKey) return;
-
       const response = res?.data?.data?.ai_execute_investigation ?? {};
+      // Settle this submission independently of whether it still owns the conversation UI.
+      if (!isMountedRef.current || currentSessionRef.current !== sessionKey || investigationGenerationRef.current !== investigationGeneration)
+        return Boolean(response.data?.query);
 
       if (!response?.data?.query) {
         const status = getUpstreamStatus(res?.data);
@@ -1126,7 +1135,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         onSuccess(llmSessionId);
       }
     },
-    [accountId, eventId, selectedModel, selectedTierModels, selectedConfig, configCleared]
+    [accountId, conversationIdAtDb, eventId, selectedModel, selectedTierModels, selectedConfig, configCleared]
   );
 
   const startInvestigation = useCallback(
@@ -1149,18 +1158,25 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         return;
       }
 
+      investigationGenerationRef.current += 1;
+      const sessionKey = currentSessionRef.current;
+      const investigationGeneration = investigationGenerationRef.current;
       const finalQuery = querySuffix ? `${text} ${querySuffix}` : text;
-      const llmSessionId = selectedSessionId || uuidv4();
+      const llmSessionId = selectedSessionId || (apiMode === 'investigate' && conversationIdAtDb ? undefined : uuidv4());
 
       dispatch({ type: 'UPDATE_CONVERSATION_META', fields: { currentlyProcessingQuestion: finalQuery, isProcessing: true } });
 
       try {
         if (apiMode === 'workflow') {
-          await handleWorkflowGeneration(finalQuery, llmSessionId, workflowId, workflowDefinition, currentCluster, onSuccess);
+          return (await handleWorkflowGeneration(finalQuery, llmSessionId, workflowId, workflowDefinition, currentCluster, onSuccess)) !== false;
         } else {
-          await handleInvestigationGeneration(finalQuery, llmSessionId, onSuccess, categorySource, images, optimisticMessageId);
+          return (await handleInvestigationGeneration(finalQuery, llmSessionId, onSuccess, categorySource, images, optimisticMessageId)) !== false;
         }
       } catch (error) {
+        // A late failure belongs to the submitted conversation, not whichever
+        // conversation/account the user has opened while the request was pending.
+        if (!isMountedRef.current || currentSessionRef.current !== sessionKey || investigationGenerationRef.current !== investigationGeneration)
+          return false;
         console.error(error);
         dispatch({ type: 'INVESTIGATION_FAILED' });
 
@@ -1174,12 +1190,12 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         }
         return false;
       }
-      return true;
     },
-    [accountId, handleWorkflowGeneration, handleInvestigationGeneration]
+    [accountId, conversationIdAtDb, handleWorkflowGeneration, handleInvestigationGeneration]
   );
 
   const resetInvestigationState = useCallback(() => {
+    investigationGenerationRef.current += 1;
     // Abort any in-flight requests and invalidate pending fetches
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();

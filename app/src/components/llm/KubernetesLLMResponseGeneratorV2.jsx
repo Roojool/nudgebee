@@ -553,7 +553,7 @@ const KubernetesLLMResponseGenerator = ({
   }, [conversationIdAtDb, conversationStatus, stopInvestigation, clearSuggestions]);
 
   const executeInvestigation = useCallback(
-    async (text, images, preserveDraftOnFailure = false) => {
+    async (text, images, preserveDraftOnFailure = false, pendingSubmission = false) => {
       if (!text) {
         return false;
       }
@@ -576,7 +576,7 @@ const KubernetesLLMResponseGenerator = ({
 
       // Add optimistic question message immediately so user sees their question right away.
       const optimisticMessageId = `optimistic-${Date.now()}`;
-      if (apiMode !== 'workflow') {
+      if (apiMode !== 'workflow' && !pendingSubmission) {
         const optimisticQuestionMessage = {
           id: optimisticMessageId,
           text: processedText,
@@ -610,6 +610,8 @@ const KubernetesLLMResponseGenerator = ({
         popup,
         router,
         onSuccess: (llmSessionId) => {
+          // Conversation-id-only routes retain that identity, including pending follow-ups.
+          if (!llmSessionId) return;
           if (!popup) {
             // Standardize on session_id for new chats, clear conversation_id to avoid ambiguity
             applyFiltersOnRouter(router, { session_id: llmSessionId, conversation_id: null }, { shallow: true });
@@ -618,13 +620,13 @@ const KubernetesLLMResponseGenerator = ({
           }
           setSelectedSessionId(llmSessionId);
           setSelectedConversationId(''); // Reset conversationId as we have a fresh session
-          setGenerateQuestionText('');
+          // A late response must not overwrite the next draft.
           setConversationStatus('IN_PROGRESS');
         },
         onFailure: () => {
           setConversationStatus('FAILED');
           setMessages((previous) => previous.filter((message) => message.id !== optimisticMessageId));
-          if (preserveDraftOnFailure) setGenerateQuestionText(text);
+          if (preserveDraftOnFailure && !pendingSubmission) setGenerateQuestionText(text);
           if (!popup && !preserveDraftOnFailure) {
             applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
           }
@@ -717,13 +719,14 @@ const KubernetesLLMResponseGenerator = ({
     [editQueuedMessage]
   );
 
-  const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled;
+  const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled && Boolean(conversationIdAtDb);
 
   const optimisticQueue = useOptimisticQueue(queueScope, maxQueuedMessages, queuedMessages.length);
   const displayedQueue = [...queuedMessages, ...optimisticQueue.entries];
 
   const isMaxQueueReached =
-    isServerMaxQueueReached || queuedMessages.length + optimisticQueue.entries.filter((entry) => entry.saving).length >= maxQueuedMessages;
+    isServerMaxQueueReached ||
+    queuedMessages.length + optimisticQueue.entries.filter((entry) => entry.saving && !entry.isForeground).length >= maxQueuedMessages;
 
   const handleGenerateInvestigation = useCallback(
     async (text, images) => {
@@ -745,10 +748,21 @@ const KubernetesLLMResponseGenerator = ({
         return accepted;
       }
 
+      // Existing conversations can accept follow-ups while this HTTP response is
+      // outstanding. Keep the submitted draft in the pending list, not the composer.
+      // A new conversation still needs its server identity before it can queue.
+      if (canQueueMessages) {
+        if (accountId && !hasReadAccess(accountId)) {
+          snackbar.error('You do not have permission to perform this action');
+          return false;
+        }
+        return optimisticQueue.submit(text, images, () => executeInvestigation(text, images, true, true), true);
+      }
       return await executeInvestigation(text, images, true);
     },
     [
       optimisticQueue.submit,
+      accountId,
       isConversationInProgress,
       isMaxQueueReached,
       canQueueMessages,

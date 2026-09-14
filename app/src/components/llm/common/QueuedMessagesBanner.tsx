@@ -42,7 +42,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
     return null;
   }
 
-  const count = queuedMessages.filter((message) => !message.saveError).length;
+  const count = queuedMessages.filter((message) => !message.saveError && !message.isForeground).length;
   const waiting = queuedMessages.filter((message) => !message.saving && !message.saveError).length;
   const saving = queuedMessages.filter((message) => message.saving).length;
   const unconfirmed = queuedMessages.filter((message) => message.saveError).length;
@@ -133,7 +133,11 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
               whiteSpace: 'nowrap',
             }}
           >
-            {isFull ? 'Queue full (wait for tasks to finish or delete a message)' : 'Runs after the current response'}
+            {isFull
+              ? 'Queue full (wait for tasks to finish or delete a message)'
+              : waiting
+              ? 'Runs after the current response'
+              : 'Waiting for confirmation'}
           </Typography>
         </Box>
 
