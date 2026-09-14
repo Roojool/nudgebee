@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_cloud_resource_metrics_tenantaccount_workloadfqdn;
