@@ -614,14 +614,17 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 			a.reportProgress("Creating pull request...")
 			prInfo, err := a.createPullRequest(ctx, sessionCtx, mergedData)
 			if errors.Is(err, errNoCommitsToPublish) {
-				// Nothing was actually committed, so there is no PR to open. That
-				// is the same terminal "already resolved" outcome as an empty
-				// diff, not a failure — report it as such so the caller does not
-				// re-dispatch.
-				a.reportProgress("Analysis complete — no code change to publish.")
-				mergedData["pr_creation_status"] = "skipped"
-				mergedData["pr_creation_reason"] = "No commits were produced on the fix branch — the change appears to be already present."
-				mergedData["execution_status"] = ExecutionStatusNoOp
+				// Reaching here means a non-empty diff existed, so the fixer did
+				// change the tree; failing to get those changes onto the branch is
+				// a commit/push problem, not evidence that the repository already
+				// held them. Report it as the failure it is rather than as a
+				// terminal "already resolved".
+				a.reportProgress("Analysis failed — the fix could not be committed.")
+				a.logger.Log(common.EventStepFailure, "Fix produced a diff but no commits reached the branch", nil)
+				mergedData["pr_creation_status"] = "failed"
+				mergedData["pr_creation_reason"] = "The fix was applied to the working tree but no commits reached the fix branch, so no pull request could be opened."
+				mergedData["execution_status"] = ExecutionStatusFailed
+				mergedData["execution_summary"] = "The fix was applied to the working tree but no commits reached the fix branch, so no pull request could be opened."
 			} else if err != nil {
 				a.logger.Log(common.EventStepFailure, "Failed to create pull request", map[string]any{"error": err.Error()})
 				mergedData["pr_creation_status"] = "failed"
@@ -668,8 +671,8 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 }
 
 // errNoCommitsToPublish signals that the fix branch carries no commits, so there
-// is nothing to open a PR for. A terminal no-op (the change is already present),
-// not a failure — the caller maps it to execution_status no_op.
+// is nothing to open a PR for. It is only raised once a diff exists, so it means
+// the commit step lost the change — the caller maps it to execution_status failed.
 var errNoCommitsToPublish = errors.New("no commits on the fix branch")
 
 // fixOnlyResponseFields lists keys that only make sense when the orchestrator
@@ -1557,34 +1560,37 @@ func (a *OrchestratorAgent) executeFixAndReviewLoop(ctx context.Context, session
 		gitDiff, _ := fixerResult["git_diff"].(string)
 		if gitDiff == "" {
 			execStatus, _ := fixerResult["execution_status"].(string)
-			if execStatus == "failed" || execStatus == "partial_success" {
-				a.logger.Log(common.EventStepFailure, "Empty diff but execution reported failure", map[string]any{
-					"attempt":           attempt,
-					"execution_status":  execStatus,
-					"execution_summary": fixerResult["execution_summary"],
-				})
-				if attempt < maxAttempts {
-					factsData["_review_feedback"] = fmt.Sprintf(
-						"Previous attempt produced no code changes. Status: %s. Summary: %v. Re-examine the target file and apply the fix correctly.",
-						execStatus, fixerResult["execution_summary"],
-					)
-					continue
-				}
+			targetFile, _ := factsData["file_path"].(string)
+			summary := emptyDiffFailureSummary(targetFile, execStatus)
+
+			a.logger.Log(common.EventStepFailure, "Empty diff from fixer", map[string]any{
+				"attempt":           attempt,
+				"execution_status":  execStatus,
+				"execution_summary": fixerResult["execution_summary"],
+			})
+
+			// Retry while attempts remain. The old gate keyed on the fixer
+			// *admitting* failure, so a fixer that believed it had succeeded burned
+			// none of its retries and the run ended on attempt 1 of 3.
+			if attempt < maxAttempts {
+				factsData["_review_feedback"] = fmt.Sprintf(
+					"Previous attempt produced no code changes. %s Re-examine the target file and apply the fix with the replace or write_file tool — reporting the edit without calling the tool changes nothing on disk.",
+					summary,
+				)
+				continue
 			}
-			// Genuine no-op: the fixer ran to completion and produced no diff, and
-			// execution did not fail — the requested change is already present.
-			// Mark it as a terminal no-op so the orchestrator surfaces an explicit
-			// "already resolved" outcome instead of an ambiguous empty result.
-			a.logger.Log(common.EventStepComplete, "No changes to review — change already present (no-op)", map[string]any{"attempt": attempt})
+
 			// Guard against a nil result map (a fixer that returned no data): writing
 			// to a nil map panics.
 			if lastFixerResult == nil {
 				lastFixerResult = map[string]any{}
 			}
-			lastFixerResult["execution_status"] = ExecutionStatusNoOp
-			if summary, _ := lastFixerResult["execution_summary"].(string); summary == "" {
-				lastFixerResult["execution_summary"] = "No code changes were produced; the requested change appears to already be present in the repository."
-			}
+			lastFixerResult["execution_status"] = ExecutionStatusFailed
+			// Overwrite rather than only filling a blank: the fixer's own summary
+			// describes edits that produced no diff, and api-server surfaces
+			// execution_summary as the cause, so propagating it puts a claim that the
+			// change was applied in front of the user as the failure reason.
+			lastFixerResult["execution_summary"] = summary
 			break
 		}
 
@@ -1754,8 +1760,12 @@ func (a *OrchestratorAgent) executeFixAndReviewLoop(ctx context.Context, session
 // ExecutionStatusNoOp marks a terminal, successful "no change required" outcome:
 // the requested fix is already present in the repository, so the agent
 // intentionally produced no diff and created no PR. It is distinct from a
-// failure — the pipeline ran to completion and the result is correct. PR
-// followup mode already emits this value; the standard fix flow now does too.
+// failure — the pipeline ran to completion and the result is correct.
+//
+// In the standard fix flow only the specialist may reach this verdict, by reading
+// the file and returning requires_fix=false. An empty diff from the fixer is not
+// eligible: by then the specialist has already said a change is needed, so the
+// honest reading is that the fix failed to land, not that it was there all along.
 const ExecutionStatusNoOp = "no_op"
 
 // ExecutionStatusSuccess marks a fix-mode run that produced a diff. The fixer
@@ -1769,16 +1779,63 @@ const ExecutionStatusSuccess = "success"
 // the cause, so the summary must name what actually broke.
 const ExecutionStatusFailed = "failed"
 
+// emptyDiffFailureSummary states what an empty fixer diff actually means, for the
+// one situation that can produce it: the fixer ran and the working tree came back
+// unchanged.
+//
+// This is never "the change is already present". Reaching the fixer at all means
+// the specialist — the only agent that read the file — returned requires_fix=true.
+// Had the file already held the requested change, the specialist would have said
+// so and the run would have ended as a no-op before the fixer was invoked. So an
+// empty diff here means the fix did not get written, and reporting it as a
+// completed change is what closed a live recommendation with the target file
+// untouched.
+//
+// Deciding this from tool invocations was tried and abandoned: a successful call
+// to an edit tool does not mean bytes were written. replace serves action="verify"
+// under the same tool name and returns success after only reading, and its
+// LLM self-correction path returns success with "no changes required" — so the
+// evidence keeps meaning less than it appears to, in the same direction every
+// time. The fixer's own execution_status is no better; a fixer that never edited
+// still reports success and narrates the edits it did not make.
+func emptyDiffFailureSummary(filePath, fixerStatus string) string {
+	target := filePath
+	if target == "" {
+		target = "the target file"
+	}
+	summary := fmt.Sprintf(
+		"No change reached %s: the fixer ran but left the working tree unchanged, so nothing was written and no pull request could be raised. Any summary of edits it reported describes work that did not happen.", target)
+	if fixerStatus != "" {
+		summary += fmt.Sprintf(" The fixer reported %q.", fixerStatus)
+	}
+	return summary
+}
+
 // shouldCreatePR determines if a PR should be created based on review results and changes.
-// Returns (shouldCreate, noChanges, reason): noChanges is true only for the empty-diff
-// case (the change is already present — a terminal no-op), false for review rejection.
+// Returns (shouldCreate, noChanges, reason): noChanges is true only when the empty diff
+// is a terminal no-op (the change is already present), false for review rejection and
+// for a fixer that produced nothing.
 func (a *OrchestratorAgent) shouldCreatePR(mergedData map[string]any) (bool, bool, string) {
 	// Check if there are actual changes
 	gitDiff, hasChanges := mergedData["git_diff"].(string)
 	if !hasChanges || gitDiff == "" {
-		reason := "No code changes were produced — the requested change appears to already be present in the repository, so there is nothing to apply."
-		a.logger.Log(common.EventStepComplete, "No changes to create PR for", nil)
-		return false, true, reason
+		// Honor the status the run already carries rather than re-deriving a verdict
+		// here. Calling every empty diff "already present" is what let a fixer that
+		// never edited anything be reported as a completed change.
+		status, _ := mergedData["execution_status"].(string)
+		reason, _ := mergedData["execution_summary"].(string)
+		if reason == "" {
+			reason = "No code changes were produced, so there is nothing to apply."
+		}
+		// Only an explicit no-op verdict counts. An empty diff that reached here
+		// unclassified is an unknown, and an unknown must not be reported as a
+		// completed change.
+		noChanges := status == ExecutionStatusNoOp
+		a.logger.Log(common.EventStepComplete, "No changes to create PR for", map[string]any{
+			"execution_status": status,
+			"no_op":            noChanges,
+		})
+		return false, noChanges, reason
 	}
 
 	// Harness-verified path: the tri-state verification verdict governs. A failed

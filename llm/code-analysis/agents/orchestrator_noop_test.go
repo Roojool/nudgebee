@@ -15,16 +15,37 @@ func newTestOrchestrator() *OrchestratorAgent {
 	return &OrchestratorAgent{logger: common.NewLogger("test-analysis", "test/repo", "test-user", nil)}
 }
 
-func TestShouldCreatePR_EmptyDiffIsTerminalNoOp(t *testing.T) {
+func TestShouldCreatePR_EmptyDiffHonorsNoOpVerdict(t *testing.T) {
 	a := newTestOrchestrator()
 
+	// The fix loop classified this empty diff as a genuine no-op (the fixer
+	// edited and the tree already matched), so shouldCreatePR must carry it
+	// through as one.
 	shouldCreate, noChanges, reason := a.shouldCreatePR(map[string]any{
-		// no git_diff → change already present
+		"execution_status":  ExecutionStatusNoOp,
+		"execution_summary": "The fixer applied its edits to values.yaml and the working tree was left unchanged — the requested change is already present.",
 	})
 
 	assert.False(t, shouldCreate, "no PR should be created when there is no diff")
-	assert.True(t, noChanges, "empty diff must be flagged as a terminal no-op")
-	assert.Contains(t, reason, "already be present")
+	assert.True(t, noChanges, "a classified no-op must stay a terminal no-op")
+	assert.Contains(t, reason, "already present")
+}
+
+func TestShouldCreatePR_EmptyDiffFromFailedFixerIsNotNoOp(t *testing.T) {
+	a := newTestOrchestrator()
+
+	// The fix loop found no edit tool was ever invoked and marked the run failed.
+	// shouldCreatePR must NOT relabel that as "already present" — doing so closes
+	// a live recommendation with the target file untouched.
+	shouldCreate, noChanges, reason := a.shouldCreatePR(map[string]any{
+		"execution_status":  ExecutionStatusFailed,
+		"execution_summary": "No change was applied to deploy/values-test.yaml: the fixer finished without invoking any file-editing tool, so nothing was written.",
+	})
+
+	assert.False(t, shouldCreate)
+	assert.False(t, noChanges, "a fixer that never edited must not be reported as a no-op")
+	assert.Contains(t, reason, "without invoking any file-editing tool")
+	assert.NotContains(t, reason, "already present")
 }
 
 func TestShouldCreatePR_ReviewRejectedIsNotNoOp(t *testing.T) {
