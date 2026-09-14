@@ -200,6 +200,12 @@ describe('describeUndo', () => {
     expect(u.payload).toMatchObject({ revert: true, undo: true });
   });
 
+  // An alert can carry several changes; the undo must target the one the revert acted on.
+  it('undoes the change the revert named', () => {
+    const u = describeUndo(done({ data: { data: { revert: true, change_event_id: 'chg-1' } } }), 'LastDeploymentCard_3');
+    expect(u.payload).toMatchObject({ revert: true, undo: true, card_id: 'LastDeploymentCard_3', change_event_id: 'chg-1' });
+  });
+
   it('offers to undo any action that recorded a before-state', () => {
     const u = describeUndo(done({ data: { before: { containers: [{ container_name: 'app' }] } } }), 'MemoryAllocationCard');
     expect(u.label).toBe('Undo');

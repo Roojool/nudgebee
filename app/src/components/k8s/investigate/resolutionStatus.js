@@ -130,9 +130,13 @@ export const describeUndo = (resolution, cardId, card) => {
   if (!resolution || resolution.status !== 'Success') return null;
 
   if (cardKey(cardId) === 'LastDeploymentCard') {
+    // Undo the change the revert acted on. Without its id the server falls back to the alert's own
+    // evidence, which refuses (or, before that guard, merged) an alert carrying several changes.
+    const recorded = typeof resolution.data === 'string' ? safeJSONParse(resolution.data) : resolution.data;
+    const changeEventId = recorded?.data?.change_event_id;
     return {
       label: 'Undo revert',
-      payload: { revert: true, undo: true, card_id: cardId },
+      payload: { revert: true, undo: true, card_id: cardId, ...(changeEventId && { change_event_id: changeEventId }) },
       preview: describeRevertUndoPreview(card),
     };
   }

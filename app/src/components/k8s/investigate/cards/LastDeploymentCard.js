@@ -25,6 +25,51 @@ const revertTargetName = (resourceName) => {
   return parts[parts.length - 1] || withoutExt;
 };
 
+const isSingleDiff = (e) => e?.type === 'diff' && e?.additional_info?.action_name !== 'deployment_history';
+
+// foldRepeatedChanges groups an event's diff evidences by the object they changed. The collector now
+// sends one block per object, but events recorded before that carry one block per edit — five
+// rewrites of an operator-managed ConfigMap rendered five identical cards and five Revert rows.
+// Blocks arrive newest first, so the first block of each object is the one kept; the rest are
+// skipped and carried along as that card's earlier edits, diff included, so each one can still be
+// opened. A block with no resource_name is never folded.
+export const foldRepeatedChanges = (evidences) => {
+  const skip = new Set();
+  const changes = new Map();
+  const firstIndexByObject = new Map();
+  (Array.isArray(evidences) ? evidences : []).forEach((e, index) => {
+    if (!isSingleDiff(e)) return;
+    const key = typeof e?.data?.resource_name === 'string' ? e.data.resource_name.trim().toLowerCase() : '';
+    if (!key) return;
+    if (!firstIndexByObject.has(key)) {
+      firstIndexByObject.set(key, index);
+      changes.set(index, [{ start_at: e.start_at, diff: e.data }]);
+      return;
+    }
+    skip.add(index);
+    changes.get(firstIndexByObject.get(key)).push({ start_at: e.start_at, diff: e.data });
+  });
+  return { skip, changes };
+};
+
+const WORKLOAD_KINDS = ['deployment', 'statefulset', 'daemonset', 'rollout', 'replicaset'];
+
+// canRevertDiff decides whether the "What you can do" list may offer to revert one diff block.
+//
+// The server reverts by writing the recorded old values onto the ALERT's workload. A ConfigMap or
+// Ingress edit is not a change to that workload, so reverting it there is wrong, and an operator-
+// managed ConfigMap would be rewritten again anyway. And an alert carrying several diff blocks must
+// name the change it means (change_event_id): without one the server would undo all of them at once.
+export const canRevertDiff = (evidence, event) => {
+  const parts = String(evidence?.data?.resource_name || '')
+    .replace(/\.yaml$/i, '')
+    .split('/');
+  if (parts.length !== 3 || !WORKLOAD_KINDS.includes(parts[0].toLowerCase())) return false;
+  if (event?.service_key && `${parts[1]}/${parts[2]}` !== event.service_key) return false;
+  if (evidence?.additional_info?.change_event_id) return true;
+  return (event?.evidences || []).filter(isSingleDiff).length === 1;
+};
+
 // isRevertableChange decides whether to offer a revert for one recorded change.
 //
 // The field summary is NOT required. It is a display convenience the server started sending
@@ -296,9 +341,102 @@ DeploymentHistoryContent.propTypes = {
   cardId: PropTypes.string,
 };
 
+// changedPathsLabel names what an edit touched, so rows of one repeatedly-edited object can be told
+// apart without opening each diff.
+const changedPathsLabel = (diff) => {
+  const paths = (Array.isArray(diff?.updated_values) ? diff.updated_values.map((v) => v?.path) : diff?.updated_paths || []).filter(Boolean);
+  if (paths.length === 0) return '';
+  const shown = paths.slice(0, 3).join(', ');
+  return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown;
+};
+
+// RepeatedChangesContent lists every edit folded into one card, newest first, each with its own diff.
+// A card that showed only the newest diff and the other edits as bare times gave no way to see what
+// those edits were. Diffs already on the page are shown directly; the collector keeps only the newest
+// one per object, so older edits are fetched from their own change event on demand.
+const RepeatedChangesContent = ({ changes, event }) => {
+  const [expanded, setExpanded] = useState(0);
+  // Keyed by change event id, so a slow response can only ever fill in its own row.
+  const [fetched, setFetched] = useState({});
+
+  const toggle = (index) => {
+    if (expanded === index) {
+      setExpanded(-1);
+      return;
+    }
+    setExpanded(index);
+    const change = changes[index];
+    if (change.diff || !change.eventId || fetched[change.eventId]) return;
+    setFetched((prev) => ({ ...prev, [change.eventId]: { loading: true } }));
+    apiKubernetes
+      .resolveEventRecord(change.eventId, event?.cloud_account_id)
+      .then((res) => {
+        const diff = (res?.data?.events?.[0]?.evidences || []).find((e) => e?.type === 'diff')?.data;
+        setFetched((prev) => ({
+          ...prev,
+          [change.eventId]: diff?.old || diff?.new ? { diff } : { error: 'No before/after manifest was recorded for this change.' },
+        }));
+      })
+      .catch(() => setFetched((prev) => ({ ...prev, [change.eventId]: { error: 'That change could not be loaded.' } })));
+  };
+
+  return (
+    <Box sx={{ marginTop: 'var(--ds-space-2)' }}>
+      {changes.map((change, index) => {
+        const state = change.eventId ? fetched[change.eventId] : null;
+        const diff = change.diff || state?.diff;
+        const paths = changedPathsLabel(diff);
+        return (
+          <Box key={change.eventId || `${change.startAt}_${index}`} sx={{ paddingBlock: 'var(--ds-space-2)' }}>
+            <Box display={'flex'} flexDirection={'row'} justifyContent={'space-between'} alignItems={'center'} gap={ds.space.mul(0, 3)}>
+              <Box display={'flex'} flexDirection={'row'} alignItems={'baseline'} gap={ds.space.mul(0, 2)} sx={{ minWidth: 0, flexWrap: 'wrap' }}>
+                <Typography sx={{ color: 'var(--ds-gray-900)', fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)' }}>
+                  {index === 0 ? 'Latest' : `Edit ${changes.length - index}`}
+                </Typography>
+                {change.startAt && <Datetime value={change.startAt} sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }} />}
+                {paths && (
+                  <Typography
+                    sx={{ fontSize: 'var(--ds-text-small)', fontFamily: 'var(--ds-font-mono)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
+                  >
+                    {paths}
+                  </Typography>
+                )}
+              </Box>
+              {(change.diff || change.eventId) && (
+                <Button size='xs' tone='link' onClick={() => toggle(index)}>
+                  {expanded === index ? 'Hide diff' : 'Show diff'}
+                </Button>
+              )}
+            </Box>
+            {expanded === index && (
+              <Box sx={{ marginTop: 'var(--ds-space-2)' }}>
+                {state?.error ? (
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-red-600)' }}>{state.error}</Typography>
+                ) : diff ? (
+                  <DiffViewer originalCode={diff.old} newCode={diff.new} language='yaml' leftLabel='Before' rightLabel='After' />
+                ) : (
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{'Loading the diff…'}</Typography>
+                )}
+              </Box>
+            )}
+            {index !== changes.length - 1 && <Divider sx={{ marginTop: 'var(--ds-space-2)' }} />}
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
+RepeatedChangesContent.propTypes = {
+  changes: PropTypes.arrayOf(PropTypes.object).isRequired,
+  event: PropTypes.object,
+};
+
 class LastDeploymentCard {
-  constructor(evidenceData, event, index) {
+  // foldedChanges: every edit foldRepeatedChanges folded into this block ({start_at, diff}), newest first.
+  constructor(evidenceData, event, index, foldedChanges) {
     this.id = `LastDeploymentCard_${index}`;
+    this.foldedChanges = foldedChanges;
     this.icon = LastDeploymentIcon;
     this.text = evidenceData.additional_info?.title || 'Last Deployment Change';
     this.resolveButton = true;
@@ -365,6 +503,18 @@ class LastDeploymentCard {
         this.renderContent = true;
         this.diff = this.evidenceData;
         this.highlightsData = this.evidenceData?.insight;
+        // The collector folds repeat edits and says so in its title; for events recorded before
+        // that, the page folds them and the title has to say it here. Built from the stored title
+        // rather than appended to this.text: this runs more than once per card.
+        const info = this.evidenceData.additional_info || {};
+        this.changes = Array.isArray(info.changes)
+          ? info.changes.map((c) => ({ startAt: c?.start_at, eventId: c?.change_event_id }))
+          : (this.foldedChanges || []).map((c) => ({ startAt: c?.start_at, diff: c?.diff }));
+        if (this.changes.length > 0) this.changes[0] = { ...this.changes[0], diff: this.evidenceData.data };
+        const baseTitle = info.title || 'Last Deployment Change';
+        this.text = !info.change_count && this.changes.length > 1 ? `${baseTitle} · ${this.changes.length} times` : baseTitle;
+        this.revertChangeId = info.change_event_id || '';
+        this.resolveButton = canRevertDiff(this.evidenceData, this.event);
         // Lets the action row name the change it reverts instead of "the last deployment change",
         // which says nothing on a workload that changed several times.
         this.actionSubject = this.evidenceData.start_at ? new Date(this.evidenceData.start_at).toLocaleString() : '';
@@ -430,9 +580,18 @@ class LastDeploymentCard {
               </Box>
             )}
           </Box>
-          <Box sx={{ marginTop: 'var(--ds-space-3)', marginBottom: 'var(--ds-space-2)' }}>
-            <DiffViewer originalCode={this.diff?.data?.old} newCode={this.diff?.data?.new} language='yaml' leftLabel='Before' rightLabel='After' />
-          </Box>
+          {this.changes?.length > 1 ? (
+            <>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', marginTop: 'var(--ds-space-2)' }}>
+                {`Changed ${this.changes.length} times before this alert.`}
+              </Typography>
+              <RepeatedChangesContent changes={this.changes} event={this.event} />
+            </>
+          ) : (
+            <Box sx={{ marginTop: 'var(--ds-space-3)', marginBottom: 'var(--ds-space-2)' }}>
+              <DiffViewer originalCode={this.diff?.data?.old} newCode={this.diff?.data?.new} language='yaml' leftLabel='Before' rightLabel='After' />
+            </Box>
+          )}
         </Box>
       );
     } else if (this.deploymentHistory?.deployments?.length > 0) {
@@ -469,7 +628,7 @@ class LastDeploymentCard {
           updateInvestigateSuccessSnackBar={handleSnackbar}
           isRevertTheDevelopment={props.open}
           cardId={this.id}
-          changeEventId={this.primaryChange?.eventId || ''}
+          changeEventId={this.primaryChange?.eventId || this.revertChangeId || ''}
         />
       </Modal>
     );
@@ -482,7 +641,7 @@ class LastDeploymentCard {
     }
     // Same rule for the card-level action, which is what the "What you can do" bar offers: a
     // restart is not a change to put back.
-    if (isRolloutOnlyChange(this.diff?.data?.updated_values)) {
+    if (!canRevertDiff(this.diff, this.event) || isRolloutOnlyChange(this.diff?.data?.updated_values)) {
       this.resolveButton = false;
       return null;
     }

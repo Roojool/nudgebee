@@ -244,7 +244,7 @@ class TestGetLastConfigChange(unittest.TestCase):
         with mock.patch.object(eh.database, "run_query", side_effect=fake_query):
             eh.get_last_config_change([], _data(), _oom_finding())
 
-        self.assertEqual(captured["values"][-1], eh.CONFIG_CHANGE_CORRELATION_LIMIT)
+        self.assertEqual(captured["values"][-1], eh.CONFIG_CHANGE_FETCH_LIMIT)
 
 
 class TestFormatEvidenceRendersEveryChange(unittest.TestCase):
@@ -299,6 +299,67 @@ class TestFormatEvidenceRendersEveryChange(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIsNone(out[0]["start_at"])
         self.assertEqual(out[0]["data"]["updated_paths"], ["data.CACHE_TTL_SECONDS"])
+
+
+def _change_row(row_id, resource_name, started):
+    diff = {"resource_name": resource_name, "updated_paths": ["data.rules"], "updated_values": []}
+    return (row_id, "monitoring/prometheus", [{"type": "diff", "data": diff}], started)
+
+
+class TestRepeatEditsFoldIntoOneBlock(unittest.TestCase):
+    """An object edited repeatedly must render once, not once per edit.
+
+    prometheus-operator rewrites its rulefiles ConfigMap on every rule change;
+    five rewrites before an OOM rendered five identical cards and five Revert
+    actions that all sent the same request.
+    """
+
+    RULEFILES = "configmap/monitoring/prometheus-rulefiles-0.yaml"
+
+    def test_five_edits_to_one_configmap_are_one_block(self):
+        rows = [_change_row(i, self.RULEFILES, datetime(2026, 9, 14, 6 - i, 28, 0)) for i in range(5)]
+        out = eh.format_evidence([], rows, "pod_oom_killer_enricher")
+        self.assertEqual(len(out), 1)
+        info = out[0]["additional_info"]
+        self.assertEqual(info["change_count"], 5)
+        # Every edit stays reachable by its own id, newest first.
+        self.assertEqual([c["change_event_id"] for c in info["changes"]], ["0", "1", "2", "3", "4"])
+        # The newest edit is the representative: its diff and its id.
+        self.assertEqual(info["change_event_id"], "0")
+        self.assertEqual(out[0]["start_at"], datetime(2026, 9, 14, 6, 28, 0).isoformat())
+        self.assertEqual(info["title"], "ConfigMap prometheus-rulefiles-0 changed 5 times · latest 06:28 UTC")
+
+    def test_distinct_objects_stay_distinct(self):
+        started = datetime(2026, 9, 14, 6, 0, 0)
+        rows = [
+            _change_row(1, self.RULEFILES, started),
+            _change_row(2, "statefulset/monitoring/prometheus.yaml", started),
+            _change_row(3, self.RULEFILES, started),
+        ]
+        out = eh.format_evidence([], rows, "pod_oom_killer_enricher")
+        self.assertEqual([b["additional_info"]["change_count"] for b in out], [2, 1])
+        self.assertEqual(out[1]["additional_info"]["title"], "StatefulSet prometheus changed · 06:00 UTC")
+
+    def test_a_noisy_object_does_not_push_out_the_workload_deploy(self):
+        started = datetime(2026, 9, 14, 6, 0, 0)
+        rows = [_change_row(i, self.RULEFILES, started) for i in range(eh.CONFIG_CHANGE_CORRELATION_LIMIT + 3)]
+        rows.append(_change_row(99, "statefulset/monitoring/prometheus.yaml", started))
+        out = eh.format_evidence([], rows, "pod_oom_killer_enricher")
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1]["additional_info"]["change_event_id"], "99")
+
+    def test_changes_without_a_resource_name_are_never_folded_together(self):
+        started = datetime(2026, 9, 14, 6, 0, 0)
+        out = eh.format_evidence(
+            [], [_change_row(1, "", started), _change_row(2, "", started)], "pod_oom_killer_enricher"
+        )
+        self.assertEqual(len(out), 2)
+
+    def test_object_limit_still_bounds_the_evidence(self):
+        started = datetime(2026, 9, 14, 6, 0, 0)
+        rows = [_change_row(i, "configmap/monitoring/cm-{}.yaml".format(i), started) for i in range(10)]
+        out = eh.format_evidence([], rows, "pod_oom_killer_enricher")
+        self.assertEqual(len(out), eh.CONFIG_CHANGE_CORRELATION_LIMIT)
 
 
 class TestMemoryLimitInsightDirection(unittest.TestCase):
@@ -385,8 +446,12 @@ class TestCorrelatedChangeTitles(unittest.TestCase):
     def test_unusable_resource_name_adds_no_title(self):
         # Better the card's own fallback than a title built from nothing.
         started = datetime(2026, 9, 11, 14, 5, 0)
-        self.assertNotIn("additional_info", self._block("", started))
-        self.assertNotIn("additional_info", self._block("bare-name", started))
+        self.assertNotIn("title", self._block("", started)["additional_info"])
+        self.assertNotIn("title", self._block("bare-name", started)["additional_info"])
+
+    def test_block_names_the_change_event_it_came_from(self):
+        block = self._block("configmap/sessions/sessions-config.yaml", datetime(2026, 9, 11, 14, 5, 0))
+        self.assertEqual(block["additional_info"]["change_event_id"], "1")
 
     def test_missing_timestamp_still_names_the_object(self):
         block = self._block("configmap/sessions/sessions-config.yaml", None)

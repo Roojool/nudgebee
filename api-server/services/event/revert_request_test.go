@@ -141,6 +141,20 @@ func TestGetRevertRecommendationRequest_Rejects(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no recorded configuration change")
 	})
+	// An OOM alert with five correlated ConfigMap edits attached: with no change selected, the
+	// paths of every edit were merged and written onto the workload the alert is about.
+	t.Run("several correlated changes and none selected", func(t *testing.T) {
+		cm := func(ts string) map[string]any {
+			return map[string]any{"type": "diff", "data": map[string]any{
+				"resource_name":  "configmap/shop/rulefiles-0.yaml",
+				"updated_values": []any{map[string]any{"path": "data.rules", "old": ts, "new": "x"}},
+			}}
+		}
+		several := models.NewJsonArray([]any{cm("06:28"), cm("06:26")})
+		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1", Evidences: &several}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "select the change to revert")
+	})
 }
 
 func TestExtractRevertPaths_SkipsMalformedEntries(t *testing.T) {

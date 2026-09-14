@@ -1864,6 +1864,13 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 	if len(resourceKeys) != 3 {
 		return map[string]any{}, fmt.Errorf("resolution: service key is not correct")
 	}
+	// An alert can carry one diff block per correlated change (its workload's deploy, a ConfigMap
+	// it reads, an Ingress in front of it). Merging their paths into one request writes every
+	// change's old values — a ConfigMap's `data.*` included — onto the workload. The caller must
+	// name the change it means via change_event_id, whose own event holds exactly one diff.
+	if countDiffEvidences(r) > 1 {
+		return map[string]any{}, common.ErrorBadRequest("event resolution: this event carries several recorded changes; select the change to revert")
+	}
 	kind := resourceKeys[1]
 	request := map[string]any{
 		"name":      resourceKeys[2],
@@ -1885,6 +1892,21 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, this event has no recorded configuration change to undo")
 	}
 	return request, nil
+}
+
+func countDiffEvidences(r models.Event) int {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return 0
+	}
+	n := 0
+	for _, item := range r.Evidences.Array() {
+		if evidence, ok := item.(map[string]any); ok {
+			if evidenceType, _ := evidence["type"].(string); evidenceType == "diff" {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // extractDiffOldManifest returns the pre-change manifest recorded on the diff

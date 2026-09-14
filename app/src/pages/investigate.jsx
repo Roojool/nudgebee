@@ -49,7 +49,7 @@ import { Link } from '@ui/Link';
 // K8s card imports
 import MemoryAllocationCard from '@components/k8s/investigate/cards/MemoryAllocationCard';
 import NoisyNeighbourCard from '@components/k8s/investigate/cards/NoisyNeighbourCard';
-import LastDeploymentCard from '@components/k8s/investigate/cards/LastDeploymentCard';
+import LastDeploymentCard, { foldRepeatedChanges } from '@components/k8s/investigate/cards/LastDeploymentCard';
 import LogsCard from '@components/k8s/investigate/cards/LogsCard';
 import AskAiCard from '@components/k8s/investigate/cards/AskAiCard';
 import TracesCard from '@components/k8s/investigate/cards/TracesCard';
@@ -1151,6 +1151,7 @@ const Investigate = () => {
     async function renderEvidenceCardAndRecommendations() {
       setIsGeneratingCards(true);
       const result = row?.evidences.filter((g) => g != null) || [];
+      const repeatedChanges = foldRepeatedChanges(result);
       const criticalCards = [];
       const highCards = [];
       const infoCards = [];
@@ -1325,8 +1326,8 @@ const Investigate = () => {
             const card = new GithubPRHistoryCard(d, row, i);
             if (await card.canRenderContent()) dynamicCards.push(card);
           }
-          if (actionType == 'diff' || actionType == 'deployment_history') {
-            const card = new LastDeploymentCard(d, row, i);
+          if ((actionType == 'diff' || actionType == 'deployment_history') && !repeatedChanges.skip.has(i)) {
+            const card = new LastDeploymentCard(d, row, i, repeatedChanges.changes.get(i));
             if (await card.canRenderContent()) dynamicCards.push(card);
           }
           if (
