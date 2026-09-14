@@ -171,12 +171,22 @@ def _table_cell(text: str) -> Dict[str, Any]:
     return {"type": "raw_text", "text": text}
 
 
+# Mirrors llm-server's negligibleCostUsd (agents/core/ai_cost_report.go) — the
+# Go payload already zeroes pct_delta_avg_daily below this per-day baseline
+# (no meaningful prior average to divide into), but a bare "(→ 0%)" then reads
+# as "flat month over month" instead of "no baseline to compare against".
+NEGLIGIBLE_AVG_DAILY_COST_USD = 0.005
+
+
 def _avg_daily_cell(row: AiCostAccountRow) -> str:
     # The prev->cur avg/day trend and its arrow/delta share one column — the
     # arrow+delta is exactly what "prev -> cur" changed by, so it reads as
     # self-explanatory here without needing a "(Δ ...)" label in the header.
+    prev_to_cur = _prev_to_cur(row.avg_daily_prev_month_usd, row.avg_daily_this_month_usd)
+    if row.avg_daily_prev_month_usd < NEGLIGIBLE_AVG_DAILY_COST_USD:
+        return prev_to_cur
     trend = f"{trend_arrow(row.pct_delta_avg_daily)} {format_delta(row.pct_delta_avg_daily)}"
-    return f"{_prev_to_cur(row.avg_daily_prev_month_usd, row.avg_daily_this_month_usd)} ({trend})"
+    return f"{prev_to_cur} ({trend})"
 
 
 def _account_table_row(row: AiCostAccountRow) -> List[Dict[str, Any]]:

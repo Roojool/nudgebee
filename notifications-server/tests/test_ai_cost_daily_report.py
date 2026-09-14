@@ -277,6 +277,20 @@ def test_avg_daily_prev_to_cur_includes_trend_arrow_and_delta():
     assert row["Avg/day (prev → cur)"] == "$10.00 → $10.00 (→ 0%)"
 
 
+def test_avg_daily_hides_trend_when_no_prev_baseline():
+    # prev_month=0 (the _account default) -> avg_daily_prev_month_usd=0.0, the
+    # same "no baseline" case llm-server's pct_delta_avg_daily sentinel covers
+    # (nudgebee-enterprise#38310). A bare "(→ 0%)" misread as "flat" instead of
+    # "nothing to compare against", so the trend is dropped entirely here.
+    params = get_ai_cost_account_report_message_params(
+        reference_date="2026-08-07",
+        accounts=[_account("Acme", mtd=100.0)],  # prev_month=0.0
+    )
+    msg = get_ai_cost_account_report_message_template(params)
+    row = _account_rows(_table_blocks(msg)[0])[0]
+    assert row["Avg/day (prev → cur)"] == "$0.00 → $10.00"
+
+
 def _top_model(model: str, mtd_cost: float, calls: int, p95: float, p99: float) -> Dict[str, Any]:
     return {
         "model": model,
