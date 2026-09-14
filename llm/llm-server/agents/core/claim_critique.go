@@ -36,6 +36,9 @@ type claimObservation struct {
 	Tool   string `json:"tool"`
 	Input  string `json:"input"`
 	Output string `json:"output"`
+	// Keep the existing bounded child manifest with its parent observation.
+	// It may contain truncation markers and must not be treated as a full trace.
+	SubAgentEvidence string `json:"sub_agent_evidence,omitempty"`
 }
 
 // Deliberately omit planner Thought text. Tool outputs may still include
@@ -49,6 +52,7 @@ func claimCritiquePacket(input, answer, notebook string, steps []NBAgentPlannerT
 		}
 		observations = append(observations, claimObservation{
 			ID: len(observations) + 1, Tool: step.Action.Tool, Input: step.Action.ToolInput, Output: step.Observation,
+			SubAgentEvidence: step.SubAgentEvidence,
 		})
 	}
 	packet, err := json.Marshal(struct {
