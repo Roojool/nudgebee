@@ -26,9 +26,9 @@ jest.mock('@ui/Label', () => ({
   Label: ({ text }) => <span data-testid='label'>{text}</span>,
 }));
 
-jest.mock('@ui/CustomBorderCard', () => ({
+jest.mock('@ui/Card', () => ({
   __esModule: true,
-  default: ({ children }) => <div data-testid='border-card'>{children}</div>,
+  Card: ({ children }) => <div data-testid='border-card'>{children}</div>,
 }));
 
 jest.mock('@shared/icons/SafeIcon', () => ({

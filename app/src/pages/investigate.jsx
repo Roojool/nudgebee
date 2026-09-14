@@ -39,7 +39,7 @@ import apiRecommendations from '@api1/recommendation';
 import apiTriage from '@api1/triage';
 import { hasReadAccess, hasWriteAccess, hasFeatureAccess } from '@lib/auth';
 import InvestigateResolution from '@components/k8s/investigate/InvestigateResolution';
-import CustomBorderCard from '@ui/CustomBorderCard';
+import { Card } from '@ui/Card';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
@@ -3091,9 +3091,9 @@ const Investigate = () => {
                                 </div>
                               ))}
                             {currentInvestigation?.text && (
-                              <CustomBorderCard borderColor={ds.gray[200]} sx={{ textAlign: 'center', mt: 0 }} showLeftBorder={false}>
+                              <Card elevation='flat' sx={{ textAlign: 'center' }}>
                                 <ConversationLoader />
-                              </CustomBorderCard>
+                              </Card>
                             )}
                           </Box>
                         </TabPanel>
