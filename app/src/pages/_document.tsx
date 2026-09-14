@@ -56,10 +56,8 @@ export default function Document({ brandHost }: DocumentProps) {
 // Only pages rendered per request get a host here — `signin`, `signup` and the
 // other getServerSideProps pages. Pages Next.js statically optimizes are
 // prerendered at build time, where there is no request: `brandHost` is null,
-// branding falls back to the deployment-wide default, and the client repaints
-// from /api/public/app_config after hydration. That is the same limit those
-// pages already had with a single TENANT_BRANDING_FILE — the head has never
-// varied per deployment on a prerendered page — so this adds no new gap. Signin
+// the head carries the house brand, and the client repaints from
+// /api/public/app_config after hydration. Signin
 // being request-rendered is what matters: it is the first page a partner's users
 // see.
 Document.getInitialProps = async (ctx: DocumentContext) => {

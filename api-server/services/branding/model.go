@@ -1,16 +1,15 @@
-// Package branding stores runtime-editable branding overrides, merged by the
-// frontend on top of the brand kit mounted from a ConfigMap.
+// Package branding stores per-hostname branding, merged by the frontend on top
+// of the bundled house brand. It is the only place branding is configured.
 //
-// The split is by churn rate, not by storage type. A partner's asset FILES are
-// onboarded once and stay in the mount, because they need a filesystem the
-// Next.js static handler can serve. Everything theme.json can say ABOUT those
-// files — which one each slot points at, the palette, the product and assistant
-// names, the fonts — lives here so it can change without an infra PR and a
-// deploy.
+// A partner's asset FILES still ship in a ConfigMap mount, because they need a
+// filesystem the Next.js static handler can serve. Everything theme.json can
+// say ABOUT those files — which one each slot points at, the palette, the
+// product and assistant names, the fonts — lives here, so it changes without an
+// infra PR or a deploy.
 //
-// An absent row, a disabled row, or an unreachable database must all be
-// indistinguishable from the pre-existing behaviour: the mounted file stays in
-// charge. See migration V925 for why that property is load-bearing.
+// An absent or disabled row renders the house brand. An unreachable database
+// must never repaint a host that already loaded its row: the frontend keeps its
+// last good snapshot.
 package branding
 
 import (
@@ -58,16 +57,14 @@ type StatusResponse struct {
 }
 
 // overridableKeys is the allow-list of fields a stored override may set. It
-// tracks theme.json: anything a mounted brand kit can express, an override can
-// express too, so operators do not have to remember which half of the contract
-// lives where.
+// tracks theme.json: anything the house brand file can express, a row can
+// express too.
 //
 // Values are the kind of validation each key gets.
 //
 // Asset URLs are overridable, but only as SAME-ORIGIN ROOT-RELATIVE paths (see
-// validateAssetURL). The kit still supplies the files — what an override buys
-// is re-pointing at a different file the kit already ships, which needs no
-// deploy. Allowing an absolute URL would let a stored row pull a partner's logo
+// validateAssetURL). The mount still supplies the files — a row points each slot
+// at a file that is already served, which needs no deploy. Allowing an absolute URL would let a stored row pull a partner's logo
 // from an arbitrary host: brand hijack, a tracking pixel on every page, and a
 // mixed-content break, none of which a reviewer would see. A path that resolves
 // to nothing is merely a broken image — visible immediately, and undone with
@@ -126,9 +123,9 @@ const (
 // generic "not overridable" message, because both look like ordinary theme.json
 // fields and an operator would otherwise assume a typo.
 var rejectedKeys = map[string]string{
-	"isWhiteLabel": "isWhiteLabel is derived, not stored: a host is white-label when its brand kit is a " +
-		"partner kit or when the override sets title or logoUrl; setting it directly would let a host " +
-		"claim or disclaim white-label independently of its brand and desynchronise the Nudgebee mascot suppression",
+	"isWhiteLabel": "isWhiteLabel is derived, not stored: a host is white-label when its override sets " +
+		"title or logoUrl; setting it directly would let a host claim or disclaim white-label " +
+		"independently of its brand and desynchronise the Nudgebee mascot suppression",
 }
 
 // MaxOverrideBytes bounds the serialized override. The blob is read on every

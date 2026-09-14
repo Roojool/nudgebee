@@ -225,7 +225,7 @@ func Restore(ctx *security.RequestContext, req HostRequest) (StatusResponse, err
 	return StatusResponse{Status: "ok", Host: host, Count: int(n)}, nil
 }
 
-// Delete removes a host's override; the host falls back to its mounted kit.
+// Delete removes a host's override; the host falls back to the house brand.
 func Delete(ctx *security.RequestContext, req HostRequest) (StatusResponse, error) {
 	if err := requireSuperAdmin(ctx); err != nil {
 		return StatusResponse{}, err

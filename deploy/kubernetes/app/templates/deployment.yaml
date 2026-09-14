@@ -1,11 +1,15 @@
-{{- if .Values.branding.enabled }}
-{{- range $host, $slug := .Values.branding.hostMap }}
-{{- $known := false }}
-{{- range $.Values.branding.tenants }}{{- if eq .slug $slug }}{{- $known = true }}{{- end }}{{- end }}
-{{- if not $known }}
-{{- fail (printf "branding.hostMap[%s] selects tenant %q, which has no entry in branding.tenants — its kit would not be mounted and the host would silently render Nudgebee branding." $host $slug) }}
+{{- /*
+Branding is configured only through the tenant_branding_override table now. The
+app no longer reads a theme file per host or per deployment, so these values
+would be silently ignored and the host would render the house brand. Refuse to
+render instead, so the change is noticed at deploy time rather than on a
+partner's own domain.
+*/}}
+{{- if .Values.branding.hostMap }}
+{{- fail "branding.hostMap is no longer supported: branding comes from the database. Save a tenant_branding_override row for each hostname (super-admin branding_upsert_override action), then remove branding.hostMap. Keep branding.tenants to serve the image files the row points at." }}
 {{- end }}
-{{- end }}
+{{- if .Values.branding.defaultTenant }}
+{{- fail "branding.defaultTenant is no longer supported: branding comes from the database. Save a tenant_branding_override row for each hostname (super-admin branding_upsert_override action), then remove branding.defaultTenant. Keep branding.tenants to serve the image files the row points at." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -64,7 +68,7 @@ spec:
             - configMapRef:
                 name: {{ include "app.fullname" . }}-extra-env
             {{- end }}
-          {{- if or .Values.adminEmailSecret .Values.statusNotice.configMapName (and .Values.branding.enabled (or .Values.branding.defaultTenant .Values.branding.hostMap)) }}
+          {{- if or .Values.adminEmailSecret .Values.statusNotice.configMapName }}
           env:
             {{- with .Values.adminEmailSecret }}
             # Pins the dummy-credentials login to the admin address.
@@ -78,22 +82,6 @@ spec:
             {{- if .Values.statusNotice.configMapName }}
             - name: STATUS_NOTICE_FILE
               value: /etc/nudgebee/status/notice.json
-            {{- end }}
-            {{- if .Values.branding.enabled }}
-            {{- if .Values.branding.defaultTenant }}
-            # Read by loadBrandingFile() relative to process.cwd()/public, i.e.
-            # /app/public/branding/<tenant>/theme.json — the mount below. Applies
-            # to every host with no branding.hostMap entry.
-            - name: TENANT_BRANDING_FILE
-              value: branding/{{ .Values.branding.defaultTenant }}/theme.json
-            {{- end }}
-            {{- if .Values.branding.hostMap }}
-            # Per-host brand selection: request hostname -> tenant slug. Read by
-            # ee/branding/serverInit.ts, which resolves the theme file for the
-            # request's X-Forwarded-Host on every render and API call.
-            - name: TENANT_BRANDING_HOST_MAP
-              value: {{ toJson .Values.branding.hostMap | quote }}
-            {{- end }}
             {{- end }}
           {{- end }}
           ports:
