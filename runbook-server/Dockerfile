@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # --- Build Stage ---
 # Use the official Go image to build the application
 FROM golang:1.26.6-alpine AS builder

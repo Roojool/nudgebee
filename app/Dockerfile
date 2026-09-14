@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM node:25-alpine AS base
 # Refresh the base image's Alpine OS packages to the latest patch level. The
 # node:25-alpine tag lags Alpine security releases (e.g. openssl/libssl3), so

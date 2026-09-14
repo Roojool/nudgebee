@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM golang:1.26.6-alpine AS build-stage
 
 # Use the builder image's bundled Go toolchain, never an auto-downloaded one.
