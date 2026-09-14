@@ -14,9 +14,11 @@ import (
 	"github.com/lib/pq"
 
 	"nudgebee/llm/common"
+	"nudgebee/llm/config"
 	"nudgebee/llm/events"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
+	"nudgebee/llm/workspace"
 )
 
 // This file backs the events_v2 agent (agents/agent_events_v2.go): three
@@ -294,33 +296,15 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 	et := EventsExecuteTool{}
 	et.enrichData(data) // single row → full-evidence path
 
-	// capInvestigateDataEvidence bounds the per-field-typed insights first (its
-	// own ~50KB aggregate budget), then the whole (already-capped) struct is
-	// measured again here — this second check covers the struct's non-Insight
-	// fields (LogData, ErrorLogData, LogSummary) that capInvestigateDataEvidence
-	// can't see, and offloads to a workspace file past
-	// LlmServerEventEvidenceOverflowThreshold, the same overflow convention
-	// get_event_evidence already uses (tool_event_evidence.go's
-	// saveEvidenceToWorkspaceIfLarge). A workspace-save failure falls back to
-	// the inline, already-per-field-capped struct rather than losing data.
 	var overflowRefs []core.NBToolResponseReference
 	for _, row := range data {
 		investigateData, ok := row["evidences"].(events.InvestigateData)
 		if !ok {
 			continue
 		}
-		capInvestigateDataEvidence(&investigateData)
-
-		if evidenceBytes, marshalErr := common.MarshalJson(investigateData); marshalErr == nil {
-			preview, refs := saveEvidenceToWorkspaceIfLarge(nbCtx.Ctx, wm, nbCtx.AccountId, nbCtx.ConversationId,
-				fmt.Sprintf("event_%s_evidence", eventID), string(evidenceBytes))
-			if refs != nil {
-				row["evidences"] = preview
-				overflowRefs = append(overflowRefs, refs...)
-				continue
-			}
-		}
-		row["evidences"] = investigateData
+		inline, refs := offloadEventEvidence(nbCtx.Ctx, wm, nbCtx.AccountId, nbCtx.ConversationId, eventID, investigateData)
+		row["evidences"] = inline
+		overflowRefs = append(overflowRefs, refs...)
 	}
 
 	bytesData, marshalErr := common.MarshalJson(data)
@@ -330,6 +314,68 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 	resp.Data = string(bytesData)
 	resp.References = append(eventReferences(nbCtx, data), overflowRefs...)
 	return resp, nil
+}
+
+// EventEvidenceFileName is the workspace file holding one event's structured
+// evidence (the InvestigateData object). get_event_by_id and the event analyzer
+// both write it, with the same shape, so an investigation finds one file under
+// one name whichever stage produced it.
+func EventEvidenceFileName(eventID string) string {
+	return fmt.Sprintf("event_%s_evidence.json", eventID)
+}
+
+// offloadEventEvidence returns the inline form of one event's evidence plus the
+// workspace-file reference, if any.
+//
+// The workspace file must hold the UNCAPPED evidence. capInsight cuts each
+// field's Data at maxEvidenceInsightDataChars, and that Data is usually a JSON
+// document stored as a string (pod_metrics series, pod_data, others) — cutting
+// it mid-document leaves invalid JSON. Agents told the file is the "full
+// evidence" then json.load it and fail at char ~3000, losing exactly the metric
+// series and pod status they needed (dev events 2271fe6b, f1580e90, f6d8fa9e,
+// 509532e3). So: marshal the full struct first, cap afterwards for the inline
+// preview only.
+//
+// Marshal before capping is load-bearing: capInsightSlice rewrites slice
+// elements in place, and a struct copy shares those backing arrays.
+//
+// Evidence under LlmServerEventEvidenceOverflowThreshold is returned whole
+// (uncapped). A marshal or workspace-save failure falls back to the inline
+// capped struct rather than losing the response.
+func offloadEventEvidence(ctx *security.RequestContext, wm workspace.WorkspaceManager, accountId, conversationId, eventID string, investigateData events.InvestigateData) (any, []core.NBToolResponseReference) {
+	fullBytes, fullErr := common.MarshalJson(investigateData)
+	if fullErr != nil {
+		ctx.GetLogger().Error("get_event_by_id: failed to marshal full evidence, returning capped evidence inline", "error", fullErr, "event_id", eventID)
+		capInvestigateDataEvidence(&investigateData)
+		return investigateData, nil
+	}
+	if len(fullBytes) <= config.Config.LlmServerEventEvidenceOverflowThreshold {
+		// Small enough to return whole: nothing to cap, nothing to save.
+		return investigateData, nil
+	}
+	capInvestigateDataEvidence(&investigateData)
+
+	outputFile := EventEvidenceFileName(eventID)
+	if err := wm.SaveFile(ctx, accountId, conversationId, outputFile, string(fullBytes)); err != nil {
+		ctx.GetLogger().Error("get_event_by_id: failed to save evidence to workspace", "error", err, "path", outputFile)
+		return investigateData, nil
+	}
+
+	cappedBytes, err := common.MarshalJson(investigateData)
+	if err != nil {
+		ctx.GetLogger().Error("get_event_by_id: failed to marshal capped evidence preview", "error", err, "event_id", eventID)
+		cappedBytes = nil
+	}
+	inline := fmt.Sprintf("Output large (%d bytes). Evidence saved to %s with every section complete — read and parse that file. "+
+		"Logs are reduced here: error lines are in error_log_data, and log_data is empty or a short tail; use get_event_evidence with evidence_type=logs for the full log body. "+
+		"Fields ending in \"... (truncated)\" in the preview below are shortened and are not valid JSON on their own.\nPreview: %s",
+		len(fullBytes), outputFile, truncateUTF8Safe(string(cappedBytes), evidencePreviewBytes))
+	return inline, []core.NBToolResponseReference{{
+		Text:        "Full event evidence saved to workspace",
+		Url:         outputFile,
+		Type:        "file",
+		Description: "Full event evidence collected by system",
+	}}
 }
 
 // get_event_by_id always selects the `evidences` column (unlike events_execute,

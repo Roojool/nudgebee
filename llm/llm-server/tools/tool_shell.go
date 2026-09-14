@@ -422,7 +422,8 @@ func wrapShellError(rawError, originalCommand string) string {
 // the per-conversation workspace: fetch_logs / metrics / traces tool output
 // (logs_/metrics_/traces_…) and offloaded investigation artifacts written by the
 // event-analyzer and planner guardrails (evidence_logs_/event_labels_/
-// event_investigation_context_/investigation_query_…). Their exact names are
+// event_investigation_context_/event_<id>_evidence/event_<id>_full_event/
+// investigation_query_…). Their exact names are
 // assigned at write time — a unix timestamp for tool output, an event/message
 // UUID for offloaded artifacts — so a missing file of this shape is almost always
 // a guessed or reconstructed name, not a stale cross-conversation file. The model

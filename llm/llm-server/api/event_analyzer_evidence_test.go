@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -199,4 +200,56 @@ func TestRenderLogPatternDigest(t *testing.T) {
 	if !strings.Contains(got, "10.0.0.1 GET /health 200 12ms") {
 		t.Errorf("expected example line, got %q", got)
 	}
+}
+
+// The investigation agent has no event-evidence tool, and the Collected Evidence
+// prompt section omits metric series and pod data, so the analyzer saves them to
+// the workspace itself. Logs are excluded: they are inline or in evidence_logs.
+func TestStructuredEvidenceForWorkspace(t *testing.T) {
+	t.Run("keeps structured sections uncut and drops logs", func(t *testing.T) {
+		series := `{"data":{"memory_usage":{"values":["` + strings.Repeat("2097152000\",\"", 400) + `0"]}}}`
+		ev := events.InvestigateData{
+			LogData:    strings.Repeat("log line\n", 2000),
+			PodMetrics: []events.InvestigateDataInsight{{Data: series}},
+		}
+
+		content, ok := structuredEvidenceForWorkspace(ev)
+		if !ok {
+			t.Fatal("expected large structured evidence to be saved")
+		}
+		var saved events.InvestigateData
+		if err := json.Unmarshal([]byte(content), &saved); err != nil {
+			t.Fatalf("saved content is not valid JSON: %v", err)
+		}
+		if saved.LogData != "" {
+			t.Error("LogData must not be duplicated into the structured evidence file")
+		}
+		if len(saved.PodMetrics) != 1 || saved.PodMetrics[0].Data != series {
+			t.Error("pod_metrics must be saved uncut")
+		}
+		if ev.LogData == "" {
+			t.Error("caller's evidence must not be mutated")
+		}
+	})
+
+	t.Run("small structured evidence is still saved", func(t *testing.T) {
+		ev := events.InvestigateData{PodData: events.InvestigateDataInsight{Data: `{"status":{"phase":"Running"}}`}}
+		content, ok := structuredEvidenceForWorkspace(ev)
+		if !ok || !strings.Contains(content, "Running") {
+			t.Errorf("small pod_data has no inline fallback and must be saved, got ok=%v content=%q", ok, content)
+		}
+	})
+
+	t.Run("evidence that is only logs is not saved", func(t *testing.T) {
+		if _, ok := structuredEvidenceForWorkspace(events.InvestigateData{LogData: strings.Repeat("x", 100000)}); ok {
+			t.Error("expected no structured file when only logs are present")
+		}
+	})
+
+	t.Run("note names the file", func(t *testing.T) {
+		note := structuredEvidenceNote("event_abc_evidence.json")
+		if !strings.Contains(note, "`event_abc_evidence.json`") {
+			t.Errorf("note must point at the file, got %q", note)
+		}
+	})
 }

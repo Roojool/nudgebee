@@ -1707,6 +1707,48 @@ func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessio
 	return fmt.Sprintf("## Stored Log Evidence\nThe full logs already collected%s are saved in your workspace at `%s` (one log line per row). Grep this file first (e.g. `grep -iE \"error|timeout|fail\" %s | head -40`) before fetching live logs — logs fetched live at analysis time include activity from after the incident window.", window, filename, filename)
 }
 
+// structuredEvidenceForWorkspace returns the event's structured evidence (metric
+// series, pod and node data, events, deployment diff) as the JSON the
+// investigation reads from the workspace, and whether it is worth saving.
+//
+// The Collected Evidence prompt section carries only insights, log patterns,
+// error lines and logs — never the metric series or pod spec/status — and the
+// investigation agent has no event-evidence tool of its own. Before this, the
+// only copy it could find was the file the summary stage's get_event_by_id
+// happened to leave in the shared workspace, undocumented in this prompt.
+//
+// LogData is dropped: the logs are already inline or in the evidence_logs file,
+// so the investigation workspace holds each piece of evidence once.
+//
+// Saved whenever anything besides logs is present, however small: there is no
+// inline fallback for this data (Collected Evidence renders insight messages,
+// never a section's Data), so a size threshold would lose a small pod_data or
+// metric series entirely.
+func structuredEvidenceForWorkspace(ev events.InvestigateData) (string, bool) {
+	ev.LogData = ""
+	b, err := common.MarshalJson(ev)
+	if err != nil {
+		return "", false
+	}
+	content := string(b)
+	if content == emptyInvestigateDataJSON {
+		return "", false
+	}
+	return content, true
+}
+
+// emptyInvestigateDataJSON is the serialized form of evidence with no sections,
+// computed once for structuredEvidenceForWorkspace's "anything to save" check.
+var emptyInvestigateDataJSON = func() string {
+	b, _ := common.MarshalJson(events.InvestigateData{})
+	return string(b)
+}()
+
+// structuredEvidenceNote is the prompt pointer to the saved structured evidence.
+func structuredEvidenceNote(file string) string {
+	return fmt.Sprintf("## Stored Structured Evidence\nThe event's structured evidence (metric series, pod and node data, events, deployment diff) is saved in your workspace at `%s` as JSON. Parse it (e.g. `jq 'keys' %s`) before fetching live data; each section's `data` field is usually a JSON document stored as a string, so decode it a second time. Logs are not in this file — use the Collected Evidence section or the stored log file.", file, file)
+}
+
 // formatWindowEnd renders an incident-window end for the prompt: a still-firing
 // occurrence has no end yet, and "ongoing" reads better to the model than the
 // generic "unknown" the shared formatter falls back to.
@@ -2452,6 +2494,11 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			// investigations never touch the workspace.
 			if fileNote := saveEvidenceLogsToWorkspace(ctx, request.AccountId, parentConversationId, request.EventId, eventData); fileNote != "" {
 				eventAnalsysisPrompt = eventAnalsysisPrompt + "\n\n" + fileNote
+			}
+			if content, ok := structuredEvidenceForWorkspace(eventData.Evidences); ok {
+				if file := saveOverflowToWorkspace(ctx, request.AccountId, parentConversationId, tools.EventEvidenceFileName(request.EventId), content); file != "" {
+					eventAnalsysisPrompt = eventAnalsysisPrompt + "\n\n" + structuredEvidenceNote(file)
+				}
 			}
 			// Persist any oversized prompt inputs the guardrail condensed to a
 			// workspace-file pointer. Best-effort: on failure the pointer simply
