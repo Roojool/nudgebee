@@ -23,7 +23,7 @@ import WatchedChannels from '@components/notifications/WatchedChannels';
 import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { EmptyState } from '@ui/EmptyState';
-import AddIcon from '@mui/icons-material/Add';
+import CheckIcon from '@mui/icons-material/Check';
 import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 
 const MessagingIntegrationTile = ({
@@ -459,6 +459,8 @@ const MessagingIntegrationTile = ({
       });
   };
 
+  const isConnected = tableData?.length > 0;
+
   return (
     <>
       <Modal
@@ -655,7 +657,7 @@ const MessagingIntegrationTile = ({
             canManage('messagingplatforms', 'Write') ? (
               <Stack direction='row' spacing={1}>
                 <DsButton
-                  id={`test-${toKebabCase(displayName)}-btn`}
+                  id={`test-${toKebabCase(provider)}-btn`}
                   tone='secondary'
                   size='md'
                   disabled={!(provider === 'ms_teams' ? installationData[0]?.channels?.channels?.[0]?.id : channelsValues?.id) || isSendingTest}
@@ -665,14 +667,20 @@ const MessagingIntegrationTile = ({
                   Test Notification
                 </DsButton>
                 <DsButton
-                  id={`add-to-${toKebabCase(displayName)}-btn`}
+                  id={`add-to-${toKebabCase(provider)}-btn`}
                   tone='primary'
                   size='md'
-                  icon={<AddIcon sx={{ fontSize: 18 }} />}
-                  disabled={tableData?.length > 0}
+                  icon={
+                    isConnected ? (
+                      <CheckIcon sx={{ fontSize: 18 }} />
+                    ) : (
+                      <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='18px' height='18px' />
+                    )
+                  }
+                  disabled={isConnected}
                   onClick={handleInstall}
                 >
-                  {`Add to ${displayName}`}
+                  {isConnected ? 'Connected' : `Connect ${displayName}`}
                 </DsButton>
               </Stack>
             ) : undefined
@@ -687,10 +695,14 @@ const MessagingIntegrationTile = ({
               id={`${provider}-not-installed`}
               icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
               title={`${displayName} is not connected yet`}
-              description={`Connect your ${displayName} user to ${getBrandTitle()}. Use the "Add to ${displayName}" button to install the app.`}
+              description={`Connect your ${displayName} user to ${getBrandTitle()}.`}
               action={
                 canManage('messagingplatforms', 'Write')
-                  ? { label: `Add to ${displayName}`, onClick: handleInstall, icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  ? {
+                      label: `Connect ${displayName}`,
+                      onClick: handleInstall,
+                      icon: <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='16px' height='16px' />,
+                    }
                   : undefined
               }
             />

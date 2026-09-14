@@ -130,7 +130,7 @@ export default function AddAccountForm() {
             return (
               <MessagingIntegrationTile
                 provider='ms_teams'
-                displayName='Ms Teams'
+                displayName='Microsoft Teams'
                 installUrl='/api/integrations/ms-teams/install'
                 headers={['User Name', 'Installed At', 'Team Name', 'Channels', '', '']}
                 mappingMode='team-multi'

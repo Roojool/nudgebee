@@ -166,7 +166,7 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
       label = 'Slack';
       break;
     case 'MSTEAMS':
-      label = 'Ms Teams';
+      label = 'Microsoft Teams';
       break;
     case 'GOOGLE_CHAT':
       label = 'Google Chat';

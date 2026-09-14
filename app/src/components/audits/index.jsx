@@ -282,7 +282,7 @@ export const AuditsTable = () => {
     } else if (item.event_type == 'NOTIFICATION_SLACK_CONFIGURATION_CREATE') {
       return <Text value={`New Slack Configuration Created`} showAutoEllipsis />;
     } else if (item.event_type == 'NOTIFICATION_MS_TEAMS_CONFIGURATION_CREATE') {
-      return <Text value={`New Ms Teams Configuration Created`} showAutoEllipsis />;
+      return <Text value={`New Microsoft Teams Configuration Created`} showAutoEllipsis />;
     } else if (item.event_type == 'NOTIFICATION_GOOGLE_CHAT_CONFIGURATION_CREATE') {
       return <Text value={`Google Chat Configuration Created`} showAutoEllipsis />;
     } else if (item.event_type == 'ROLE_USER_CREATE') {
@@ -346,7 +346,7 @@ export const AuditsTable = () => {
     } else if (item.event_type == 'NOTIFICATION_SLACK_CONFIGURATION_CREATE') {
       return <Text value={`Slack Configuration Updated`} showAutoEllipsis />;
     } else if (item.event_type == 'NOTIFICATION_MS_TEAMS_CONFIGURATION_CREATE') {
-      return <Text value={`Ms Teams Configuration Updated`} showAutoEllipsis />;
+      return <Text value={`Microsoft Teams Configuration Updated`} showAutoEllipsis />;
     } else if (item.event_type == 'NOTIFICATION_GOOGLE_CHAT_CONFIGURATION_CREATE') {
       return <Text value={`Google Chat Configuration Updated`} showAutoEllipsis />;
     } else if (item.event_type == 'ROLE_USER_UPDATE') {
