@@ -12,6 +12,25 @@ import (
 	"github.com/tmc/langchaingo/prompts"
 )
 
+// search_tools lists this agent beside the per-automation `automation_<name>` run
+// tools. While its description advertised triggering, orchestrators delegated here to
+// run an automation, and this agent paged every automation with workflow_list to find
+// an ID — minutes per request. Guard the routing contract on both sides.
+func TestWorkflowAgent_RoutesRunsToPerAutomationTools(t *testing.T) {
+	t.Parallel()
+
+	agent := newWorkflowAgent("test_account")
+	desc := strings.ToLower(agent.GetDescription())
+	assert.NotContains(t, desc, "trigger", "description must not advertise running automations")
+	assert.Contains(t, desc, "automation_<name>", "description must point runs at the per-automation tools")
+
+	ctx := security.NewRequestContextForTenantAccountAdmin("t", "u", []string{"test_account"})
+	prompt := strings.Join(agent.GetSystemPrompt(ctx, core.NBAgentRequest{AccountId: "test_account"}).Instructions, "\n")
+	assert.NotContains(t, prompt, "`workflow_list` finds the ID by name",
+		"a named automation must be resolved with workflow_search, not by paging workflow_list")
+	assert.Contains(t, prompt, "Do NOT hunt for it with `workflow_list`")
+}
+
 // Repro for issue #30120: the WorkflowAgent's "Configs" instruction contained
 // a literal `{{ Configs.key_name }}` that Go's text/template parsed as a call
 // to an undefined function `Configs`, making GetPromptTemplate.Format() fail
