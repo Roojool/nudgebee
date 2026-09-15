@@ -10,6 +10,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 	"nudgebee/services/tenant"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -948,6 +949,12 @@ func VulnerabilityRecommendationSQL(recAlias, vulnAccessor string) string {
 		ELSE ` + r + `.recommendation
 		END`
 }
+
+// imageScanOnlyRuleNameFilter matches renderFilterSQLForColumn's rendering of
+// an exact rule_name='image_scan' filter (Eq or single-value In), tolerant of
+// whitespace so it doesn't silently stop matching if that helper's formatting
+// changes -- see recommendation_groupings_v2's DefGenerator below.
+var imageScanOnlyRuleNameFilter = regexp.MustCompile(`^\s*AND\s+r\.rule_name\s*(?:=\s*'image_scan'|IN\s*\(\s*'image_scan'\s*\))\s*$`)
 
 var table_metadata = map[string]TableDefinition{
 	"k8s_cluster_groupings_v2": {
@@ -3300,36 +3307,6 @@ var table_metadata = map[string]TableDefinition{
 		Source:           database.Metastore,
 		Name:             "recommendation_groupings_v2",
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Push down these filters into the subquery so the planner can use
-			// idx_recommendation_tenant_account_status(tenant_id, cloud_account_id, status, category, rule_name)
-			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
-			pushdownFilters += extractFilterSQL(&request, "status", "r.status")
-			pushdownFilters += extractFilterSQL(&request, "category", "r.category")
-			pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
-			// Push tenant_id into the CTE for the same reason the sibling recommendations_v2
-			// generator does (see its comment): the ROW_NUMBER() window's PARTITION BY does
-			// not include tenant_id, so the planner cannot push an outer tenant filter through
-			// the window fence. Without it the CTE windows every tenant's recommendations
-			// (joined to cloud_resourses, detoasting the meta jsonb) before the outer query
-			// narrows to one tenant. It also completes the leading column of the composite
-			// idx_recommendation_tenant_account_status index. tenant_id is injected by the
-			// security layer as an _and clause, not into _binary, so it is not extracted by
-			// the calls above — take it straight from the security context.
-			sc := ctx.GetSecurityContext()
-			tenantId := sc.GetTenantId()
-			if tenantId == "" && !sc.IsSuperAdmin() {
-				// Fail closed: a non-super-admin must always be tenant-scoped.
-				return "", request, fmt.Errorf("tenant_id is required")
-			}
-			if tenantId != "" {
-				pushdownFilters += " AND r.tenant_id = " + (&postgresDialect{}).QuoteLiteral(tenantId)
-			}
-
-			// Fast path: when no column requiring a JOIN or the dedup window function is
-			// needed (e.g. pure count queries like count_recommendations), skip the CTE
-			// entirely and scan recommendation directly. This avoids the LEFT JOINs to
-			// cloud_resourses / cloud_accounts and the ROW_NUMBER() window function.
-			//
 			// joinRequiringCols is only the columns projected out of the cloud_resourses /
 			// cloud_accounts joins. The two dedup columns are tracked separately in
 			// windowRequiringCols: they need the ROW_NUMBER() window but not the
@@ -3391,6 +3368,43 @@ var table_metadata = map[string]TableDefinition{
 			needsJoin := references(joinRequiringCols)
 			needsWindow := references(windowRequiringCols)
 
+			isFastPath := !needsJoin && !needsWindow
+
+			// status/rule_name pre-window can crown the wrong row primary; only
+			// safe fast-path or rule_name='image_scan' (resource_id always NULL).
+			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
+			pushdownFilters += extractFilterSQL(&request, "category", "r.category")
+			ruleNameFilterSQL := renderFilterSQLForColumn(&request, "rule_name", "r.rule_name")
+			isImageScanOnly := imageScanOnlyRuleNameFilter.MatchString(ruleNameFilterSQL)
+			switch {
+			case isFastPath:
+				pushdownFilters += extractFilterSQL(&request, "status", "r.status")
+				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
+				pushdownFilters += extractFilterSQL(&request, "severity", "r.severity")
+			case isImageScanOnly:
+				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
+				pushdownFilters += extractFilterSQL(&request, "severity", "r.severity")
+			}
+
+			// Push tenant_id into the CTE for the same reason the sibling recommendations_v2
+			// generator does (see its comment): the ROW_NUMBER() window's PARTITION BY does
+			// not include tenant_id, so the planner cannot push an outer tenant filter through
+			// the window fence. Without it the CTE windows every tenant's recommendations
+			// (joined to cloud_resourses, detoasting the meta jsonb) before the outer query
+			// narrows to one tenant. It also completes the leading column of the composite
+			// idx_recommendation_tenant_account_status index. tenant_id is injected by the
+			// security layer as an _and clause, not into _binary, so it is not extracted by
+			// the calls above — take it straight from the security context.
+			sc := ctx.GetSecurityContext()
+			tenantId := sc.GetTenantId()
+			if tenantId == "" && !sc.IsSuperAdmin() {
+				// Fail closed: a non-super-admin must always be tenant-scoped.
+				return "", request, fmt.Errorf("tenant_id is required")
+			}
+			if tenantId != "" {
+				pushdownFilters += " AND r.tenant_id = " + (&postgresDialect{}).QuoteLiteral(tenantId)
+			}
+
 			// The vulnerabilities join is its own opt-in, separate from needsJoin
 			// above: unlike cloud_resourses/cloud_accounts (needed by many common
 			// columns), it's only relevant to the 3 columns that actually read
@@ -3415,7 +3429,7 @@ var table_metadata = map[string]TableDefinition{
 				v.data_source AS v_data_source, v.details AS v_details`
 			}
 
-			if !needsJoin && !needsWindow {
+			if isFastPath {
 				def := `(
 		SELECT
 			r.*` + vulnCols + `,
@@ -5419,7 +5433,6 @@ var table_metadata = map[string]TableDefinition{
 		Source:           database.Metastore,
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
 			pushdownFilters := extractFilterSQL(&request, "account_id", "r.cloud_account_id")
-			pushdownFilters += extractFilterSQL(&request, "status", "r.status")
 			// needsWindow: is_primary_recommendation is a ROW_NUMBER() OVER (...) window,
 			// which Postgres cannot compute until it has materialized every row in the
 			// partition — that defeats the ORDER BY .. LIMIT top-N pushdown every paginated
@@ -5428,16 +5441,10 @@ var table_metadata = map[string]TableDefinition{
 			// dashboard-panel "Is primary" filter/column does. Gated the same way as the
 			// sibling recommendation_groupings_v2 generator above (windowRequiringCols).
 			needsWindow := requestReferencesColumns(request, map[string]bool{"is_primary_recommendation": true})
-			// id is not part of PARTITION BY, so pushing it pre-window would narrow
-			// the sibling set is_primary_recommendation is ranked against — a caller
-			// that filters by id AND reads that column would see rank computed only
-			// among the requested ids, not the full history. Only take the shortcut
-			// when the request provably doesn't touch that column (mirrors the
-			// joinRequiringCols guard in recommendation_groupings_v2 above); otherwise
-			// fall back to the correct-but-slower outer-filter path. When the window
-			// isn't computed at all (needsWindow false), there is no partition to
-			// narrow, so pushing early is always safe.
+			// status/id/rule_name/account_object_id pre-window can crown the wrong
+			// row primary (same bug class as recommendation_groupings_v2 above).
 			if !needsWindow {
+				pushdownFilters += extractFilterSQL(&request, "status", "r.status")
 				pushdownFilters += extractFilterSQL(&request, "id", "r.id")
 				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
 				pushdownFilters += extractFilterSQL(&request, "account_object_id", "r.account_object_id")

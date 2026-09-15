@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"regexp"
 
 	"nudgebee/llm/common"
 	"nudgebee/llm/tools/core"
@@ -69,10 +70,23 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 		)`, alias, accountAlias)
 }
 
+// safeSavingsScopeColumns: the only columns scopeFilter may compare on --
+// others can crown the wrong row primary (see recommendation_groupings_v2's
+// DefGenerator in api-server/services/query/metadata.go). Matched regardless
+// of alias prefix (or lack of one): an unqualified "rule_name = $1" resolves
+// against r2 just as unsafely as "r2.rule_name = $1" would, since r2 is the
+// only aliased table in scope where scopeFilter lands.
+var safeSavingsScopeColumns = map[string]bool{
+	"tenant_id":        true,
+	"cloud_account_id": true,
+}
+var savingsScopeColumnPattern = regexp.MustCompile(`(?i)\bAND\s+(?:\w+\.)?(\w+)\s*(?:=|IN\b)`)
+
 // PrimarySavingsSubquery builds a subquery over `recommendation` that keeps one
 // row per opportunity (the highest-saving alternative), projecting groupCol and
 // estimated_savings. scopeFilter is AND-ed into the inner WHERE and must be
-// written against alias `r2` (e.g. " AND r2.tenant_id = $1").
+// written against alias `r2` (e.g. " AND r2.tenant_id = $1"), restricted to
+// safeSavingsScopeColumns above.
 //
 // Every savings roll-up in this service goes through here so the AI cannot
 // report one total from spend_summary and a different one from the
@@ -82,6 +96,11 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 // cannot be pushed in, and the rank would be computed across the whole tenant —
 // 247k open recommendations on the largest dev tenant.
 func PrimarySavingsSubquery(groupCol, scopeFilter string) string {
+	for _, m := range savingsScopeColumnPattern.FindAllStringSubmatch(scopeFilter, -1) {
+		if !safeSavingsScopeColumns[m[1]] {
+			panic(fmt.Sprintf("PrimarySavingsSubquery: scopeFilter references %s, not provably constant within a PrimaryRecommendationRank partition -- see safeSavingsScopeColumns", m[1]))
+		}
+	}
 	return fmt.Sprintf(`(
 			SELECT %[1]s, SUM(estimated_savings) AS estimated_savings
 			FROM (
