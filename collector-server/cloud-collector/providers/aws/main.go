@@ -1687,86 +1687,29 @@ func (a *awsProvider) ListEventRules(ctx providers.CloudProviderContext, account
 		wg.Add(1)
 		go func(regionName string) {
 			defer wg.Done()
-			cfg.Region = regionName
-			cwSvc := cloudwatch.NewFromConfig(cfg)
+			// Each goroutine needs its own config: mutating the shared cfg.Region
+			// raced across regions, so a client could be built for another region.
+			regionCfg := cfg.Copy()
+			regionCfg.Region = regionName
 
-			paginator := cloudwatch.NewDescribeAlarmsPaginator(cwSvc, &cloudwatch.DescribeAlarmsInput{})
-			for paginator.HasMorePages() {
-				page, err := paginator.NextPage(context.TODO())
-				if err != nil {
-					if isRegionEndpointMissing(err) {
-						ctx.GetLogger().Debug("skipping region without cloudwatch endpoint", "region", regionName)
-						return
-					}
-					if isThrottleError(err) {
-						ctx.GetLogger().Warn("skipping rate-limited cloudwatch region; will retry next sync", "error", err, "region", regionName)
-						return
-					}
-					errChan <- fmt.Errorf("failed to describe alarms in %s: %w", regionName, err)
+			// Deliberately not derived from the job context: this runs at the end
+			// of the post-report job, often after its time budget has expired, and
+			// the alarm sync would otherwise fail outright on those accounts. The
+			// region still gets its own bound so a hung endpoint can't pin the
+			// goroutine.
+			regionCtx, cancel := context.WithTimeout(context.Background(), alarmRegionTimeout)
+			defer cancel()
+			rules, err := describeRegionAlarmRules(regionCtx, ctx.GetLogger(), cloudwatch.NewFromConfig(regionCfg), regionName, account.AccountNumber)
+			if err != nil {
+				if skipAlarmRegion(ctx.GetLogger(), err, regionName) {
 					return
 				}
-				mu.Lock()
-				for _, alarm := range page.MetricAlarms {
-					namespace, ok := cloudwatchNamespaceServiceMap[aws.ToString(alarm.Namespace)]
-					serviceName := ""
-					if ok {
-						serviceName = namespace.ServiceName
-					} else {
-						// Fallback for custom namespaces
-						serviceName = "CloudWatch"
-						ctx.GetLogger().Info("using fallback for custom namespace in event rules", "namespace", aws.ToString(alarm.Namespace), "alarmName", aws.ToString(alarm.AlarmName))
-					}
-
-					exprJson, err := common.MarshalJson(alarm)
-					if err != nil {
-						ctx.GetLogger().Error("unable to serialize data", "error", err)
-						continue
-					}
-
-					// Handle optional fields safely to avoid nil pointer dereference
-					var duration time.Duration
-					if alarm.Period != nil {
-						duration = time.Second * time.Duration(*alarm.Period)
-					}
-
-					threshold := "0"
-					if alarm.Threshold != nil {
-						threshold = fmt.Sprintf("%f", *alarm.Threshold)
-					}
-
-					metricName := ""
-					if alarm.MetricName != nil {
-						metricName = *alarm.MetricName
-					}
-
-					statistic := ""
-					if alarm.Statistic != "" {
-						statistic = string(alarm.Statistic)
-					}
-
-					eventRules = append(eventRules, providers.EventRule{
-						Name:        aws.ToString(alarm.AlarmName),
-						Description: aws.ToString(alarm.AlarmDescription),
-						Summary:     fmt.Sprintf("CloudWatch Alarm '%s' in region %s", aws.ToString(alarm.AlarmName), regionName),
-						Expr:        string(exprJson),
-						Source:      "AWS_CloudWatch_Alarm",
-						Severity:    providers.EventDefinitionSeverityCritical,
-						Category:    serviceName,
-						Duration:    duration,
-						Labels: map[string]string{
-							"aws_region":                 regionName,
-							"aws_alarm":                  aws.ToString(alarm.AlarmName),
-							"aws_account":                account.AccountNumber,
-							"aws_service_name":           serviceName,
-							"aws_event_threshold":        threshold,
-							"aws_event_metric_namespace": aws.ToString(alarm.Namespace),
-							"aws_event_metric_name":      metricName,
-							"aws_event_metric_statistic": statistic,
-						},
-					})
-				}
-				mu.Unlock()
+				errChan <- fmt.Errorf("failed to describe alarms in %s: %w", regionName, err)
+				return
 			}
+			mu.Lock()
+			eventRules = append(eventRules, rules...)
+			mu.Unlock()
 		}(region)
 	}
 

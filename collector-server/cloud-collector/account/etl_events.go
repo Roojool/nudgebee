@@ -834,10 +834,16 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 		return providers.ListEventRules{}, errors.New("tenantId is required")
 	}
 
-	rules, err := ListEventRules(ctx, accountId)
-	if err != nil {
-		ctx.GetLogger().Error("unable to list event rules", "error", err, "component", funcName, "accountId", accountId)
-		return rules, err
+	rules, listErr := ListEventRules(ctx, accountId)
+	if listErr != nil {
+		ctx.GetLogger().Error("unable to list event rules", "error", listErr, "component", funcName, "accountId", accountId, "rulesCount", len(rules.Items))
+		// Providers return the rules from the regions that succeeded alongside the
+		// error. Storing them is safe — this only upserts, it never removes a rule
+		// missing from the list — and dropping them let one failing region keep
+		// every rule in the account stale.
+		if len(rules.Items) == 0 {
+			return rules, listErr
+		}
 	}
 
 	ctx.GetLogger().Info("StoreEventRules: fetched event rules from provider", "component", funcName, "accountId", accountId, "rulesCount", len(rules.Items))
@@ -930,6 +936,7 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 		ctx.GetLogger().Info("StoreEventRules: successfully stored event rules", "component", funcName, "rowsAffected", rowsAffected, "rulesCount", len(rules.Items))
 	}
 
-	return rules, err
+	// Still surface a partial listing so the caller logs the failed regions.
+	return rules, errors.Join(err, listErr)
 
 }
