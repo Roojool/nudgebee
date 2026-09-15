@@ -675,9 +675,22 @@ func (r *EventAnalysisRepository) GetLatestAnalysisUpdatedAt(ctx *security.Reque
 	return latest.Time, nil
 }
 
+// eventRuleDefinitionQuery picks one event_rules row for an alert. Rows are
+// unique per source, so one alert can have several: a rule synced from the
+// provider (prometheus, AWS_CloudWatch_Alarm, GCP_Metric_Alert) next to a stub
+// created when the alert first arrived by webhook (AWS_EventBridge,
+// prometheus_alertmanager_webhook), whose expr is empty or a one-line summary.
+// Without an ORDER BY the stub could win and the investigation prompt got a
+// blank Event Definition, so prefer a populated expr, then the fullest one,
+// then the most recently updated.
+const eventRuleDefinitionQuery = `select expr, annotations::jsonb from event_rules er
+	where er.account_id = $1 and er.alert = $2
+	order by (er.expr <> '') desc, length(er.expr) desc, er.updated_at desc nulls last
+	limit 1`
+
 // GetEventRuleDefinition fetches the rule definition and annotations for a given aggregation key.
 func (r *EventAnalysisRepository) GetEventRuleDefinition(ctx *security.RequestContext, accountId string, aggregationKey string) (string, map[string]any, error) {
-	rows, err := r.dbManager.Db.Query("select expr, annotations::jsonb from event_rules er where er.account_id = $1 and er.alert  = $2", accountId, aggregationKey)
+	rows, err := r.dbManager.Db.Query(eventRuleDefinitionQuery, accountId, aggregationKey)
 	if err != nil {
 		return "", nil, err
 	}
