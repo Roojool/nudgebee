@@ -44,6 +44,9 @@ func FetchLoadBalancerTargetGroups(
 		return targetGroups, nil
 	}
 
+	if !awsRegionPattern.MatchString(region) {
+		return nil, fmt.Errorf("invalid AWS region %q", region)
+	}
 	command := fmt.Sprintf(
 		"aws elbv2 describe-target-groups --region %s --load-balancer-arn %s --output json",
 		region, loadBalancerARN,
@@ -74,7 +77,7 @@ func FetchLoadBalancerTargetGroups(
 // topology may be nil; on a miss this falls back to `aws elbv2 describe-tags`.
 func FetchLoadBalancerTags(
 	reqCtx *security.RequestContext,
-	awsAccountID, loadBalancerARN string,
+	awsAccountID, region, loadBalancerARN string,
 	topology *CloudTopologyStore,
 ) (map[string]string, error) {
 	if tags, hit := topology.TagsForLB(loadBalancerARN); hit {
@@ -83,7 +86,13 @@ func FetchLoadBalancerTags(
 		return tags, nil
 	}
 
-	command := fmt.Sprintf("aws elbv2 describe-tags --resource-arns %s --output json", loadBalancerARN)
+	if !awsRegionPattern.MatchString(region) {
+		return nil, fmt.Errorf("invalid AWS region %q", region)
+	}
+	command := fmt.Sprintf(
+		"aws elbv2 describe-tags --region %s --resource-arns %s --output json",
+		region, loadBalancerARN,
+	)
 	resp, err := cloud.ExecuteCli(reqCtx, cloud.CloudExecuteCliCommandRequest{
 		AccountID: awsAccountID,
 		Command:   command,

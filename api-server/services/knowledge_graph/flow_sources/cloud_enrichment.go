@@ -650,7 +650,7 @@ func (e *CloudEnricher) enrichLoadBalancerWithTargets(
 
 	// Step 1.5: Read LoadBalancer tags to check for Kubernetes service mapping
 	var k8sServiceName, k8sNamespace string
-	tags, tagsErr := FetchLoadBalancerTags(reqCtx, awsAccountID, arn, e.topology)
+	tags, tagsErr := FetchLoadBalancerTags(reqCtx, awsAccountID, region, arn, e.topology)
 	if tagsErr != nil {
 		e.logger.Debug("Failed to query LoadBalancer tags",
 			"lb_name", lbNode.Properties["name"],

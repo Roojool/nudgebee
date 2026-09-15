@@ -25,6 +25,10 @@ definition:
       type: "string"
       description: "Desired instance count"
       required: true
+    - id: "region"
+      type: "string"
+      description: "AWS region (e.g. us-east-1)"
+      required: true
     - id: "account_id"
       type: "string"
       description: "Cloud account ID"
@@ -39,14 +43,14 @@ definition:
     - id: "scale"
       type: "cloud.aws.cli"
       params:
-        command: "aws autoscaling set-desired-capacity --auto-scaling-group-name {{ Inputs.asg_name }} --desired-capacity {{ Inputs.desired_capacity }}"
+        command: "aws autoscaling set-desired-capacity --auto-scaling-group-name {{ Inputs.asg_name }} --desired-capacity {{ Inputs.desired_capacity }} --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "approve"
     - id: "verify"
       type: "cloud.aws.cli"
       params:
-        command: "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names {{ Inputs.asg_name }} --query AutoScalingGroups[0].{Desired:DesiredCapacity,Min:MinSize,Max:MaxSize,InService:length(Instances[?LifecycleState==`InService`])}"
+        command: "aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names {{ Inputs.asg_name }} --query AutoScalingGroups[0].{Desired:DesiredCapacity,Min:MinSize,Max:MaxSize,InService:length(Instances[?LifecycleState==`InService`])} --region {{ Inputs.region }}"
         account_id: "{{ Inputs.account_id }}"
       depends_on:
         - "scale"
@@ -63,6 +67,12 @@ template_variables:
     required: true
     type: "string"
     placeholder: "3"
+  - id: "region"
+    input_ref: "region"
+    display_name: "AWS Region"
+    required: true
+    type: "string"
+    placeholder: "us-east-1"
   - id: "account_id"
     input_ref: "account_id"
     display_name: "Account"
