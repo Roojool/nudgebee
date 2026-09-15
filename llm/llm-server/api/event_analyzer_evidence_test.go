@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/events"
 )
@@ -252,4 +253,82 @@ func TestStructuredEvidenceForWorkspace(t *testing.T) {
 			t.Errorf("note must point at the file, got %q", note)
 		}
 	})
+}
+
+func TestResolveInvestigationWindow(t *testing.T) {
+	at := func(h, m int) *time.Time {
+		v := time.Date(2026, 9, 13, h, m, 0, 0, time.UTC)
+		return &v
+	}
+	tests := []struct {
+		name       string
+		event      events.Event
+		chainFirst *time.Time
+		chainLast  *time.Time
+		wantStart  time.Time
+		wantEnd    *time.Time // nil = ongoing
+	}{
+		{
+			name:      "closed point event is padded on both sides",
+			event:     events.Event{StartsAt: at(9, 39), EndsAt: at(9, 39), Status: "CLOSED"},
+			wantStart: *at(9, 24),
+			wantEnd:   at(9, 54),
+		},
+		{
+			name:      "firing alarm stamped ends_at=starts_at is open-ended",
+			event:     events.Event{StartsAt: at(8, 55), EndsAt: at(8, 55), Status: "FIRING"},
+			wantStart: *at(8, 40),
+			wantEnd:   nil,
+		},
+		{
+			name:      "real window is kept",
+			event:     events.Event{StartsAt: at(8, 0), EndsAt: at(8, 30), Status: "CLOSED"},
+			wantStart: *at(8, 0),
+			wantEnd:   at(8, 30),
+		},
+		{
+			name:       "earlier chain occurrence moves the start back (re-fire of an earlier episode)",
+			event:      events.Event{StartsAt: at(8, 55), EndsAt: at(8, 55), Status: "FIRING"},
+			chainFirst: at(7, 38),
+			wantStart:  *at(7, 23),
+			wantEnd:    nil,
+		},
+		{
+			name:      "later chain occurrence extends the end (termination after state change)",
+			event:     events.Event{StartsAt: at(9, 39), EndsAt: at(9, 39), Status: "CLOSED"},
+			chainLast: at(10, 5),
+			wantStart: *at(9, 24),
+			wantEnd:   at(10, 5),
+		},
+		{
+			name:      "missing end on a closed event is treated as zero width",
+			event:     events.Event{StartsAt: at(9, 0), Status: "CLOSED"},
+			wantStart: *at(8, 45),
+			wantEnd:   at(9, 15),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveInvestigationWindow(tc.event, tc.chainFirst, tc.chainLast)
+			if !ok {
+				t.Fatal("expected a window")
+			}
+			if !got.Start.Equal(tc.wantStart) {
+				t.Errorf("start = %v, want %v", got.Start, tc.wantStart)
+			}
+			switch {
+			case tc.wantEnd == nil && got.End != nil:
+				t.Errorf("end = %v, want ongoing", *got.End)
+			case tc.wantEnd != nil && (got.End == nil || !got.End.Equal(*tc.wantEnd)):
+				t.Errorf("end = %v, want %v", got.End, *tc.wantEnd)
+			}
+			if tc.wantEnd == nil && got.endString() != "ongoing" {
+				t.Errorf("endString = %q, want ongoing", got.endString())
+			}
+		})
+	}
+
+	if _, ok := resolveInvestigationWindow(events.Event{}, nil, nil); ok {
+		t.Error("an event without a start time has no window")
+	}
 }

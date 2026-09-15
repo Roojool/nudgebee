@@ -718,6 +718,42 @@ func (r *EventAnalysisRepository) GetEventRuleDefinition(ctx *security.RequestCo
 	return "", nil, nil
 }
 
+// Bounds on how far a duplicate chain may widen an incident window around the
+// event's own start: a long-lived chain (a daily alarm on occurrence 50) must not
+// stretch one investigation across days.
+const (
+	duplicateChainLookback  = 6 * time.Hour
+	duplicateChainLookahead = time.Hour
+)
+
+// GetDuplicateChainSpan returns the earliest and latest starts_at of the events in
+// eventId's duplicate chain that fall near around (see duplicateChainLookback /
+// duplicateChainLookahead). Both are nil when the event has no chain row.
+func (r *EventAnalysisRepository) GetDuplicateChainSpan(ctx *security.RequestContext, accountId, eventId string, around time.Time) (*time.Time, *time.Time, error) {
+	var first, last sql.NullTime
+	err := r.dbManager.Db.QueryRow(`select min(e.starts_at), max(e.starts_at)
+		from event_duplicates d
+		join events e on e.id = d.event_id
+		where d.cloud_account_id = $1
+		  and d.first_event_id = (select first_event_id from event_duplicates where event_id = $2 and cloud_account_id = $1)
+		  and e.starts_at between $3 and $4`,
+		accountId, eventId, around.Add(-duplicateChainLookback), around.Add(duplicateChainLookahead)).Scan(&first, &last)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("GetDuplicateChainSpan: %w", err)
+	}
+	var f, l *time.Time
+	if first.Valid {
+		f = &first.Time
+	}
+	if last.Valid {
+		l = &last.Time
+	}
+	return f, l, nil
+}
+
 // GetEventRuleActionDefinitions fetches action definitions for a given alert rule.
 func (r *EventAnalysisRepository) GetEventRuleActionDefinitions(ctx *security.RequestContext, accountId string, aggregationKey string) ([]map[string]any, error) {
 	rows, err := r.dbManager.Db.Query(`select action_params

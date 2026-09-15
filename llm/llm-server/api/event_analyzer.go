@@ -1632,7 +1632,15 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 		b.WriteString("\n")
 	}
 
-	// 2. The log enricher's pattern digest: top templates with counts plus
+	// 2. Metric values: one line per series with its span, first/min/max/last.
+	// Insight messages name the metric fetch but carry none of its numbers.
+	if digest := renderMetricDigest(ev); digest != "" {
+		b.WriteString("### Metric Values\n")
+		b.WriteString(digest)
+		b.WriteString("\n")
+	}
+
+	// 3. The log enricher's pattern digest: top templates with counts plus
 	// the severity breakdown.
 	if digest := renderLogPatternDigest(ev.LogSummary); digest != "" {
 		b.WriteString("### Log Patterns\n")
@@ -1640,7 +1648,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 		b.WriteString("\n")
 	}
 
-	// 3. Extracted error/warning lines (see formatErrorLogLine in the events
+	// 4. Extracted error/warning lines (see formatErrorLogLine in the events
 	// tool). Middle-truncated so the start and end of the window both survive.
 	if len(ev.ErrorLogData) > 0 {
 		if errText := strings.TrimSpace(strings.Join(ev.ErrorLogData, "\n")); errText != "" {
@@ -1650,7 +1658,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 		}
 	}
 
-	// 4. The raw log body, only if it fits the remaining budget. When it does
+	// 5. The raw log body, only if it fits the remaining budget. When it does
 	// not, the caller saves it to the conversation workspace instead and the
 	// prompt points the agent at that file.
 	if logText := strings.TrimSpace(ev.LogData); logText != "" {
@@ -1683,7 +1691,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 // must be saved under the UUID the agent's shell_execute will run in — saving
 // under the session string lands it in a directory the agent never sees. The
 // conversation row exists by this point: Step 1 (summary) created it.
-func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessionId, eventId string, event events.Event) string {
+func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessionId, eventId string, event events.Event, window investigationWindow, hasWindow bool) string {
 	logText := strings.TrimSpace(event.Evidences.LogData)
 	if len(logText) <= maxInlineRawLogBytes {
 		return ""
@@ -1700,11 +1708,11 @@ func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessio
 		return ""
 	}
 	ctx.GetLogger().Info("analyzer: evidence logs saved to workspace", "file", filename, "bytes", len(logText), "event_id", eventId)
-	window := ""
-	if event.StartsAt != nil {
-		window = fmt.Sprintf(" for the incident window (%s → %s)", common.FormatPresentationTime(event.StartsAt), formatWindowEnd(event.EndsAt))
+	windowNote := ""
+	if hasWindow {
+		windowNote = fmt.Sprintf(" for the incident window (%s → %s)", window.startString(), window.endString())
 	}
-	return fmt.Sprintf("## Stored Log Evidence\nThe full logs already collected%s are saved in your workspace at `%s` (one log line per row). Grep this file first (e.g. `grep -iE \"error|timeout|fail\" %s | head -40`) before fetching live logs — logs fetched live at analysis time include activity from after the incident window.", window, filename, filename)
+	return fmt.Sprintf("## Stored Log Evidence\nThe full logs already collected%s are saved in your workspace at `%s` (one log line per row). Grep this file first (e.g. `grep -iE \"error|timeout|fail\" %s | head -40`) before fetching live logs — logs fetched live at analysis time include activity from after the incident window.", windowNote, filename, filename)
 }
 
 // structuredEvidenceForWorkspace returns the event's structured evidence (metric
@@ -1749,14 +1757,92 @@ func structuredEvidenceNote(file string) string {
 	return fmt.Sprintf("## Stored Structured Evidence\nThe event's structured evidence (metric series, pod and node data, events, deployment diff) is saved in your workspace at `%s` as JSON. Parse it (e.g. `jq 'keys' %s`) before fetching live data; each section's `data` field is usually a JSON document stored as a string, so decode it a second time. Logs are not in this file — use the Collected Evidence section or the stored log file.", file, file)
 }
 
-// formatWindowEnd renders an incident-window end for the prompt: a still-firing
-// occurrence has no end yet, and "ongoing" reads better to the model than the
-// generic "unknown" the shared formatter falls back to.
-func formatWindowEnd(t *time.Time) string {
-	if t == nil {
+// Padding applied when an event's own window has no width. Collectors stamp
+// ends_at = starts_at for point events (ECS task stopped, EC2 state change) and for
+// alarms at ingest — 74% of Rackspace EventBridge events — so the investigation was
+// told the incident lasted zero seconds. With the "post-window evidence cannot be the
+// cause" rule that excluded a termination 4 minutes after a state change, and an
+// alarm's own evaluation periods before it fired.
+const (
+	zeroWidthWindowLeadIn = 15 * time.Minute
+	zeroWidthWindowTail   = 15 * time.Minute
+)
+
+// investigationWindow is the incident window an investigation is scoped to. End is
+// nil while the event is still firing.
+type investigationWindow struct {
+	Start time.Time
+	End   *time.Time
+}
+
+func (w investigationWindow) startString() string {
+	return common.FormatPresentationTime(&w.Start)
+}
+
+// endString renders the window end for the prompt: a still-firing occurrence has no
+// end yet, and "ongoing" reads better to the model than the generic "unknown" the
+// shared formatter falls back to.
+func (w investigationWindow) endString() string {
+	if w.End == nil {
 		return "ongoing"
 	}
-	return common.FormatPresentationTime(t)
+	return common.FormatPresentationTime(w.End)
+}
+
+// resolveInvestigationWindow derives the incident window from the event and the
+// span of its nearby duplicate-chain occurrences (nil when unknown):
+//   - the window starts at the earlier of the event and its chain, so a re-fire of
+//     an episode that began earlier (an alarm flapping OK→ALARM) is scoped to the
+//     episode, not to the re-fire;
+//   - a zero-width window is padded by zeroWidthWindowLeadIn before and
+//     zeroWidthWindowTail after, and extended to the chain's last occurrence;
+//   - a FIRING event is open-ended regardless of its stamped ends_at.
+//
+// Returns false when the event has no start time.
+func resolveInvestigationWindow(event events.Event, chainFirst, chainLast *time.Time) (investigationWindow, bool) {
+	if event.StartsAt == nil {
+		return investigationWindow{}, false
+	}
+	start := *event.StartsAt
+	zeroWidth := event.EndsAt == nil || !event.EndsAt.After(start)
+	if chainFirst != nil && chainFirst.Before(start) {
+		start = *chainFirst
+	}
+	if zeroWidth {
+		start = start.Add(-zeroWidthWindowLeadIn)
+	}
+	window := investigationWindow{Start: start}
+	if strings.EqualFold(event.Status, "FIRING") {
+		return window, true
+	}
+	end := event.StartsAt.Add(zeroWidthWindowTail)
+	if !zeroWidth {
+		end = *event.EndsAt
+	}
+	if chainLast != nil && chainLast.After(end) {
+		end = *chainLast
+	}
+	window.End = &end
+	return window, true
+}
+
+// investigationWindowFor resolves the event's incident window, reading its
+// duplicate-chain span from the repository. A chain lookup failure degrades to the
+// event's own times.
+func investigationWindowFor(ctx *security.RequestContext, repo *events.EventAnalysisRepository, accountId string, event events.Event) (investigationWindow, bool) {
+	if event.StartsAt == nil {
+		return investigationWindow{}, false
+	}
+	var chainFirst, chainLast *time.Time
+	if repo != nil {
+		first, last, err := repo.GetDuplicateChainSpan(ctx, accountId, event.Id, *event.StartsAt)
+		if err != nil {
+			ctx.GetLogger().Warn("analyzer: unable to read duplicate chain span for incident window", "error", err, "event_id", event.Id)
+		} else {
+			chainFirst, chainLast = first, last
+		}
+	}
+	return resolveInvestigationWindow(event, chainFirst, chainLast)
 }
 
 // renderLogPatternDigest renders the log enricher's pattern summary (top
@@ -1989,7 +2075,7 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 	return b.String()
 }
 
-func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Event, request EventAnalysisRequest, response EventAnalysisResponse, parsedLabels map[string]any, anaylsisRepo *events.EventAnalysisRepository, pending map[string]string) (string, string, bool, string, *tools.RunbookRef, *services_server.EventCodeCapabilities, error) {
+func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Event, request EventAnalysisRequest, response EventAnalysisResponse, parsedLabels map[string]any, anaylsisRepo *events.EventAnalysisRepository, pending map[string]string, window investigationWindow, hasWindow bool) (string, string, bool, string, *tools.RunbookRef, *services_server.EventCodeCapabilities, error) {
 	// runbookRef holds the runbook resolved from the event's runbook_url label
 	// (if any), so the caller can cite it in the synthesized analysis.
 	var runbookRef *tools.RunbookRef
@@ -1999,11 +2085,19 @@ func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Even
 		eventDefinition = "n/a" // Default value if fetching fails
 	}
 
+	windowStart, windowEnd := common.FormatPresentationTime(event.StartsAt), "ongoing"
+	if event.EndsAt != nil {
+		windowEnd = common.FormatPresentationTime(event.EndsAt)
+	}
+	if hasWindow {
+		windowStart, windowEnd = window.startString(), window.endString()
+	}
+
 	// do rootcause analysis
 	// Arg order must match the %s placeholders in event_investigation.txt:
 	// id, definition, title, description, labels, time, window start, window
 	// end, source, summary.
-	eventAnalsysisPrompt := prompts.GetPrompt(ctx.GetContext(), prompts.PromptEventInvestigation, request.AccountId, request.EventId, eventDefinition, event.Title, event.Description, sanitizeEventLabelsForPrompt(ctx, event.Labels, request.EventId, pending), common.FormatPresentationTime(event.UpdatedAt), common.FormatPresentationTime(event.StartsAt), formatWindowEnd(event.EndsAt), event.Source, response.Summary)
+	eventAnalsysisPrompt := prompts.GetPrompt(ctx.GetContext(), prompts.PromptEventInvestigation, request.AccountId, request.EventId, eventDefinition, event.Title, event.Description, sanitizeEventLabelsForPrompt(ctx, event.Labels, request.EventId, pending), common.FormatPresentationTime(event.UpdatedAt), windowStart, windowEnd, event.Source, response.Summary)
 
 	// Add account context (cloud provider) to help the LLM tailor its output
 	if cloudProvider := agents.GetCloudProviderForAccount(request.AccountId); cloudProvider != "" {
@@ -2254,11 +2348,16 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		parsedLabels["aggregation_key"] = eventData.AggregationKey
 	}
 
-	if parsedLabels["start"] == nil && eventData.StartsAt != nil {
-		parsedLabels["start"] = eventData.StartsAt.UnixMilli()
+	// One incident window drives the prompt, the stored-log note and the tools'
+	// default time range, so they cannot disagree about when the incident was.
+	window, hasWindow := investigationWindowFor(ctx, eventAnalysisRepo, request.AccountId, eventData)
+	if parsedLabels["start"] == nil && hasWindow {
+		parsedLabels["start"] = window.Start.UnixMilli()
 	}
 
-	if parsedLabels["end"] == nil && eventData.EndsAt != nil {
+	if parsedLabels["end"] == nil && hasWindow && window.End != nil {
+		parsedLabels["end"] = window.End.UnixMilli()
+	} else if parsedLabels["end"] == nil && !hasWindow && eventData.EndsAt != nil {
 		parsedLabels["end"] = eventData.EndsAt.UnixMilli()
 	} else if parsedLabels["end"] == nil {
 		parsedLabels["end"] = time.Now().UnixMilli()
@@ -2420,7 +2519,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	// They are persisted below only on the branch that actually runs the agent, so
 	// recovered / re-polled investigations never touch the workspace.
 	pendingWorkspaceWrites := map[string]string{}
-	eventAnalsysisPrompt, accountPrompt, debugAnalysisEnabled, debugSkipReason, runbookRef, codeCapabilities, err := generateEventAnalysisPrompt(ctx, eventData, request, response, parsedLabels, eventAnalysisRepo, pendingWorkspaceWrites)
+	eventAnalsysisPrompt, accountPrompt, debugAnalysisEnabled, debugSkipReason, runbookRef, codeCapabilities, err := generateEventAnalysisPrompt(ctx, eventData, request, response, parsedLabels, eventAnalysisRepo, pendingWorkspaceWrites, window, hasWindow)
 	if err != nil {
 		return EventAnalysisResponse{}, err
 	}
@@ -2492,7 +2591,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			// the pipeline itself produced). Done only on this branch — the
 			// one that actually runs the agent — so re-polls and recovered
 			// investigations never touch the workspace.
-			if fileNote := saveEvidenceLogsToWorkspace(ctx, request.AccountId, parentConversationId, request.EventId, eventData); fileNote != "" {
+			if fileNote := saveEvidenceLogsToWorkspace(ctx, request.AccountId, parentConversationId, request.EventId, eventData, window, hasWindow); fileNote != "" {
 				eventAnalsysisPrompt = eventAnalsysisPrompt + "\n\n" + fileNote
 			}
 			if content, ok := structuredEvidenceForWorkspace(eventData.Evidences); ok {
