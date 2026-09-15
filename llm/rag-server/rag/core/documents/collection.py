@@ -471,44 +471,77 @@ def _source_identifier(metadata: dict) -> str | None:
     return None
 
 
+# Chunks read from Qdrant per scroll call, and the most chunks one listing
+# request reads before handing back a cursor (bounds request time on
+# collections with many chunks per document).
+_DOCUMENT_SCROLL_BATCH = 256
+_DOCUMENT_SCAN_LIMIT = 5000
+
+
+def _is_listed_point(payload: dict) -> bool:
+    """One entry per source document. Unchunked points are documents. A chunked
+    document (points sharing ``metadata.parent_id``) is listed through its first
+    chunk only: the one whose text opens ``metadata.parent_content``. This keeps
+    each document to a single entry across pages, not just within one page."""
+    metadata = _point_metadata(payload)
+    if not metadata.get("parent_id"):
+        return True
+    parent_content = metadata.get("parent_content")
+    chunk = payload.get("page_content")
+    if not isinstance(parent_content, str) or not isinstance(chunk, str):
+        return True
+    opening = chunk.strip()[:200]
+    if not opening:
+        # Every string starts with "", so a blank chunk would match any parent.
+        return not parent_content.strip()
+    return parent_content.lstrip().startswith(opening)
+
+
 def list_collection_documents(collection_name: str, limit: int = 50, offset: str | None = None) -> dict:
     """
     List one page of a collection's documents as title/link entries, without content.
 
-    Integration scrapers store one point per source page/article. Chunked
-    documents store one point per chunk sharing ``metadata.parent_id``; those
-    collapse to a single entry so the list matches the KB's document count.
-    Chunks of one document that straddle a page boundary can repeat on the next
-    page. ``next_offset`` is Qdrant's scroll cursor; None means last page.
+    Pages count documents, not chunks: chunks are scanned until ``limit``
+    documents are found, the collection ends, or ``_DOCUMENT_SCAN_LIMIT`` chunks
+    were read. ``next_offset`` is the Qdrant point to resume from; None means
+    there is nothing left.
     """
-    points, next_offset = get_qdrant_client().scroll(
-        collection_name=collection_name,
-        limit=limit,
-        offset=_parse_point_id(offset) if offset else None,
-        with_payload=True,
-        with_vectors=False,
-    )
-    items = []
-    seen_parents = set()
-    for point in points:
-        payload = point.payload or {}
-        metadata = _point_metadata(payload)
-        parent_id = metadata.get("parent_id")
-        if parent_id:
-            if parent_id in seen_parents:
-                continue
-            seen_parents.add(parent_id)
-        items.append(
-            {
-                "id": str(point.id),
-                "title": _document_title(metadata, _document_content(payload)),
-                "url": _document_url(metadata),
-                # The scraper's own id for the page: what a Fact/SOP mark is keyed on,
-                # because unlike the point id it survives a re-sync.
-                "source_id": _source_identifier(metadata),
-            }
+    client = get_qdrant_client()
+    cursor: Any = _parse_point_id(offset) if offset else None
+    items: list[dict] = []
+    scanned = 0
+    while cursor is not None or scanned == 0:
+        points, next_page = client.scroll(
+            collection_name=collection_name,
+            limit=_DOCUMENT_SCROLL_BATCH,
+            offset=cursor,
+            with_payload=True,
+            with_vectors=False,
         )
-    return {"items": items, "next_offset": str(next_offset) if next_offset is not None else None}
+        cursor = next_page
+        for index, point in enumerate(points):
+            scanned += 1
+            payload = point.payload or {}
+            if not _is_listed_point(payload):
+                continue
+            metadata = _point_metadata(payload)
+            items.append(
+                {
+                    "id": str(point.id),
+                    "title": _document_title(metadata, _document_content(payload)),
+                    "url": _document_url(metadata),
+                    # The scraper's own id for the page: what a Fact/SOP mark is keyed on,
+                    # because unlike the point id it survives a re-sync.
+                    "source_id": _source_identifier(metadata),
+                }
+            )
+            if len(items) >= limit:
+                # Scroll offsets are inclusive: resume at the next unread point.
+                cursor = points[index + 1].id if index + 1 < len(points) else next_page
+                return {"items": items, "next_offset": str(cursor) if cursor is not None else None}
+        if not points or scanned >= _DOCUMENT_SCAN_LIMIT:
+            break
+    return {"items": items, "next_offset": str(cursor) if cursor is not None else None}
 
 
 def get_collection_document(collection_name: str, point_id: str) -> dict | None:

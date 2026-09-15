@@ -1671,8 +1671,10 @@ const KnowledgeBaseTab = ({ accountId }) => {
         key: 'document_count',
         label: 'Docs',
         type: 'count',
+        // Drill into documents only once the source is Ready; while syncing or
+        // failed the stored set is in flux or stale.
         render: (kb) =>
-          kb.document_count > 0 ? (
+          kb.document_count > 0 && kb.status === 'active' ? (
             <Button
               tone='link'
               size='sm'
