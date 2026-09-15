@@ -220,6 +220,62 @@ func AssembleTiers(seed AlertIdentity, candidates []AlertIdentity, dependsOn map
 	return out
 }
 
+// CoFiringWindowSeconds bounds co-firing candidates to alerts that started within this
+// many seconds of the root. MaxCoFiring caps how many distinct ones are returned.
+const (
+	CoFiringWindowSeconds = 30 * 60
+	MaxCoFiring           = 10
+)
+
+// CoFiring returns the candidates AssembleTiers left unrelated to the seed that
+// still fired close to it in the same account, nearest first: issues within
+// ±CoFiringWindowSeconds, configuration changes only before the root.
+//
+// AssembleTiers relates a different subject only through a topology edge, so on an
+// account whose service map has no edge between the pieces of one outage (an EC2
+// host terminated a second before its ALB and service alarms, a dependency that
+// failed a minute earlier) every one of them was dropped and the investigation was
+// told nothing else was going on (Rackspace R0083, R0158, R0074, R0106). These are
+// the weakest candidates the assembly offers: they share a window and an account,
+// nothing more. Chronic and derived (SLO/anomaly) signals stay excluded, as they are
+// from the causal tiers.
+//
+// Pure (no I/O), like AssembleTiers; tiers is AssembleTiers' result for the same
+// candidates.
+func CoFiring(seed AlertIdentity, candidates []AlertIdentity, tiers map[string]string, rates map[string]Rate) []AlertIdentity {
+	sk := SubjectKey(seed)
+	var out []AlertIdentity
+	for _, e := range candidates {
+		if _, tiered := tiers[e.ID]; tiered {
+			continue
+		}
+		if SubjectKey(e) == sk || isDerivedSignal(e) {
+			continue
+		}
+		if e.TsOffsetS > CoFiringWindowSeconds || e.TsOffsetS < -CoFiringWindowSeconds {
+			continue
+		}
+		if e.IsConfigChange && e.TsOffsetS > 0 {
+			continue
+		}
+		if rates[rateKey(e)].IsChronic() {
+			continue
+		}
+		out = append(out, e)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return absInt(out[i].TsOffsetS) < absInt(out[j].TsOffsetS)
+	})
+	return out
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // Relation values describe how a candidate is wired to the seed in the service map.
 // Pairs with edges in BOTH directions are common (two services that call each other);
 // for those the cause-vs-impact split rests on timing alone, which is a weak signal —
@@ -228,6 +284,7 @@ const (
 	RelationSeedCalls = "seed_calls" // the seed calls this service (a dependency of the seed)
 	RelationCallsSeed = "calls_seed" // this service calls the seed (a dependent)
 	RelationMutual    = "mutual"     // edges exist in both directions
+	RelationCoFiring  = "co_firing"  // no topology link; only the account and the window are shared
 )
 
 // RelationTo reports how cand is connected to seed. Empty when there is no direct

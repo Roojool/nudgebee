@@ -113,3 +113,23 @@ func TestBoundIncidentAssemblyPassthroughOnUnexpectedShape(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundIncidentAssemblyKeepsCoFiring(t *testing.T) {
+	data := `{"event_id":"seed-1","coverage_confidence":"none","assembly":{"root_identity":"|order-service",
+		"same_incident":[],"cause":{"config_changes":[],"upstream":[]},"impact":[],"chronic":[],
+		"co_firing":[{"event_id":"ec2-term","title":"EC2 Instance State-change Notification","relation":"co_firing","dt_seconds":-2}]}}`
+
+	out := boundIncidentAssembly(data)
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("output is not JSON: %v", err)
+	}
+	coFiring, ok := m["co_firing"].([]any)
+	if !ok || len(coFiring) != 1 {
+		t.Fatalf("co_firing not passed through: %s", out)
+	}
+	if note, _ := m["note"].(string); !strings.Contains(note, "co_firing") {
+		t.Errorf("an assembly holding only co-firing alerts must not get the empty-window caveat: %q", note)
+	}
+}
