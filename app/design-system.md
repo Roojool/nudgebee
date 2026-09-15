@@ -21,7 +21,7 @@ the right component **and** call it correctly without opening every file.
 **Where components live:**
 
 - `@ui/*` → `src/components/common/ds/*` — the **design-system primitives** (the in-scope set; §4
-  documents all 45).
+  documents all 44).
 - `@shared/*` → `src/components/common/*` — **domain compositions** built from primitives
   (`CustomTable`, `MarkDowns`, `Form`, `CustomDropdown`, …). Referenced here where a decision rule
   needs them; not part of the §4 primitive reference.
@@ -40,14 +40,14 @@ app-specific component built from primitives.
 
 ### Layout & page shell
 
-| Component                         | Where | Use when                                                                                                                                                                                                                                                                                                                                                         |
-| --------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ListingLayout`                   | ds/   | The card shell for any table/listing screen — `Toolbar` + `Body` + `Footer` slots.                                                                                                                                                                                                                                                                               |
-| `Card`                            | ds/   | **Canonical content card** — `variant` (elevated/outlined/accent/**tinted**) × `size` (sm/md/lg) × `elevation` (raised/flat). Slots: `header` / `footer` / `children`. Use for all new card surfaces. **`variant='tinted'` + `tone`** gives a coloured-background panel (neutral→gray-100, info→blue-100, success→green-100, warning→amber-100, danger→red-100). |
-| `WidgetCard` · `CustomBorderCard` | ds/   | Legacy plain content cards — consolidated into `Card`. Co-exist; **don't introduce new uses.**                                                                                                                                                                                                                                                                   |
-| `CollapsableCard`                 | ds/   | A single collapsible card (one unit — _not_ an accordion). Composes `Card` for the surface.                                                                                                                                                                                                                                                                      |
-| `Accordion`                       | ds/   | 3+ sibling collapsibles as one group. For a single collapsible unit use `CollapsableCard`.                                                                                                                                                                                                                                                                       |
-| `Divider` · `List`                | ds/   | Rules and simple item lists.                                                                                                                                                                                                                                                                                                                                     |
+| Component          | Where | Use when                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ListingLayout`    | ds/   | The card shell for any table/listing screen — `Toolbar` + `Body` + `Footer` slots.                                                                                                                                                                                                                                                                               |
+| `Card`             | ds/   | **Canonical content card** — `variant` (elevated/outlined/accent/**tinted**) × `size` (sm/md/lg) × `elevation` (raised/flat). Slots: `header` / `footer` / `children`. Use for all new card surfaces. **`variant='tinted'` + `tone`** gives a coloured-background panel (neutral→gray-100, info→blue-100, success→green-100, warning→amber-100, danger→red-100). |
+| `WidgetCard`       | ds/   | Legacy plain content card — consolidated into `Card`. Co-exists; **don't introduce new uses.** (`CustomBorderCard` was removed — use `Card`, e.g. `variant='accent'` for a coloured left edge.)                                                                                                                                                                  |
+| `CollapsableCard`  | ds/   | A single collapsible card (one unit — _not_ an accordion). Composes `Card` for the surface.                                                                                                                                                                                                                                                                      |
+| `Accordion`        | ds/   | 3+ sibling collapsibles as one group. For a single collapsible unit use `CollapsableCard`.                                                                                                                                                                                                                                                                       |
+| `Divider` · `List` | ds/   | Rules and simple item lists.                                                                                                                                                                                                                                                                                                                                     |
 
 ### Tables & data display
 
@@ -503,7 +503,7 @@ When two components could fit, this is which to pick.
 | Content-shaped loading placeholder                                                                 | `ds/Skeleton`                                                      | `ds/ProgressLinear`                                                        |
 | Determinate progress against a known max (utilisation)                                             | `ds/ProgressBar`                                                   | `ds/ProgressLinear` (unknown max)                                          |
 | Indeterminate "something is happening"                                                             | `ds/ProgressLinear`                                                | `ds/Skeleton`                                                              |
-| Plain content card on any new screen                                                               | `ds/Card`                                                          | `ds/WidgetCard` / `ds/CustomBorderCard` (legacy; consolidated into `Card`) |
+| Plain content card on any new screen                                                               | `ds/Card`                                                          | `ds/WidgetCard` (legacy) · `ds/CustomBorderCard` (removed) — both → `Card` |
 | Card needs a coloured left-edge for tone                                                           | `ds/Card variant="accent" + tone`                                  | a hand-rolled `borderLeft` on a `WidgetCard`                               |
 | Subtle bg grouping inside a modal/Card                                                             | `ds/Card variant="tinted" + tone`                                  | a hand-rolled `<Box sx={{ backgroundColor }}>`                             |
 | Card needs disclosure (open / closed body)                                                         | `ds/CollapsableCard`                                               | `ds/Card` with manual state                                                |
@@ -528,7 +528,7 @@ When two components could fit, this is which to pick.
 
 ## 4. Component API reference (`ds/` primitives)
 
-Per-component reference for all 45 primitives in `src/components/common/ds/`, harvested from each
+Per-component reference for all 44 primitives in `src/components/common/ds/`, harvested from each
 file's JSDoc + `Props` interface. **Conventions for the tables below:**
 
 - **Req** column: `✓` = required, `—` = optional.
@@ -541,7 +541,7 @@ file's JSDoc + `Props` interface. **Conventions for the tables below:**
 
 #### `Card` — `import { Card } from '@ui/Card'`
 
-Canonical content-card surface (consolidates `WidgetCard` + `CustomBorderCard`). Slots: `header`,
+Canonical content-card surface (consolidates `WidgetCard` and the removed `CustomBorderCard`). Slots: `header`,
 `footer`, `children`. **Use** for all new card surfaces; **not** for tinting message panels (use `Banner`).
 
 ```tsx
@@ -573,26 +573,6 @@ new uses. Props: `children`, `sx`, plus any MUI `BoxProps`.
 ```tsx
 <WidgetCard>Body content</WidgetCard>
 ```
-
-#### `CustomBorderCard` — `import { CustomBorderCard } from '@ui/CustomBorderCard'` (legacy)
-
-Lightweight surface with a bottom hairline + optional coloured left accent. Prefer `Card`; reach
-here only for that specific look.
-
-```tsx
-<CustomBorderCard showLeftBorder borderLeftColor={ds.red[500]}>
-  Row
-</CustomBorderCard>
-```
-
-| Prop              | Type               | Default          | Req                      |
-| ----------------- | ------------------ | ---------------- | ------------------------ |
-| `borderColor`     | `string`           | hairline default | —                        |
-| `borderLeftColor` | `string`           | —                | —                        |
-| `borderLeftWidth` | `string \| number` | —                | —                        |
-| `showLeftBorder`  | `boolean`          | `true`           | —                        |
-| `padding`         | `string \| number` | default          | —                        |
-| `onClick`         | `(e) => void`      | —                | — (makes it interactive) |
 
 #### `CollapsableCard` — `import { CollapsableCard } from '@ui/CollapsableCard'`
 

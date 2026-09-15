@@ -3,7 +3,7 @@
  * Spec: design-system/primitives/layout/card.html
  * Original proposal: design-system/proposals/card-consolidation.html
  *
- * Consolidates WidgetCard + CustomBorderCard into a single primitive with
+ * Consolidates WidgetCard and the removed CustomBorderCard into a single primitive with
  * three independent axes: `variant`, `size`, `elevation`. Visual baseline
  * (size="md" + elevation="raised") matches @common/WidgetCard exactly —
  * same border, radius, padding tokens, and shadow value.
