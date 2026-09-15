@@ -2,6 +2,10 @@ package egressfilter
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -21,14 +25,14 @@ func TestReportScope_EmptyHistoryKeepsFirstSighting(t *testing.T) {
 	hits := Scan(payload).Hits
 	require.Len(t, hits, 1)
 
-	kept, mask := newReportScope("").filter(hits, payload)
+	kept, mask := newReportScope("", "").filter(hits, payload)
 	assert.Len(t, kept, 1, "an empty history seed keeps the first sighting")
 	assert.Equal(t, []bool{true}, mask)
 }
 
 func TestReportScope_DropsCarriedOverSecret(t *testing.T) {
 	// Payload re-sends the prior secret (history) and adds a fresh one.
-	scope := newReportScope("previous message pasted " + secretPrior)
+	scope := newReportScope("previous message pasted "+secretPrior, "")
 	payload := "<history>" + secretPrior + "</history> <question>" + secretCurrent + "</question>"
 
 	hits := Scan(payload).Hits
@@ -44,7 +48,7 @@ func TestReportScope_DropsCarriedOverSecret(t *testing.T) {
 }
 
 func TestReportScope_AllCarriedOverYieldsEmpty(t *testing.T) {
-	scope := newReportScope("history holds " + secretPrior)
+	scope := newReportScope("history holds "+secretPrior, "")
 	payload := "re-sent history: " + secretPrior
 
 	hits := Scan(payload).Hits
@@ -57,7 +61,7 @@ func TestReportScope_AllCarriedOverYieldsEmpty(t *testing.T) {
 func TestReportScope_DedupesRepeatedCalls(t *testing.T) {
 	// The same current-turn secret scanned on two LLM calls of one turn must
 	// count exactly once — the scope remembers it after the first call.
-	scope := newReportScope("")
+	scope := newReportScope("", "")
 	payload := "question: echo " + secretCurrent
 	hits := Scan(payload).Hits
 	require.Len(t, hits, 1)
@@ -100,7 +104,7 @@ func TestWrapper_DetectReportsOnlyCurrentTurnSecret(t *testing.T) {
 
 	var events []FilterEvent
 	ctx := collectEvents(context.Background(), &events)
-	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior)
+	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior, "")
 
 	_, err := wrapped.GenerateContent(ctx, msgs)
 	require.NoError(t, err, "detect mode must not block")
@@ -126,7 +130,7 @@ func TestWrapper_DedupesAcrossCallsInTurn(t *testing.T) {
 
 	var events []FilterEvent
 	ctx := collectEvents(context.Background(), &events)
-	ctx = WithReportBaseline(ctx, "") // fresh turn, no history
+	ctx = WithReportBaseline(ctx, "", "") // fresh turn, no history
 
 	_, err := wrapped.GenerateContent(ctx, msgs)
 	require.NoError(t, err)
@@ -152,7 +156,7 @@ func TestWrapper_DetectSuppressesPureCarryOver(t *testing.T) {
 
 	var events []FilterEvent
 	ctx := collectEvents(context.Background(), &events)
-	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior)
+	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior, "")
 
 	_, err := wrapped.GenerateContent(ctx, msgs)
 	require.NoError(t, err)
@@ -185,7 +189,7 @@ func TestWrapper_EnforceStillBlocksCarriedOver(t *testing.T) {
 
 	var events []FilterEvent
 	ctx := collectEvents(context.Background(), &events)
-	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior)
+	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior, "")
 
 	_, err := wrapped.GenerateContent(ctx, msgs)
 	require.Error(t, err, "carried-over secret still egresses and must be blocked")
@@ -195,10 +199,10 @@ func TestWrapper_EnforceStillBlocksCarriedOver(t *testing.T) {
 
 // TestReportScope_ReTypedSecretInNewTurnIsReported locks the contract that when
 // a secret from prior conversation history is re-typed in the current turn,
-// the scope recognizes the surplus occurrence and reports it (fixes #35811).
+// the scope recognizes the explicit current input and reports it (fixes #35811).
 func TestReportScope_ReTypedSecretInNewTurnIsReported(t *testing.T) {
 	// Baseline history has 1 occurrence of secretPrior.
-	scope := newReportScope("history holds " + secretPrior)
+	scope := newReportScope("history holds "+secretPrior, secretPrior)
 	// Payload contains history (1 occurrence) PLUS new message with secretPrior (2nd occurrence).
 	payload := "history: " + secretPrior + "\nquestion: echo " + secretPrior
 
@@ -208,7 +212,7 @@ func TestReportScope_ReTypedSecretInNewTurnIsReported(t *testing.T) {
 	kept, mask := scope.filter(hits, payload)
 	require.Len(t, kept, 1, "re-typed secret must be reported for the current turn")
 	assert.Equal(t, secretPrior, payload[kept[0].Start:kept[0].End])
-	assert.Equal(t, []bool{false, true}, mask, "history occurrence is dropped, current turn occurrence is kept")
+	assert.Equal(t, []bool{true, false}, mask, "the re-entered value is reported once regardless of payload position")
 }
 
 // TestWrapper_DetectReportsReTypedSecret: end-to-end wrapper test ensuring that
@@ -225,7 +229,7 @@ func TestWrapper_DetectReportsReTypedSecret(t *testing.T) {
 
 	var events []FilterEvent
 	ctx := collectEvents(context.Background(), &events)
-	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior)
+	ctx = WithReportBaseline(ctx, "earlier turn contained "+secretPrior, secretPrior)
 
 	_, err := wrapped.GenerateContent(ctx, msgs)
 	require.NoError(t, err)
@@ -236,23 +240,89 @@ func TestWrapper_DetectReportsReTypedSecret(t *testing.T) {
 	assert.Contains(t, events[0].RuleIDs, "aws-access-key-id")
 }
 
-// TestReportScope_ReTypedSecretInSubsequentCallIsReported verifies that a secret
-// suppressed in an earlier LLM call of a turn (due to matching history count)
-// is still reported when a subsequent call in the same turn introduces a fresh occurrence.
+// Retyping is known before any call; later prompt copies must not recount it.
 func TestReportScope_ReTypedSecretInSubsequentCallIsReported(t *testing.T) {
-	scope := newReportScope("history holds " + secretPrior)
+	scope := newReportScope("history holds "+secretPrior, secretPrior)
+	payload := "history: " + secretPrior
+	kept, _ := scope.filter(Scan(payload).Hits, payload)
+	require.Len(t, kept, 1)
+	payload += " question: " + secretPrior
+	kept, _ = scope.filter(Scan(payload).Hits, payload)
+	assert.Empty(t, kept)
+}
 
-	// Call 1: 1 occurrence (same as history) -> should be suppressed
-	payload1 := "history: " + secretPrior
-	hits1 := Scan(payload1).Hits
-	require.Len(t, hits1, 1)
-	kept1, _ := scope.filter(hits1, payload1)
-	assert.Empty(t, kept1, "pure carry-over in first call is suppressed")
+func TestWrapper_MessageScopeAcrossAgentsAndModes(t *testing.T) {
+	for _, mode := range []Mode{ModeDetect, ModeEnforce} {
+		for _, retyped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/retyped=%t", mode, retyped), func(t *testing.T) {
+				inner := &fakeModel{respText: "ok"}
+				wrapped := WrapModel(inner, "openai", "gpt-4o", true, mode)
+				query := "what did I ask first?"
+				if retyped {
+					query += " " + secretPrior
+				}
+				var events []FilterEvent
+				ctx := collectEvents(context.Background(), &events)
+				ctx = WithReportBaseline(ctx, "previous user: "+secretPrior, query)
+				payload := strings.Repeat("history: "+secretPrior+"\n", 7) + query
+				msgs := []llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, payload)}
+				for i := 0; i < 3; i++ {
+					// Child queries may echo a historical value; they cannot redefine
+					// what the user actually entered or reset the shared seen set.
+					child := EnsureReportBaseline(context.WithValue(ctx, reportTestKey{}, i), "", secretPrior)
+					_, err := wrapped.GenerateContent(child, msgs)
+					if mode == ModeEnforce {
+						require.Error(t, err)
+					} else {
+						require.NoError(t, err)
+					}
+				}
+				expected := 0
+				if retyped {
+					expected = 1
+				}
+				require.Len(t, events, expected)
+				if retyped {
+					assert.Equal(t, 1, events[0].HitCount)
+				}
+				if mode == ModeEnforce {
+					assert.Zero(t, inner.callCount())
+				} else {
+					assert.Equal(t, 3, inner.callCount())
 
-	// Call 2: 2 occurrences (1 more than history) -> should report the new one
-	payload2 := "history: " + secretPrior + "\nquestion: echo " + secretPrior
-	hits2 := Scan(payload2).Hits
-	require.Len(t, hits2, 2)
-	kept2, _ := scope.filter(hits2, payload2)
-	assert.Len(t, kept2, 1, "new occurrence in second call must be reported")
+				}
+			})
+		}
+	}
+}
+
+type reportTestKey struct{}
+
+func TestReportScope_ConcurrentCallsAndFreshTurn(t *testing.T) {
+	ctx := WithReportBaseline(context.Background(), "", secretCurrent)
+	scope := reportScopeFromContext(ctx)
+	var wg sync.WaitGroup
+	var count atomic.Int32
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload := secretCurrent + " " + secretCurrent
+			kept, _ := scope.filter(Scan(payload).Hits, payload)
+			count.Add(int32(len(kept)))
+		}()
+	}
+	wg.Wait()
+	assert.EqualValues(t, 1, count.Load())
+	next := WithReportBaseline(ctx, secretCurrent, secretCurrent)
+	kept, _ := reportScopeFromContext(next).filter(Scan(secretCurrent).Hits, secretCurrent)
+	assert.Len(t, kept, 1, "a fresh message can report a re-entered value again")
+}
+
+func TestReportScope_NewToolSecretStillReported(t *testing.T) {
+	scope := newReportScope(secretPrior, "a clean user question")
+	payload := strings.Repeat(secretPrior+" ", 5) + secretCurrent
+	kept, _ := scope.filter(Scan(payload).Hits, payload)
+	require.Len(t, kept, 1)
+	assert.Equal(t, secretCurrent, payload[kept[0].Start:kept[0].End])
 }

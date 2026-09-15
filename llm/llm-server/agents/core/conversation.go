@@ -1250,6 +1250,35 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		ctx.GetMeter(),
 	)
 
+	// Establish reporting attribution before saving/activating a message, so a
+	// history-read failure cannot strand newly accepted work in IN_PROGRESS.
+	// This also precedes contextualization and agent execution.
+	// The executor's context copies and child agents inherit this same scope.
+	// Include stored context because refinement can resend it independently of
+	// the recent-message window. Security still scans every outbound payload.
+	reportBaseline := ""
+	if !newConversation {
+		reportHistory, err := getExistingHistory(request, ctx)
+		if err != nil {
+			return NBAgentResponse{}, fmt.Errorf("conversation: load history for egress reporting baseline: %w", err)
+		}
+		reportBaseline = messageFormatterToString(reportHistory)
+	}
+	if len(conversation.Context) > 0 {
+		contextJSON, err := common.MarshalJson(conversation.Context)
+		if err != nil {
+			return NBAgentResponse{}, fmt.Errorf("conversation: encode egress reporting baseline: %w", err)
+		}
+		reportBaseline += "\n" + string(contextJSON)
+		// Match the executor's human-readable memory too: JSON escapes
+		// multiline values that appear literally in the outbound prompt.
+		var unified LlmUnifiedExtraction
+		if err := common.UnmarshalJson(contextJSON, &unified); err == nil {
+			reportBaseline += "\n" + unified.String()
+		}
+	}
+	ctx.SetContext(egressfilter.WithReportBaseline(ctx.GetContext(), reportBaseline, request.Query))
+
 	historyType := MessageTypeGeneration
 	status := ConversationStatusCompleted
 	if agent.GetName() == RouterAgentName {
