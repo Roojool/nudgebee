@@ -58,7 +58,7 @@ export class EgressFilterLocators extends CommonLocators {
     // rather than getByRole("dialog") because MUI marks a background dialog
     // aria-hidden the moment the pattern dialog opens, which drops it out of
     // every role-based query while it is still perfectly present in the DOM.
-    this.settingsPaper = page.locator(".MuiDialog-paper").filter({ hasText: "Secret filter enabled" }).first();
+    this.settingsPaper = page.locator(".MuiDialog-paper").filter({ hasText: "Secret Filter" }).first();
 
     // ds/Switch sets inputProps['aria-label'] only when it is given a `label`.
     // These two are rendered without one, so there is no accessible name to
