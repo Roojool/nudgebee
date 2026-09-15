@@ -744,10 +744,15 @@ def _delete_document(client, doc_id, collection_name):
 
 
 def _get_missing_doc_ids(client, collection_name, documents_id):
-    """Helper function to identify documents that need to be deleted using direct Qdrant client."""
+    """Helper function to identify documents that need to be deleted using direct Qdrant client.
+
+    Returns point ids exactly as Qdrant returned them. Legacy points carry
+    integer ids; stringifying one makes Qdrant reject the later delete with a
+    400, so those points were never pruned.
+    """
     try:
         # Scroll through all points to get existing IDs
-        all_ids = []
+        existing_ids = set()
         offset = None
         while True:
             points, next_offset = client.scroll(
@@ -759,19 +764,15 @@ def _get_missing_doc_ids(client, collection_name, documents_id):
             )
             if not points:
                 break
-            all_ids.extend([str(point.id) for point in points])
+            existing_ids.update(point.id for point in points)
             if next_offset is None:
                 break
             offset = next_offset
 
         logger.info(f"Length of documents processed: {len(documents_id)}")
-        existing_ids = set(all_ids)
         logger.info(f"Length of existing documents: {len(existing_ids)}")
-        # Normalize IDs by removing hyphens for comparison.
-        # Qdrant stores UUIDs with hyphens (e.g. "3c73415d-dce9-..."),
-        # but _generate_document_ids returns plain hex (e.g. "3c73415ddce9...").
-        normalized_doc_ids = {doc_id.replace("-", "") for doc_id in documents_id}
-        missing_ids = {eid for eid in existing_ids if eid.replace("-", "") not in normalized_doc_ids}
+        normalized_doc_ids = {_normalize_point_id(doc_id) for doc_id in documents_id}
+        missing_ids = {eid for eid in existing_ids if _normalize_point_id(eid) not in normalized_doc_ids}
         logger.info(f"Missing ids: {len(missing_ids)}")
         return missing_ids
     except Exception as e:
