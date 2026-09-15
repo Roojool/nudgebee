@@ -229,6 +229,11 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 	}
 	plan.Actions = kept
 
+	// Deterministic command contract. Runs after kind and confidence are canonical (so a demotion
+	// here is not undone) and before ranking (so a demoted action also moves down the list). See
+	// remediation_validate.go for why these are checks rather than additional prompt rules.
+	validatePlanCommands(plan)
+
 	// Rank by what the action is worth, not by how confident the model felt: anything that removes
 	// the cause outranks anything that merely restores service, however reliable the latter is. The
 	// prompt asks for this ordering and the model does not reliably obey it, so enforce it here.
@@ -522,6 +527,18 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	if sc == nil || (!sc.HasAccountAccess(request.AccountId, security.SecurityAccessTypeCreate) &&
 		!grantedRun(sc, request.AccountId, moduleAiMisc)) {
 		c.JSON(403, buildApiResponse(nil, []error{errors.New("remediation: write access is required to run remediation commands")}))
+		return
+	}
+
+	// A stand-in value must never reach the cluster. The generation prompt asks the model to emit a
+	// clearly-named placeholder rather than a secret, and the panel runs what it is given verbatim:
+	// the audit found `kubectl set env deployment/app-prod GITHUB_WEBHOOK_SECRET=
+	// GITHUB_WEBHOOK_SECRET_PLACEHOLDER` offered as a fix against production, which would have
+	// replaced a live secret with that literal string and rolled the deployment. normalizePlan
+	// already demotes such an action off the fix ranking; this is the block that makes it safe.
+	if commandHasPlaceholder(command) {
+		ctx.GetLogger().Warn("remediation_execute: command carries a placeholder value", "command", command)
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: this command contains a placeholder value and was not run. Substitute the real value and run it yourself — applying it as written would overwrite the setting with the placeholder text."}}))
 		return
 	}
 
