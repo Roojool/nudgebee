@@ -292,4 +292,4 @@ def test_search_never_queries_ineligible_vectors(monkeypatch, restrict, live):
         collection_name=f"kb_{DISABLED_KB}",
         tenant_id=TENANT,
         restrict_to_collection=restrict,
-    ) == ([], {})
+    ) == ([], {}, None)

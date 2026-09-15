@@ -553,7 +553,7 @@ func TestNudgebeeIntegrationDiagnoseToolRequiresID(t *testing.T) {
 func TestNudgebeeDocsSearchFiltersAndFormatsProductDocs(t *testing.T) {
 	previous := queryNudgebeeDocs
 	t.Cleanup(func() { queryNudgebeeDocs = previous })
-	queryNudgebeeDocs = func(userID, accountID, query, module string, count int, conversationID, messageID, agentID string, track bool, filters ...map[string]any) core.RAGSearchResults {
+	queryNudgebeeDocs = func(_ context.Context, userID, accountID, _, query, module, _ string, count int, conversationID, messageID, agentID string, track bool, filters ...map[string]any) core.RAGSearchResults {
 		assert.Equal(t, "user-1", userID)
 		assert.Equal(t, "acc-1", accountID)
 		assert.Equal(t, "what is an account?", query)
@@ -596,7 +596,7 @@ func TestNudgebeeDocsSearchNoResultDoesNotFallback(t *testing.T) {
 	previous := queryNudgebeeDocs
 	t.Cleanup(func() { queryNudgebeeDocs = previous })
 	calls := 0
-	queryNudgebeeDocs = func(_, _, _, _ string, _ int, _, _, _ string, _ bool, _ ...map[string]any) core.RAGSearchResults {
+	queryNudgebeeDocs = func(_ context.Context, _, _, _, _, _, _ string, _ int, _, _, _ string, _ bool, _ ...map[string]any) core.RAGSearchResults {
 		calls++
 		return nil
 	}

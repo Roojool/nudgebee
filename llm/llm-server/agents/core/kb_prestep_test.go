@@ -156,7 +156,7 @@ func TestRetrieveKnowledgeDocsPartialTimeout(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			docs := retrieveKnowledgeDocs(ctx, NBAgentRequest{}, "memory runbook", kbs)
+			docs, _ := retrieveKnowledgeDocs(ctx, NBAgentRequest{}, "memory runbook", kbs)
 			var got []string
 			for _, doc := range docs {
 				got = append(got, doc.Document)
@@ -649,4 +649,69 @@ func TestKnowledgeDiscoveryDisabledSkipsAgentAndServices(t *testing.T) {
 
 func TestKnowledgeDiscoveryMissingAgentSkipsServices(t *testing.T) {
 	require.Empty(t, DiscoverKnowledgeCandidates(nil, NBAgentRequest{KnowledgePolicy: KnowledgeAlways}, nil))
+}
+
+// The judge runs on the merged set of every search the pre-step launched, and a
+// keep-none verdict must leave the prompt with no knowledge at all — the
+// pre-step is the path most KB text reaches the model by, so a verdict it
+// ignored would be a verdict that does nothing.
+func TestRetrieveRelevantKBAppliesTheJudgeOnce(t *testing.T) {
+	previousAccountQuery := queryAccountKnowledgeFn
+	previousCollectionQuery := queryCollectionKnowledgeFn
+	previousListAccountKBs := listAccountKBsFn
+	previousJudge := judgeKBResultsFn
+	t.Cleanup(func() {
+		queryAccountKnowledgeFn = previousAccountQuery
+		queryCollectionKnowledgeFn = previousCollectionQuery
+		listAccountKBsFn = previousListAccountKBs
+		judgeKBResultsFn = previousJudge
+	})
+
+	previousResolver := resolveManualKnowledgeFn
+	resolveManualKnowledgeFn = func(_ *security.RequestContext, _ string, docs toolcore.RAGSearchResults) toolcore.RAGSearchResults {
+		return docs
+	}
+	t.Cleanup(func() { resolveManualKnowledgeFn = previousResolver })
+
+	mapped := toolcore.Knowledgebase{
+		Id: "mapped-runbook", Name: "es_metrics_discovery",
+		Description: "Discover Elasticsearch metric field names before querying",
+		Status:      "active", Enabled: true, KBType: "manual",
+	}
+	queryAccountKnowledgeFn = func(_ context.Context, _, _, _, _ string, _ int, _, _, _ string, _ bool) toolcore.RAGSearchResults {
+		return toolcore.RAGSearchResults{
+			{Document: "Account-wide page", Metadata: map[string]any{"title": "Account page", "collection": "global_docs"}},
+		}
+	}
+	queryCollectionKnowledgeFn = func(_ context.Context, _, _, _, _, collection string, _ int, _, _, _ string, _ bool) toolcore.RAGSearchResults {
+		return toolcore.RAGSearchResults{
+			{Document: "Mapped page", Metadata: map[string]any{"title": "Mapped page", "collection": collection}},
+		}
+	}
+	listAccountKBsFn = func(_ *security.RequestContext, _ string) ([]toolcore.Knowledgebase, error) {
+		return []toolcore.Knowledgebase{mapped}, nil
+	}
+
+	calls := 0
+	var judged, seenTraceIDs int
+	judgeKBResultsFn = func(_ *security.RequestContext, _, _, _, _, _ string, docs toolcore.RAGSearchResults, traceIDs ...string) toolcore.RAGSearchResults {
+		seenTraceIDs = len(traceIDs)
+		calls++
+		judged = len(docs)
+		return toolcore.RAGSearchResults{}
+	}
+
+	request := NBAgentRequest{
+		AccountId: "account-36421", ConversationId: "conversation-36421",
+		MessageId: "message-36421", AgentId: "elastic-search-metrics-agent",
+		OriginalQuery: "why are Elasticsearch metrics missing", Query: "inspect available metric fields",
+	}
+	result := retrieveRelevantKB(security.NewRequestContextForSuperAdmin(), request, []toolcore.Knowledgebase{mapped})
+
+	assert.Equal(t, 1, calls, "one judge call per turn, not one per search")
+	assert.Equal(t, 2, judged, "both searches' results reach the judge together")
+	assert.Equal(t, 2, seenTraceIDs, "every search that fed the judge is identified for the write-back")
+	assert.Empty(t, result.menu)
+	assert.Empty(t, result.content)
+	assert.Empty(t, result.references)
 }

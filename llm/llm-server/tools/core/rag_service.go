@@ -51,10 +51,21 @@ type ragQueryRequest struct {
 	// runbooks) become decisively ordered, at the cost of one extra LLM call
 	// inside retrieval.
 	UseReranking *bool `json:"use_reranking,omitempty"`
+	// TraceID names the row rag-server writes to llm_retrieval_trace for this
+	// search. Supplied by this side so the judge can update that row afterwards
+	// with what it decided — without it the row gets a server-generated id this
+	// service never learns, and the verdict has nowhere to land.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 type RAGSearchResult struct {
-	Document        string         `json:"document"`
+	Document string `json:"document"`
+	// Chunk is the passage that matched, present only in rag-server's ranked
+	// mode, where Document carries the whole parent document instead. It is what
+	// the score refers to, so it is what a relevance judgement should read, and
+	// it says which part of a long document answered the question. Empty in
+	// threshold mode, where Document IS the chunk.
+	Chunk           string         `json:"chunk"`
 	Metadata        map[string]any `json:"metadata"`
 	SimilarityScore float32        `json:"similarity_score"`
 }
@@ -104,7 +115,29 @@ func addRAGAuth(req *http.Request) {
 	}
 }
 
+// retrievalTraceIDKey carries the caller-chosen trace id for ONE search.
+// Concurrent searches (the KB pre-step runs up to four) each derive their own
+// context, so one id never covers two rows.
+type retrievalTraceIDKeyType struct{}
+
+var retrievalTraceIDKey retrievalTraceIDKeyType
+
+// WithRetrievalTraceID returns ctx carrying the id rag-server should use for the
+// trace row of the search made with it, and the id itself.
+func WithRetrievalTraceID(ctx context.Context) (context.Context, string) {
+	id := uuid.NewString()
+	return context.WithValue(ctx, retrievalTraceIDKey, id), id
+}
+
+func retrievalTraceIDFrom(ctx context.Context) string {
+	if id, ok := ctx.Value(retrievalTraceIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
 func executeRAGCall(ctx context.Context, payload ragQueryRequest) (RAGSearchResults, error) {
+	payload.TraceID = retrievalTraceIDFrom(ctx)
 	// Stamp trace_id/span_id from the caller's context so RAG round-trips
 	// correlate with the conversation's other log lines in Loki.
 	logger := common.TraceLogger(ctx)

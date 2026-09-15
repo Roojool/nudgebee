@@ -233,7 +233,7 @@ async def search_kb(request: KBSearchRequest):
         # get_matching_documents is ``module``, which made the old positional
         # call treat "kb_<id>" as a module filter — no collection has that
         # module tag, so every KB search returned zero hits.
-        results, token_usage = await asyncio.to_thread(
+        results, token_usage, _ = await asyncio.to_thread(
             get_matching_documents,
             request.query,
             request.k,

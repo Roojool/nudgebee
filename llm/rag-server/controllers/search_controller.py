@@ -5,6 +5,7 @@ Handles document search endpoints with token tracking and metadata filtering.
 """
 
 import logging
+import time
 from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from controllers.knowledge_document import discovery_document, router as knowledge_router
 
 from rag.core.llm.rag import get_matching_documents
-from rag.core.monitoring.audit import save_audit_async
+from rag.core.monitoring.audit import RetrievalTrace, save_trace_async
 from rag.core.monitoring.token_tracker import persist_llm_token_usage
 from utils.config import Config
 
@@ -42,6 +43,12 @@ class GetMatchingDocRequest(BaseModel):
     # ``account_id`` so tenant-scoped integration collections (Confluence,
     # ServiceNow) are visible without the caller needing to know about tenants.
     tenant_id: Optional[str] = None
+    # Identifier for this retrieval's trace row, chosen by the caller so it can
+    # later record what it did with the results — which document it used, what
+    # reached the prompt — against the same row rather than a second one that
+    # has to be joined back. Omitted means the server allocates one and nobody
+    # updates it.
+    trace_id: Optional[str] = None
     use_reranking: bool = Config.reranking_enabled  # Enable LLM-based reranking (default from RAG_RERANKING_ENABLED)
     # When true, ``collection_name`` RESTRICTS the search to that one collection
     # instead of being added to the discovered set. Used by the knowledge-base
@@ -129,6 +136,43 @@ def _extract_prometheus_metric(doc_content: str) -> str:
     return metric
 
 
+def _ranked_entry(entry: dict) -> dict:
+    """Reshape one result for ranked mode: the whole document, plus the chunk.
+
+    Retrieval matched a 600-character chunk, but a chunk starts mid-sentence and
+    carries none of its document's context, so what the caller needs to read is
+    the parent. The chunk still travels alongside it: it is what the relevance
+    score refers to, and it tells the caller which passage to judge and where in
+    the document to look.
+
+    ``parent_content`` is removed from the metadata once it has been promoted to
+    ``document`` — leaving it would send the same text twice, and these documents
+    reach 60000 characters.
+    """
+    metadata = dict(entry.get("metadata") or {})
+    parent = metadata.pop("parent_content", None)
+    if not parent:
+        # Chunks indexed before parent text was stored. The chunk is all there
+        # is, so return it as the document rather than an empty one.
+        return entry
+
+    chunk = entry["document"]
+    document = parent[: Config.ranked_max_doc_chars]
+    if len(parent) > Config.ranked_max_doc_chars:
+        logger.info(
+            "Truncated document %s from %d to %d chars",
+            metadata.get("parent_id") or (metadata.get("retrieval") or {}).get("parent_id"),
+            len(parent),
+            Config.ranked_max_doc_chars,
+        )
+    return {
+        "document": document,
+        "chunk": chunk,
+        "metadata": metadata,
+        "similarity_score": entry["similarity_score"],
+    }
+
+
 def _fetch_prometheus_metadata(documents: list, account_id: str, total_token_usage: dict) -> list:
     """Fetch metadata for prometheus metrics and accumulate token usage."""
     metadata = []
@@ -136,7 +180,7 @@ def _fetch_prometheus_metadata(documents: list, account_id: str, total_token_usa
         if not doc.page_content:
             continue
         metric = _extract_prometheus_metric(doc.page_content)
-        docs, metadata_token_usage = get_matching_documents(
+        docs, metadata_token_usage, _ = get_matching_documents(
             query=metric,
             no_of_results=1,
             account_id=account_id,
@@ -163,7 +207,8 @@ async def get_matching_doc(request: GetMatchingDocRequest):
             f"metadata_filter: {request.metadata_filter}"
         )
 
-        documents, token_usage = get_matching_documents(
+        started = time.monotonic()
+        documents, token_usage, trace = get_matching_documents(
             query=request.query,
             no_of_results=request.k,
             account_id=request.account_id,
@@ -173,19 +218,29 @@ async def get_matching_doc(request: GetMatchingDocRequest):
             metadata_filter=request.metadata_filter,
             use_reranking=request.use_reranking,
             tenant_id=request.tenant_id,
+            trace=RetrievalTrace(
+                cloud_account_id=request.account_id,
+                module=request.module,
+                query=request.query,
+                trace_id=request.trace_id,
+                conversation_id=request.conversation_id,
+                message_id=request.message_id,
+                tenant_id=request.tenant_id,
+            ),
         )
+        if trace is not None:
+            trace.retrieval_ms = int((time.monotonic() - started) * 1000)
 
         for doc, score in documents:
             content, metadata = doc.page_content, doc.metadata
             if request.module == "knowledge_base" and request.knowledge_excerpt_bytes:
                 content, metadata = discovery_document(content, metadata, request.knowledge_excerpt_bytes)
-            doc_response.append(
-                {
-                    "document": content,
-                    "metadata": metadata,
-                    "similarity_score": score,
-                }
-            )
+            entry = {
+                "document": content,
+                "metadata": metadata,
+                "similarity_score": score,
+            }
+            doc_response.append(_ranked_entry(entry) if Config.ranked_mode else entry)
 
         # Log token usage
         _persist_token_usage(
@@ -199,13 +254,8 @@ async def get_matching_doc(request: GetMatchingDocRequest):
             request.agent_id,
         )
 
-        save_audit_async(
-            request.account_id,
-            request.module,
-            request.query,
-            request.conversation_id,
-            documents,
-        )
+        if trace is not None:
+            save_trace_async(trace)
     except Exception as e:
         logger.exception(f"Error getting matching document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -230,7 +280,7 @@ async def get_prometheus_doc(request: GetMatchingDocRequest):
 
     logger.info("Getting matching document")
     try:
-        documents, token_usage = get_matching_documents(
+        documents, token_usage, trace = get_matching_documents(
             query=request.query,
             no_of_results=request.k,
             account_id=request.account_id,

@@ -36,7 +36,7 @@ type nudgebeeProviderErrorClassification struct {
 }
 
 var (
-	queryNudgebeeDocs                    = core.QueryRAG
+	queryNudgebeeDocs                    = core.QueryRAGCollection
 	nudgebeeNow                          = time.Now
 	nudgebeeHTMLTags                     = regexp.MustCompile(`(?i)</?[a-z](?:[^'">]|"[^"]*"|'[^']*')*?>`)
 	nudgebeeHTTPStatusCode               = regexp.MustCompile(`(?i)\b(?:http(?: status)?|status(?: code)?|response|returned|googleapi: error)\s*[:=]?\s*(401|403|502|503)\b`)
@@ -896,11 +896,13 @@ func (NudgebeeDocsSearchTool) Call(nbCtx core.NbToolContext, input core.NBToolCa
 
 	started := time.Now()
 	userID := nbCtx.Ctx.GetSecurityContext().EffectiveUserIdForRPC()
+	searchCtx, traceID := core.WithRetrievalTraceID(nbCtx.Ctx.GetContext())
 	results := queryNudgebeeDocs(
-		userID, nbCtx.AccountId, input.Command, nudgebeeDocsModule,
+		searchCtx, userID, nbCtx.AccountId, "", input.Command, nudgebeeDocsModule, "",
 		nudgebeeDocsResultLimit, nbCtx.ConversationId, nbCtx.MessageId,
 		nbCtx.ParentAgentId, true, map[string]any{"source": nudgebeeDocsSource},
 	)
+	results = core.JudgeKBResults(nbCtx.Ctx, nbCtx.AccountId, userID, nbCtx.ConversationId, nbCtx.MessageId, input.Command, results, traceID)
 	data, references, selected, truncated := formatNudgebeeDocsResults(results)
 	if nbCtx.Ctx != nil {
 		nbCtx.Ctx.GetLogger().Info("nudgebee: product docs search completed",

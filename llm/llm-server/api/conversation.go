@@ -9,8 +9,10 @@ import (
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
+	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -74,6 +76,83 @@ type ConversationReferenceListApiRequest struct {
 
 func handleConversationApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter) {
 	groupV2 := r.Group("/v1/conversations")
+
+	// What the knowledge base did for one message: which documents were found,
+	// which one was used, and in the reader's words why the rest were not.
+	groupV2.POST("/ai_list_knowledge_activity", func(c *gin.Context) {
+		common.MetricsApiRequestsTotal("ai_list_knowledge_activity")
+
+		requestMap := make(map[string]any)
+		if err := c.ShouldBindJSON(&requestMap); err != nil {
+			slog.Error(errorBindingMessage, "error", err)
+			c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		var actionRequest ActionRequest
+		if err := common.DecodeMapToStruct(requestMap, &actionRequest); err != nil {
+			slog.Error(errorBindingMessage, "error", err)
+			c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+
+		type knowledgeActivityRequest struct {
+			AccountId      string   `json:"account_id" mapstructure:"required" validate:"required"`
+			ConversationId string   `json:"conversation_id" mapstructure:"required" validate:"required"`
+			MessageIds     []string `json:"message_ids" mapstructure:"required" validate:"required"`
+		}
+		payload := actionRequest.Input
+		if payload["request"] != nil {
+			payload, _ = payload["request"].(map[string]any)
+		}
+		if payload == nil {
+			payload = requestMap
+		}
+		var request knowledgeActivityRequest
+		if err := common.DecodeMapToStruct(payload, &request); err != nil {
+			c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "api: " + err.Error()}}))
+			return
+		}
+		// Authenticate before validating the payload, as every sibling action
+		// does: reporting "these fields are required" to a caller we have not
+		// authenticated tells them which payloads are well-formed.
+		agentContext, err := buildContextFromPayload(c.Request.Context(), c, &actionRequest, tracer, meter, slog.Default())
+		if err != nil {
+			c.JSON(401, buildApiResponse(nil, []error{err}))
+			return
+		}
+		if request.AccountId == "" || request.ConversationId == "" || len(request.MessageIds) == 0 {
+			c.JSON(400, buildApiResponse(nil, []error{
+				errors.New("api: account_id, conversation_id and message_ids are required"),
+			}))
+			return
+		}
+		// Every id reaches Postgres as a uuid. A malformed one raises "invalid
+		// input syntax for type uuid" there, which surfaces as a 500 and a noisy
+		// error log for what is a caller mistake.
+		if _, err := uuid.Parse(request.ConversationId); err != nil {
+			c.JSON(400, buildApiResponse(nil, []error{errors.New("api: conversation_id is not a valid id")}))
+			return
+		}
+		for _, id := range request.MessageIds {
+			if _, err := uuid.Parse(id); err != nil {
+				c.JSON(400, buildApiResponse(nil, []error{errors.New("api: message_ids contains an invalid id")}))
+				return
+			}
+		}
+		if !agentContext.GetSecurityContext().CanReadAccountData(request.AccountId, "ai_conversations") {
+			c.JSON(403, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
+			return
+		}
+
+		activity, err := toolcore.GetKnowledgeActivity(agentContext, request.AccountId, request.ConversationId, request.MessageIds)
+		if err != nil {
+			agentContext.GetLogger().Error("knowledge activity: lookup failed", "error", err,
+				"conversation_id", request.ConversationId)
+			c.JSON(500, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
+			return
+		}
+		c.JSON(200, buildApiResponse(activity, nil))
+	})
 
 	// Get model configuration for a conversation
 	groupV2.POST("/ai_get_model_config", func(c *gin.Context) {

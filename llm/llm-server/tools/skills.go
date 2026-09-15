@@ -514,7 +514,9 @@ func enrichIntegrationSkillsFromRAG(ctx core.NbToolContext, results map[string]s
 		if query == "" {
 			query = key
 		}
-		docs := core.QueryRAGCollectionReranked(retrievalCtx, ctx.UserId, ctx.AccountId, query, ragKBModule, collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+		searchCtx, traceID := core.WithRetrievalTraceID(retrievalCtx)
+		docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, query, ragKBModule, collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+		docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, query, docs, traceID)
 		var content strings.Builder
 		for _, doc := range docs {
 			// Defend against a mis-scoped response from an incompatible server.
@@ -622,9 +624,10 @@ func (s SearchSkillsTool) Call(ctx core.NbToolContext, input core.NBToolCallRequ
 	// 2. Integration KBs — single RAG search with module "knowledge_base".
 	go func() {
 		var out searchOutput
-		docs := core.QueryRAG(ctx.UserId, ctx.AccountId, query, ragKBModule,
+		searchCtx, traceID := core.WithRetrievalTraceID(ctx.Ctx.GetContext())
+		docs := core.QueryRAGCollection(searchCtx, ctx.UserId, ctx.AccountId, "", query, ragKBModule, "",
 			ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
-		out.docs = docs
+		out.docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, query, docs, traceID)
 		ragCh <- out
 	}()
 

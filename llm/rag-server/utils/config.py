@@ -89,6 +89,35 @@ class Config:
     reranker_threshold = float(os.environ.get("RAG_RERANKER_THRESHOLD", 0.50))
     reranker_max_length = int(os.environ.get("RAG_RERANKER_MAX_LENGTH", 128))  # tokens per (query, doc) pair
     reranker_max_doc_chars = int(os.environ.get("RAG_RERANKER_MAX_DOC_CHARS", 500))  # doc chars scored
+    # Ranked mode: score every candidate, group chunks by their parent document,
+    # and return the best N documents without filtering, leaving the relevance
+    # decision to the caller that has the conversation to judge against. Off by
+    # default — turning it on changes what every KB search returns.
+    #
+    # Measured over 300 real questions against the live dev index: filtering at
+    # 0.85 delivers an answering document for 5 of 14 answerable documentation
+    # questions, while ranking and returning ten lets one reach the caller for
+    # 14 of 14. The threshold was never the binding constraint on those; it was
+    # discarding documents the caller could have used.
+    ranked_mode = os.environ.get("RAG_RANKED_MODE", "false").lower() == "true"
+    # Documents returned in ranked mode. Ten is where answer-present peaks
+    # (14/14 documentation, 119/123 overall); the pool is scored either way, so
+    # this costs nothing here and only sets how much the caller must judge.
+    ranked_limit = int(os.environ.get("RAG_RANKED_LIMIT", 10))
+    # Weight on retrieval similarity in the blended score, the rest going to the
+    # cross-encoder. Both are normalised per query first: raw similarity spans
+    # roughly 0.85-0.90 within one query's candidates, so an unnormalised blend
+    # is the cross-encoder plus a constant. At 0.5, top-3 answer-present rose
+    # from 65% to 71% over 123 answerable questions; it wins on 27 of 40
+    # held-out splits and loses on 3.
+    ranked_similarity_weight = float(os.environ.get("RAG_RANKED_SIMILARITY_WEIGHT", 0.5))
+    # Per-document cap on returned text. One document in the dev corpus is
+    # 60000 characters and would otherwise dominate a caller's whole budget.
+    ranked_max_doc_chars = int(os.environ.get("RAG_RANKED_MAX_DOC_CHARS", 15000))
+    # Fraction of retrievals that write a trace row. One row per retrieval, so
+    # this is the only bound on growth: the table this replaced reached 1.9GB
+    # over two years because nothing ever limited it and nothing ever read it.
+    trace_sample_rate = float(os.environ.get("RAG_TRACE_SAMPLE_RATE", 1.0))
     # int8 quantization: measured slower and larger on ARM (qnnpack), so it is
     # off until measured to help on the target platform (x86/fbgemm).
     reranker_quantize = os.environ.get("RAG_RERANKER_QUANTIZE", "false").lower() == "true"

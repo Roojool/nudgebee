@@ -59,7 +59,9 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 			return knowledgeFailure(err)
 		}
 		if kbType == "integration" {
-			docs := core.QueryRAGCollectionReranked(deadline, ctx.UserId, ctx.AccountId, ctx.Query, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+			searchCtx, traceID := core.WithRetrievalTraceID(deadline)
+			docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, ctx.Query, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+			docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, ctx.Query, docs, traceID)
 			var scoped core.RAGSearchResults
 			for _, doc := range docs {
 				if collection, _ := doc.Metadata["collection"].(string); collection == selected.Collection {

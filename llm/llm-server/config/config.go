@@ -996,6 +996,27 @@ type appConfig struct {
 	// that cosine alone can't separate. Default off (pre-flag behaviour: cosine
 	// order only). Fail-open: any rerank miss keeps the cosine order.
 	MemoryRerankEnabled bool `mapstructure:"llm_memory_rerank_enabled"`
+	// KBRerankEnabled turns on the llm-server-side LLM rerank of knowledge-base
+	// candidates. It pairs with rag-server's RAG_RANKED_MODE: that side stops
+	// filtering and returns its best ten documents ranked, and this side decides
+	// which — if any — is worth putting in the prompt.
+	//
+	// Both are needed together. With rag-server ranking but this off, unfiltered
+	// candidates reach the prompt; with this on but rag-server still filtering at
+	// its threshold, there is little left to judge. Default off.
+	//
+	// Fail-open: any rerank miss keeps the order rag-server gave. A deliberate
+	// empty verdict is distinct from a miss and does suppress the results.
+	KBRerankEnabled bool `mapstructure:"llm_kb_rerank_enabled"`
+	// KBRerankMinScore is the cutoff on the LLM's own 0-1 score for the best
+	// candidate. Below it nothing is inserted and the search is treated as having
+	// found nothing, which on real traffic is the correct answer more often than
+	// not: of 300 production questions, 177 had no answer anywhere in the corpus.
+	//
+	// Deliberately not yet tuned — it is set from measurement against traced
+	// traffic, not guessed. 0 inserts the best candidate whenever the reranker
+	// returns one at all.
+	KBRerankMinScore float64 `mapstructure:"llm_kb_rerank_min_score"`
 	// MemoryRerankMinScore is an optional COARSE cosine pre-filter applied before
 	// the LLM rerank: candidates whose normalized similarity (0..1) is below it
 	// are dropped cheaply, shrinking the LLM rerank's input and cutting obvious
@@ -1566,6 +1587,8 @@ func init() {
 	viper.SetDefault("llm_memory_rag_enabled", true)
 	viper.SetDefault("llm_memory_rerank_enabled", false)
 	viper.SetDefault("llm_memory_rerank_min_score", 0.8)
+	viper.SetDefault("llm_kb_rerank_enabled", false)
+	viper.SetDefault("llm_kb_rerank_min_score", 0.0)
 	// Combined-score weights (similarity / relevancy / decay) and the post-rerank
 	// filter threshold. Threshold defaults to 0 (off) so an unchanged deployment
 	// filters nothing; weights emphasise query-match (similarity+relevancy) over
