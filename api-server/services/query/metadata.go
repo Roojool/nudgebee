@@ -3808,10 +3808,12 @@ var table_metadata = map[string]TableDefinition{
 		Type:             Normal,
 		Source:           database.Metastore,
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Drive from recommendation using idx_recommendation_security_status_weight
-			// (cloud_account_id, status, severity_weight DESC) so the planner can seek to
-			// (account, status='Open') and scan in severity order, stopping at LIMIT without
-			// sorting all 400K+ rows.
+			// Drive from recommendation using idx_recommendation_severity_weight
+			// (cloud_account_id, status, severity_weight DESC) — shared with
+			// recommendations_v2 and the CIS/misconfig groupings, not image_scan-
+			// specific — so the planner can seek to (account, status='Open') and
+			// scan in severity order, stopping at LIMIT without sorting all
+			// matching rows.
 			// pod_container is an inline subquery (NOT a CTE) so PostgreSQL can pull the entire
 			// def up into the outer query — a CTE barrier would prevent the planner from seeing
 			// the recommendation table and applying the index for the outer ORDER BY + LIMIT.
