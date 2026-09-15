@@ -1176,7 +1176,8 @@ func allEventAnalysisTypesCompleted(ctx *security.RequestContext, repo *events.E
 	return true
 }
 
-func getAgentResponseFromConversation(ctx *security.RequestContext, sessionId string, accountId string, agentName string) (string, bool) {
+// eventId, when set, limits recovery to this event's run (see messagesForEvent).
+func getAgentResponseFromConversation(ctx *security.RequestContext, sessionId string, accountId string, agentName string, eventId string) (string, bool) {
 	dao := core.GetConversationDao()
 	if dao == nil {
 		return "", false
@@ -1189,7 +1190,29 @@ func getAgentResponseFromConversation(ctx *security.RequestContext, sessionId st
 	if err != nil {
 		return "", false
 	}
-	return latestAgentGenerationResponse(messages, agentName)
+	return latestAgentGenerationResponse(messagesForEvent(messages, eventId), agentName)
+}
+
+// messagesForEvent drops the messages written before this event's run began.
+// The event-analysis conversation is shared by every firing of a fingerprint,
+// and each stage row is marked IN_PROGRESS before its agent runs, which makes
+// it eligible for recovery. Without this cut, recovery for a new firing
+// returned the previous firing's answer and saved it as this event's analysis
+// without running any agent (dev events 11271ebc, f2581730). A run starts with
+// the summary or investigation message, and both quote the event id; later
+// stages (code fix, synthesis) follow it. No message quoting the id means this
+// event never ran here, so nothing is recoverable. An empty eventId keeps the
+// whole conversation (RCA attempts own their session).
+func messagesForEvent(messages []core.ConversationMessage, eventId string) []core.ConversationMessage {
+	if eventId == "" {
+		return messages
+	}
+	for i, msg := range messages {
+		if strings.Contains(msg.Message, eventId) {
+			return messages[i:]
+		}
+	}
+	return nil
 }
 
 // latestAgentGenerationResponse returns the latest generation's answer only
@@ -1463,7 +1486,7 @@ func analyzeEventRCAUsingAgentsAndUpdateDb(ctx *security.RequestContext, request
 
 	// Try to recover from existing COMPLETED conversation if not regenerating
 	if request.AttemptID != "" || !request.Regenerate {
-		rcaResponse, hasResponse = getAgentResponseFromConversation(ctx, parentSessionId, request.AccountId, rcaAgent.GetName())
+		rcaResponse, hasResponse = getAgentResponseFromConversation(ctx, parentSessionId, request.AccountId, rcaAgent.GetName(), "")
 	}
 
 	if hasResponse {
@@ -2455,7 +2478,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		var hasSummary bool
 
 		if shouldRecoverStageFromConversation(eventAnalysisRepo, existingSummary, request.Regenerate) {
-			summaryResponseStr, hasSummary = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, summaryAgentName)
+			summaryResponseStr, hasSummary = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, summaryAgentName, request.EventId)
 		}
 
 		if hasSummary {
@@ -2582,7 +2605,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		var hasInvestigation bool
 
 		if shouldRecoverStageFromConversation(eventAnalysisRepo, existingInvestigation, request.Regenerate) {
-			investigationResponse, hasInvestigation = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, rootcauseAgentName)
+			investigationResponse, hasInvestigation = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, rootcauseAgentName, request.EventId)
 		}
 
 		if hasInvestigation {
@@ -2785,7 +2808,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	var detailedResponse string
 	var hasSynth bool
 	if shouldRecoverStageFromConversation(eventAnalysisRepo, existingDR, request.Regenerate) {
-		detailedResponse, hasSynth = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, "event_detailed_response")
+		detailedResponse, hasSynth = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, "event_detailed_response", request.EventId)
 	}
 
 	if hasSynth && strings.TrimSpace(detailedResponse) != "" {
@@ -3545,7 +3568,7 @@ func runCodeFixStage(ctx *security.RequestContext, request EventAnalysisRequest,
 	var llmResponse core.NBAgentResponse
 	var hasResponse bool
 	if recoverConversation {
-		if respStr, found := getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, llm.GetName()); found {
+		if respStr, found := getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, llm.GetName(), request.EventId); found {
 			llmResponse = core.NBAgentResponse{Response: []string{respStr}, Status: core.ConversationStatusCompleted}
 			hasResponse = true
 			ctx.GetLogger().Info("analyzer: recovered code analysis response from conversation history", "session_id", parentConversationId)

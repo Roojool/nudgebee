@@ -169,3 +169,68 @@ func TestLatestAgentGenerationResponsePreservesCompletedFindingsAfterApproval(t 
 		})
 	}
 }
+
+// Reproduces dev events 11271ebc and f2581730: a new firing's stage row was
+// IN_PROGRESS, so recovery ran against the fingerprint conversation and saved
+// the previous firing's answer as the new event's analysis, with no agent run.
+func TestMessagesForEventIgnoresEarlierFirings(t *testing.T) {
+	summaryAgent, debugAgent, synth := "events", "k8s_orchestrator", "event_detailed_response"
+	previous, current := "ab70097a-f890-47de-875b-f57663939b8b", "11271ebc-6867-41fc-afdf-33b9434134f9"
+	gen := func(agent, message, response string) core.ConversationMessage {
+		return core.ConversationMessage{AgentName: &agent, MessageType: string(core.MessageTypeGeneration),
+			Message: message, Response: response, Status: core.ConversationStatusCompleted}
+	}
+	earlier := []core.ConversationMessage{
+		gen(summaryAgent, "Get the details of Event with id - "+previous, "old summary"),
+		gen(debugAgent, "Identify RootCause of the event with id "+previous, "old RCA"),
+		gen(synth, "synthesize detailed response", "old report"),
+	}
+
+	t.Run("new firing with no run yet recovers nothing", func(t *testing.T) {
+		for _, agent := range []string{summaryAgent, debugAgent, synth} {
+			got, found := latestAgentGenerationResponse(messagesForEvent(earlier, current), agent)
+			assert.False(t, found, agent)
+			assert.Empty(t, got, agent)
+		}
+	})
+
+	t.Run("interrupted run of this firing recovers its own answers", func(t *testing.T) {
+		messages := append(append([]core.ConversationMessage{}, earlier...),
+			gen(summaryAgent, "Get the details of Event with id - "+current, "new summary"),
+			gen(debugAgent, "## Runbook\n...\nIdentify RootCause of the event with id "+current, "new RCA"),
+		)
+		scoped := messagesForEvent(messages, current)
+
+		got, found := latestAgentGenerationResponse(scoped, debugAgent)
+		assert.True(t, found)
+		assert.Equal(t, "new RCA", got)
+
+		// Synthesis has not run for this firing; the older report must not stand in.
+		_, found = latestAgentGenerationResponse(scoped, synth)
+		assert.False(t, found)
+	})
+
+	t.Run("empty event id keeps the whole conversation", func(t *testing.T) {
+		assert.Len(t, messagesForEvent(earlier, ""), len(earlier))
+	})
+}
+
+// Every automatic stage must scope recovery to the event; only RCA, whose
+// attempts own their session, may pass an empty event id.
+func TestAutomaticStageRecoveryIsScopedToEvent(t *testing.T) {
+	source, err := os.ReadFile("event_analyzer.go")
+	require.NoError(t, err)
+
+	calls := regexp.MustCompile(`getAgentResponseFromConversation\(ctx, [^\n]*\)`).FindAll(source, -1)
+	require.Len(t, calls, 5)
+	unscoped := 0
+	for _, c := range calls {
+		if regexp.MustCompile(`, ""\)$`).Match(c) {
+			unscoped++
+			assert.Contains(t, string(c), "rcaAgent.GetName()", "only the RCA lookup may skip event scoping")
+		} else {
+			assert.Contains(t, string(c), "request.EventId)", "automatic stages must pass the event id")
+		}
+	}
+	assert.Equal(t, 1, unscoped)
+}
