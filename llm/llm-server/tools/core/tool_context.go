@@ -104,6 +104,15 @@ type NBQueryConfig struct {
 	// that the planner may strip when rewriting the step query.
 	OriginalUserQuery string `json:"original_user_query,omitempty"`
 
+	// SkipConversationHistory runs the turn without the conversation's earlier
+	// messages or distilled conversation memory. Automated event re-analysis
+	// reuses one conversation per fingerprint; with history loaded, the agent
+	// answered a new occurrence by rewording the previous occurrence's RCA
+	// without calling a tool. Stored in message_config so sub-agents and
+	// approval resumes of the same turn inherit it; never inherited by the
+	// conversation's next turn (see handleConversationRequest).
+	SkipConversationHistory bool `json:"skip_conversation_history,omitempty"`
+
 	// Tool infrastructure (managed by executor/planner)
 	ToolConfigs        map[string]string `json:"tool_configs,omitempty"`
 	ClientTools        []NBToolCommand   `json:"client_tools,omitempty"`
@@ -120,7 +129,7 @@ func (q NBQueryConfig) IsEmpty() bool {
 		q.CurrentCluster == "" && q.CurrentClusterId == "" && q.K8sOrchestratorMode == "" &&
 		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && q.LlmConfigSource == "" && !q.LlmConfigReset && len(q.ToolConfigs) == 0 &&
 		len(q.ClientTools) == 0 && q.Capabilities.IsEmpty() && len(q.ToolConfirmations) == 0 &&
-		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == ""
+		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == "" && !q.SkipConversationHistory
 }
 
 // MergeFrom copies fields from src into q only when q's field is the zero value.
@@ -204,6 +213,9 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 	// it is independent of the LLM model config above and of a reset turn.
 	if q.LogProviderOverride == "" {
 		q.LogProviderOverride = src.LogProviderOverride
+	}
+	if !q.SkipConversationHistory {
+		q.SkipConversationHistory = src.SkipConversationHistory
 	}
 	if src.ToolConfigs != nil {
 		q.ToolConfigs = lo.Assign(src.ToolConfigs, q.ToolConfigs)

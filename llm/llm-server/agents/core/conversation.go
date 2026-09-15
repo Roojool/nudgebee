@@ -349,6 +349,7 @@ type additionalConversationSessionRequestConfig struct {
 	channelContext        string
 	channelContextRefs    map[string]any
 	replyRef              string
+	skipHistory           bool
 }
 
 type ConversationSessionRequestConfig interface {
@@ -655,8 +656,26 @@ func ConversationSessionRequestWithReplyRef(replyRef string) ConversationSession
 	}
 }
 
-func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgent, userId string, accountId string, sessionId string, query string, configs ...ConversationSessionRequestConfig) (NBAgentResponse, error) {
+type sessionRequestWithoutConversationHistory struct{}
 
+func (h sessionRequestWithoutConversationHistory) apply(c *additionalConversationSessionRequestConfig) {
+	c.skipHistory = true
+}
+
+// ConversationSessionRequestWithoutConversationHistory runs the turn without the
+// conversation's earlier messages or distilled conversation memory, while still
+// saving the turn into that conversation. For automated pipelines that reuse one
+// conversation across independent runs (event analysis per fingerprint), where
+// prior answers must not stand in for fresh investigation.
+func ConversationSessionRequestWithoutConversationHistory() ConversationSessionRequestConfig {
+	return sessionRequestWithoutConversationHistory{}
+}
+
+// resolveSessionRequestConfigs applies the options, then folds the fields that
+// live inside NBQueryConfig into it. The fold runs after every option so
+// WithConfig, which replaces config wholesale, cannot drop them whatever the
+// option order.
+func resolveSessionRequestConfigs(configs ...ConversationSessionRequestConfig) additionalConversationSessionRequestConfig {
 	defaultConfig := additionalConversationSessionRequestConfig{
 		source: ConversationSourceUserInvestigation,
 	}
@@ -670,6 +689,15 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 	if !defaultConfig.capabilities.IsEmpty() {
 		defaultConfig.config.Capabilities = defaultConfig.capabilities
 	}
+	if defaultConfig.skipHistory {
+		defaultConfig.config.SkipConversationHistory = true
+	}
+	return defaultConfig
+}
+
+func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgent, userId string, accountId string, sessionId string, query string, configs ...ConversationSessionRequestConfig) (NBAgentResponse, error) {
+
+	defaultConfig := resolveSessionRequestConfigs(configs...)
 
 	if defaultConfig.enableQueryRefinement == nil {
 		defaultConfig.enableQueryRefinement = lo.ToPtr(true)
@@ -1264,7 +1292,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		}
 		reportBaseline = messageFormatterToString(reportHistory)
 	}
-	if len(conversation.Context) > 0 {
+	if len(conversation.Context) > 0 && !request.QueryConfig.SkipConversationHistory {
 		contextJSON, err := common.MarshalJson(conversation.Context)
 		if err != nil {
 			return NBAgentResponse{}, fmt.Errorf("conversation: encode egress reporting baseline: %w", err)
@@ -1315,6 +1343,9 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 						if err != nil {
 							ctx.GetLogger().Error("conversation: unable to unmarshal message config from previous message", "error", err, "data", *v.MessageConfig, "id", v.ID)
 						}
+						// Skipping history is a property of the turn that asked for it; a
+						// user's follow-up after an automated re-analysis needs the history.
+						prevConfig.SkipConversationHistory = false
 						request.QueryConfig.MergeFrom(prevConfig)
 						break
 					}
@@ -1489,7 +1520,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	// When ConversationContextEnabled is true, skip query rewriting — the agent LLM resolves
 	// references naturally from the increased history window + summary context.
 	// Also skip if we are resuming an agent (request.AgentId is set) to prevent feedback turns from being rewritten.
-	if !config.Config.ConversationContextEnabled && (conversation.Context != nil) && request.EnableQueryRefinement && messageStatus != ConversationStatusWaiting && request.Query != "" && messageType != MessageTypeFollowup && agent.GetName() != RouterAgentName && agent.GetPlannerType() != AgentPlannerTypeCustom && request.AgentId == "" {
+	if !config.Config.ConversationContextEnabled && (conversation.Context != nil) && !request.QueryConfig.SkipConversationHistory && request.EnableQueryRefinement && messageStatus != ConversationStatusWaiting && request.Query != "" && messageType != MessageTypeFollowup && agent.GetName() != RouterAgentName && agent.GetPlannerType() != AgentPlannerTypeCustom && request.AgentId == "" {
 		contextualizedQuery, err := GetContextManager().ContextualizeQuery(ctx, request, conversation.Context)
 		if err == nil && contextualizedQuery != "" && contextualizedQuery != request.Query {
 			ctx.GetLogger().Info("conversation: query contextualized", "original", request.Query, "contextualized", contextualizedQuery)
@@ -1498,7 +1529,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	}
 
 	// Set the conversation context in the request
-	if len(conversation.Context) > 0 {
+	if len(conversation.Context) > 0 && !request.QueryConfig.SkipConversationHistory {
 		contextJSON, err := common.MarshalJson(conversation.Context)
 		if err != nil {
 			ctx.GetLogger().Warn("conversation: unable to marshal conversation context", "error", err)

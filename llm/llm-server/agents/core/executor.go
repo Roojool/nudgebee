@@ -1179,6 +1179,9 @@ func refineAgentQuestionAndHandleFollowups(ctx *security.RequestContext, request
 }
 
 func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([]prompts.MessageFormatter, error) {
+	if request.QueryConfig.SkipConversationHistory {
+		return []prompts.MessageFormatter{}, nil
+	}
 	chatHistory, err := GetConversationDao().LoadConversationMessages(request.AccountId, request.ConversationId, "", "", config.Config.ConversationHistoryWindowSize)
 	if err != nil {
 		ctx.GetLogger().Error("agentexecutor: unable to load chat history", "error", err)
