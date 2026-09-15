@@ -14,11 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFetchLogsAgentV2_EmbedsV1Identity guards the embedding contract: v2 must
-// keep v1's tool name ("fetch_logs") and Custom planner type so it slots into
-// the same factory/registration without a router change.
-func TestFetchLogsAgentV2_EmbedsV1Identity(t *testing.T) {
-	a := &FetchLogsAgentV2{FetchLogsAgent: &FetchLogsAgent{}}
+// TestFetchLogsAgent_Identity guards the tool name ("fetch_logs") and Custom
+// planner type so the agent slots into its factory/registration correctly.
+func TestFetchLogsAgent_Identity(t *testing.T) {
+	a := &FetchLogsAgent{}
 	assert.Equal(t, FetchLogsAgentName, a.GetName())
 	assert.Equal(t, core.AgentPlannerTypeCustom, a.GetPlannerType())
 }
@@ -407,7 +406,7 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 
 	// Resolve the account's real provider + canonical label-mappings + labels,
 	// exactly as the agent does at request time.
-	agent := newFetchLogsAgentV2(account)
+	agent := newFetchLogsAgent(account)
 	require.NotEmpty(t, agent.provider.Provider, "account has no services-server log provider configured")
 	fields, indices := fetchLabelsAndIndices(account, agent.provider)
 	ctx := security.NewRequestContextForTenantAccountAdmin(tenant, user, []string{account})

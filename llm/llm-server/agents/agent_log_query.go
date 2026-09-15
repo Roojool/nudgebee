@@ -20,7 +20,7 @@ const LogQueryAgentName = "log_query"
 // ESLogAgent/elastic_search_query/elastic_search_execute trio, both removed once
 // this action took over), it does not need a dedicated prompt/tool pair per
 // backend: it reuses the exact canonical query-generation prompt
-// FetchLogsAgentV2 uses for the full investigation flow (generateCanonicalLogQuery),
+// FetchLogsAgent uses for the full investigation flow (generateCanonicalLogQuery),
 // then resolves the canonical where-clause to provider-native query TEXT via
 // GetLogsQuery/logs_get_query — a preview-only resolution, not a real query
 // execution. This endpoint's job is only to fill in the query bar; running the
@@ -43,7 +43,7 @@ type LogQueryAgent struct {
 // default — e.g. an account configured with both Loki and Pinot integrations
 // must generate against whichever one is selected, not silently fall back to
 // whatever the account's default happens to be. Empty behaves exactly like
-// the account-default resolution used elsewhere (FetchLogsAgentV2, etc).
+// the account-default resolution used elsewhere (FetchLogsAgent, etc).
 //
 // requestedIndex optionally pins generation to a specific Elasticsearch index
 // (the logs tab's "Select an Index" dropdown). Elasticsearch field sets are
@@ -56,7 +56,7 @@ type LogQueryAgent struct {
 func NewLogQueryAgent(accountId, requestedProvider, requestedIndex string) *LogQueryAgent {
 	provider, err := tools.GetLogProviderWithOverride(accountId, requestedProvider)
 	// Empty provider (or unresolved) means no services-server log backend —
-	// Execute rejects those accounts outright, same as FetchLogsAgentV2. An
+	// Execute rejects those accounts outright, same as FetchLogsAgent. An
 	// override that failed to resolve is deliberately NOT normalized away here
 	// — Execute uses requestedProvider to report a specific "not configured"
 	// error instead of the generic "no log backend configured" message.

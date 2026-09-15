@@ -12,20 +12,19 @@ import (
 )
 
 // ToolLogsExecuteV2 is the canonical, provider-independent log executor used by
-// FetchLogsAgentV2. Unlike v1's logs_execute (which translates the where clause
-// to a provider-native query string inside llm-server, per provider), this tool
-// forwards the structured canonical where clause to services-server's FetchLogs,
-// which resolves canonical→provider labels and builds the native query
-// server-side — the same path the UI log query builder uses.
+// FetchLogsAgent. It forwards the structured canonical where clause to
+// services-server's FetchLogs, which resolves canonical→provider labels and
+// builds the native query server-side — the same path the UI log query
+// builder uses.
 //
-// It is registered so FetchLogsAgentV2 can invoke it by name via callTool; it is
+// It is registered so FetchLogsAgent can invoke it by name via callTool; it is
 // NOT added to any agent's GetSupportedTools, so generic planners never see it as
 // a separately-callable tool.
 const ToolLogsExecuteV2 = "logs_execute_v2"
 
-// NoLogsFoundPrefix is the leading phrase of the human-readable message both
-// logs_execute and logs_execute_v2 return when a query succeeds but matches zero
-// rows. Exported so FetchLogsAgentV2 can detect "no results" (to trigger its
+// NoLogsFoundPrefix is the leading phrase of the human-readable message
+// logs_execute_v2 returns when a query succeeds but matches zero rows.
+// Exported so FetchLogsAgent can detect "no results" (to trigger its
 // kubectl fallback) without coupling to the full message text.
 const NoLogsFoundPrefix = "No logs found"
 
@@ -60,8 +59,8 @@ func (t *NBLogToolV2) Description() string {
 	return "Executes a provider-independent canonical log query and returns the result."
 }
 
-// InputSchema mirrors v1's logs_execute schema — the agent emits the same
-// `{"where": {...}}` JSON `command`, plus optional time-window controls.
+// InputSchema — the agent emits a `{"where": {...}}` JSON `command`, plus
+// optional time-window controls.
 func (t *NBLogToolV2) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
@@ -156,7 +155,7 @@ func (t *NBLogToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToo
 		// or the generic "broaden your query" guidance) into Suggestion and still
 		// serialize the full response — response.Metadata.Query/Provider already
 		// carry the real backend query and provider services-server executed (even
-		// on a zero-row result), and FetchLogsAgentV2's executedLogQuery/
+		// on a zero-row result), and FetchLogsAgent's executedLogQuery/
 		// providerFromLogs read them from here. Returning a bare string instead (as
 		// this used to do) silently discarded them, so the UI fell back to showing
 		// the LLM's canonical where-clause JSON instead of the real query.

@@ -363,7 +363,7 @@ type appConfig struct {
 	LLMServerAgentPromqlMaxIterations         int  `mapstructure:"llm_server_agent_promql_max_iterations"`
 	LLMServerAgentObservabilityMaxIterations  int  `mapstructure:"llm_server_agent_observability_max_iterations"`
 	LLMServerAgentObservabilityTimeoutSeconds int  `mapstructure:"llm_server_agent_observability_timeout_seconds"`
-	// LlmServerFetchLogsWallClockTimeoutSeconds caps the entire FetchLogsAgentV2.Execute
+	// LlmServerFetchLogsWallClockTimeoutSeconds caps the entire FetchLogsAgent.Execute
 	// pipeline (services-server RPC + kubectl_execute + datadog + workspace pod) at
 	// this wall-clock budget. Any stall (see conv 8832d8f4 — 6520s hang on a single
 	// fetch_logs call, 2026-08-05) surfaces to the planner as a clean error envelope
@@ -621,20 +621,17 @@ type appConfig struct {
 	// evidence-recall layer it feeds into (LlmServerFsEvidenceRecallEnabled),
 	// this save path had no independent on/off switch. Default 2000.
 	LlmServerEventEvidenceOverflowThreshold int `mapstructure:"llm_server_event_evidence_overflow_threshold"`
-	// LogAgentV2Enabled gates the canonical, provider-independent fetch_logs
-	// agent (FetchLogsAgentV2). Global per-deploy toggle; default false.
-	LogAgentV2Enabled bool `mapstructure:"llm_server_log_agent_v2_enabled"`
 	// LogsV3CanonicalFastPathEnabled gates the `logs` agent's ROUTINE-mode
 	// canonical-JSON fast path (canonicalQueryAuthoringForRoutine /
-	// preBuiltCanonicalQuery / FetchLogsAgentV2.ExecuteV3, all in
-	// agent_log_v3.go): when the ReAct loop already knows namespace + app/pod,
+	// preBuiltCanonicalQuery / FetchLogsAgent.ExecuteDirect, all in
+	// agent_log.go): when the ReAct loop already knows namespace + app/pod,
 	// it builds the canonical `{"where": ...}` query itself and calls
-	// fetch_logs_v3 with it directly, skipping the tool's internal
+	// fetch_logs_direct with it directly, skipping the tool's internal
 	// NL-translation LLM call. Global per-deploy toggle, default true — kept
 	// as its own flag for a clean on/off A/B and instant rollback of just this
 	// sub-feature without reverting the whole agent. When false: the prompt
 	// never advertises the canonical-JSON option (fastPathAppAnchor and the
-	// tool description fall back to their NL-only phrasing) and fetchLogsV3Tool.Call never inspects
+	// tool description fall back to their NL-only phrasing) and fetchLogsDirectTool.Call never inspects
 	// tool_input shape — every fetch goes through the original NL →
 	// generateCanonicalLogQuery path unchanged.
 	LogsV3CanonicalFastPathEnabled bool `mapstructure:"llm_server_logs_v3_canonical_fast_path_enabled"`
@@ -963,7 +960,7 @@ type appConfig struct {
 	// LLM Trace - logs full prompt messages and LLM responses for debugging
 	LlmTraceEnabled bool `mapstructure:"llm_trace_enabled"`
 
-	// LogsStandardGrepEnabled gates the auto-bundle: fetch_logs/fetch_logs_v3 run
+	// LogsStandardGrepEnabled gates the auto-bundle: fetch_logs/fetch_logs_direct run
 	// standard_diagnostic_grep's crash-pattern sweep server-side after an
 	// investigation/enumeration-intent (or explicitly error-worded) fetch, riding the
 	// result back as bundle_signal so the LLM can skip its own manual grep turns. When
@@ -1409,7 +1406,6 @@ func init() {
 	viper.SetDefault("llm_server_knowledge_workspace_enabled", true)
 	viper.SetDefault("llm_server_fs_evidence_recall_enabled", true)
 	viper.SetDefault("llm_server_event_evidence_overflow_threshold", 2000)
-	viper.SetDefault("llm_server_log_agent_v2_enabled", true)
 	viper.SetDefault("llm_server_logs_v3_canonical_fast_path_enabled", true)
 	viper.SetDefault("llm_server_log_validate_request_enabled", true)
 	viper.SetDefault("llm_server_trace_validate_request_enabled", true)

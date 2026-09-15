@@ -211,7 +211,7 @@ func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.Observ
 // LogProvider/LogProviderSource ARE forwarded from the caller's already-resolved
 // logProvider (mirroring the legacy path) — services-server falls back to its own
 // account-default lookup when they're empty, so this is a no-op for the common
-// case FetchLogsAgentV2 relies on (a well-formed account with exactly one default
+// case FetchLogsAgent relies on (a well-formed account with exactly one default
 // log provider: services-server would resolve the same provider either way). It
 // stops being a no-op for a per-request provider override (e.g.
 // ai_generate_log_query honoring the user's "Log Provider:" dropdown selection on

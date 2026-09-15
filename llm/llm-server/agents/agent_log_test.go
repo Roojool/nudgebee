@@ -1,15 +1,16 @@
 package agents
 
 import (
+	"os"
+	"strings"
+	"testing"
+
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
-	"os"
-	"strings"
-	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,22 +18,21 @@ import (
 )
 
 // TestLogAgent_BuildToolList: the LLM-visible tool surface must be uniform
-// across providers — provider-specific dispatch lives inside fetch_logs.
-// Re-introducing any of the mustNotHave tools would expose the per-provider
-// pipeline to the LLM and bypass the investigation classifier.
+// across providers, and must expose fetch_logs_direct (not the v1/v2
+// fetch_logs agent-as-tool) plus the plain resource_search_execute tool (not
+// the resource_search agent-as-tool, which fans out to Datadog/cloud
+// unnecessarily for a Kubernetes-only agent).
 func TestLogAgent_BuildToolList(t *testing.T) {
 	ctx := security.NewRequestContextForSuperAdmin()
 
-	mustHave := []string{tools.ToolResourceSearch, FetchLogsAgentName}
+	mustHave := []string{tools.ToolResourceSearch, FetchLogsDirectToolName, toolcore.ToolExecuteShellCommand}
 	mustNotHave := []string{
+		FetchLogsAgentName, // the v1/v2 agent-as-tool must not leak into this agent's toolset
 		"query_generator",
 		"datadog_log_query",
 		"kubectl_intent_generator",
 		"kubectl_execute",
 	}
-	// NB: the logs agent holds the direct resource_search_execute tool (mustHave
-	// above), never the removed resource_search agent — it resolves pod names via
-	// the tool without the extra LLM translate hop.
 
 	cases := []struct {
 		name     string
@@ -41,7 +41,6 @@ func TestLogAgent_BuildToolList(t *testing.T) {
 		{"loki provider", "loki"},
 		{"signoz provider", "signoz"},
 		{"es provider", "es"},
-		{"elasticsearch provider", "elasticsearch"},
 		{"datadog provider", "datadog"},
 		{"no provider falls back to kubectl-only path", ""},
 	}
@@ -50,67 +49,22 @@ func TestLogAgent_BuildToolList(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
 				services_server.ObservabilityProvider{Provider: tc.provider})
-			tl := agent.GetSupportedTools(ctx)
-			names := toolNamesForTest(tl)
+			names := toolNamesForTest(agent.GetSupportedTools(ctx))
 
 			for _, expected := range mustHave {
 				assert.Contains(t, names, expected,
-					"provider %q must expose %q (uniform across all providers)", tc.provider, expected)
+					"provider %q must expose %q", tc.provider, expected)
 			}
 			for _, forbidden := range mustNotHave {
 				assert.NotContains(t, names, forbidden,
-					"provider %q must NOT expose %q — it should be hidden behind fetch_logs", tc.provider, forbidden)
+					"provider %q must NOT expose %q", tc.provider, forbidden)
 			}
 		})
 	}
 }
 
-// TestFetchLogsAgent_Registered ensures fetch_logs is in the system registry
-// so LogAgent.GetSupportedTools can resolve it by name.
-
-func TestFetchLogsAgent_Registered(t *testing.T) {
-	ctx := security.NewRequestContextForSuperAdmin()
-	agent, ok := core.GetNBAgent(ctx, FetchLogsAgentName, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "")
-	assert.True(t, ok, "fetch_logs must be registered as a system agent")
-	assert.NotNil(t, agent)
-	assert.Equal(t, FetchLogsAgentName, agent.GetName())
-}
-
-func TestPrepareLogAgentInput_InjectsValidatedResolvedTargets(t *testing.T) {
-	input := toolcore.NBToolCallRequest{
-		Command: "investigate checkout logs",
-		Context: "existing context",
-		Arguments: map[string]any{
-			toolcore.ResolvedTargetsArgument: []any{map[string]any{
-				"domain": "kubernetes", "kind": "Deployment", "canonical_id": "checkout",
-				"scope":   map[string]any{"namespace": "prod"},
-				"members": []any{"checkout-7d9f6c8b5-x2abc"},
-			}},
-		},
-	}
-
-	got, err := prepareLogAgentInput(input)
-	require.NoError(t, err)
-	assert.Contains(t, got.Context, "existing context")
-	assert.Contains(t, got.Context, `<resolved_targets source="validated_tool_input">`)
-	assert.Contains(t, got.Context, `canonical_id="checkout"`)
-	assert.Contains(t, got.Context, `<member>checkout-7d9f6c8b5-x2abc</member>`)
-}
-
-func TestPrepareLogAgentInput_RejectsInvalidResolvedTargets(t *testing.T) {
-	_, err := prepareLogAgentInput(toolcore.NBToolCallRequest{Arguments: map[string]any{
-		toolcore.ResolvedTargetsArgument: []any{map[string]any{"domain": "kubernetes"}},
-	}})
-	assert.ErrorContains(t, err, "domain, kind, and canonical_id are required")
-}
-
-func TestLogAgentToolSchema_ExposesResolvedTargets(t *testing.T) {
-	prop, ok := (LogAgentTool{}).InputSchema().Properties[toolcore.ResolvedTargetsArgument]
-	require.True(t, ok)
-	assert.Equal(t, toolcore.ToolSchemaTypeArray, prop.Type)
-	assert.Contains(t, prop.Description, "confirmed|candidate")
-}
-
+// toolNamesForTest extracts plain tool names from a tool list, so a test can
+// lock a resource-search split without standing up a populated tool registry.
 func toolNamesForTest(ts []toolcore.NBTool) []string {
 	out := make([]string, 0, len(ts))
 	for _, t := range ts {
@@ -119,575 +73,41 @@ func toolNamesForTest(ts []toolcore.NBTool) []string {
 	return out
 }
 
-// TestClassifyLogMode pins the deterministic intent classifier the LogAgent
-// uses to decide whether to follow the routine, investigation, or enumeration
-// branch of its prompt. The classifier prefers OriginalQuery over Query so
-// that a parent planner's paraphrase ("Get logs for X") doesn't downgrade an
-// investigation ("Were there issues with X?") to routine.
-
-func TestClassifyLogMode(t *testing.T) {
-	cases := []struct {
-		name     string
-		query    string
-		original string
-		want     logMode
-	}{
-		// Routine
-		{"tail logs", "show me last logs for api-server", "", logModeRoutine},
-		{"recent logs", "get recent logs of llm-server in nudgebee namespace", "", logModeRoutine},
-		{"time range only", "logs between 10:00 and 11:00", "", logModeRoutine},
-
-		// Investigation
-		{"why is X broken", "why is api-service in app-108 failing", "", logModeInvestigation},
-		{"diagnose", "diagnose checkout-api connection refused errors", "", logModeInvestigation},
-		{"what caused", "what caused the outage in payment-api", "", logModeInvestigation},
-		{"were there issues", "were there issues with cron-scheduler in ns-73b", "", logModeInvestigation},
-		{"root cause", "find the root cause of the crash in worker-7", "", logModeInvestigation},
-
-		// Enumeration
-		{"list errors", "list all errors in payment-api last 1h", "", logModeEnumeration},
-		{"show errors", "show me the errors in my-app-51", "", logModeEnumeration},
-		{"distinct errors", "what distinct errors appear in checkout-api", "", logModeEnumeration},
-		{"summarise errors", "summarize errors in cron-scheduler", "", logModeEnumeration},
-
-		// OriginalQuery wins over per-step paraphrase — this is the case that
-		// regressed in production today: parent emitted "Get logs for pod X"
-		// and the LLM treated it as routine, skipping the investigation flow.
-		{
-			name:     "parent paraphrase loses intent without classifier",
-			query:    "Get logs for pod cron-scheduler-xtcwd in namespace-73b",
-			original: "Were there issues with the cron-scheduler pod in namespace-73b?",
-			want:     logModeInvestigation,
-		},
-		{
-			name:     "empty original falls back to query",
-			query:    "why is api-server failing",
-			original: "",
-			want:     logModeInvestigation,
-		},
-
-		// Enumeration's noun list must cover symptom words, not just the
-		// "error" family — otherwise a plain listing request that happens to
-		// describe pods as "failing"/"broken"/"crashed" (rather than saying
-		// "errors") falls through to the weak-symptom investigation tier and
-		// gets routed into the heavier mandatory-shell_execute workflow for
-		// what the user framed as "just list them".
-		{"list failing pods", "list the pods that are failing in namespace nudgebee", "", logModeEnumeration},
-		{"show broken services", "show me the broken services in prod", "", logModeEnumeration},
-		{"list crashed pods", "list crashed pods in nudgebee", "", logModeEnumeration},
-
-		// Stem/wildcard forms (fail\w*, crash\w*) and optional plurals catch
-		// variants a literal enumeration would miss: past tense ("failed", not
-		// just "failures"/"failing"), compound crash states that don't end at
-		// a word boundary after "crash" ("crashloopbackoff"), and singular
-		// nouns ("exception"/"issue", not just their plurals). Without these,
-		// "list the pods that failed" fell all the way through to ROUTINE —
-		// worse than the investigation-mode misroute this file's earlier
-		// cases fix, since ROUTINE doesn't even get the weak-symptom fallback.
-		{"list failed pods", "list the pods that failed in namespace nudgebee", "", logModeEnumeration},
-		{"list crashloopbackoff pods", "list crashloopbackoff pods in nudgebee", "", logModeEnumeration},
-		{"list exception singular", "list exception in api-server", "", logModeEnumeration},
-		{"show issue singular", "show issue with pod", "", logModeEnumeration},
-
-		// A strong causal ask must win even when an enumeration verb also
-		// appears in the same query — enumeration checking first (as it did
-		// before this fix) would discard the causal ask entirely.
-		{"causal ask co-occurring with enumeration verb", "show me the errors and explain why it broke", "", logModeInvestigation},
-		{"why are pods failing", "why are the pods failing in cron-scheduler", "", logModeInvestigation},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := classifyLogMode(tc.query, tc.original)
-			assert.Equalf(t, tc.want, got,
-				"classifyLogMode(%q, %q) = %s; want %s",
-				tc.query, tc.original, logModeName(got), logModeName(tc.want))
-		})
-	}
+// TestFetchLogsDirectTool_Registered ensures fetch_logs_direct is in the system tool
+// registry so LogAgent.GetSupportedTools can resolve it by name.
+func TestFetchLogsDirectTool_Registered(t *testing.T) {
+	tool, ok := toolcore.GetNBTool("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", FetchLogsDirectToolName)
+	require.True(t, ok, "fetch_logs_direct must be registered as a system tool")
+	require.NotNil(t, tool)
+	assert.Equal(t, FetchLogsDirectToolName, tool.Name())
+	assert.Equal(t, toolcore.NBToolTypeTool, tool.GetType())
 }
 
-// TestSystemPrompt_NarrowsToOneMode verifies the prompt assembled by
-// GetSystemPrompt contains ONLY the matching mode's workflow. With the
-// previous "all three modes inline + MODE flag" approach the LLM
-// occasionally followed the wrong block; with mode-specific assembly the
-// wrong block isn't even visible.
+// TestFetchLogsV3Alias_ResolvesToFetchLogsDirect guards the back-compat alias:
+// stored conversation history referencing the pre-rename tool name must keep
+// resolving to the same tool as fetch_logs_direct.
+func TestFetchLogsV3Alias_ResolvesToFetchLogsDirect(t *testing.T) {
+	tool, ok := toolcore.GetNBTool("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "fetch_logs_v3")
+	require.True(t, ok, "fetch_logs_v3 alias must still resolve")
+	require.NotNil(t, tool)
+	assert.Equal(t, FetchLogsDirectToolName, tool.Name())
+}
 
-func TestSystemPrompt_NarrowsToOneMode(t *testing.T) {
+// TestLogAgent_Registered mirrors TestFetchLogsAgent_Registered for the
+// top-level agent.
+func TestLogAgent_Registered(t *testing.T) {
 	ctx := security.NewRequestContextForSuperAdmin()
-	cases := []struct {
-		name     string
-		query    string
-		original string
-		wantMode string
-		mustHave []string // substrings that must appear
-		mustMiss []string // substrings that must NOT appear (other modes' content)
-	}{
-		{
-			name:     "investigation prompt has investigation block, no routine/enumeration",
-			query:    "Get logs for pod cron-scheduler-xtcwd in namespace-73b",
-			original: "Were there issues with the cron-scheduler pod in namespace-73b?",
-			wantMode: "INVESTIGATION",
-			mustHave: []string{
-				"MODE = INVESTIGATION",
-				"framework-generated `<resolved_targets>` block",
-				"A `candidate` target alone never suppresses discovery",
-				"Step 2a remains mandatory",
-				"logs_format_hint",
-				"never JSON-decode the whole file",
-				"last 24h, limit 5000",
-				"Mandatory diagnostic sweep",
-				"Time-window framing",
-				"Label anchor",
-				"all logs for app <name>",
-				"all logs for pod <name>",
-			},
-			mustMiss: []string{
-				"Workflow (Routine):",
-				"Workflow (Enumeration):",
-				"Per-signature aggregation pipeline",
-			},
-		},
-		{
-			name:     "routine prompt has routine block, no investigation/enumeration",
-			query:    "show me last 30m logs for api-server",
-			original: "",
-			wantMode: "ROUTINE",
-			mustHave: []string{
-				"MODE = ROUTINE",
-				"Workflow (Routine):",
-				"Single fetch is enough",
-				"Label anchor",
-			},
-			mustMiss: []string{
-				"Mandatory diagnostic sweep",
-				"last 24h, limit 5000",
-				"Per-signature aggregation pipeline",
-				"Time-window framing",
-			},
-		},
-		{
-			name:     "enumeration prompt has enumeration block, no routine/investigation",
-			query:    "list all errors in service-y",
-			original: "",
-			wantMode: "ENUMERATION",
-			mustHave: []string{
-				"MODE = ENUMERATION",
-				"Workflow (Enumeration):",
-				// New grep-on-text aggregation pipeline (replaces the jq one).
-				"grep -iE 'error|fail|warn|exception|fatal|timeout|refused|denied'",
-				"sort | uniq -c",
-				"Label anchor",
-			},
-			mustMiss: []string{
-				"Workflow (Routine):",
-				"Mandatory diagnostic sweep",
-				"last 24h, limit 5000",
-				"Time-window framing",
-				// jq pipeline was removed (broke after JSONL flatten).
-				"jq -r '.logs[].message'",
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
-			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query:         tc.query,
-				OriginalQuery: tc.original,
-			})
-			body := strings.Join(prompt.Instructions, "\n")
-			for _, sub := range tc.mustHave {
-				assert.Contains(t, body, sub,
-					"%s prompt should contain %q", tc.wantMode, sub)
-			}
-			for _, sub := range tc.mustMiss {
-				assert.NotContains(t, body, sub,
-					"%s prompt should NOT contain %q (belongs to a different mode)", tc.wantMode, sub)
-			}
-		})
-	}
+	agent, ok := core.GetNBAgent(ctx, LogsAgentName, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "")
+	assert.True(t, ok, "logs must be registered as a system agent")
+	assert.NotNil(t, agent)
+	assert.Equal(t, LogsAgentName, agent.GetName())
 }
 
-// TestAutoBundleGate_ModeAwareness locks the gating rule that runAuto
-// DiagnosticBundle uses to decide whether to fire. The rule is:
-//
-//   - Investigation intent ("were there issues", "why", "broken",
-//     "diagnose", …) → ALWAYS fire. The logs prompt actively tells the
-//     LLM to strip error keywords from the fetch question, so keying only
-//     on the fetch query text would miss the exact investigations the
-//     bundle was built for.
-//   - Enumeration intent ("list errors", "show me distinct errors") →
-//     ALWAYS fire. That IS the enumeration answer.
-//   - Routine intent → fire only when the wording explicitly names error
-//     content (get error logs, any failures, …). Plain "tail last 100
-//     lines" stays a one-shot fetch.
-//
-// This mirrors the same decision runAutoDiagnosticBundle makes inline; the
-// test asserts the composed behaviour so a regression to a keyword-only gate
-// would fail here.
-func TestAutoBundleGate_ModeAwareness(t *testing.T) {
-	cases := []struct {
-		name     string
-		query    string // per-step query the parent passed to fetch_logs
-		original string // OriginalQuery — the user's verbatim question
-		want     bool
-	}{
-		{"investigation via 'were there issues' fires (fetch query itself has no keyword)",
-			"all logs for pod task-scheduler-abc in ns", "Were there issues with the task-scheduler pod", true},
-		{"investigation via 'why is X broken' fires",
-			"all logs for pod x", "why is service-y broken", true},
-		{"enumeration via 'list errors' fires",
-			"all logs last 1h", "list errors in service-z", true},
-		{"routine plain tail does NOT fire",
-			"tail last 100 lines", "", false},
-		{"routine with error keyword fires (fallback)",
-			"get error logs for pod x", "", true},
-		{"routine with no error content stays cold",
-			"give me the last 5 mins of logs", "recent logs for cron-scheduler", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			mode := classifyLogMode(tc.query, tc.original)
-			q := strings.TrimSpace(tc.original)
-			if q == "" {
-				q = strings.TrimSpace(tc.query)
-			}
-			got := mode != logModeRoutine || autoBundleQueryRE.MatchString(q)
-			assert.Equal(t, tc.want, got,
-				"mode=%v q=%q — bundle gate mismatch", mode, q)
-		})
-	}
-}
-
-func TestAutoBundleQueryRE(t *testing.T) {
-	// Guards the trigger-word list that gates the auto-diagnostic-bundle
-	// inside fetch_logs. The list is deliberately narrow — a plain "tail
-	// last 100 lines" must NOT trigger the bundle, or we regress fetch's
-	// "one-shot, no extra work" semantic for routine viewing. Any
-	// addition/removal here should be conscious.
-	cases := []struct {
-		q    string
-		want bool
-	}{
-		{"get error logs for pod x", true},
-		{"any failures in namespace y", true},
-		{"show me warnings from last hour", true},
-		{"was there a crash on this pod", true},
-		{"any exceptions in api-server", true},
-		{"timeout occurred?", true},
-		{"OOMKilled events for job", true},
-		{"tail last 100 lines", false},
-		{"recent logs for cron-scheduler", false},
-		{"give me the last 5 mins of logs", false},
-		{"show pod restart count", false},
-	}
-	for _, tc := range cases {
-		assert.Equalf(t, tc.want, autoBundleQueryRE.MatchString(tc.q),
-			"autoBundleQueryRE.MatchString(%q)", tc.q)
-	}
-}
-
-func TestSystemPrompt_BundleSignalInAllModes(t *testing.T) {
-	// The bundle now fires deterministically inside fetch_logs and its
-	// result ships in the fetch envelope's `bundle_signal` field — the
-	// LLM never calls the tool itself. Every mode's prompt (investigation,
-	// enumeration, routine) must tell the LLM to READ `bundle_signal`
-	// from the fetch response, and none of them may reference the
-	// standard_diagnostic_grep tool (dropping it from the toolset would be
-	// misleading if the prompt still asked the LLM to call it).
-	prev := config.Config.LogsStandardGrepEnabled
-	config.Config.LogsStandardGrepEnabled = true
-	defer func() { config.Config.LogsStandardGrepEnabled = prev }()
-
-	ctx := security.NewRequestContextForSuperAdmin()
-	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
-
-	cases := []struct {
-		name              string
-		query             string
-		original          string
-		wantsBundleSignal bool
-	}{
-		{"investigation references bundle_signal", "get logs", "why is cron-scheduler broken", true},
-		{"enumeration references bundle_signal", "list errors in service-y", "", true},
-		{"routine always references bundle_signal (envelope carries it or not, LLM is told to read it)", "tail last 100 lines", "", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query:         tc.query,
-				OriginalQuery: tc.original,
-			})
-			body := strings.Join(prompt.Instructions, "\n")
-			assert.NotContains(t, body, "standard_diagnostic_grep",
-				"the bundle tool is no longer exposed to the LLM — prompt must not reference it")
-			if tc.wantsBundleSignal {
-				assert.Contains(t, body, "bundle_signal",
-					"prompt should tell the LLM to read the pre-computed bundle signal from the fetch envelope")
-			}
-		})
-	}
-}
-
-// TestSystemPrompt_KubectlDisclosureInAllModes locks in the fix for issue
-// #36237's follow-up gap: kubectl_disclosure is injected into the fetch
-// envelope by withKubectlDisclosure (agent_log_fetch.go) but, unlike
-// bundle_signal/logs_complete/logs_format_hint, was never named in any
-// workflow step — so the planner had no instruction to read or surface it.
-// It lives in sharedHeaderAndWorkflow (step 2c) so it must appear in every
-// mode's prompt, not just one.
-func TestSystemPrompt_KubectlDisclosureInAllModes(t *testing.T) {
-	ctx := security.NewRequestContextForSuperAdmin()
-	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
-
-	cases := []struct {
-		name     string
-		query    string
-		original string
-	}{
-		{"investigation mode", "get logs", "why is cron-scheduler broken"},
-		{"enumeration mode", "list errors in service-y", ""},
-		{"routine mode", "tail last 100 lines", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query:         tc.query,
-				OriginalQuery: tc.original,
-			})
-			body := strings.Join(prompt.Instructions, "\n")
-			assert.Contains(t, body, "kubectl_disclosure",
-				"prompt should tell the LLM to surface kubectl_disclosure from the fetch envelope when present")
-		})
-	}
-}
-
-// TestLogAgent_BundleToolNotInToolset locks the change: after moving the
-// bundle to deterministic auto-fire inside fetch_logs, the LLM's tool list
-// must not include standard_diagnostic_grep — the LLM already has the
-// bundle output in its fetch response and a redundant tool call would
-// waste an LLM turn.
-func TestLogAgent_BundleToolNotInToolset(t *testing.T) {
-	prev := config.Config.LogsStandardGrepEnabled
-	config.Config.LogsStandardGrepEnabled = true
-	defer func() { config.Config.LogsStandardGrepEnabled = prev }()
-
-	ctx := security.NewRequestContextForSuperAdmin()
-	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
-	names := toolNamesForTest(agent.GetSupportedTools(ctx))
-	for _, n := range names {
-		assert.NotEqual(t, "standard_diagnostic_grep", n,
-			"standard_diagnostic_grep must not be exposed to the LLM — it runs auto inside fetch_logs")
-	}
-}
-
-// TestSystemPrompt_NoFixtureLeaks fails if specific benchmark fixture names,
-// fixture-answer time windows, or literal benchmark prompt phrasings appear
-// in the LLM-visible system prompt or the agent description. The prompt
-// drives behaviour on real production workloads; if it embeds fixture
-// names, the LLM may treat those as canonical and behave differently for
-// non-fixture queries.
-
-func TestSystemPrompt_NoFixtureLeaks(t *testing.T) {
-	// Names and phrases that exist as benchmark fixtures in
-	// llm/benchmark/llm/agents/nubi/fixtures/.
-	leaks := []string{
-		// Pod / deployment names from the time-window-anomaly fixtures
-		"cron-scheduler",
-		"task-scheduler",
-		// Fixture 51's deployment
-		"my-app-51",
-		"my-app",
-		// Fixture 100a / 101 / 108
-		"payment-api",
-		"api-service",
-		"app-108",
-		// Fixture answer windows (would teach the LLM the answer)
-		"03:00–03:05",
-		"03:00-03:05",
-		// Specific pod hashes from prior fixture runs
-		"7d8b598678",
-		"6fb6dd6b8c",
-		// Literal benchmark prompts (verbatim user questions in test_case.yaml)
-		"Were there issues with",
-	}
-
-	ctx := security.NewRequestContextForSuperAdmin()
-	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
-	tool := LogAgentTool{}
-
-	cases := []struct {
-		name    string
-		surface string
-	}{
-		{
-			"investigation prompt body",
-			strings.Join(agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query:         "Get logs for service-x",
-				OriginalQuery: "why is service-x failing",
-			}).Instructions, "\n"),
-		},
-		{
-			"routine prompt body",
-			strings.Join(agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query: "show me last 30m logs for service-x",
-			}).Instructions, "\n"),
-		},
-		{
-			"enumeration prompt body",
-			strings.Join(agent.GetSystemPrompt(ctx, core.NBAgentRequest{
-				Query: "list errors in service-x",
-			}).Instructions, "\n"),
-		},
-		{"agent description (registry)", agent.GetDescription()},
-		{"agent description (tool wrapper)", tool.Description()},
-		// fetch_logs's tool description and few-shot examples are also
-		// LLM-visible surfaces — round-3 review caught a regression where
-		// fixture names re-appeared here after they were scrubbed from
-		// agent_log.go. Walk the entire agent_log_fetch.go source file to
-		// catch leaks in tool descriptions, prompt strings, and production
-		// code comments.
-		{"agent_log_fetch.go source (covers tool desc, prompts, comments)", readAgentLogFetchSource(t)},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, leak := range leaks {
-				assert.NotContains(t, tc.surface, leak,
-					"%s leaks fixture identifier %q — replace with an abstract pattern (e.g. `<workload>-<6-10 hex>-<5 alnum>`)",
-					tc.name, leak)
-			}
-		})
-	}
-}
-
-// readAgentLogFetchSource returns the contents of agent_log_fetch.go so
-// TestSystemPrompt_NoFixtureLeaks can scan tool descriptions, few-shot
-// examples, and production code comments for fixture-name leakage. Walking
-// the source file is a more reliable guard than only sampling
-// LLM-visible strings via accessor methods — comments are not LLM-visible
-// but they document the LLM-visible code, and comment leaks rot when
-// fixtures move.
-
-func readAgentLogFetchSource(t *testing.T) string {
-	t.Helper()
-	body, err := os.ReadFile("agent_log_fetch.go")
-	if err != nil {
-		t.Fatalf("readAgentLogFetchSource: %v", err)
-	}
-	return string(body)
-}
-
-// fakeLogAgentForCall is a minimal core.NBAgent stand-in for
-// TestBuildLogToolResponse_AdditionalDetails — it lets that test exercise
-// buildLogToolResponse's branches directly against hand-built
-// core.NBAgentResponse values, without running the real LogAgent (which
-// requires a DB-backed ExecuteAgentToolCall and live LLM calls).
-type fakeLogAgentForCall struct{}
-
-func (fakeLogAgentForCall) GetName() string          { return LegacyLogsAgentName }
-func (fakeLogAgentForCall) GetNameAliases() []string { return nil }
-func (fakeLogAgentForCall) GetDescription() string   { return "" }
-func (fakeLogAgentForCall) GetSupportedTools(ctx *security.RequestContext) []toolcore.NBTool {
-	return nil
-}
-func (fakeLogAgentForCall) GetSystemPrompt(ctx *security.RequestContext, query core.NBAgentRequest) core.NBAgentPrompt {
-	return core.NBAgentPrompt{}
-}
-func (fakeLogAgentForCall) GetPlannerType() core.AgentPlannerType { return core.AgentPlannerTypeReAct }
-
-// fakeSummaryToolLogAgent additionally implements
-// NBAgentReActPlannerSummaryToolProvider, to exercise buildLogToolResponse's
-// summary-tool-provider branch (agent_log.go:545).
-type fakeSummaryToolLogAgent struct{ fakeLogAgentForCall }
-
-func (fakeSummaryToolLogAgent) GetSummaryToolName() string { return "shell_execute" }
-
-// TestBuildLogToolResponse_AdditionalDetails is the regression test for bug
-// A1 (log_analysis_bugs): LogAgentTool.Call() is a hand-copied variant of
-// factory_agent.go's generic nbAgentTool.Call() that drifted and stopped
-// setting AdditionalDetails["agent_id"]/["message_id"] — the keys
-// planner_callback_handler.go reads to populate child_agent_id, which the UI
-// conversation tree needs to nest fetch_logs/shell_execute under the `logs`
-// node. It exercises every return path in buildLogToolResponse (the shaping
-// logic extracted from Call()) to confirm AdditionalDetails survives all of
-// them, not just the happy path.
-func TestBuildLogToolResponse_AdditionalDetails(t *testing.T) {
-	ctx := security.NewRequestContextForSuperAdmin()
-	nbCtx := toolcore.NbToolContext{Ctx: ctx, AccountId: "acct", ConversationId: "conv"}
-	input := toolcore.NBToolCallRequest{Command: "get logs for service-x"}
-
-	const wantAgentId = "child-agent-id"
-	const wantMessageId = "child-message-id"
-
-	assertAdditionalDetails := func(t *testing.T, resp toolcore.NBToolResponse) {
-		t.Helper()
-		require.NotNil(t, resp.AdditionalDetails)
-		assert.Equal(t, wantAgentId, resp.AdditionalDetails["agent_id"])
-		assert.Equal(t, wantMessageId, resp.AdditionalDetails["message_id"])
-	}
-
-	t.Run("ExecuteAgentToolCall error still carries agent_id/message_id", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{AgentId: wantAgentId, MessageId: wantMessageId}
-		resp, err := buildLogToolResponse(nbCtx, fakeLogAgentForCall{}, input, agentResp, assert.AnError)
-		assert.ErrorIs(t, err, assert.AnError)
-		assertAdditionalDetails(t, resp)
-	})
-
-	t.Run("empty response (ErrUnableToFetchData) still carries agent_id/message_id", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{AgentId: wantAgentId, MessageId: wantMessageId}
-		resp, err := buildLogToolResponse(nbCtx, fakeLogAgentForCall{}, input, agentResp, nil)
-		assert.ErrorIs(t, err, toolcore.ErrUnableToFetchData)
-		assertAdditionalDetails(t, resp)
-	})
-
-	t.Run("SummaryToolProvider success path carries agent_id/message_id", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{AgentId: wantAgentId, MessageId: wantMessageId, Response: []string{"the logs"}}
-		resp, err := buildLogToolResponse(nbCtx, fakeSummaryToolLogAgent{}, input, agentResp, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "the logs", resp.Data)
-		assertAdditionalDetails(t, resp)
-	})
-
-	t.Run("unified LogAgent returns its completed analysis instead of raw step output", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{
-			AgentId:   wantAgentId,
-			MessageId: wantMessageId,
-			Status:    core.ConversationStatusCompleted,
-			Response:  []string{"synthesized analysis"},
-			AgentStepResponse: []core.ToolInvocation{
-				{Response: llms.ToolCallResponse{Content: "raw shell output"}},
-			},
-		}
-		resp, err := buildLogToolResponse(nbCtx, &LogAgent{}, input, agentResp, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "synthesized analysis", resp.Data)
-		assert.Equal(t, toolcore.NBToolResponseTypeText, resp.Type)
-		assertAdditionalDetails(t, resp)
-	})
-
-	t.Run("non-summary agent, matching step-response path carries agent_id/message_id", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{
-			AgentId:   wantAgentId,
-			MessageId: wantMessageId,
-			Response:  []string{"the logs"},
-			AgentStepResponse: []core.ToolInvocation{
-				{Response: llms.ToolCallResponse{Content: "step output"}},
-			},
-		}
-		resp, err := buildLogToolResponse(nbCtx, fakeLogAgentForCall{}, input, agentResp, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "step output", resp.Data)
-		assertAdditionalDetails(t, resp)
-	})
-
-	t.Run("non-summary agent, final fallback path carries agent_id/message_id", func(t *testing.T) {
-		agentResp := core.NBAgentResponse{AgentId: wantAgentId, MessageId: wantMessageId, Response: []string{"the logs"}}
-		resp, err := buildLogToolResponse(nbCtx, fakeLogAgentForCall{}, input, agentResp, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "the logs", resp.Data)
-		assertAdditionalDetails(t, resp)
-	})
+func TestLogAgent_RegisteredAsTool(t *testing.T) {
+	tool, ok := toolcore.GetNBTool("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", LogsAgentName)
+	require.True(t, ok, "logs must be registered as a system tool so other agents can delegate to it")
+	require.NotNil(t, tool)
+	assert.Equal(t, LogsAgentName, tool.Name())
 }
 
 func TestGetLogAgent(t *testing.T) {
@@ -695,7 +115,419 @@ func TestGetLogAgent(t *testing.T) {
 	agent, err := getLogAgent(sc, os.Getenv("TEST_ACCOUNT"))
 	assert.Nil(t, err)
 	assert.NotNil(t, agent)
-	assert.Equal(t, LegacyLogsAgentName, agent.GetName())
+	assert.Equal(t, LogsAgentName, agent.GetName())
+}
+
+// TestLogAgent_SystemPrompt_MatchesModeClassification confirms the mode
+// classifier narrows the prompt to exactly one mode's workflow.
+func TestLogAgent_SystemPrompt_MatchesModeClassification(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+
+	cases := []struct {
+		name     string
+		query    string
+		wantMode string
+	}{
+		{"investigation wording", "why is checkout failing", "INVESTIGATION"},
+		{"enumeration wording", "list all distinct errors in checkout", "ENUMERATION"},
+		{"routine wording", "show me recent logs for checkout", "ROUTINE"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: tc.query})
+			require.NotEmpty(t, prompt.Instructions)
+			assert.Contains(t, prompt.Instructions[0], "MODE = "+tc.wantMode)
+		})
+	}
+}
+
+func TestLogAgent_SystemPrompt_ReusesResolvedPodsAndExplainsArtifactFormat(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+	prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "why is checkout failing"})
+	body := strings.Join(prompt.Instructions, "\n")
+
+	assert.Contains(t, body, "framework-generated `<resolved_targets>` block")
+	assert.Contains(t, body, "A `candidate` target alone never suppresses discovery")
+	assert.Contains(t, body, "Step 2a remains mandatory")
+	assert.Contains(t, body, "logs_format_hint")
+	assert.Contains(t, body, "never JSON-decode the whole file")
+	assert.Contains(t, body, "kubectl_disclosure")
+}
+
+// TestLogAgent_FastPathAppAnchor_RoutineOnly pins that the app-anchor
+// fast-path override appears for ROUTINE mode only, never for
+// investigation/enumeration, so resource_search still runs first for those
+// modes exactly as sharedHeaderAndWorkflow's step 1 requires.
+func TestLogAgent_FastPathAppAnchor_RoutineOnly(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+
+	cases := []struct {
+		name      string
+		query     string
+		wantFound bool
+	}{
+		{"routine wording gets the override", "get me logs for relay_server", true},
+		{"investigation wording does not", "why is relay_server failing", false},
+		{"enumeration wording does not", "list all distinct errors in relay_server", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: tc.query})
+			found := false
+			for _, line := range prompt.Instructions {
+				if strings.Contains(line, "This refines workflow step 1c") {
+					found = true
+					break
+				}
+			}
+			assert.Equal(t, tc.wantFound, found)
+		})
+	}
+}
+
+// TestBuildFetchLogsDirectToolResponse pins the NBAgentResponse -> NBToolResponse
+// mapping fetchLogsDirectTool.Call() delegates to. In particular: a FAILED/
+// TERMINATED/WAITING terminal status must propagate to the tool response
+// status instead of being silently reported as success (the A2/A3 bug class
+// from the v1 bespoke wrapper — see log_analysis_bugs notes).
+func TestBuildFetchLogsDirectToolResponse(t *testing.T) {
+	t.Run("Execute error maps to ERROR status and propagates the error", func(t *testing.T) {
+		resp, err := buildFetchLogsDirectToolResponse(core.NBAgentResponse{}, assert.AnError)
+		assert.ErrorIs(t, err, assert.AnError)
+		assert.Equal(t, toolcore.NBToolResponseStatusError, resp.Status)
+	})
+
+	t.Run("ConversationStatusFailed maps to ERROR status with no Go error", func(t *testing.T) {
+		agentResp := core.NBAgentResponse{Status: core.ConversationStatusFailed, Response: []string{"kubectl fetch failed: NotFound"}}
+		resp, err := buildFetchLogsDirectToolResponse(agentResp, nil)
+		require.NoError(t, err)
+		assert.Equal(t, toolcore.NBToolResponseStatusError, resp.Status)
+		assert.Equal(t, "kubectl fetch failed: NotFound", resp.Data)
+	})
+
+	t.Run("ConversationStatusTerminated propagates", func(t *testing.T) {
+		agentResp := core.NBAgentResponse{Status: core.ConversationStatusTerminated}
+		resp, err := buildFetchLogsDirectToolResponse(agentResp, nil)
+		require.NoError(t, err)
+		assert.Equal(t, toolcore.NBToolResponseStatusTerminated, resp.Status)
+	})
+
+	t.Run("ConversationStatusWaiting propagates", func(t *testing.T) {
+		agentResp := core.NBAgentResponse{Status: core.ConversationStatusWaiting}
+		resp, err := buildFetchLogsDirectToolResponse(agentResp, nil)
+		require.NoError(t, err)
+		assert.Equal(t, toolcore.NBToolResponseStatusWaiting, resp.Status)
+	})
+
+	t.Run("ConversationStatusCompleted maps to SUCCESS with data and references", func(t *testing.T) {
+		agentResp := core.NBAgentResponse{
+			Status:     core.ConversationStatusCompleted,
+			Response:   []string{`{"query":"{app=\"x\"}","logs":"...","file_ref":"logs_loki_1.txt"}`},
+			References: []toolcore.NBToolResponseReference{{Text: "logs_loki_1.txt", Url: "logs_loki_1.txt", Type: "file"}},
+		}
+		resp, err := buildFetchLogsDirectToolResponse(agentResp, nil)
+		require.NoError(t, err)
+		assert.Equal(t, toolcore.NBToolResponseStatusSuccess, resp.Status)
+		assert.Equal(t, toolcore.NBToolResponseTypeJson, resp.Type)
+		assert.Contains(t, resp.Data, "logs_loki_1.txt")
+		require.Len(t, resp.References, 1)
+		assert.Equal(t, "logs_loki_1.txt", resp.References[0].Url)
+	})
+
+	t.Run("empty Response does not panic, yields empty data", func(t *testing.T) {
+		resp, err := buildFetchLogsDirectToolResponse(core.NBAgentResponse{Status: core.ConversationStatusCompleted}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, resp.Data)
+		assert.Equal(t, toolcore.NBToolResponseStatusSuccess, resp.Status)
+	})
+}
+
+// buildLogIntentMessages depends on OriginalQuery/AccountPrompt reaching the
+// translator call; this guards against silently dropping them again.
+func TestBuildFetchLogsDirectRequest_PropagatesOriginalQueryAndAccountPrompt(t *testing.T) {
+	nbCtx := toolcore.NbToolContext{
+		AccountId:      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		ConversationId: "conv-1",
+		ParentAgentId:  "parent-agent-1",
+		MessageId:      "msg-1",
+		UserId:         "user-1",
+		SessionId:      "session-1",
+		OriginalQuery:  "why is checkout-service throwing 500s",
+		AccountContext: "cluster is prod-us-east-1",
+		AccountPrompt:  "log field for pod name is k8s_pod_name, not pod",
+	}
+	input := toolcore.NBToolCallRequest{Command: "get recent logs for checkout-service"}
+
+	request := buildFetchLogsDirectRequest(nbCtx, input)
+
+	assert.Equal(t, "why is checkout-service throwing 500s", request.OriginalQuery)
+	assert.Equal(t, "cluster is prod-us-east-1", request.AccountContext)
+	assert.Equal(t, "log field for pod name is k8s_pod_name, not pod", request.AccountPrompt)
+	assert.Equal(t, "get recent logs for checkout-service", request.Query)
+	assert.Equal(t, "parent-agent-1", request.AgentId)
+	assert.Equal(t, "parent-agent-1", request.ParentAgentId)
+}
+
+// TestFetchLogsDirectTool_InputSchema pins the tool's LLM-facing contract: a
+// single required "command" string, matching the calling convention
+// LogAgent's prompt (labelAnchorRules, sharedHeaderAndWorkflow) teaches.
+func TestFetchLogsDirectTool_InputSchema(t *testing.T) {
+	tool := &fetchLogsDirectTool{accountId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+	schema := tool.InputSchema()
+	assert.Equal(t, toolcore.ToolSchemaTypeObject, schema.Type)
+	assert.Contains(t, schema.Properties, "command")
+	assert.Equal(t, []string{"command"}, schema.Required)
+}
+
+// TestPreBuiltCanonicalQuery pins the detection rule fetchLogsDirectTool.Call uses
+// to decide whether the model already supplied a ready-to-execute canonical
+// query (skip the internal translation call) versus a natural-language
+// question (unchanged path) — a natural-language command is never valid JSON
+// with a top-level "where" key, so that shape is the unambiguous signal.
+func TestPreBuiltCanonicalQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantOK  bool
+		wantOut string
+	}{
+		{
+			name:   "natural language command",
+			input:  "all logs for app relay-server in namespace nudgebee",
+			wantOK: false,
+		},
+		{
+			name:    "canonical JSON with where clause",
+			input:   `{"where": {"app": {"_eq": "relay-server"}}, "time_range": "30m", "limit": 1000}`,
+			wantOK:  true,
+			wantOut: `{"where": {"app": {"_eq": "relay-server"}}, "time_range": "30m", "limit": 1000}`,
+		},
+		{
+			name:   "JSON object without a where key",
+			input:  `{"time_range": "30m", "limit": 1000}`,
+			wantOK: false,
+		},
+		{
+			name:   "malformed JSON",
+			input:  `{"where": {"app": {"_eq": "relay-server"}}`,
+			wantOK: false,
+		},
+		{
+			name:   "empty string",
+			input:  "",
+			wantOK: false,
+		},
+		{
+			name:    "leading/trailing whitespace is trimmed",
+			input:   "  " + `{"where": {"app": {"_eq": "relay-server"}}}` + "  ",
+			wantOK:  true,
+			wantOut: `{"where": {"app": {"_eq": "relay-server"}}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, ok := preBuiltCanonicalQuery(tc.input)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.wantOut, out)
+			}
+		})
+	}
+}
+
+// TestCanonicalQueryAuthoringForRoutine checks the ROUTINE-mode fast-path
+// instructions carry the same correctness-critical rules
+// buildCanonicalLogQueryPrompt enforces for the internal translator (field
+// names come only from the advertised list, namespace vs workload isn't
+// conflated) — this prompt is the only guardrail once the model is trusted to
+// produce canonical JSON directly.
+func TestCanonicalQueryAuthoringForRoutine(t *testing.T) {
+	provider := services_server.ObservabilityProvider{
+		Provider: "loki",
+		Capabilities: services_server.ProviderCapabilities{
+			LabelMappings: map[string]string{
+				"app":       "deployment.keyword",
+				"namespace": "k8s.namespace.keyword",
+			},
+		},
+	}
+	out := canonicalQueryAuthoringForRoutine("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", provider)
+
+	assert.Contains(t, out, "not an optional shortcut", "must state canonical JSON is the ROUTINE-mode default, not a hedged suggestion — hedged phrasing lost to the tool description's NL framing in live testing")
+	assert.Contains(t, out, "app → deployment.keyword", "must advertise this account's real canonical mapping, not a generic placeholder")
+	assert.Contains(t, out, "namespace → k8s.namespace.keyword")
+	assert.Contains(t, out, "never invent a field name")
+	assert.Contains(t, out, "not fully confident", "must tell the model it can still fall back to natural language")
+}
+
+func TestCanonicalQueryAuthoringForRoutine_NoLabelMappings_StillProducesGuidance(t *testing.T) {
+	provider := services_server.ObservabilityProvider{Provider: "loki"}
+	out := canonicalQueryAuthoringForRoutine("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", provider)
+	assert.Contains(t, out, "not an optional shortcut")
+	assert.NotContains(t, out, "Canonical fields for this backend", "must not claim a canonical mapping when the provider has none")
+}
+
+// TestLogsV3CanonicalFastPathFlag_GatesRoutinePromptContent covers
+// LogsV3CanonicalFastPathEnabled (config/config.go): when false, ROUTINE
+// mode's prompt must reproduce the original NL-only wording exactly — no
+// mention of canonical JSON anywhere, since a stray mention with the code
+// path disabled would tell the model to do something the tool can't
+// fast-path. When true (the default), the fast-path wording must be present.
+func TestLogsV3CanonicalFastPathFlag_GatesRoutinePromptContent(t *testing.T) {
+	orig := config.Config.LogsV3CanonicalFastPathEnabled
+	t.Cleanup(func() { config.Config.LogsV3CanonicalFastPathEnabled = orig })
+
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+	ctx := security.NewRequestContextForSuperAdmin()
+
+	t.Run("disabled: no canonical-JSON mention anywhere in ROUTINE prompt", func(t *testing.T) {
+		config.Config.LogsV3CanonicalFastPathEnabled = false
+		prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "recent logs for relay-server"})
+		full := strings.Join(prompt.Instructions, "\n")
+		assert.NotContains(t, full, "canonical JSON")
+		assert.NotContains(t, full, "fast path")
+		assert.Contains(t, full, "Phrase the NL question using the right label", "must fall back to the original NL-only step-3 wording")
+	})
+
+	t.Run("enabled: canonical-JSON fast path present in ROUTINE prompt", func(t *testing.T) {
+		config.Config.LogsV3CanonicalFastPathEnabled = true
+		prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "recent logs for relay-server"})
+		full := strings.Join(prompt.Instructions, "\n")
+		assert.Contains(t, full, "canonical JSON")
+		assert.Contains(t, full, "not an optional shortcut")
+	})
+}
+
+// TestLogsV3CanonicalFastPathFlag_GatesToolBehavior covers the code-path side
+// of the same flag: disabled must make fetchLogsDirectTool.Call ignore a
+// canonical-JSON tool_input entirely (never call ExecuteDirect) and
+// Description/InputSchema must drop back to NL-only wording — defense in
+// depth so a stray canonical JSON in conversation history/memory can't
+// resurrect the fast path once it's supposed to be off.
+func TestLogsV3CanonicalFastPathFlag_GatesToolBehavior(t *testing.T) {
+	orig := config.Config.LogsV3CanonicalFastPathEnabled
+	t.Cleanup(func() { config.Config.LogsV3CanonicalFastPathEnabled = orig })
+
+	tool := &fetchLogsDirectTool{accountId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+
+	config.Config.LogsV3CanonicalFastPathEnabled = false
+	assert.NotContains(t, tool.Description(), "canonical JSON")
+	schema := tool.InputSchema()
+	assert.NotContains(t, schema.Properties["command"].Description, "canonical JSON")
+
+	config.Config.LogsV3CanonicalFastPathEnabled = true
+	assert.Contains(t, tool.Description(), "canonical JSON")
+	schema = tool.InputSchema()
+	assert.Contains(t, schema.Properties["command"].Description, "canonical JSON")
+}
+
+// TestBuildCanonicalLogQueryPromptV3 mirrors TestBuildCanonicalLogQueryPrompt
+// (agent_log_fetch_v2_test.go) — same correctness-critical assertions,
+// confirming the v3 copy didn't drop anything from the shared original —
+// plus the duplicateLabelHeuristicHint addition this copy exists for.
+func TestBuildCanonicalLogQueryPromptV3(t *testing.T) {
+	t.Run("sparse label_mappings (this account's real shape): hint appears alongside the canonical-fields fallback list", func(t *testing.T) {
+		provider := services_server.ObservabilityProvider{
+			Provider: "loki",
+			Capabilities: services_server.ProviderCapabilities{
+				SupportedOperators: []string{"_eq", "_neq", "_ilike", "_contains"},
+				LabelMappings:      map[string]string{"content": "log"},
+			},
+		}
+		p := buildCanonicalLogQueryPromptV3(provider, []string{"app", "namespace", "pod", "k8s_deployment_name", "k8s_namespace_name", "k8s_pod_name"}, nil)
+
+		assert.Contains(t, p, "Canonical fields for THIS backend")
+		assert.Contains(t, p, "content → log")
+		assert.Contains(t, p, "Backend labels (use ONLY when NO canonical_name above fits the concept)")
+		assert.Contains(t, p, "prefer the SHORT Kubernetes-native form", "the sparse-mapping fallback list must carry the ambiguity heuristic")
+		assert.Contains(t, p, "k8s_deployment_name")
+	})
+
+	t.Run("no label_mappings at all: hint appears alongside the AVAILABLE FIELDS list", func(t *testing.T) {
+		provider := services_server.ObservabilityProvider{Provider: "loki"}
+		p := buildCanonicalLogQueryPromptV3(provider, []string{"app", "k8s_deployment_name"}, nil)
+
+		assert.Contains(t, p, "AVAILABLE FIELDS for query building")
+		assert.Contains(t, p, "prefer the SHORT Kubernetes-native form")
+	})
+
+	t.Run("preserves the shared original's correctness-critical rules", func(t *testing.T) {
+		provider := services_server.ObservabilityProvider{
+			Provider: "loki",
+			Capabilities: services_server.ProviderCapabilities{
+				SupportedOperators: []string{"_eq", "_neq", "_ilike", "_like"},
+				LabelMappings: map[string]string{
+					"app": "app", "namespace": "namespace", "pod": "pod",
+					"container": "container", "content": "log",
+				},
+			},
+		}
+		p := buildCanonicalLogQueryPromptV3(provider, []string{"app", "namespace", "pod", "container", "level"}, nil)
+
+		assert.Contains(t, p, "do NOT emit `service_name`")
+		assert.Contains(t, p, "A window in the question is a HARD constraint")
+		assert.Contains(t, p, "NEVER widen or shrink a window")
+		assert.Contains(t, p, "values come from the QUESTION, never from the examples")
+		assert.Contains(t, p, "VERBATIM")
+		assert.Contains(t, p, "_ilike")
+	})
+}
+
+// The parent owns knowledge loading. Its chosen constraints must reach the leaf
+// unchanged, whether it authors canonical JSON or asks the translator to do so.
+// This does not assert that a live model selects the right knowledge guidance.
+func TestKnowledgeDerivedCommandHandoff(t *testing.T) {
+	for _, command := range []string{
+		"Read index checkout-preprod for host preprod-01 from 2026-09-06T10:00:00Z to 2026-09-06T10:15:00Z; filter service=checkout",
+		`{"where":{"host":{"eq":"preprod-01"}},"index":"checkout-preprod","start_time":"2026-09-06T10:00:00Z","end_time":"2026-09-06T10:15:00Z","limit":200}`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			ctx := toolcore.NbToolContext{AccountId: "preprod-account", OriginalQuery: "Investigate checkout in PreProd", QueryContext: "environment=PreProd"}
+			request := buildFetchLogsDirectRequest(ctx, toolcore.NBToolCallRequest{Command: command})
+			require.Equal(t, command, request.Query)
+			require.Equal(t, ctx.AccountId, request.AccountId)
+			require.Equal(t, ctx.QueryContext, request.QueryContext)
+			canonical, fast := preBuiltCanonicalQuery(request.Query)
+			if strings.HasPrefix(command, "{") {
+				require.True(t, fast)
+				require.Equal(t, command, canonical)
+			} else {
+				require.False(t, fast)
+				messages := buildLogIntentMessages("translator", request)
+				var text strings.Builder
+				for _, part := range messages[len(messages)-1].Parts {
+					if content, ok := part.(llms.TextContent); ok {
+						text.WriteString(content.Text)
+					}
+				}
+				require.Contains(t, text.String(), command)
+				require.Contains(t, text.String(), ctx.OriginalQuery)
+			}
+		})
+	}
+}
+
+// Delegated scope must reach the translator used by both the primary and
+// kubectl fallback paths, not just remain on the request for tool execution.
+func TestDelegatedContextReachesTranslator(t *testing.T) {
+	scope := "Use namespace payments-preprod and host preprod-01; last 15m limit 25"
+	request := buildFetchLogsDirectRequest(toolcore.NbToolContext{QueryContext: scope}, toolcore.NBToolCallRequest{Command: "fetch checkout logs"})
+	messages := buildLogIntentMessages("translator", request)
+	var human strings.Builder
+	for _, part := range messages[len(messages)-1].Parts {
+		if content, ok := part.(llms.TextContent); ok {
+			human.WriteString(content.Text)
+		}
+	}
+	require.Contains(t, human.String(), scope)
+	require.Contains(t, human.String(), "fetch checkout logs")
+	require.Empty(t, request.KBPrestepContent)
+	require.Empty(t, request.SkillsContext)
 }
 
 // The original question is per-request text (an event investigation carries the

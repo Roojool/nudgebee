@@ -19,7 +19,7 @@ import (
 // the query, so it is independent of backend/relay health (which is what makes
 // the full chat path fall back to kubectl in this env).
 //
-// It builds the real FetchLogsAgentV2 for TEST_ACCOUNT, so the prompt is fed the
+// It builds the real FetchLogsAgent for TEST_ACCOUNT, so the prompt is fed the
 // account's actual capabilities.label_mappings + supported_operators (from
 // get_default_provider) and backend labels (from get_labels). For each question
 // it asserts the generated query is valid JSON, has a `where`, and uses ONLY
@@ -39,7 +39,7 @@ func TestGenerateCanonicalLogQuery_Live(t *testing.T) {
 	}
 	sc := security.NewRequestContextForTenantAccountAdmin(tenant, user, nil)
 
-	a := newFetchLogsAgentV2(account)
+	a := newFetchLogsAgent(account)
 	fields, indices := fetchLabelsAndIndices(account, a.provider)
 	t.Logf("provider=%q\n  label_mappings=%v\n  supported_operators=%v\n  backend_labels=%v\n  default_index=%q",
 		a.provider.Provider, a.provider.Capabilities.LabelMappings,
