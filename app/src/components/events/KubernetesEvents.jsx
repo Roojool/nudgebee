@@ -85,6 +85,16 @@ const KNOWN_SHORTCUT_DURATIONS_MS = new Set([
   24 * 60 * 60 * 1000,
   7 * 24 * 60 * 60 * 1000,
 ]);
+
+const resolveEffectiveRange = (range) => {
+  const shortcut = range?.shortcutClickTime;
+  if (typeof shortcut === 'number' && KNOWN_SHORTCUT_DURATIONS_MS.has(shortcut)) {
+    const now = Date.now();
+    return { startDate: now - shortcut, endDate: now };
+  }
+  return { startDate: range?.startDate, endDate: range?.endDate };
+};
+
 // Distinct line colors for the multi-account trend chart, cycled by account index.
 const TREND_SERIES_COLORS = ['#2f7af0', '#f5b400', '#e5484d', '#16a34a', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
 
@@ -397,10 +407,12 @@ const KubernetesEventsTable = ({
     const endTime = getValidParam(router.query.end_time);
 
     if (startTime && endTime) {
-      return {
-        startDate: parseInt(startTime),
-        endDate: parseInt(endTime),
-      };
+      const urlShortcut = Number(getValidParam(router.query.time_shortcut));
+      if (!isTroubleshootPage && Number.isFinite(urlShortcut) && KNOWN_SHORTCUT_DURATIONS_MS.has(urlShortcut)) {
+        const now = Date.now();
+        return { startDate: now - urlShortcut, endDate: now, shortcutClickTime: urlShortcut };
+      }
+      return { startDate: parseInt(startTime), endDate: parseInt(endTime) };
     } else if (defaultQuery?.startTime && defaultQuery?.endTime) {
       return { startDate: defaultQuery.startTime, endDate: defaultQuery.endTime };
     }
@@ -420,7 +432,7 @@ const KubernetesEventsTable = ({
     ) {
       return { startDate: persisted.startDate, endDate: persisted.endDate };
     }
-    return { startDate: getLast24Hrs().getTime(), endDate: new Date().getTime() };
+    return { startDate: getLast24Hrs().getTime(), endDate: new Date().getTime(), shortcutClickTime: 24 * 60 * 60 * 1000 };
   };
 
   const getInitialAggregationKey = () => {
@@ -594,6 +606,7 @@ const KubernetesEventsTable = ({
   const [isTrendChartLoading, setIsTrendChartLoading] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState({});
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
+  const [dateDisplayNonce, setDateDisplayNonce] = useState(0);
 
   // --- Hooks ---
 
@@ -1146,15 +1159,16 @@ const KubernetesEventsTable = ({
     if (selectedSource && selectedSource.length > 0) {
       query.source = selectedSource?.map((e) => e.value);
     }
+    const effectiveRange = resolveEffectiveRange(selectedDateRange);
     if (defaultQuery.startDate) {
       query.startDate = new Date(defaultQuery.startDate);
-    } else if (selectedDateRange?.startDate) {
-      query.startDate = new Date(selectedDateRange.startDate);
+    } else if (effectiveRange.startDate) {
+      query.startDate = new Date(effectiveRange.startDate);
     }
     if (defaultQuery.endDate) {
       query.endDate = new Date(defaultQuery.endDate);
-    } else if (selectedDateRange?.endDate) {
-      query.endDate = new Date(selectedDateRange.endDate);
+    } else if (effectiveRange.endDate) {
+      query.endDate = new Date(effectiveRange.endDate);
     }
     if (resource_ids.length) {
       query.resource_ids = resource_ids;
@@ -1789,6 +1803,7 @@ const KubernetesEventsTable = ({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
               {showTimeFilter && !hideScopeFilters && (
                 <CustomDateTimeRangePicker
+                  key={dateDisplayNonce}
                   passedSelectedDateTime={{
                     startTime: selectedDateRange.startDate,
                     endTime: selectedDateRange.endDate,
@@ -1838,7 +1853,10 @@ const KubernetesEventsTable = ({
                 aria-label='Refresh'
                 tooltip='Refresh'
                 id='all-events-refresh'
-                onClick={() => listEvents()}
+                onClick={() => {
+                  setSelectedDateRange((prev) => ({ ...prev, ...resolveEffectiveRange(prev) }));
+                  setDateDisplayNonce((n) => n + 1);
+                }}
                 loading={loading}
               />
             </Box>
