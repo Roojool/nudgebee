@@ -243,7 +243,7 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
         >
           <Typography sx={{ fontSize: 'var(--ds-text-small)', color: verdictStyle.text, lineHeight: 1.5 }}>{verdictStyle.message}</Typography>
           {!!matchResult?.filter && !isChecking && (
-            <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mt: 0.5, wordBreak: 'break-all' }}>
+            <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mt: 0.5, wordBreak: 'break-all' }}>
               {matchResult.filter}
             </Typography>
           )}
@@ -295,14 +295,14 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
             }}
           >
             <CopyButton text={`{{ Inputs.event.${field.path} }}`} size='xs' />
-            <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: ds.gray[700], flexShrink: 0 }}>
+            <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: ds.gray[700], flexShrink: 0 }}>
               event.{field.path}
             </Typography>
             <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], flexShrink: 0 }}>{field.type}</Typography>
             <Typography
               title={field.example}
               sx={{
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: 'var(--ds-text-caption)',
                 color: ds.gray[400],
                 flex: 1,

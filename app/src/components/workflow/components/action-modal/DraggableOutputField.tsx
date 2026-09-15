@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Typography } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
 import { DragIndicator } from '@mui/icons-material';
+import { ds } from '@utils/colors';
 
 interface DraggableOutputFieldProps {
   taskId: string;
@@ -163,7 +164,7 @@ const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
           <Typography
             sx={{
               fontSize: 'var(--ds-text-caption)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: 'var(--ds-blue-600)',
               lineHeight: 1.2,
               overflow: 'hidden',

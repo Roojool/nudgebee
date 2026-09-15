@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useMemo, memo } from 'react';
 import { Box, TextField, Popper, Paper, List, ListItem, ListItemText, Typography, Chip } from '@mui/material';
 import { Code as CodeIcon, Close as CloseIcon } from '@mui/icons-material';
-import { colors } from 'src/utils/colors';
+import { colors, ds } from '@utils/colors';
 
 interface PreviousTask {
   id: string;
@@ -127,7 +127,7 @@ const TemplateChip = memo(({ segment, disabled, onRemove }: { segment: ParsedSeg
     sx={{
       height: 24,
       fontSize: 'var(--ds-text-caption)',
-      fontFamily: 'monospace',
+      fontFamily: ds.font.mono,
       backgroundColor: 'var(--ds-blue-200)',
       color: 'var(--ds-blue-700)',
       border: '1px solid var(--ds-blue-300)',
@@ -456,7 +456,7 @@ const HighlightedTemplateTextField: React.FC<HighlightedTemplateTextFieldProps> 
               >
                 <ListItemText
                   primary={
-                    <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
+                    <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
                       {suggestion.insertText}
                     </Typography>
                   }

@@ -240,7 +240,7 @@ const renderDescriptiveOption = (
       <Box sx={{ py: 0.25 }}>
         <Typography
           component='span'
-          sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontSize: 'var(--ds-text-body)', color: ds.blue[500], fontFamily: 'monospace' }}
+          sx={{ fontWeight: 'var(--ds-font-weight-semibold)', fontSize: 'var(--ds-text-body)', color: ds.blue[500], fontFamily: ds.font.mono }}
         >
           {option}
         </Typography>
@@ -1759,7 +1759,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 component='pre'
                 sx={{
                   fontSize: 'var(--ds-text-caption)',
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   whiteSpace: 'pre-wrap',
                   wordBreak: 'break-word',
                   color: 'var(--ds-red-700)',
@@ -4041,7 +4041,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                         sx={{
                           fontSize: '0.625rem',
                           mt: 0.125,
-                          fontFamily: 'monospace',
+                          fontFamily: ds.font.mono,
                           bgcolor: ds.brand[500],
                           color: 'white',
                           px: 0.375,

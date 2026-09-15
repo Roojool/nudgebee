@@ -1037,7 +1037,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     }
 
     return (
-      <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
+      <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700] }}>
         {typeof data === 'string' ? data : JSON.stringify(data, null, 2)}
       </Box>
     );
@@ -1333,7 +1333,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                               sx={{
                                 fontSize: 'var(--ds-text-caption)',
                                 color: ds.gray[600],
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 backgroundColor: 'var(--ds-gray-100)',
                                 border: '1px solid var(--ds-gray-200)',
                                 borderRadius: 'var(--ds-radius-sm)',
@@ -1544,7 +1544,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         body: (
                           <Box
                             sx={{
-                              fontFamily: 'monospace',
+                              fontFamily: ds.font.mono,
                               fontSize: 'var(--ds-text-caption)',
                               color: 'var(--ds-red-600)',
                               wordBreak: 'break-word',
@@ -1582,7 +1582,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 <FormCard title='Inputs' description={''} icon={null} number={''} columns={1}>
                                   <Box
                                     sx={{
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       fontSize: 'var(--ds-text-caption)',
                                       color: ds.gray[700],
                                       wordBreak: 'break-word',
@@ -1623,7 +1623,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 <FormCard title='Result' description={''} icon={null} number={''} columns={1}>
                                   <Box
                                     sx={{
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       fontSize: 'var(--ds-text-caption)',
                                       color: ds.gray[700],
                                       wordBreak: 'break-word',
@@ -2103,7 +2103,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                         {inlineInputViewMode === 'formatted' ? (
                           renderFormattedField(selectedTaskData.rendered_params ?? selectedTaskData.input ?? {}, 'input')
                         ) : (
-                          <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
+                          <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                             {JSON.stringify(selectedTaskData.rendered_params ?? selectedTaskData.input ?? {}, null, 2)}
                           </Box>
                         )}
@@ -2200,7 +2200,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                           {inlineOutputViewMode === 'formatted' ? (
                             renderFormattedField(selectedTaskData.output, 'output')
                           ) : (
-                            <Box sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
+                            <Box sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-body)', color: ds.gray[700], whiteSpace: 'pre-wrap' }}>
                               {typeof selectedTaskData.output === 'string'
                                 ? selectedTaskData.output
                                 : JSON.stringify(selectedTaskData.output, null, 2)}
@@ -2271,7 +2271,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                                 border: `1px solid ${ds.red[200]}`,
                                 borderRadius: 'var(--ds-radius-md)',
                                 padding: 'var(--ds-space-3)',
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 fontSize: 'var(--ds-text-body)',
                                 wordBreak: 'break-word',
                                 whiteSpace: 'pre-wrap',

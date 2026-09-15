@@ -1,6 +1,7 @@
 import { Box, Typography } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import JsonTreeView from '@shared/viewers/JsonTreeView';
+import { ds } from '@utils/colors';
 
 interface TestResponseModalProps {
   open: boolean;
@@ -22,7 +23,7 @@ const renderResult = (result: any) => {
             border: '1px solid var(--ds-brand-150)',
             borderRadius: 'var(--ds-radius-lg)',
             padding: 'var(--ds-space-3)',
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
             fontSize: 'var(--ds-text-small)',
             whiteSpace: 'pre-wrap',
             overflowX: 'auto',
@@ -78,7 +79,7 @@ const TestResponseModal: React.FC<TestResponseModalProps> = ({ open, onClose, ta
                   borderRadius: 'var(--ds-radius-lg)',
                   padding: 'var(--ds-space-3)',
                   mb: 2,
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   fontSize: 'var(--ds-text-small)',
                   color: 'var(--ds-red-600)',
                   whiteSpace: 'pre-wrap',

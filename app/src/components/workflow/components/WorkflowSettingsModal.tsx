@@ -661,7 +661,7 @@ const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
                                 flexShrink: 1,
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                               }}
                             >
                               <Typography component='span' sx={{ color: 'var(--ds-gray-400)', fontSize: 'var(--ds-text-small)' }}>

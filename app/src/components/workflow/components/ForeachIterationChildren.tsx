@@ -93,7 +93,7 @@ const IterationCard: React.FC<{ iteration: IterationEntry; copyToClipboard?: (te
                 borderRadius: 'var(--ds-radius-sm)',
                 padding: 'var(--ds-space-1) var(--ds-space-2)',
                 marginBottom: 'var(--ds-space-2)',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: 'var(--ds-text-caption)',
                 color: ds.red[600],
                 whiteSpace: 'pre-wrap',

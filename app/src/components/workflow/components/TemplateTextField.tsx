@@ -4,6 +4,7 @@ import { Button } from '@ui/Button';
 import DataObjectIcon from '@mui/icons-material/DataObject';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
+import { ds } from '@utils/colors';
 
 interface PreviousTask {
   id: string;
@@ -561,7 +562,7 @@ const TemplateTextField: React.FC<TemplateTextFieldProps> = ({
                     >
                       <ListItemText
                         primary={
-                          <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
+                          <Typography sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: 'var(--ds-blue-600)' }}>
                             {suggestion.insertText}
                           </Typography>
                         }

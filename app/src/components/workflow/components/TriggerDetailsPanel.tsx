@@ -54,7 +54,7 @@ const formatLegacyEventType = (raw: unknown): string => {
 
 // Mono style for code-like values in detail rows
 const MONO_STYLE = {
-  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+  fontFamily: ds.font.mono,
   backgroundColor: ds.background[200],
   border: `1px solid ${ds.gray[200]}`,
   borderRadius: 'var(--ds-radius-md)',

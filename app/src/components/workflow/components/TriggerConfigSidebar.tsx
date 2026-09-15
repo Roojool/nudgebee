@@ -776,7 +776,7 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
           }}
         >
           Filter example:{' '}
-          <Box component='span' sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', wordBreak: 'break-all' }}>
+          <Box component='span' sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', wordBreak: 'break-all' }}>
             {EVENT_FILTER_EXAMPLE}
           </Box>
         </Typography>
@@ -1453,7 +1453,7 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
                       border: `1px solid ${ds.brand[200]}`,
                     }}
                   >
-                    <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                    <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], fontFamily: ds.font.mono, wordBreak: 'break-all' }}>
                       {eventFilter}
                     </Typography>
                   </Box>

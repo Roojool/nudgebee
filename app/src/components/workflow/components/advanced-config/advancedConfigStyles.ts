@@ -1,6 +1,7 @@
 import { colors } from 'src/utils/colors';
 
 // Shared styles for code/monospace input fields
+import { ds } from '@utils/colors';
 export const codeInputStyles = {
   '& .MuiInputBase-root': {
     bgcolor: 'var(--ds-background-200)',
@@ -12,7 +13,7 @@ export const codeInputStyles = {
     },
   },
   '& .MuiInputBase-input': {
-    fontFamily: 'monospace',
+    fontFamily: ds.font.mono,
     fontSize: 'var(--ds-text-small)',
     resize: 'vertical' as const,
   },
@@ -22,7 +23,7 @@ export const codeInputStyles = {
 export const jsonTextareaStyles = {
   ...codeInputStyles,
   '& .MuiInputBase-input': {
-    fontFamily: 'monospace',
+    fontFamily: ds.font.mono,
     fontSize: 'var(--ds-text-small)',
     resize: 'vertical' as const,
     lineHeight: 1.5,

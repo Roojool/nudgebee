@@ -6,6 +6,7 @@ import JsonTreeView from '@shared/viewers/JsonTreeView';
 import type { WorkflowDryRunResponse } from '@api1/workflow/types';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 import { getLlmSessionId, buildAskNudgebeeHref } from '../utils/llmChat';
+import { ds } from '@utils/colors';
 
 interface DryRunResultModalProps {
   open: boolean;
@@ -67,7 +68,7 @@ const DryRunResultModal: React.FC<DryRunResultModalProps> = ({ open, onClose, re
                 border: '1px solid var(--ds-red-200)',
                 borderRadius: 'var(--ds-radius-lg)',
                 padding: 'var(--ds-space-3)',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 fontSize: 'var(--ds-text-small)',
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
