@@ -277,7 +277,7 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 			CloudAccountID: k8sAccountID,
 			TenantID:       tenantID,
 			Level:          "Tenant",
-			Source:         "cloud",
+			Source:         e.GetName(),
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}
@@ -297,6 +297,12 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 				"ingress_service", k8sServiceName)
 		} else if ingressBackendNodes != nil {
 			nodes = append(nodes, ingressBackendNodes...)
+			// The shared resolver stamps its edges "cloud", which the centralized
+			// external-service enricher also uses. Claim them under this enricher's
+			// name so a scoped build can sweep them without touching the others.
+			for _, backendEdge := range ingressBackendEdges {
+				backendEdge.Source = e.GetName()
+			}
 			resultEdges = append(resultEdges, ingressBackendEdges...)
 			e.logger.Info("Resolved Ingress backend services",
 				"ingress_service", k8sServiceName,
@@ -629,7 +635,7 @@ func (e *LoadBalancerPodTargetEnricher) enrichLoadBalancerWithTargets(
 			CloudAccountID: awsAccountID,
 			TenantID:       tenantID,
 			Level:          "Tenant",
-			Source:         "cloud",
+			Source:         e.GetName(),
 			CreatedAt:      time.Now(),
 			UpdatedAt:      time.Now(),
 		}

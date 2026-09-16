@@ -184,6 +184,16 @@ func dropContextOnlyEdges(edges []*DbEdge, contextIDs map[string]struct{}) []*Db
 // For a partial build this deliberately never contains the tenant-scoped
 // producers (identity, ownership, github, gitlab, pagerduty), `manual`, or any
 // flow source — none of them run in a partial build.
+//
+// ranEnrichers are enricher GetName() values, and they are only valid edge
+// stamps because every cross-source enricher stamps its edges with its own
+// GetName(). An enricher that stamps anything else is invisible to the scoped
+// sweep, so its stale edges survive account rebuilds. That contract is enforced
+// against the real enrichers by test/e2e_enricher_edge_source_test.go.
+//
+// Never add a generic stamp such as "cloud" here: the centralized
+// external-service enricher also writes "cloud" edges, and it only runs with
+// flow sources, so a partial build would tombstone edges it never re-emits.
 func collectRanEdgeSources(response *BuildResponse, ranEnrichers []string) []string {
 	seen := make(map[string]struct{})
 	add := func(name string) {

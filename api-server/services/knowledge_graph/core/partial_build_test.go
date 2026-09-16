@@ -69,15 +69,21 @@ func TestCollectRanEdgeSources(t *testing.T) {
 		},
 	}
 
-	got := collectRanEdgeSources(response, []string{"k8s_ec2_enricher", "aws_lb_k8s"})
-	want := []string{"aws", "aws_lb_k8s", "cross_account", "k8s", "k8s_ec2_enricher"}
+	// ranEnrichers are enricher GetName() values, exactly as BuildGraphs records
+	// them. They double as edge stamps only because every enricher stamps its
+	// edges with its own name — the contract test in
+	// test/e2e_enricher_edge_source_test.go enforces that against the real
+	// enrichers. Passing the stamp here instead of the name is what once hid a
+	// name/stamp mismatch, so these must stay the real registered names.
+	got := collectRanEdgeSources(response, []string{"k8s_ec2", "aws_lb_k8s"})
+	want := []string{"aws", "aws_lb_k8s", "cross_account", "k8s", "k8s_ec2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("collectRanEdgeSources = %v, want %v", got, want)
 	}
 
 	// Producers a partial build never runs must not appear — their edges would
 	// otherwise be swept by a build that has no evidence about them.
-	forbidden := []string{"identity", "ownership", "github", "gitlab", "pagerduty", "manual", "ebpf", "traces"}
+	forbidden := []string{"identity", "ownership", "github", "gitlab", "pagerduty", "manual", "ebpf", "traces", "cloud"}
 	for _, name := range got {
 		for _, bad := range forbidden {
 			if name == bad {
@@ -94,7 +100,7 @@ func TestCollectRanEdgeSources_OmitsEnrichersThatDidNotRun(t *testing.T) {
 	}, nil)
 
 	for _, name := range got {
-		if name == "k8s_ec2_enricher" {
+		if name == "k8s_ec2" {
 			t.Fatalf("ran-set contains an enricher that did not run: %v", got)
 		}
 	}

@@ -615,7 +615,9 @@ func TestE2E_TierA_AWSLBToK8s(t *testing.T) {
 	// Assert the two cross-source edge types from this enricher are present.
 	var routesToK8s, managesK8s bool
 	for _, e := range edges {
-		if e.Source == "aws_lb_k8s_enricher" {
+		// Enrichers stamp their edges with their registered name; the scoped edge
+		// sweep relies on that to recognise edges from an enricher that ran.
+		if e.Source == "aws_lb_k8s" {
 			switch e.RelationshipType {
 			case core.RelationshipRoutesTo:
 				routesToK8s = true

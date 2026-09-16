@@ -197,3 +197,68 @@ func activeByID(t *testing.T, dbm *database.DatabaseManager, query string) map[s
 	}
 	return out
 }
+
+// The bug this pins: an account rebuild that ran the k8s_ec2 enricher must clean
+// up that enricher's stale edge — a K8s node still linked to an EC2 instance
+// that no longer exists. The enricher used to stamp "k8s_ec2_enricher" while the
+// sweep looked for "k8s_ec2", so the stale link survived until the next hourly
+// build. It must also leave alone an edge stamped "cloud" by the centralized
+// external-service enricher, which a partial build never re-runs: "cloud" is
+// deliberately not a stamp any enricher that runs in a partial build uses.
+func TestMarkInactiveInfraEdgesScoped_SweepsStaleEnricherEdgesButNotSharedCloudStamp(t *testing.T) {
+	dbm := testenv.RequireMetastore(t)
+	ctx := newTestRequestContext()
+	svc := NewService(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), dbm)
+	t.Cleanup(func() {
+		_, _ = dbm.Exec(`DELETE FROM knowledge_graph_edge WHERE tenant_id = $1::uuid`, scopedSweepTenant)
+		_, _ = dbm.Exec(`DELETE FROM knowledge_graph_node WHERE tenant_id = $1::uuid`, scopedSweepTenant)
+	})
+
+	mk := func(nodeType NodeType, name string) *DbNode {
+		key := BuildUniqueKey(CloudProviderAWS, scopedSweepAccountA, "us-east-1", nodeType, "", name)
+		return NewNode(nodeType, key,
+			map[string]interface{}{"name": name},
+			scopedSweepTenant, scopedSweepAccountA, "aws")
+	}
+	k8sNode := mk(NodeTypeNode, "ip-10-0-1-5")
+	terminated := mk(NodeTypeComputeInstance, "i-terminated")
+	externalSvc := mk(NodeTypeExternalService, "db.example.internal")
+	database := mk(NodeTypeDatabase, "orders-db")
+
+	const oldSyncVersion = 1
+	allNodes := []*DbNode{k8sNode, terminated, externalSvc, database}
+	if err := svc.SaveNodes(allNodes, oldSyncVersion); err != nil {
+		t.Fatalf("seed nodes: %v", err)
+	}
+
+	// Stamped with the enricher's registered name, as the enricher now emits it.
+	staleEnricherEdge := NewEdge(k8sNode.ID, terminated.ID, RelationshipRunsOn, nil,
+		scopedSweepTenant, scopedSweepAccountA, "k8s_ec2")
+	// Structural (RESOLVES_TO) edge from the external-service enricher, which only
+	// runs with flow sources and so never runs in a partial build.
+	sharedCloudEdge := NewEdge(externalSvc.ID, database.ID, RelationshipResolvesTo, nil,
+		scopedSweepTenant, scopedSweepAccountA, "cloud")
+	if err := svc.SaveEdges([]*DbEdge{staleEnricherEdge, sharedCloudEdge}, allNodes, oldSyncVersion); err != nil {
+		t.Fatalf("seed edges: %v", err)
+	}
+
+	// Partial rebuild of account A in which aws, k8s_ec2 and aws_lb_pod_target all
+	// ran and re-emitted neither edge.
+	const newSyncVersion = 2
+	ranSources := collectRanEdgeSources(&BuildResponse{
+		AccountMetadata: []AccountGraphMetadata{{AccountID: scopedSweepAccountA, SourcesBuilt: []string{"aws"}}},
+	}, []string{"k8s_ec2", "aws_lb_pod_target"})
+	if _, err := svc.markInactiveInfraEdgesScoped(scopedSweepTenant, newSyncVersion, []string{scopedSweepAccountA}, ranSources); err != nil {
+		t.Fatalf("markInactiveInfraEdgesScoped: %v", err)
+	}
+
+	edgeActive := activeByID(t, dbm, `SELECT id, is_active FROM knowledge_graph_edge WHERE tenant_id = $1::uuid`)
+	if isActive, ok := edgeActive[staleEnricherEdge.ID]; !ok {
+		t.Error("stale enricher edge missing from database entirely")
+	} else if isActive {
+		t.Error("stale k8s_ec2 edge to a terminated instance survived an account rebuild that ran k8s_ec2")
+	}
+	if isActive, ok := edgeActive[sharedCloudEdge.ID]; !ok || !isActive {
+		t.Errorf("edge stamped \"cloud\" by a producer that did not run was tombstoned: is_active=%v ok=%v", isActive, ok)
+	}
+}
