@@ -6,11 +6,12 @@ import CloudAccountTable from '@components/cloudaccount/CloudAccountTable';
 import { hasWriteAccess } from '@lib/auth';
 import { Label } from '@ui/Label';
 import ECSSummary from './Summary'; // Corrected import
+import ECSCloudLogs from './CloudLogs';
 import Datetime from '@shared/format/Datetime';
 import CustomTable from '@shared/tables/CustomTable';
 import { toast as snackbar } from '@ui/Toast';
 import TagsCell from '@components/cloudaccount/TagsCell';
-import { buildStateApiParams, getStateDropdownOptions } from '@components/cloudaccount/stateFilter';
+import { buildStateApiParams, getStateColor, getStateDropdownOptions } from '@components/cloudaccount/stateFilter';
 import { getActionsForService, buildMenuItems } from '@components/cloudaccount/resourceActions';
 import { useCloudResourceAction } from '@hooks/useCloudResourceAction';
 import ConfirmActionDialog from '@components/cloudaccount/ConfirmActionDialog';
@@ -181,7 +182,7 @@ export const ECSTasks = (props: {
             // Column 2: Status
             component: (
               <Box>
-                <Label text={item.meta?.LastStatus || item.status} />
+                <Label text={item.meta?.LastStatus || item.status} variant={getStateColor(item.meta?.LastStatus || item.status)} />
                 {item.meta?.StoppedReason && item.meta?.LastStatus === 'STOPPED' && (
                   <Typography
                     sx={{ fontSize: ds.text.caption, color: ds.gray[600], maxWidth: ds.space.mul(0, 75) }}
@@ -339,8 +340,14 @@ export const ECSTasks = (props: {
                 key: 'ecs-task-containers',
                 componentFn: (opt: any, dq: any) => <ECSTaskContainers taskDetails={dq} />,
               },
-              { text: 'Network', value: 4, key: 'ecs-task-network', componentFn: (opt: any, dq: any) => <ECSTaskNetworkInfo taskDetails={dq} /> },
-              { text: 'Tags', value: 5, key: 'ecs-task-tags', componentFn: (opt: any, dq: any) => <ECSTaskTagsDisplay taskDetails={dq} /> },
+              {
+                text: 'Logs',
+                value: 4,
+                key: 'ecs-task-logs',
+                componentFn: (opt: any, dq: any) => <ECSTaskLogsTab accountId={props?.accountId} taskDetails={dq} />,
+              },
+              { text: 'Network', value: 5, key: 'ecs-task-network', componentFn: (opt: any, dq: any) => <ECSTaskNetworkInfo taskDetails={dq} /> },
+              { text: 'Tags', value: 6, key: 'ecs-task-tags', componentFn: (opt: any, dq: any) => <ECSTaskTagsDisplay taskDetails={dq} /> },
             ],
           }}
           stickyColumnIndex={props.stickyColumnIndex}
@@ -1387,6 +1394,30 @@ interface ECSTaskDetailsProps {
     };
   };
 }
+
+const ECSTaskLogsTab = ({ accountId, taskDetails }: { accountId: string | undefined; taskDetails: any }) => {
+  const meta = taskDetails?.meta;
+  const clusterName = taskDetails?.tags?.['aws:ecs:clusterName']?.[0] || meta?.ClusterArn?.split('/').pop();
+  const taskDefName = meta?.TaskDefinitionArn?.split('/').pop(); // "family:revision"
+  const serviceName = taskDetails?.tags?.['aws:ecs:serviceName']?.[0] || meta?.ServiceArn?.split('/').pop();
+  const taskId = taskDetails?.name || taskDetails?.resourse_id?.split('/').pop();
+  const region = taskDetails?.region || meta?.AvailabilityZone?.replace(/[a-z]$/, '') || 'us-east-1';
+
+  let resourceId = '';
+  if (clusterName && taskDefName) {
+    resourceId = `${clusterName}/${taskDefName}/${taskId || 'task'}`;
+  } else if (clusterName && serviceName) {
+    resourceId = `${clusterName}/${serviceName}`;
+  } else {
+    resourceId = taskDetails?.resourse_id || '';
+  }
+
+  if (!accountId || !resourceId) {
+    return <Typography sx={{ ...DETAIL_CARD_SX, color: ds.gray[600] }}>No log source available for this task.</Typography>;
+  }
+
+  return <ECSCloudLogs accountId={accountId} resourceId={resourceId} region={region} />;
+};
 
 const ECSTaskInfo = ({ taskDetails }: ECSTaskDetailsProps) => {
   const meta = taskDetails?.meta;
