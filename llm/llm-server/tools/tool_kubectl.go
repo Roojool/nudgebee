@@ -1155,25 +1155,6 @@ func (m KubectlExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestCont
 // fall through to InferToolRequestTypePrompt so the safety posture remains
 // fail-closed.
 func InferKubectlVerbType(command string) core.ToolRequestType {
-	// A read-only kubectl command followed only by stdout transforms remains a
-	// read. Keep this allowlist narrow so executors, redirections, and commands
-	// with file operands still fall through to the approval classifier.
-	stages := splitKubectlPipeline(command)
-	if len(stages) > 1 {
-		if InferKubectlVerbType(stages[0]) != core.ToolRequestTypeRead {
-			return ""
-		}
-		for _, stage := range stages[1:] {
-			if hasUnquotedShellSyntax(stage) {
-				return ""
-			}
-			parts, err := shlex.Split(strings.TrimSpace(stage))
-			if err != nil || !isKnownReadOnlyKubectlPipelineFilter(parts) {
-				return ""
-			}
-		}
-		return core.ToolRequestTypeRead
-	}
 	if hasUnquotedShellSyntax(command) {
 		return ""
 	}
@@ -1246,67 +1227,6 @@ func InferKubectlVerbType(command string) core.ToolRequestType {
 	}
 
 	return ""
-}
-
-// splitKubectlPipeline splits only on unquoted pipes. Quoted pipes remain part
-// of JSONPath, jq, grep, or awk arguments and are not execution boundaries.
-func splitKubectlPipeline(command string) []string {
-	var stages []string
-	start := 0
-	var singleQuoted, doubleQuoted, escaped bool
-	for i := 0; i < len(command); i++ {
-		char := command[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if char == '\\' && !singleQuoted {
-			escaped = true
-			continue
-		}
-		if char == '\'' && !doubleQuoted {
-			singleQuoted = !singleQuoted
-			continue
-		}
-		if char == '"' && !singleQuoted {
-			doubleQuoted = !doubleQuoted
-			continue
-		}
-		if char == '|' && !singleQuoted && !doubleQuoted {
-			stages = append(stages, command[start:i])
-			start = i + 1
-		}
-	}
-	return append(stages, command[start:])
-}
-
-// isKnownReadOnlyKubectlPipelineFilter permits stdout-only transforms used by
-// the kubectl tool. Options that name output or input files stay ambiguous.
-func isKnownReadOnlyKubectlPipelineFilter(parts []string) bool {
-	if len(parts) == 0 {
-		return false
-	}
-	command := filepath.Base(parts[0])
-	switch command {
-	case "cat", "cut", "egrep", "fgrep", "grep", "head", "jq", "od", "rgrep", "tail", "tr", "wc":
-		return true
-	case "sort":
-		for _, part := range parts[1:] {
-			if part == "-o" || strings.HasPrefix(part, "-o") || part == "--output" || strings.HasPrefix(part, "--output=") {
-				return false
-			}
-		}
-		return true
-	case "uniq":
-		for _, part := range parts[1:] {
-			if !strings.HasPrefix(part, "-") {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
 }
 
 // hasUnquotedShellSyntax reports command shapes whose overall intent cannot be
