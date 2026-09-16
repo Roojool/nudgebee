@@ -522,7 +522,13 @@ func init() {
 	viper.SetDefault("rabbit_mq_kg_update_exchange", "kg_update_exchange")
 	viper.SetDefault("rabbit_mq_kg_update_queue", "kg_update")
 	viper.SetDefault("rabbit_mq_kg_update_concurrency", 2)
-	viper.SetDefault("kg_update_deduplication_minutes", 120)
+	// Minimum gap between the end of one tenant-wide knowledge-graph build and the
+	// start of the next for the same tenant. Collectors request tenant-wide
+	// rebuilds several times an hour; requests inside the window stay queued and
+	// run on the first trigger after it. Kept below the hourly cron period so the
+	// cron, not this window, sets the cadence. Account-scoped and manual builds are
+	// not deferred. 0 disables.
+	viper.SetDefault("kg_update_deduplication_minutes", 45)
 	viper.SetDefault("kg_update_processing_timeout_minutes", 30)
 
 	// Event post-process queue configuration

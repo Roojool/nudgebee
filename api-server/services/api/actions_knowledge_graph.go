@@ -222,7 +222,7 @@ func handleKnowledgeGraphAction(actionPayload *ActionRequest, c *gin.Context, tr
 		if specificTenantID != "" {
 			if err := kgqueue.PublishKGUpdateMessage(ctx.GetContext(), kgqueue.KGUpdateMessage{
 				TenantID:    specificTenantID,
-				Source:      "manual",
+				Source:      core.BuildRequestTriggerManual,
 				AccountIDs:  scopeAccountIDs,
 				Sources:     scopeSources,
 				FlowSources: scopeFlowSources,

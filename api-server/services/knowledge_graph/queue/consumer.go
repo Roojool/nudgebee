@@ -2,6 +2,8 @@ package queue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -28,6 +30,13 @@ import (
 // worker at a time; this cap stops a steady stream of requests from pinning that
 // worker past RabbitMQ's consumer acknowledgement timeout.
 const maxDrainsPerDelivery = 3
+
+// drainContinuationSource marks the message a worker republishes when it hands
+// back work at maxDrainsPerDelivery. The work itself is already in the queue
+// table as pending rows; the message only exists to make some replica claim it,
+// so it must not be enqueued as a request of its own — carrying no scope, it
+// would become a tenant-wide rebuild nobody asked for.
+const drainContinuationSource = "drain-continuation"
 
 func init() {
 	err := common.MqConsume(
@@ -68,33 +77,37 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 		logger.Error("kg_queue: failed to get database manager", "error", err)
 		return nil // Don't requeue on DB errors, log and move on
 	}
-	requestRepo := core.NewBuildRequestRepository(dbms, logger)
+	requestRepo := core.NewBuildRequestRepository(dbms, logger).WithPolicy(core.BuildRequestPolicy{
+		StaleAfter:            time.Duration(config.Config.KGUpdateProcessingTimeoutMinutes) * time.Minute,
+		MinTenantWideInterval: time.Duration(config.Config.KGUpdateDeduplicationMinutes) * time.Minute,
+	})
 
 	// 2. Record the request durably before competing for the tenant. If another
 	// worker is mid-build it will drain this row when it finishes, so no request
 	// is ever silently dropped (which the old time-window claim did).
-	if err := requestRepo.Enqueue(core.BuildRequestSpec{
-		TenantID:      message.TenantID,
-		AccountIDs:    message.AccountIDs,
-		Sources:       message.Sources,
-		FlowSources:   message.FlowSources,
-		Trigger:       message.Source,
-		CorrelationID: message.CorrelationID,
-	}); err != nil {
-		logger.Error("kg_queue: failed to enqueue build request", "error", err)
-		return nil
+	if shouldEnqueue(message) {
+		if err := requestRepo.Enqueue(core.BuildRequestSpec{
+			TenantID:      message.TenantID,
+			AccountIDs:    message.AccountIDs,
+			Sources:       message.Sources,
+			FlowSources:   message.FlowSources,
+			Trigger:       message.Source,
+			CorrelationID: message.CorrelationID,
+		}); err != nil {
+			logger.Error("kg_queue: failed to enqueue build request", "error", err)
+			return nil
+		}
 	}
 
 	// 3. Try to become the tenant's builder. Losing the race is the normal case
 	// under a burst and needs no retry — the winner drains what we just enqueued.
-	staleAfter := time.Duration(config.Config.KGUpdateProcessingTimeoutMinutes) * time.Minute
-	claim, claimed, err := requestRepo.TryClaim(message.TenantID, staleAfter)
+	claim, claimed, err := requestRepo.TryClaim(message.TenantID)
 	if err != nil {
 		logger.Error("kg_queue: failed to claim tenant build", "error", err)
 		return nil
 	}
 	if !claimed {
-		logger.Info("kg_queue: another build is running for this tenant; request queued for it to drain")
+		logger.Info("kg_queue: nothing claimable now; request stays queued (another build is running, or a tenant-wide rebuild is waiting out the minimum interval)")
 		return nil
 	}
 
@@ -133,7 +146,7 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 			}
 			if err := PublishKGUpdateMessage(msgCtx, KGUpdateMessage{
 				TenantID: message.TenantID,
-				Source:   "drain-continuation",
+				Source:   drainContinuationSource,
 			}); err != nil {
 				logger.Error("kg_queue: failed to republish drain continuation", "error", err)
 			}
@@ -198,6 +211,7 @@ func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlati
 	// Process each filter
 	successCount := 0
 	failureCount := 0
+	var filterErrs []error
 	for i, filter := range filters {
 		logger.Info("kg_queue: processing filter",
 			"correlation_id", correlationID,
@@ -213,6 +227,7 @@ func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlati
 				"filter_name", filter.FilterName,
 				"error", err)
 			failureCount++
+			filterErrs = append(filterErrs, fmt.Errorf("filter %q: %w", filter.FilterName, err))
 			// Continue with other filters
 		} else {
 			successCount++
@@ -229,7 +244,23 @@ func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlati
 		"success_count", successCount,
 		"failure_count", failureCount)
 
-	return nil
+	return aggregateFilterErrors(filterErrs, len(filters))
+}
+
+// aggregateFilterErrors turns the per-filter build failures into the error the
+// build request is resolved with, so a failed build is recorded as 'failed' with
+// its cause instead of 'done'. Nil when every filter succeeded.
+func aggregateFilterErrors(errs []error, totalFilters int) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of %d filters failed: %w", len(errs), totalFilters, errors.Join(errs...))
+}
+
+// shouldEnqueue reports whether a message represents a build request of its own.
+// A drain continuation does not: its work is already pending in the queue table.
+func shouldEnqueue(message KGUpdateMessage) bool {
+	return message.Source != drainContinuationSource
 }
 
 // buildRequestForFilter turns a tenant filter plus the claim's scope into the
