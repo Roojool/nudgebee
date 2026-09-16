@@ -1819,22 +1819,26 @@ rules:
           {{ (index .Detail "previousState" "value") }} to {{ (index .Detail "state" "value") }}.
           {{ $namespace := "" }}
           {{ $metricName := "" }}
+          {{ $expression := "" }}
+          {{ $label := "" }}
           {{ $metrics := (index .Detail "configuration" "metrics") }}
-          {{ if $metrics }}
-            {{ $firstMetric := index $metrics 0 }}
-            {{ if $firstMetric }}
-              {{ $metricStat := (index $firstMetric "metricStat") }}
-              {{ if $metricStat }}
-                {{ $metric := (index $metricStat "metric") }}
-                {{ if $metric }}
+          {{ range $m := $metrics }}
+            {{ $metricStat := (index $m "metricStat") }}
+            {{ if $metricStat }}
+              {{ $metric := (index $metricStat "metric") }}
+              {{ if $metric }}
+                {{ if or (index $m "returnData") (eq $namespace "") }}
                   {{ $namespace = (index $metric "namespace") | str }}
                   {{ $metricName = (index $metric "name") | str }}
                 {{ end }}
               {{ end }}
+            {{ else if index $m "returnData" }}
+              {{ $expression = (index $m "expression") | str }}
+              {{ $label = (index $m "label") | str }}
             {{ end }}
           {{ end }}
           Namespace: {{ $namespace }}.
-          Metric: {{ $metricName }}.
+          {{ if $expression }}Metric: {{ $label }} ({{ $expression }}).{{ else }}Metric: {{ $metricName }}.{{ end }}
           Reason: {{ (index .Detail "state" "reason") }}.
       status:
         template: |
@@ -1870,13 +1874,12 @@ rules:
             template: |
               {{ $namespace := "" }}
               {{ $metrics := (index .Detail "configuration" "metrics") }}
-              {{ if $metrics }}
-                {{ $firstMetric := index $metrics 0 }}
-                {{ if $firstMetric }}
-                  {{ $metricStat := (index $firstMetric "metricStat") }}
-                  {{ if $metricStat }}
-                    {{ $metric := (index $metricStat "metric") }}
-                    {{ if $metric }}
+              {{ range $m := $metrics }}
+                {{ $metricStat := (index $m "metricStat") }}
+                {{ if $metricStat }}
+                  {{ $metric := (index $metricStat "metric") }}
+                  {{ if $metric }}
+                    {{ if or (index $m "returnData") (eq $namespace "") }}
                       {{ $namespace = (index $metric "namespace") | str }}
                     {{ end }}
                   {{ end }}
@@ -1887,19 +1890,25 @@ rules:
             template: |
               {{ $metricName := "" }}
               {{ $metrics := (index .Detail "configuration" "metrics") }}
-              {{ if $metrics }}
-                {{ $firstMetric := index $metrics 0 }}
-                {{ if $firstMetric }}
-                  {{ $metricStat := (index $firstMetric "metricStat") }}
-                  {{ if $metricStat }}
-                    {{ $metric := (index $metricStat "metric") }}
-                    {{ if $metric }}
+              {{ range $m := $metrics }}
+                {{ $metricStat := (index $m "metricStat") }}
+                {{ if $metricStat }}
+                  {{ $metric := (index $metricStat "metric") }}
+                  {{ if $metric }}
+                    {{ if or (index $m "returnData") (eq $metricName "") }}
                       {{ $metricName = (index $metric "name") | str }}
                     {{ end }}
                   {{ end }}
                 {{ end }}
               {{ end }}
               {{ $metricName }}
+          # For metric-math alarms, namespace/metric_name above can only ever
+          # resolve to one raw sub-metric (a template always renders to a
+          # single string). This param hands the whole metrics array through
+          # as JSON text instead, so the Go side can decode it and fetch the
+          # actual expression alongside its inputs in one GetMetricData call.
+          metrics_json:
+            template: "{{ (index .Detail \"configuration\" \"metrics\") | toJson }}"
           period_seconds: 300
           statistic: "Average"
           start_time_offset: "-1h"

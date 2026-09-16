@@ -63,13 +63,12 @@ func TestAlarmActionNamespaceRendering(t *testing.T) {
 	nsTemplate := `
               {{ $namespace := "" }}
               {{ $metrics := (index .Detail "configuration" "metrics") }}
-              {{ if $metrics }}
-                {{ $firstMetric := index $metrics 0 }}
-                {{ if $firstMetric }}
-                  {{ $metricStat := (index $firstMetric "metricStat") }}
-                  {{ if $metricStat }}
-                    {{ $metric := (index $metricStat "metric") }}
-                    {{ if $metric }}
+              {{ range $m := $metrics }}
+                {{ $metricStat := (index $m "metricStat") }}
+                {{ if $metricStat }}
+                  {{ $metric := (index $metricStat "metric") }}
+                  {{ if $metric }}
+                    {{ if or (index $m "returnData") (eq $namespace "") }}
                       {{ $namespace = (index $metric "namespace") | str }}
                     {{ end }}
                   {{ end }}
@@ -79,6 +78,113 @@ func TestAlarmActionNamespaceRendering(t *testing.T) {
 
 	if got := processor.renderParamValue(pCtx, "namespace", nsTemplate, templateData); got != "AWS/ApplicationELB" {
 		t.Errorf("namespace rendered as %q, want %q", got, "AWS/ApplicationELB")
+	}
+}
+
+// mathExpressionAlarmDetail is a metric-math alarm (error rate = errors/requests*100)
+// whose "metrics" array puts the expression FIRST, ahead of the two raw metrics it
+// references. Only "e1" (the expression) is marked returnData: true — that's the
+// series CloudWatch actually evaluated against the threshold, but it has no
+// "metricStat"/"metric" of its own, so namespace/name must fall back to a raw
+// sub-metric while still picking up returnData's precedence when it does apply.
+const mathExpressionAlarmDetail = `{
+  "alarmName": "nb-demo-error-rate",
+  "state": {"value": "ALARM", "reason": "Threshold Crossed", "timestamp": "2026-08-06T04:37:01.389+0000"},
+  "previousState": {"value": "OK"},
+  "configuration": {
+    "metrics": [
+      {
+        "id": "e1",
+        "expression": "(m2/m1)*100",
+        "returnData": true
+      },
+      {
+        "id": "m1",
+        "metricStat": {
+          "stat": "Sum",
+          "period": 60,
+          "metric": {
+            "name": "RequestCount",
+            "namespace": "AWS/ApplicationELB",
+            "dimensions": {"LoadBalancer": "app/nb-demo-alb/3c4737067cb64e8e"}
+          }
+        },
+        "returnData": false
+      },
+      {
+        "id": "m2",
+        "metricStat": {
+          "stat": "Sum",
+          "period": 60,
+          "metric": {
+            "name": "HTTPCode_Target_5XX_Count",
+            "namespace": "AWS/ApplicationELB",
+            "dimensions": {"LoadBalancer": "app/nb-demo-alb/3c4737067cb64e8e"}
+          }
+        },
+        "returnData": false
+      }
+    ]
+  }
+}`
+
+// TestAlarmActionNamespaceRenderingMathExpressionFirst pins the fix for the bug
+// where the namespace/metric_name templates in aws_runbook.yaml hardcoded
+// "metrics[0]". When the returnData expression comes first in the array, index-0
+// resolves to an entry with no "metricStat", so the old template rendered an
+// empty namespace even though the array holds two perfectly good raw metrics.
+// The range-based template must walk the whole array and fall back to the first
+// entry that actually has a metric identity.
+func TestAlarmActionNamespaceRenderingMathExpressionFirst(t *testing.T) {
+	processor := NewTemplatedEventBridgeProcessor(EventRuleSet{}, nil)
+	pCtx := providers.NewCloudProviderContext(context.Background())
+
+	templateData := processor.prepareTemplateData(EventBridgeEvent{
+		ID:         "repro-math",
+		Source:     "aws.cloudwatch",
+		Region:     "us-east-1",
+		DetailType: "CloudWatch Alarm State Change",
+		Time:       time.Date(2026, 8, 6, 4, 37, 1, 0, time.UTC),
+		Detail:     []byte(mathExpressionAlarmDetail),
+	})
+
+	nsTemplate := `
+              {{ $namespace := "" }}
+              {{ $metrics := (index .Detail "configuration" "metrics") }}
+              {{ range $m := $metrics }}
+                {{ $metricStat := (index $m "metricStat") }}
+                {{ if $metricStat }}
+                  {{ $metric := (index $metricStat "metric") }}
+                  {{ if $metric }}
+                    {{ if or (index $m "returnData") (eq $namespace "") }}
+                      {{ $namespace = (index $metric "namespace") | str }}
+                    {{ end }}
+                  {{ end }}
+                {{ end }}
+              {{ end }}
+              {{ $namespace }}`
+
+	nameTemplate := `
+              {{ $metricName := "" }}
+              {{ $metrics := (index .Detail "configuration" "metrics") }}
+              {{ range $m := $metrics }}
+                {{ $metricStat := (index $m "metricStat") }}
+                {{ if $metricStat }}
+                  {{ $metric := (index $metricStat "metric") }}
+                  {{ if $metric }}
+                    {{ if or (index $m "returnData") (eq $metricName "") }}
+                      {{ $metricName = (index $metric "name") | str }}
+                    {{ end }}
+                  {{ end }}
+                {{ end }}
+              {{ end }}
+              {{ $metricName }}`
+
+	if got := processor.renderParamValue(pCtx, "namespace", nsTemplate, templateData); got != "AWS/ApplicationELB" {
+		t.Errorf("namespace rendered as %q, want %q (fell through to a raw sub-metric)", got, "AWS/ApplicationELB")
+	}
+	if got := processor.renderParamValue(pCtx, "metric_name", nameTemplate, templateData); got != "RequestCount" {
+		t.Errorf("metric_name rendered as %q, want %q (first raw sub-metric, since the returnData entry is an expression with no metric identity)", got, "RequestCount")
 	}
 }
 

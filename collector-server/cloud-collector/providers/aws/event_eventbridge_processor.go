@@ -1005,6 +1005,28 @@ func (p *TemplatedEventBridgeProcessor) executeAction(
 			EndDate:         &endTime,
 			Region:          ebEvent.Region,
 		}
+
+		// A metric-math alarm's real value is an expression over several
+		// sub-metrics, which Namespace/MetricName above can't represent (each
+		// only ever holds one metric). Decode the whole array here instead and,
+		// only if an expression is actually present, hand it to the provider so
+		// it can build the multi-query GetMetricData call CloudWatch needs to
+		// evaluate it. Plain single-metric alarms have no "expression" entry, so
+		// this stays empty and the fields set above are used exactly as today.
+		if params.MetricsJSON != "" {
+			var entries []providers.CloudWatchMetricEntry
+			if err := common.UnmarshalJson([]byte(params.MetricsJSON), &entries); err != nil {
+				logger.Warn("eventprocessor: failed to parse metrics_json, falling back to single-metric evidence", "error", err)
+			} else {
+				for _, e := range entries {
+					if e.Expression != "" {
+						metricQuery.MetricQueries = entries
+						break
+					}
+				}
+			}
+		}
+
 		return p.awsAPI.QueryMetrices(pCtx, awsAccount, metricQuery)
 
 	case "aws_get_log":

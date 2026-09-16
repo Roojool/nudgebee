@@ -77,6 +77,46 @@ func extractAlarmEvaluation(ebEvent EventBridgeEvent) alarmEvaluation {
 	return eval
 }
 
+// extractAlarmValueName returns the display name of the series CloudWatch
+// actually evaluated against the threshold — the entry marked
+// "returnData": true in configuration.metrics. Checks label before the raw
+// metric name, matching buildMetricDataQueriesFromMetricQueries's own
+// precedence (metricName := mq.Label, falling back to the metric name only
+// when Label is empty) — that precedence is what actually becomes
+// providers.MetricItem.Name in the fetched results, so this has to agree with
+// it exactly. A plain metricStat entry can carry a custom Label too (not just
+// an expression), so checking metric name first would silently mismatch for
+// any single-metric alarm that sets one. Returns "" if it can't be
+// determined, in which case the caller falls back to today's behaviour
+// (attach the threshold line to every series) rather than silently dropping
+// the comparison for events this can't parse.
+func extractAlarmValueName(ebEvent EventBridgeEvent) string {
+	var detail map[string]any
+	if err := common.UnmarshalJson(ebEvent.Detail, &detail); err != nil {
+		return ""
+	}
+	config, _ := detail["configuration"].(map[string]any)
+	metrics, _ := config["metrics"].([]any)
+
+	for _, raw := range metrics {
+		metric, _ := raw.(map[string]any)
+		if metric == nil || metric["returnData"] != true {
+			continue
+		}
+		if label, ok := metric["label"].(string); ok && label != "" {
+			return label
+		}
+		if metricStat, ok := metric["metricStat"].(map[string]any); ok {
+			if m, ok := metricStat["metric"].(map[string]any); ok {
+				if name, ok := m["name"].(string); ok && name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // buildActionEvidenceInsight returns the insight lines for an action's evidence
 // card. An insight has to say something about the data that was fetched — the
 // action's name and description are static per rule and already carried in
@@ -89,7 +129,7 @@ func buildActionEvidenceInsight(ebEvent EventBridgeEvent, actionDef ActionDefini
 		if !ok {
 			return nil
 		}
-		return metricSeriesInsight(metrics, extractAlarmEvaluation(ebEvent))
+		return metricSeriesInsight(metrics, extractAlarmEvaluation(ebEvent), extractAlarmValueName(ebEvent))
 	default:
 		return nil
 	}
@@ -97,10 +137,14 @@ func buildActionEvidenceInsight(ebEvent EventBridgeEvent, actionDef ActionDefini
 
 // metricSeriesInsight summarises each returned series — peak, when it peaked,
 // and the mean — and states the alarm threshold next to the observed range.
+// The threshold line is attached only to alarmValueName's series when it's
+// known (a metric-math alarm has several unrelated input series that were
+// never themselves compared to the threshold); if it can't be determined,
+// every series gets the line, as before.
 // The threshold line is phrased as a comparison rather than a verdict because
 // the alarm's comparison operator is not carried on the event, so "breached"
 // cannot be asserted for LessThanThreshold alarms.
-func metricSeriesInsight(metrics providers.QueryMetricsResponse, eval alarmEvaluation) []string {
+func metricSeriesInsight(metrics providers.QueryMetricsResponse, eval alarmEvaluation, alarmValueName string) []string {
 	var lines []string
 
 	for i, item := range metrics.Items {
@@ -141,7 +185,7 @@ func metricSeriesInsight(metrics providers.QueryMetricsResponse, eval alarmEvalu
 		line += fmt.Sprintf("; mean %s over %d datapoints.", formatMetricValue(mean), len(item.Values))
 		lines = append(lines, line)
 
-		if eval.HasThreshold {
+		if eval.HasThreshold && (alarmValueName == "" || item.Name == alarmValueName) {
 			lines = append(lines, fmt.Sprintf("Alarm threshold %s; series ranged %s to %s.",
 				formatMetricValue(eval.Threshold), formatMetricValue(low), formatMetricValue(peak)))
 		}

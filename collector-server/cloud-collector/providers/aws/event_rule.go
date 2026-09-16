@@ -104,6 +104,13 @@ type GetMetricActionParams struct {
 	Statistic       string              `json:"statistic"`
 	StartTimeOffset string              `json:"start_time_offset"` // e.g., "-15m", "-1h"
 	EndTimeOffset   string              `json:"end_time_offset"`   // e.g., "+5m", "0m"
+	// MetricsJSON is the alarm's whole configuration.metrics array, serialized
+	// to JSON by the yaml template (via the toJson helper). Namespace/MetricName
+	// above can only ever hold one metric's identity — a Go template always
+	// renders to a single string — so a metric-math alarm's raw sub-metrics and
+	// its expression travel through here instead, to be decoded with
+	// encoding/json rather than forced through the single-string template path.
+	MetricsJSON string `json:"metrics_json,omitempty"`
 }
 
 type GetLogActionParams struct {

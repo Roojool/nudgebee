@@ -57,6 +57,48 @@ type QueryMetricsRequest struct {
 	Dimensions      []map[string]string `json:"dimensions,omitempty"` // Added field for metric dimensions
 	Statistics      []string            `json:"statistics"`
 	Query           string              `json:"query,omitempty"`
+	// MetricQueries carries a full CloudWatch metric-math query set (raw
+	// sub-metrics plus an expression referencing them by id), for alarms where
+	// MetricNamespace/MetricNames (a single metric) can't represent what the
+	// alarm actually evaluates. Populated only for that case; the single-metric
+	// fields above are ignored by providers when this is set.
+	MetricQueries []CloudWatchMetricEntry `json:"metric_queries,omitempty"`
+}
+
+// CloudWatchMetricEntry mirrors one entry of a CloudWatch alarm's
+// configuration.metrics array exactly as AWS emits it (camelCase field names)
+// — either a raw metric (MetricStat set) or a math expression referencing
+// other entries by Id (Expression set), never both. Kept provider-agnostic
+// (no AWS SDK types) so it can live on QueryMetricsRequest; the AWS provider
+// converts it to the SDK's own MetricDataQuery shape when calling GetMetricData.
+type CloudWatchMetricEntry struct {
+	Id         string                     `json:"id"`
+	ReturnData bool                       `json:"returnData"`
+	Label      string                     `json:"label,omitempty"`
+	Expression string                     `json:"expression,omitempty"`
+	MetricStat *CloudWatchMetricEntryStat `json:"metricStat,omitempty"`
+	// Period is set at this top level only for an Expression entry with no
+	// MetricStat — a Metrics Insights (SELECT ...) query has no sub-metric to
+	// inherit a period from, so CloudWatch requires it here instead. A metric
+	// math expression referencing other entries (e.g. "m1 - m2 - m3") doesn't
+	// need this; it derives timing from the MetricStat entries it references.
+	Period int `json:"period,omitempty"`
+}
+
+// CloudWatchMetricEntryStat is CloudWatchMetricEntry.MetricStat's shape,
+// named (rather than inline) so callers building one — construction call
+// sites, tests — don't have to repeat an anonymous struct literal type.
+type CloudWatchMetricEntryStat struct {
+	Stat   string                   `json:"stat"`
+	Period int                      `json:"period"`
+	Metric CloudWatchMetricEntryRef `json:"metric"`
+}
+
+// CloudWatchMetricEntryRef identifies one raw CloudWatch metric.
+type CloudWatchMetricEntryRef struct {
+	Namespace  string            `json:"namespace"`
+	Name       string            `json:"name"`
+	Dimensions map[string]string `json:"dimensions"`
 }
 
 type Account struct {
