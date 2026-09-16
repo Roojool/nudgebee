@@ -60,9 +60,10 @@ const (
 	DefaultMetricsProvider = "default_metrics_provider"
 	// DefaultLLMProvider marks which LLM integration an account resolves to
 	// when several are enabled. Like the other default_* flags it lives on the
-	// integrations_cloud_accounts link row, not in integration_config_values —
-	// llm-server reads that table as the credential itself, so a stray
-	// default_llm_provider row there would be merged into the credential map.
+	// integrations_cloud_accounts link row. The same name also has one
+	// integration_config_values row per LLM integration recording whether it is
+	// the tenant's default provider (see applyLLMTenantDefault); llm-server
+	// reads that map by key only, so the row never reaches a credential.
 	DefaultLLMProvider    = "default_llm_provider"
 	AccountId             = "account_id"
 	IntegrationConfigName = "integration_config_name"
@@ -773,6 +774,15 @@ func CreateIntegrationConfig(
 		case DefaultLLMProvider:
 			column = "default_llm_provider"
 		}
+		if column == "default_llm_provider" {
+			skipAccountFlags, err := applyLLMTenantDefault(dbms, ctx.GetSecurityContext().GetTenantId(), ctx.GetSecurityContext().GetUserId(), configId, value)
+			if err != nil {
+				return IntegrationDto{}, err
+			}
+			if skipAccountFlags {
+				continue
+			}
+		}
 		if column != "" {
 
 			// Check if value is a per-account JSON map (e.g. {"acc-id-1":"true","acc-id-2":"false"})
@@ -978,6 +988,62 @@ func CreateIntegrationConfig(
 		Schema:  integrationConfigSchema,
 		Id:      configId,
 	}, nil
+}
+
+// applyLLMTenantDefault records the "Default LLM provider" checkbox on the
+// integration itself, as its default_llm_provider row in
+// integration_config_values: the tenant has at most one integration with value
+// 'true', and llm.AttachTenantDefaultLLMProvider links it to accounts created
+// later. llm-server only reads that map by key, so the extra row never reaches
+// a provider credential.
+//
+// Marking an integration sets 'false' on the tenant's other LLM integrations
+// but leaves their per-account default_llm_provider flags alone, so changing
+// the tenant default never re-routes accounts that already have a provider.
+//
+// It returns skipAccountFlags=true for a "false" save on an integration that
+// was not the tenant default: that save is not an un-marking, so the
+// per-account flags it would otherwise clear are kept. A per-account JSON map
+// is the API-only form and leaves the tenant default untouched.
+func applyLLMTenantDefault(dbms *database.DatabaseManager, tenantId, userId, integrationId, value string) (skipAccountFlags bool, err error) {
+	if strings.HasPrefix(strings.TrimSpace(value), "{") {
+		return false, nil
+	}
+	if value == "true" {
+		if _, err := dbms.Exec(`
+			UPDATE integration_config_values icv
+			SET value = 'false', updated_at = now(), updated_by = $3
+			FROM integrations i
+			WHERE i.id = icv.integration_id
+			  AND i.tenant_id = $1 AND i.type = 'llm' AND i.id != $2
+			  AND icv.name = $4 AND icv.value = 'true'`,
+			tenantId, integrationId, userId, DefaultLLMProvider); err != nil {
+			return false, fmt.Errorf("failed to unmark the previous tenant default LLM provider: %w", err)
+		}
+		if _, err := dbms.Exec(`
+			INSERT INTO integration_config_values(
+				id, integration_id, name, value, is_encrypted, created_at, updated_at, created_by, updated_by
+			) VALUES ($1, $2, $3, 'true', false, now(), now(), $4, $4)
+			ON CONFLICT(integration_id, name)
+			DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+			uuid.NewString(), integrationId, DefaultLLMProvider, userId); err != nil {
+			return false, fmt.Errorf("failed to set tenant default LLM provider: %w", err)
+		}
+		return false, nil
+	}
+	res, err := dbms.Exec(`
+		UPDATE integration_config_values
+		SET value = 'false', updated_at = now(), updated_by = $3
+		WHERE integration_id = $1 AND name = $2 AND value = 'true'`,
+		integrationId, DefaultLLMProvider, userId)
+	if err != nil {
+		return false, fmt.Errorf("failed to clear tenant default LLM provider: %w", err)
+	}
+	cleared, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read tenant default LLM provider update: %w", err)
+	}
+	return cleared == 0, nil
 }
 
 func ListIntegrationConfigs(context *security.RequestContext, accountId string, integrationName string) ([]IntegrationDto, error) {

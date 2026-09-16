@@ -14,6 +14,7 @@ import { Button } from '@ui/Button';
 import { Divider } from '@ui/Divider';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from '@utils/colors';
+import { safeJSONParse } from '@utils/common';
 import apiUser from '@api1/user';
 import apiIntegrations from '@api1/integrations';
 import apiAskNudgebee from '@api1/ask-nudgebee';
@@ -550,15 +551,10 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
           ? editData.integrations_cloud_accounts.map((a) => a?.cloud_account_id).filter(Boolean)
           : []
       );
-      // The flag is per (config, account) link row, but the form offers one
-      // checkbox for all selected accounts — so a config that is default for
-      // any of its accounts shows as checked, and re-saving applies that
-      // answer to every selected account.
-      setIsDefault(
-        Array.isArray(editData.integrations_cloud_accounts)
-          ? editData.integrations_cloud_accounts.some((a) => a?.default_llm_provider === true)
-          : false
-      );
+      // The checkbox is the tenant's default LLM provider, recorded as the
+      // integration's own default_llm_provider config value rather than on its
+      // account links.
+      setIsDefault(cfg.default_llm_provider === 'true' || cfg.default_llm_provider === true);
       setConfigName(editData.name || '');
       setProvider(cfg.llm_provider || '');
       setModel(cfg.llm_model_name || '');
@@ -1542,22 +1538,36 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     }
   };
 
-  // findAccountsMissingLLMDefault checks, for each selected account, whether
-  // it already has at least one OTHER enabled LLM integration (limit:1 is
-  // enough — we only need existence, not the full list). An account with
-  // none is about to be left with zero default LLM config if this save goes
-  // through unchecked, which is exactly the "no LLM configuration found"
-  // failure this dialog exists to prevent. A check failure fails OPEN (the
-  // account is not flagged) rather than blocking the save on a client-side
-  // read that isn't the source of truth. EXPERIMENTAL — not yet validated.
+  // findAccountsMissingLLMDefault returns the selected accounts that would be
+  // left with several LLM providers and none flagged default if this save goes
+  // through unchecked. llm-server cannot choose between them and falls back to
+  // the environment credential, which is what this dialog warns about. An
+  // account whose only provider is this one needs no flag: it resolves to it.
+  //
+  // Saving unchecked keeps this config's existing per-account flags unless it
+  // was the tenant default (the backend only clears flags when un-marking), so
+  // an account it is already flagged on stays resolvable. A check failure
+  // fails OPEN (the account is not flagged) rather than blocking the save on a
+  // client-side read that isn't the source of truth.
   const findAccountsMissingLLMDefault = async () => {
+    const isFlaggedOn = (row, accId) =>
+      (Array.isArray(row?.integrations_cloud_accounts)
+        ? row.integrations_cloud_accounts
+        : safeJSONParse(row?.integrations_cloud_accounts) || []
+      ).some((a) => a?.cloud_account_id === accId && a?.default_llm_provider === true);
+    const wasTenantDefault = (Array.isArray(editData?.integration_config_values) ? editData.integration_config_values : []).some(
+      (v) => v?.name === 'default_llm_provider' && v?.value === 'true'
+    );
     const missing = await Promise.all(
       selectedAccountIds.map(async (accId) => {
         try {
-          const res = await apiIntegrations.listIntegrations({ type: 'llm', status: 'enabled', cloudAccountId: accId, limit: 1 });
+          if (isEdit && !wasTenantDefault && isFlaggedOn(editData, accId)) {
+            return null;
+          }
+          const res = await apiIntegrations.listIntegrations({ type: 'llm', status: 'enabled', cloudAccountId: accId, limit: 50 });
           const rows = res?.data?.data?.integrations_list?.rows;
           const others = Array.isArray(rows) ? rows.filter((row) => !(isEdit && editData?.id && row.id === editData.id)) : [];
-          return others.length === 0 ? accId : null;
+          return others.length > 0 && !others.some((row) => isFlaggedOn(row, accId)) ? accId : null;
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error('AddLLMConfigModal: default-coverage check failed', accId, err);
@@ -1671,8 +1681,8 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
             size='sm'
             checked={isDefault}
             onChange={setIsDefault}
-            label='Default LLM provider for the selected accounts'
-            description='Used for requests that do not pick a specific provider. Marking this one clears the flag from any other provider on the same account. With none marked, the system falls back to the environment credential.'
+            label='Default LLM provider'
+            description='Used for requests that do not pick a specific provider, and linked automatically to accounts added later. Only one provider can be the default; marking this one unmarks the previous default, but accounts already using it keep it. An account with a single provider always uses that provider.'
           />
 
           <Input
@@ -2531,20 +2541,14 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
         </Box>
       )}
       {showDefaultConfirm && (
-        <Modal
-          width='sm'
-          title='No default LLM configuration for this account'
-          open={showDefaultConfirm}
-          onClose={() => setShowDefaultConfirm(false)}
-        >
+        <Modal width='sm' title='No default LLM provider for this account' open={showDefaultConfirm} onClose={() => setShowDefaultConfirm(false)}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[4], p: ds.space[4] }}>
             <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700], lineHeight: 1.5 }}>
               {accountsMissingDefault.length === 1
-                ? 'The selected account has no LLM configuration yet.'
-                : `${accountsMissingDefault.length} of the selected accounts have no LLM configuration yet.`}{' '}
-              If you save without marking this one as default, no agent can use an LLM for{' '}
-              {accountsMissingDefault.length === 1 ? 'that account' : 'those accounts'} until one is set as default. Set this as default now, or save
-              anyway?
+                ? 'The selected account already has another LLM provider, and none is marked default.'
+                : `${accountsMissingDefault.length} of the selected accounts already have another LLM provider, and none is marked default.`}{' '}
+              If you save without marking this one as default, {accountsMissingDefault.length === 1 ? 'that account' : 'those accounts'} will fall
+              back to the environment credential. Set this as default now, or save anyway?
             </Typography>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[2], pt: ds.space[1] }}>
               <Button id='llm-default-confirm-cancel-btn' tone='secondary' size='md' onClick={() => setShowDefaultConfirm(false)} disabled={saving}>

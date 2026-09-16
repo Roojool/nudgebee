@@ -259,14 +259,14 @@ const ListIntegrations = ({ integrationName }) => {
     }
   };
 
+  // The tenant's default LLM provider is recorded as the integration's own
+  // default_llm_provider config value.
+  const isTenantDefault = (item) =>
+    (Array.isArray(item?.integration_config_values) ? item.integration_config_values : []).some(
+      (v) => v?.name === 'default_llm_provider' && v?.value === 'true'
+    );
+
   const linkedAccounts = (item) => (Array.isArray(item?.integrations_cloud_accounts) ? item.integrations_cloud_accounts : []);
-
-  const defaultAccountCount = (item) => linkedAccounts(item).filter((a) => a?.default_llm_provider === true).length;
-
-  const isDefaultForAllAccounts = (item) => {
-    const accounts = linkedAccounts(item);
-    return accounts.length > 0 && defaultAccountCount(item) === accounts.length;
-  };
 
   const getMenuItems = (item) => {
     // Same gate as the Add-integration button below (canManage('integrations',
@@ -313,7 +313,7 @@ const ListIntegrations = ({ integrationName }) => {
       // Offered only where it can take effect — a disabled config is skipped by
       // resolution — and hidden once this config already serves every account
       // it is linked to.
-      if (isLLMIntegration && status !== 'disabled' && !isDefaultForAllAccounts(item)) {
+      if (isLLMIntegration && status !== 'disabled' && !isTenantDefault(item)) {
         items.push({ label: 'Set as default', id: 'set-default' });
       }
     }
@@ -472,17 +472,10 @@ const ListIntegrations = ({ integrationName }) => {
   };
 
   // The marker sits on the config's own name rather than in a column, because
-  // it is a property of this config, not of any one account it serves.
-  //
-  // The UI applies one default to every account a config is linked to, so the
-  // normal state is all-or-nothing and a bare chip says it. A mixed state can
-  // only arrive through the API (the write path accepts a per-account map); it
-  // shows the count rather than being rounded to a plain "Default", which would
-  // misstate the accounts it excludes.
+  // it is a property of this config, not of any one account it serves: the
+  // tenant's default LLM provider, which accounts added later are linked to.
   const nameCell = (item) => {
-    const linked = linkedAccounts(item);
-    const marked = linked.filter((a) => a?.default_llm_provider === true).length;
-    if (!isLLMIntegration || marked === 0) {
+    if (!isLLMIntegration || !isTenantDefault(item)) {
       return { text: item.name };
     }
     return {
@@ -490,9 +483,9 @@ const ListIntegrations = ({ integrationName }) => {
         <Stack direction='row' spacing={0.5} alignItems='center' useFlexGap flexWrap='wrap'>
           <span>{item.name}</span>
           <Chip size='sm' variant='tag' tone='success'>
-            {marked === linked.length ? 'Default' : `Default (${marked} of ${linked.length})`}
+            Default
           </Chip>
-          <Tooltip title='Accounts added here use this provider by default.'>
+          <Tooltip title='Accounts added later use this provider automatically.'>
             <InfoOutlinedIcon sx={{ fontSize: ds.text.body, color: ds.gray[500], cursor: 'help' }} />
           </Tooltip>
         </Stack>

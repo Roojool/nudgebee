@@ -20,6 +20,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
 	"nudgebee/services/license"
+	"nudgebee/services/llm"
 	"nudgebee/services/security"
 	tenantpkg "nudgebee/services/tenant"
 	"slices"
@@ -1099,6 +1100,10 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 			}
 			return AccountCreateResponse{}, fmt.Errorf("account: unable to complete account setup, please try again")
 		}
+	}
+
+	if err := llm.AttachTenantDefaultLLMProvider(context.GetContext(), dbms, query.Tenant, newAccountId); err != nil {
+		context.GetLogger().Error("account: created, but failed to attach the default LLM provider", "error", err, "account", newAccountId)
 	}
 
 	// invalidate tenant cache

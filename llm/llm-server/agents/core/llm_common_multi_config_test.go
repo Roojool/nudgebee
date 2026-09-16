@@ -59,20 +59,22 @@ func TestFetchLLMIntegrationConfigByAccount_PrefersFlaggedDefault(t *testing.T) 
 	require.NotContains(t, cfg, "llm_model_name", "keys from the non-default config must not appear")
 }
 
-// A single UNFLAGGED integration must NOT act as the account default: a config
-// saved without marking default cannot silently capture the account's LLM
-// traffic. Pre-V840 accounts carry the flag via that migration's backfill;
-// anything unflagged resolves ENV until its operator marks it default.
-func TestFetchLLMIntegrationConfigByAccount_SingleUnflaggedConfigFallsThrough(t *testing.T) {
+// A single UNFLAGGED integration resolves as the account's provider: linking
+// exactly one provider to an account is the operator's choice for it, so the
+// default checkbox only matters once an account has several.
+func TestFetchLLMIntegrationConfigByAccount_SingleUnflaggedConfigResolves(t *testing.T) {
 	dbManager, mock := mockLLMConfigDB(t)
 
 	expectSelect(mock, [2]any{"int-a", false})
-	// No config-value query may run — the resolver falls through to ENV.
+	expectConfig(mock, "int-a",
+		[2]string{"llm_provider", "openai"},
+		[2]string{"llm_provider_api_key", "key-openai"})
 
 	cfg, err := fetchLLMIntegrationConfigByAccount(nil, dbManager, "acct-single")
 
 	require.NoError(t, err)
-	require.Nil(t, cfg, "an unflagged config must never resolve as the account default")
+	require.Equal(t, "openai", cfg["llm_provider"])
+	require.Equal(t, "key-openai", cfg["llm_provider_api_key"])
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

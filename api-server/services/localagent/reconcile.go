@@ -25,6 +25,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/llm"
 	"nudgebee/services/security"
 )
 
@@ -234,6 +235,12 @@ func reconcile(ctx context.Context, logger *slog.Logger, dbms *database.Database
 		return fmt.Errorf("local agent: failed to commit: %w", err)
 	}
 	committed = true
+
+	if created {
+		if err := llm.AttachTenantDefaultLLMProvider(ctx, dbms, tenantID, accountID); err != nil {
+			logger.Error("local agent: registered, but failed to attach the default LLM provider", "error", err, "account", accountID, "tenant", tenantID)
+		}
+	}
 
 	// The security context caches the tenant's account ids in Redis for 30
 	// minutes, and Redis outlives a services-server restart. Without this the

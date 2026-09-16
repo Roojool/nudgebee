@@ -4052,16 +4052,13 @@ func fetchLLMIntegrationConfigByAccount(ctx *security.RequestContext, dbManager 
 // integrations to resolve against, returning "" when there is no single answer.
 //
 // The choice is: the integration flagged default_llm_provider on its account
-// link row, or nothing. An unflagged config never resolves as the account
-// default — not even when it is the only one — so a config a user saved
-// without marking default cannot silently capture all of the account's LLM
-// traffic. Pre-flag accounts were flagged by the V840 backfill; a config
-// created since then only resolves as default once its operator marks it so.
+// link row; otherwise the account's only enabled LLM integration, since linking
+// exactly one provider to an account is itself the operator's choice for it.
 //
-// Every no-single-answer shape ("none flagged", "several flagged") falls
-// through to ENV, the documented final fallback, rather than guessing —
-// picking one anyway would silently bind an account to a credential its
-// operator didn't choose.
+// Every no-single-answer shape ("several flagged", "several linked and none
+// flagged") falls through to ENV, the documented final fallback, rather than
+// guessing — picking one anyway would silently bind an account to a credential
+// its operator didn't choose.
 func selectAccountLLMIntegration(ctx *security.RequestContext, dbManager *common.DatabaseManager, accountId string) (string, error) {
 	query := `SELECT i.id, ia.default_llm_provider FROM integrations i
 			  JOIN integrations_cloud_accounts ia ON i.id = ia.integration_id
@@ -4110,8 +4107,10 @@ func selectAccountLLMIntegration(ctx *security.RequestContext, dbManager *common
 		slog.Error("LLM config: account has multiple integrations flagged default; falling back to ENV",
 			"accountId", accountId, "defaultCount", len(defaults))
 		return "", nil
-	case len(all) > 0:
-		slog.Warn("LLM config: account has enabled integrations but none flagged default; falling back to ENV",
+	case len(all) == 1:
+		return all[0], nil
+	case len(all) > 1:
+		slog.Warn("LLM config: account has several enabled integrations but none flagged default; falling back to ENV",
 			"accountId", accountId, "count", len(all))
 		return "", nil
 	}
