@@ -5,6 +5,7 @@ import (
 	"nudgebee/llm/security"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -497,4 +498,51 @@ func getSafeFloat(f *float64) float64 {
 		return 0.0
 	}
 	return *f
+}
+
+// TestMergedApiTimeCalculation_ConcurrentSubAgents reproduces #38129: three
+// sub-agents each spend 10s on an LLM call at the same time. A naive sum
+// (calculateLatencyStats) reports 30s of "API time" against a ~10s wall-clock
+// window, i.e. 300% API time. The merged calculation must report ~10s, since
+// the calls overlap almost entirely.
+func TestMergedApiTimeCalculation_ConcurrentSubAgents(t *testing.T) {
+	end := time.Date(2026, 1, 1, 12, 0, 10, 0, time.UTC)
+	records := []TokenUsageDetailedRecord{
+		{CreatedAt: end, LatencySeconds: sql.NullFloat64{Float64: 10.0, Valid: true}},
+		{CreatedAt: end, LatencySeconds: sql.NullFloat64{Float64: 10.0, Valid: true}},
+		{CreatedAt: end, LatencySeconds: sql.NullFloat64{Float64: 10.0, Valid: true}},
+	}
+
+	merged := calculateMergedApiTimeSeconds(records)
+
+	assert.NotNil(t, merged)
+	assert.Equal(t, 10.0, *merged)
+}
+
+// TestMergedApiTimeCalculation_SequentialCalls checks that non-overlapping
+// calls still sum normally, so the fix for #38129 doesn't undercount the
+// common (non-parallel) case.
+func TestMergedApiTimeCalculation_SequentialCalls(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	records := []TokenUsageDetailedRecord{
+		{CreatedAt: base.Add(2 * time.Second), LatencySeconds: sql.NullFloat64{Float64: 2.0, Valid: true}},  // [0s,2s]
+		{CreatedAt: base.Add(10 * time.Second), LatencySeconds: sql.NullFloat64{Float64: 3.0, Valid: true}}, // [7s,10s]
+		{CreatedAt: base, LatencySeconds: sql.NullFloat64{Valid: false}},                                    // ignored
+	}
+
+	merged := calculateMergedApiTimeSeconds(records)
+
+	assert.NotNil(t, merged)
+	assert.Equal(t, 5.0, *merged) // 2s + 3s, no overlap
+}
+
+func TestMergedApiTimeCalculation_NoValidRecords(t *testing.T) {
+	records := []TokenUsageDetailedRecord{
+		{LatencySeconds: sql.NullFloat64{Valid: false}},
+		{LatencySeconds: sql.NullFloat64{Float64: 0, Valid: true}},
+	}
+
+	merged := calculateMergedApiTimeSeconds(records)
+
+	assert.Nil(t, merged)
 }
