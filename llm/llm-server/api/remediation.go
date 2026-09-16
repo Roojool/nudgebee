@@ -421,11 +421,27 @@ func processRemediationGet(c *gin.Context, tracer trace.Tracer, meter metric.Met
 		c.JSON(200, buildApiResponse(plan, nil))
 		return
 	}
+	// When this event has no plan of its own, the lookup falls back to the newest plan saved for the
+	// same alert - one generated from an earlier firing's investigation. The panel treats any plan it
+	// gets back as already generated, so restoring that one shows the operator another incident's root
+	// cause, confidence and commands, and never builds a plan for this incident. Returning no plan here
+	// makes the panel generate one from this event's own investigation.
+	if !planSavedForEvent(saved, request.EventId) {
+		c.JSON(200, buildApiResponse(plan, nil))
+		return
+	}
 	if err := json.Unmarshal([]byte(saved.Analysis), &plan); err != nil {
 		ctx.GetLogger().Warn("remediation_get: failed to parse saved plan", "error", err)
 		plan = RemediationPlan{}
 	}
 	c.JSON(200, buildApiResponse(plan, nil))
+}
+
+// planSavedForEvent reports whether a stored plan was generated for eventId. A row with no event id
+// cannot be attributed to any incident, so it is not restored either.
+func planSavedForEvent(saved *events.EventAnalysis, eventId string) bool {
+	owner := strings.TrimSpace(saved.RelatedEventId)
+	return owner != "" && strings.EqualFold(owner, strings.TrimSpace(eventId))
 }
 
 // persistRemediationPlan upserts the plan into event_log_analysis under the `remediation` analysis

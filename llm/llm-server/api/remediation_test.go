@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"nudgebee/llm/workspace"
+	"strings"
 	"testing"
 
 	"nudgebee/llm/common"
+	"nudgebee/llm/events"
 	"nudgebee/llm/tools"
 
 	"github.com/stretchr/testify/assert"
@@ -676,4 +678,19 @@ func TestEventRegionOnlyForCloudAccounts(t *testing.T) {
 	assert.Equal(t, "", eventRegion("", acct, evt), "an unknown provider must not be treated as cloud")
 	assert.Equal(t, "", eventRegion("AWS", "", evt), "no account, no lookup")
 	assert.Equal(t, "", eventRegion("AWS", acct, ""), "no event, no lookup")
+}
+
+// A plan is stored per alert, so a new firing's lookup can land on the plan an earlier firing
+// generated. Only a plan saved for the requested event may be restored; anything else makes the
+// panel present another incident's root cause and commands as this one's.
+func TestPlanSavedForEvent_OnlyRestoresThisIncidentsPlan(t *testing.T) {
+	const thisEvent = "f6a775cf-cad9-4a56-a1d2-3559f5db955b"
+
+	assert.True(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: thisEvent}, thisEvent))
+	assert.True(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: strings.ToUpper(thisEvent)}, thisEvent),
+		"uuid case must not decide ownership")
+	assert.False(t, planSavedForEvent(&events.EventAnalysis{RelatedEventId: "a3adb998-a45c-44fe-8a20-246c2fd63e10"}, thisEvent),
+		"a plan generated for an earlier firing of the same alert")
+	assert.False(t, planSavedForEvent(&events.EventAnalysis{}, thisEvent),
+		"a row with no event id belongs to no incident")
 }
