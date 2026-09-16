@@ -21,7 +21,8 @@ import PriorityPinControl from '@shared/widgets/PriorityPinControl';
 import InvestigateDropdown from '@components/k8s/investigate/InvestigateDropdown';
 import { EventStateRows, LinkedEventState } from '@components/k8s/investigate/EventStateRows';
 import k8sApi from '@api1/kubernetes';
-import { hasWriteAccess } from '@lib/auth';
+import { hasWriteAccess, getUserSession } from '@lib/auth';
+import { snackbar } from '@shared/snackbarService';
 import { exitCodeMapping, snakeToTitleCase } from 'src/utils/common';
 import { hasEventSubjectLink } from 'src/utils/eventSubjectLink';
 import TroubleShootIcon from '@assets/home/node-errors-icon.svg';
@@ -122,6 +123,46 @@ function InvestigateSidebar({
       cancelled = true;
     };
   }, [row?.id, row?.cloud_account_id, row?.incident_member_count]);
+
+  // Who manually closed this event, if anyone — same batch lookup the Events
+  // table uses (event_get_status_change), just called with a single id here.
+  // Only returns a name when the LATEST status change was a manual close, so
+  // it's re-fetched whenever the event's own status flips (a reopen elsewhere,
+  // or this panel's own toggle below, can make a previously-set name stale).
+  const [closedByName, setClosedByName] = useState(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    setClosedByName(undefined);
+    if (row?.id && row?.status === 'CLOSED') {
+      k8sApi
+        .getEventStatusChanges([row.id])
+        .then((changes) => {
+          if (cancelled) return;
+          const match = (changes || []).find((c) => c.event_id === row.id);
+          if (match?.changed_by_name) setClosedByName(match.changed_by_name);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [row?.id, row?.status]);
+
+  const handleToggleAlertStatus = async (eventId, newStatus) => {
+    try {
+      await k8sApi.updateEventStatus(eventId, newStatus);
+      onRowChange((prev) => ({ ...prev, status: newStatus }));
+      if (newStatus === 'CLOSED') {
+        const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
+        if (closerName) setClosedByName(closerName);
+      } else {
+        setClosedByName(undefined);
+      }
+      snackbar.success(newStatus === 'CLOSED' ? 'Event closed' : 'Event opened');
+    } catch (_error) {
+      snackbar.error(newStatus === 'CLOSED' ? 'Failed to close event' : 'Failed to open event');
+    }
+  };
 
   const detailsPathPrefix = isCloud ? '/cloud-account/details' : '/kubernetes/details';
 
@@ -296,7 +337,12 @@ function InvestigateSidebar({
                 }
               />
             </Box>
-            <EventStateRows row={row} />
+            <EventStateRows
+              row={row}
+              canToggleStatus={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
+              closedByName={closedByName}
+              onToggleStatus={handleToggleAlertStatus}
+            />
             <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
               <Text value={'Severity'} secondaryText />
               <Box>

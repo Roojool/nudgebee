@@ -12,7 +12,6 @@ import CustomTable from '@shared/tables/CustomTable';
 import { Button as DsButton } from '@ui/Button';
 import { DropdownMenu as DsDropdownMenu } from '@ui/DropdownMenu';
 import { SeverityIcon as DsSeverityIcon } from '@ui/SeverityIcon';
-import { Label } from '@ui/Label';
 import { ds } from 'src/utils/colors';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import HelpBeeModal from '@components/helpbee';
@@ -25,8 +24,10 @@ import { useEventCloudFilter } from '@hooks/useCloudFilters';
 import { syncFilterFromQuery, toSeverityLevel } from '@utils/common';
 import { FiArrowRight } from 'react-icons/fi';
 import NBStatusBadge from '@shared/widgets/NBStatusBadge';
+import AlertStatusBadge from '@shared/widgets/AlertStatusBadge';
+import k8sApi from '@api1/kubernetes';
 import { usePagination } from '@hooks/usePagination';
-import { hasReadAccess, hasWriteAccess } from '@lib/auth';
+import { hasReadAccess, hasWriteAccess, getUserSession } from '@lib/auth';
 import { TicketsIcon, dashboardIcon1 as ClassifyIcon, infoIcon } from '@assets';
 import ticketsApi from '@api1/tickets';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
@@ -95,19 +96,6 @@ const getValidParam = (param: any, defaultValue = ''): string => {
     return defaultValue;
   }
   return String(param);
-};
-
-const getStatusText = (status: string | undefined): string => {
-  if (status === 'FIRING') return 'Open';
-  if (status === 'CLOSED') return 'Closed';
-  if (status === 'RESOLVED') return 'Resolved';
-  return status || '-';
-};
-
-const getStatusTone = (status: string | undefined): 'critical' | 'success' | 'neutral' => {
-  if (status === 'FIRING') return 'critical';
-  if (status === 'RESOLVED') return 'success';
-  return 'neutral';
 };
 
 const parseSubjectName = (item: any): string | undefined => {
@@ -201,6 +189,10 @@ const CloudAccountEvents = (props: {
   const rawEventsRef = useRef<any[]>([]);
   const ticketReferenceMapRef = useRef<Map<string, any>>(new Map());
   const buildRowDataRef = useRef<((evts: any[], map: Map<string, any>) => ICustomTableRow[][]) | null>(null);
+  // event id -> the display name of whoever manually closed it, prefetched
+  // below alongside the ticket badges. Read directly by mapEventToRow's Alert
+  // Status cell (see KubernetesEvents.jsx's identical pattern).
+  const closedByMapRef = useRef<Map<string, string>>(new Map());
 
   const cloudAccountEventsTable = 'cloudaccount-events';
   const _showEllipsis = true;
@@ -370,6 +362,23 @@ const CloudAccountEvents = (props: {
     setEvents(rawEventsRef.current.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));
   };
 
+  const handleToggleEventStatus = async (eventId: string, newStatus: string) => {
+    try {
+      await k8sApi.updateEventStatus(eventId, newStatus);
+      rawEventsRef.current = rawEventsRef.current.map((e: any) => (e.id === eventId ? { ...e, status: newStatus } : e));
+      if (newStatus === 'CLOSED') {
+        const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
+        if (closerName) closedByMapRef.current.set(eventId, closerName);
+      } else {
+        closedByMapRef.current.delete(eventId);
+      }
+      setEvents(rawEventsRef.current.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));
+      snackbar.success(newStatus === 'CLOSED' ? 'Event closed' : 'Event opened');
+    } catch (_error) {
+      snackbar.error(newStatus === 'CLOSED' ? 'Failed to close event' : 'Failed to open event');
+    }
+  };
+
   const mapEventToRow = (item: any, ticketReferenceMap: Map<string, any>): ICustomTableRow[] => {
     const subjectName = parseSubjectName(item);
     const rowData: ICustomTableRow[] = [];
@@ -449,9 +458,13 @@ const CloudAccountEvents = (props: {
     rowData.push({
       component: (
         <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <Label tone={getStatusTone(item?.status)} size='sm'>
-            {getStatusText(item?.status)}
-          </Label>
+          <AlertStatusBadge
+            eventId={item.id}
+            status={item?.status}
+            canToggle={hasWriteAccess(item.account_id || props.accountId)}
+            closedByName={closedByMapRef.current.get(item.id)}
+            onToggle={handleToggleEventStatus}
+          />
           <Text value={item.source?.replace('AWS_', '')} secondaryText sx={{ fontSize: ds.text.caption, mt: 'var(--ds-space-1)' }} />
         </Box>
       ),
@@ -544,13 +557,33 @@ const CloudAccountEvents = (props: {
           return;
         }
 
-        // Render rows now; ticket badges are a non-blocking second pass below.
+        // Render rows now; ticket badges and "Closed by" data are non-blocking
+        // second passes below.
         rawEventsRef.current = events;
         ticketReferenceMapRef.current = new Map();
+        closedByMapRef.current = new Map();
         buildRowDataRef.current = (evts: any[], map: Map<string, any>) => evts.map((item: any) => mapEventToRow(item, map));
         setEvents(events.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));
         setEventsCount(totalCount);
         setLoading(false);
+
+        const closedEventIds = events.filter((item: any) => item.status === 'CLOSED').map((item: any) => item.id);
+        if (closedEventIds.length) {
+          k8sApi
+            .getEventStatusChanges(closedEventIds)
+            .then((changes: any[]) => {
+              if (isCancelled()) return;
+              const closedByMap = new Map<string, string>();
+              (changes || []).forEach((change) => {
+                if (change.event_id && change.changed_by_name) closedByMap.set(change.event_id, change.changed_by_name);
+              });
+              closedByMapRef.current = closedByMap;
+              setEvents(events.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));
+            })
+            .catch(() => {
+              // Non-critical: the badge just falls back to no reopen option.
+            });
+        }
 
         const uniqueReferenceIds = new Set();
         events.forEach((item: any) => {

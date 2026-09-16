@@ -322,6 +322,75 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 		}
 		return
 
+	case "event_update_status":
+		eventID, ok := actionRequest["event_id"].(string)
+		if !ok || eventID == "" {
+			c.JSON(400, common.ErrorActionBadRequest("event_id is required"))
+			return
+		}
+		status, ok := actionRequest["status"].(string)
+		if !ok || status == "" {
+			c.JSON(400, common.ErrorActionBadRequest("status is required"))
+			return
+		}
+
+		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		resp, err := event.UpdateEventStatus(ctx, event.UpdateEventStatusRequest{EventID: eventID, Status: status}, ctx.GetSecurityContext().GetUserId())
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		c.JSON(200, resp)
+		if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{{
+			TenantId:      ctx.GetSecurityContext().GetTenantId(),
+			UserId:        ctx.GetSecurityContext().GetUserId(),
+			EventTime:     time.Now().UTC(),
+			EventCategory: audit.EventAlertEvent,
+			EventType:     audit.EventTypeEventUpdate,
+			EventState:    map[string]any{"event_id": eventID, "status": status},
+			EventActor:    audit.EventActorApiService,
+			EventTarget:   eventID,
+			EventAction:   audit.EventActionUpdate,
+			EventStatus:   audit.EventStatusSuccess,
+		}}}); err != nil {
+			ctx.GetLogger().Error("failed to create audit event", "error", err)
+		}
+		return
+
+	case "event_get_status_change":
+		rawEventIDs, ok := actionRequest["event_ids"].([]interface{})
+		if !ok || len(rawEventIDs) == 0 {
+			c.JSON(400, common.ErrorActionBadRequest("event_ids is required"))
+			return
+		}
+		eventIDs := make([]string, 0, len(rawEventIDs))
+		for _, v := range rawEventIDs {
+			if s, ok := v.(string); ok && s != "" {
+				eventIDs = append(eventIDs, s)
+			}
+		}
+
+		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		resp, err := event.GetEventManualStatusChanges(ctx, eventIDs)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		c.JSON(200, resp)
+		return
+
 	case "add_event_evidence":
 		// Lets an automation attach its collected output to the event that
 		// triggered it. trigger_investigation cannot do this: its duplicate

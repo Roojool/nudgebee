@@ -1234,6 +1234,19 @@ type Mutation {
 }
 
 type Mutation {
+  event_update_status(
+    event_id: String!
+    status: String!
+  ): UpdateEventStatusResponse
+}
+
+type Mutation {
+  event_get_status_change(
+    event_ids: [String!]!
+  ): [EventManualStatusChangeResponse!]
+}
+
+type Mutation {
   event_update_triage_rule(
     cloud_account_id: String!
     rule_id: String!
@@ -9203,6 +9216,19 @@ type UpdateNBStatusResponse {
   success: Boolean!
   prev_status: String!
   new_status: String!
+}
+
+type UpdateEventStatusResponse {
+  success: Boolean!
+  prev_status: String!
+  new_status: String!
+}
+
+type EventManualStatusChangeResponse {
+  event_id: String!
+  changed_by_name: String!
+  status: String!
+  changed_at: String!
 }
 
 type GetBulkOperationStatusResponse {

@@ -18,9 +18,9 @@ import SearchInput from '@ui/SearchInput';
 // DS V2 compositions / format / widgets
 import Datetime from '@shared/format/Datetime';
 import Text from '@shared/format/Text';
-import { Label } from '@ui/Label';
 import TicketLink from '@shared/links/TicketLink';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
+import AlertStatusBadge from '@shared/widgets/AlertStatusBadge';
 import { toast as snackbar } from '@ui/Toast';
 import ScoreDisplay from '@shared/widgets/ScoreDisplay';
 import PriorityPinControl from '@shared/widgets/PriorityPinControl';
@@ -50,7 +50,7 @@ import k8sApi from '@api1/kubernetes';
 import ticketsApi from '@api1/tickets';
 import apiUser from '@api1/user';
 import { getDateString, getLast24Hrs } from '@lib/datetime';
-import { hasWriteAccess, hasPermission, getCurrentTenant } from '@lib/auth';
+import { hasWriteAccess, hasPermission, getCurrentTenant, getUserSession } from '@lib/auth';
 import { safeJSONParse, titleCaseForAggregationKey, syncFilterFromQuery, toSeverityLevel, EXCLUDED_TRIAGE_AGGREGATION_KEYS } from 'src/utils/common';
 import { applyFiltersOnRouter } from '@lib/router';
 import { action } from 'src/utils/actionStyles';
@@ -780,6 +780,9 @@ const KubernetesEventsTable = ({
 
   const rawEventsRef = useRef([]);
   const ticketReferenceMapRef = useRef(new Map());
+  // event id -> the display name of whoever manually closed it, prefetched in
+  // listEvents' non-blocking second pass for the current page's Closed rows.
+  const closedByMapRef = useRef(new Map());
   const buildRowDataRef = useRef(null);
   // Sequence guards so a slow, superseded request can't overwrite state set by a
   // later, faster one (e.g. rapid filter changes firing overlapping API calls).
@@ -958,6 +961,9 @@ const KubernetesEventsTable = ({
 
   const getMenuItems = (item, disableTicket) => {
     const canCreateTicket = canCreateTicketFor(item);
+    // Close/Open lives on the Alert Status badge's own dropdown (AlertStatusBadge),
+    // not here — matching how Triage Status exposes its transitions on the badge
+    // rather than in this overflow menu.
     let MENU_ITEMS;
     if (hasWriteAccess(item.account_id)) {
       MENU_ITEMS = [
@@ -1019,6 +1025,25 @@ const KubernetesEventsTable = ({
       if (accountId) params.set('eventCluster', accountId);
       if (data.subject_namespace) params.set('eventNamespace', data.subject_namespace);
       router.push(`/automation/new?${params.toString()}`);
+    }
+  };
+
+  const handleToggleEventStatus = async (eventId, newStatus) => {
+    try {
+      await k8sApi.updateEventStatus(eventId, newStatus);
+      rawEventsRef.current = rawEventsRef.current.map((e) => (e.id === eventId ? { ...e, status: newStatus } : e));
+      if (newStatus === 'CLOSED') {
+        const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
+        if (closerName) closedByMapRef.current.set(eventId, closerName);
+      } else {
+        closedByMapRef.current.delete(eventId);
+      }
+      if (buildRowDataRef.current) {
+        setData(buildRowDataRef.current(rawEventsRef.current, ticketReferenceMapRef.current));
+      }
+      snackbar.success(newStatus === 'CLOSED' ? 'Event closed' : 'Event opened');
+    } catch (_error) {
+      snackbar.error(newStatus === 'CLOSED' ? 'Failed to close event' : 'Failed to open event');
     }
   };
 
@@ -1407,10 +1432,12 @@ const KubernetesEventsTable = ({
                   alignItems: 'center',
                 }}
               >
-                <Label
-                  margin='0'
-                  text={item.status === 'FIRING' ? 'Open' : item.status === 'CLOSED' ? 'Closed' : item.status}
-                  variant={item.status === 'FIRING' ? 'red' : item.status === 'CLOSED' ? 'grey' : ''}
+                <AlertStatusBadge
+                  eventId={item.id}
+                  status={item.status}
+                  canToggle={hasWriteAccess(item.account_id)}
+                  closedByName={closedByMapRef.current.get(item.id)}
+                  onToggle={handleToggleEventStatus}
                 />
               </Box>
             ),
@@ -1568,6 +1595,7 @@ const KubernetesEventsTable = ({
       const events = res.data?.events || [];
       rawEventsRef.current = events;
       ticketReferenceMapRef.current = new Map();
+      closedByMapRef.current = new Map();
       setData(buildRowData(events, ticketReferenceMapRef.current));
       setLoading(false);
 
@@ -1576,6 +1604,28 @@ const KubernetesEventsTable = ({
         if (item.fingerprint) uniqueReferenceIds.add(item.fingerprint);
       });
       const references = Array.from(uniqueReferenceIds);
+
+      // "Closed by" tooltip / reopen-dropdown data for the current page's Closed
+      // rows — batched in one call and independent of the tickets pass below, so
+      // neither hovering nor opening the badge ever waits on a request (see
+      // AlertStatusBadge).
+      const closedEventIds = events.filter((item) => item.status === 'CLOSED').map((item) => item.id);
+      if (closedEventIds.length) {
+        k8sApi
+          .getEventStatusChanges(closedEventIds)
+          .then((changes) => {
+            if (requestId !== eventsRequestIdRef.current) return;
+            const closedByMap = new Map();
+            (changes || []).forEach((change) => {
+              if (change.event_id && change.changed_by_name) closedByMap.set(change.event_id, change.changed_by_name);
+            });
+            closedByMapRef.current = closedByMap;
+            setData(buildRowData(events, ticketReferenceMapRef.current));
+          })
+          .catch(() => {
+            // Non-critical: the tooltip just falls back to plain "Closed".
+          });
+      }
 
       return ticketsApi.listTicketsSummary({ reference_id: references }).then((ticketRes) => {
         if (requestId !== eventsRequestIdRef.current) return;

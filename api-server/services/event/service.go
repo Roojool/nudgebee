@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/samber/lo"
 	"gopkg.in/yaml.v2"
 )
@@ -4229,6 +4231,216 @@ func UpdateEvent(ctx *security.RequestContext, request models.UpdateEventRequest
 	}
 
 	return r, nil
+}
+
+// manualStatusChangeReasons is the set of statuses the Events three-dot menu's
+// Close/Open toggle accepts, and the event_history change_reason recorded for
+// each so a later GetEventManualStatusChange lookup can tell a manual flip
+// apart from an automated one (ingestion, webhook resolves, the inactive-
+// resource sweep) touching the same status field.
+var manualStatusChangeReasons = map[string]string{
+	string(EventStatusClosed): "manual_close",
+	string(EventStatusFiring): "manual_reopen",
+}
+
+// UpdateEventStatusRequest manually opens or closes an event's alert status.
+type UpdateEventStatusRequest struct {
+	EventID string `json:"event_id" mapstructure:"event_id"`
+	Status  string `json:"status" mapstructure:"status"`
+}
+
+type UpdateEventStatusResponse struct {
+	Success    bool   `json:"success"`
+	PrevStatus string `json:"prev_status"`
+	NewStatus  string `json:"new_status"`
+}
+
+// UpdateEventStatus manually opens or closes an event (Troubleshoot > Events >
+// three-dot menu > Close/Open). Unlike UpdateEvent, it writes status directly
+// rather than round-tripping through InsertEvent: InsertEvent re-persists the
+// full event content and is meant for metadata edits, while a status-only
+// change here mirrors CloseEventsForInactiveResources's direct UPDATE +
+// event_history audit row so a manual change is indistinguishable in the
+// timeline from any other status change.
+func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRequest, userID string) (*UpdateEventStatusResponse, error) {
+	changeReason, ok := manualStatusChangeReasons[request.Status]
+	if !ok {
+		return nil, fmt.Errorf("unsupported status: %s (only %s and %s are supported)", request.Status, EventStatusClosed, EventStatusFiring)
+	}
+
+	r, err := GetEvent(ctx, request.EventID)
+	if err != nil {
+		ctx.GetLogger().Error("services.UpdateEventStatus error getting event", "error", err)
+		return nil, err
+	}
+	if r.CloudAccountId == nil || *r.CloudAccountId == "" {
+		return nil, fmt.Errorf("event %s has no account association", request.EventID)
+	}
+	if !ctx.GetSecurityContext().HasAccountAccess(*r.CloudAccountId, security.SecurityAccessTypeUpdate) {
+		return nil, common.ErrorUnauthorized("access denied for account: " + *r.CloudAccountId)
+	}
+
+	prevStatus := common.StrVal(r.Status)
+	if prevStatus == request.Status {
+		return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status}, nil
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to get db manager: %w", err)
+	}
+
+	var endsAt sql.NullTime
+	if request.Status == string(EventStatusClosed) {
+		endsAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+	}
+
+	_, err = dbms.Db.ExecContext(ctx.GetContext(),
+		`UPDATE events SET status = $1, ends_at = $2, updated_at = now() AT TIME ZONE 'utc' WHERE id = $3 AND status <> $1`,
+		request.Status, endsAt, request.EventID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to update event status: %w", err)
+	}
+
+	logger := ctx.GetLogger()
+	tenant := common.StrVal(r.Tenant)
+	accountId := *r.CloudAccountId
+	// Detach from the request context: this fire-and-forget write outlives the HTTP
+	// request, and the request ctx is cancelled the moment the handler returns its
+	// response (see the equivalent comment on triage.UpdateNBStatus).
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if histErr := insertEventStatusHistory(bgCtx, dbms.Db, request.EventID, tenant, accountId, prevStatus, request.Status, changeReason, userID); histErr != nil {
+			logger.Error("event: failed to record manual status-change history", "error", histErr, "event_id", request.EventID)
+		}
+	}()
+
+	return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status}, nil
+}
+
+// EventManualStatusChange is the most recent manual open/close of an event,
+// surfaced as the "Closed by <user>" tooltip on the Alert Status badge.
+type EventManualStatusChange struct {
+	EventID       string    `json:"event_id"`
+	ChangedByName string    `json:"changed_by_name"`
+	Status        string    `json:"status"`
+	ChangedAt     time.Time `json:"changed_at"`
+}
+
+// GetEventManualStatusChanges batch-looks-up the most recent status-field
+// entry in event_history for each of eventIDs, resolving the acting user's
+// display name in the same query so the Events table can prefetch tooltip
+// data for every currently-rendered "Closed" row in one round trip (instead
+// of a per-row fetch-on-hover, which meant two sequential dependent requests
+// — status lookup, then user lookup — before the tooltip could show anything).
+// An event is included in the result only if its latest status-history row is
+// a manual close (change_reason "manual_close", new_value "CLOSED"); an event
+// whose current status came from ingestion, a webhook resolve, the inactive-
+// resource sweep, or was never touched is simply absent from the result.
+//
+// Deliberately CLOSED-only, not "any manual change": callers only ever ask
+// about events currently showing as CLOSED, but ingestion and webhook resolves
+// write no history row on their own status flips, so the latest row can be a
+// stale manual_reopen even though the event has since been closed again by
+// one of those untracked paths (reopen, then an unrelated webhook resolves it
+// again) — attributing that close to the old reopener would be wrong. Pinning
+// the check to the "CLOSED" value, not just "some manual reason", is what
+// rules that out. Taking only the LATEST row (not the latest CLOSED one) is
+// what keeps this correct across repeated toggles: close, reopen, close again
+// correctly attributes to the third close, not the first.
+func GetEventManualStatusChanges(ctx *security.RequestContext, eventIDs []string) ([]EventManualStatusChange, error) {
+	if len(eventIDs) == 0 {
+		return nil, nil
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to get db manager: %w", err)
+	}
+
+	var rows []struct {
+		EventID        string         `db:"event_id"`
+		CloudAccountId string         `db:"cloud_account_id"`
+		ChangedBy      sql.NullString `db:"changed_by"`
+		ChangedByName  sql.NullString `db:"changed_by_name"`
+		NewValue       []byte         `db:"new_value"`
+		ChangeReason   string         `db:"change_reason"`
+		ChangedAt      time.Time      `db:"changed_at"`
+	}
+	err = dbms.Db.SelectContext(ctx.GetContext(), &rows,
+		`SELECT DISTINCT ON (eh.event_id)
+			eh.event_id, eh.cloud_account_id, eh.changed_by, eh.new_value, eh.change_reason, eh.changed_at,
+			COALESCE(u.display_name, u.username) AS changed_by_name
+		 FROM event_history eh
+		 LEFT JOIN users u ON u.id = eh.changed_by
+		 WHERE eh.event_id = ANY($1) AND eh.change_type = 'status'
+		 ORDER BY eh.event_id, eh.changed_at DESC`,
+		pq.Array(eventIDs),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to look up status history for %d events: %w", len(eventIDs), err)
+	}
+
+	results := make([]EventManualStatusChange, 0, len(rows))
+	for _, row := range rows {
+		// Callers pass event ids from their own already-authorized events_list
+		// fetch, but nothing stops a direct RPC call naming an id from an
+		// account the caller can't see — event_history carries no row-level
+		// scoping of its own, so this is the only check standing between an
+		// arbitrary event id and another account's "who closed this" data.
+		if !ctx.GetSecurityContext().HasAccountAccess(row.CloudAccountId, security.SecurityAccessTypeRead) {
+			continue
+		}
+		status := stringFromJSON(row.NewValue)
+		if !row.ChangedBy.Valid || status != string(EventStatusClosed) || row.ChangeReason != manualStatusChangeReasons[string(EventStatusClosed)] {
+			continue
+		}
+		results = append(results, EventManualStatusChange{
+			EventID:       row.EventID,
+			ChangedByName: row.ChangedByName.String,
+			Status:        status,
+			ChangedAt:     row.ChangedAt,
+		})
+	}
+	return results, nil
+}
+
+// insertEventStatusHistory records a manual status transition. Unlike
+// InsertEventHistory, it always writes a fresh row with a random id rather
+// than one derived from (event, change_type, old, new): the Close/Open toggle
+// legitimately repeats the same old->new pair (close, reopen, close again),
+// and InsertEventHistory's fingerprint-derived id would collide on the
+// second occurrence, silently dropping it via its ON CONFLICT DO NOTHING
+// dedup. triage.logStatusChangeToHistory (nb_status, equally repeatable)
+// uses the same random-id approach for the same reason.
+func insertEventStatusHistory(ctx context.Context, db DBExecutor, eventID, tenantID, cloudAccountID, oldStatus, newStatus, changeReason, changedBy string) error {
+	oldJSON, err := json.Marshal(oldStatus)
+	if err != nil {
+		return err
+	}
+	newJSON, err := json.Marshal(newStatus)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO event_history (id, event_id, tenant_id, cloud_account_id, change_type, old_value, new_value, change_reason, changed_by)
+		 VALUES ($1, $2, $3, $4, 'status', $5, $6, $7, $8)`,
+		uuid.New().String(), eventID, tenantID, cloudAccountID, oldJSON, newJSON, changeReason,
+		sql.NullString{String: changedBy, Valid: changedBy != ""},
+	)
+	return err
+}
+
+// stringFromJSON unmarshals a jsonb column known to hold a plain JSON string
+// (as insertEventStatusHistory writes it), returning "" for anything else.
+func stringFromJSON(raw []byte) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
 }
 
 // evidenceSourceWorkflowKey is the additional_info field carrying the automation

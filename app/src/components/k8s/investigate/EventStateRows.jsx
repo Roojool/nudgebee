@@ -10,6 +10,7 @@ import { Label } from '@ui/Label';
 import { Link } from '@ui/Link';
 import { ds } from '@utils/colors';
 import { infoIcon } from '@assets';
+import AlertStatusBadge from '@shared/widgets/AlertStatusBadge';
 import { describeEventState, describeRecurredSince } from './eventState';
 
 // Same grid as the sidebar's other rows, so the key lines up with its value.
@@ -21,9 +22,19 @@ const detailSx = { color: ds.gray[700], whiteSpace: 'nowrap' };
 // microseconds, the filter only milliseconds.
 const SELF_CREATED_AT_SLACK_MS = 1000;
 
-const StateLine = ({ state, testId }) => (
+// The badge takes over for FIRING/CLOSED — the two statuses the Close/Open
+// toggle actually knows how to act on — so "State" doubles as the Alert
+// Status control instead of sitting next to a second, redundant row showing
+// the same value. RESOLVED (and anything else) falls back to the old
+// read-only Label: AlertStatusBadge has no dropdown transitions for it, and
+// showing an arrow that does nothing would be worse than no arrow.
+const StateLine = ({ state, testId, eventId, rawStatus, canToggle, closedByName, onToggle }) => (
   <Box sx={valueSx} data-testid={testId}>
-    <Label tone={state.tone} text={state.label} margin='0' />
+    {rawStatus === 'FIRING' || rawStatus === 'CLOSED' ? (
+      <AlertStatusBadge eventId={eventId} status={rawStatus} canToggle={canToggle} closedByName={closedByName} onToggle={onToggle} />
+    ) : (
+      <Label tone={state.tone} text={state.label} margin='0' />
+    )}
     {state.detail && <Text value={state.detail} secondaryText sx={detailSx} />}
     {state.hint && (
       <Tooltip title={state.hint} arrow placement='bottom'>
@@ -39,10 +50,15 @@ const StateLine = ({ state, testId }) => (
 StateLine.propTypes = {
   state: PropTypes.object.isRequired,
   testId: PropTypes.string,
+  eventId: PropTypes.string,
+  rawStatus: PropTypes.string,
+  canToggle: PropTypes.bool,
+  closedByName: PropTypes.string,
+  onToggle: PropTypes.func,
 };
 
 /** "State" and "Recurred" rows: is this still going on, has it ended, did it come back. */
-export const EventStateRows = ({ row }) => {
+export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleStatus }) => {
   const [recurred, setRecurred] = useState(null);
   const accountId = row?.cloud_account_id;
   const isDemo = accountId === 'demo';
@@ -83,7 +99,15 @@ export const EventStateRows = ({ row }) => {
       {state && (
         <Box sx={rowSx}>
           <Text value={'State'} secondaryText />
-          <StateLine state={state} testId='event-lifecycle-state' />
+          <StateLine
+            state={state}
+            testId='event-lifecycle-state'
+            eventId={row?.id}
+            rawStatus={row?.status}
+            canToggle={canToggleStatus}
+            closedByName={closedByName}
+            onToggle={onToggleStatus}
+          />
         </Box>
       )}
       {recurredSince && (
@@ -110,6 +134,9 @@ export const EventStateRows = ({ row }) => {
 
 EventStateRows.propTypes = {
   row: PropTypes.object,
+  canToggleStatus: PropTypes.bool,
+  closedByName: PropTypes.string,
+  onToggleStatus: PropTypes.func,
 };
 
 /** The state of another event (e.g. the original of a duplicate), shown beside its link. */

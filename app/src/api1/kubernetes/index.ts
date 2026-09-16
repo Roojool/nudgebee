@@ -430,6 +430,25 @@ query GetEventState($id:String!) {
   }
 }
 `;
+export const EVENT_UPDATE_STATUS = `
+mutation EventUpdateStatus($event_id: String!, $status: String!) {
+  event_update_status(event_id: $event_id, status: $status) {
+    success
+    prev_status
+    new_status
+  }
+}
+`;
+export const EVENT_GET_STATUS_CHANGE = `
+mutation EventGetStatusChange($event_ids: [String!]!) {
+  event_get_status_change(event_ids: $event_ids) {
+    event_id
+    changed_by_name
+    status
+    changed_at
+  }
+}
+`;
 export const EVENT_SIMILAR_AND_INSIGHTS = `
 query eventsSimilarAndInsightData($id:String!,$aggregation_key: String!, $service_key: String!, $sdate_1_days:Datetime!,$sdate_7_days:Datetime!,$endDate: Datetime!) {
   similar_issue_in_7_days: event_groupings_v2(where: {starts_at: {_gte: $sdate_7_days, _lte: $endDate}, aggregation_key: {_eq: $aggregation_key}, id: {_neq:$id}}) {
@@ -4417,6 +4436,22 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       data: response?.data?.data?.relay_forward_request?.data,
       errors: response?.data?.errors,
     };
+  },
+
+  async updateEventStatus(eventId: string, status: string) {
+    const response = await queryGraphQL(EVENT_UPDATE_STATUS, 'EventUpdateStatus', {
+      event_id: eventId,
+      status,
+    });
+    return response?.data?.data?.event_update_status;
+  },
+
+  async getEventStatusChanges(eventIds: string[]) {
+    if (!eventIds.length) return [];
+    const response = await queryGraphQL(EVENT_GET_STATUS_CHANGE, 'EventGetStatusChange', {
+      event_ids: eventIds,
+    });
+    return response?.data?.data?.event_get_status_change || [];
   },
 
   async upsertResourceAttributes(resourceId: string, accountId: string, attributes: { name: string; value: string }[]) {
