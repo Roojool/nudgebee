@@ -102,7 +102,13 @@ var logActions = map[string]bool{
 }
 
 // upsertEventRule inserts or updates an event rule, returning the id and whether a row was affected.
-func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any, alert, expr, duration, accountId, tenantId, source, category, severity string, enabled bool, alertType, metricProvider, metricProviderSource, externalRuleId string, providerConfig map[string]interface{}) (string, bool, error) {
+// isDefinition says whether this write carries the rule's *definition* (its
+// query, evaluation window and type) rather than one firing of it. It exists
+// because `source` is not a reliable proxy for that distinction: a provider
+// rule sync writes authoritative definitions under the provider's own
+// `*_webhook` source (see syncableProviders.ruleSource), so keying the guard
+// below on the source string alone silently discarded every synced expr.
+func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any, alert, expr, duration, accountId, tenantId, source, category, severity string, enabled bool, alertType, metricProvider, metricProviderSource, externalRuleId string, providerConfig map[string]interface{}, isDefinition bool) (string, bool, error) {
 	annotationsJSON, err := common.MarshalJson(annotations)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to marshal annotations: %w", err)
@@ -140,11 +146,22 @@ func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any
 		-- So: volatile fields always update; definition + integration fields are overwritten only by a
 		-- non-webhook write (EXCLUDED.source NOT LIKE '%_webhook', matching isWebhookSource), or when the
 		-- existing row is itself webhook-sourced / unset so a pure-webhook alert can still populate them.
+		--
+		-- The isDefinition parameter below is the explicit form of "this write carries the definition,
+		-- not a firing", for the caller the source heuristic gets wrong: SyncProviderRules pulls authoritative rule
+		-- definitions from the provider and writes them under the provider's own *_webhook ruleSource
+		-- (syncableProviders.ruleSource), so the heuristic classified them as firings and silently dropped
+		-- every synced expr/duration/alert_type on any row that already existed. A definition write only
+		-- ever *fills* those fields: COALESCE(NULLIF(...)) keeps the stored value when the provider returns
+		-- nothing, so a partial or degraded listing can never blank a good definition.
 		DO UPDATE SET updated_at = now(), annotations = EXCLUDED.annotations,
 			labels = EXCLUDED.labels, severity = EXCLUDED.severity, enabled = EXCLUDED.enabled,
-			expr = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.expr ELSE event_rules.expr END,
-			duration = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.duration ELSE event_rules.duration END,
-			alert_type = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.alert_type ELSE event_rules.alert_type END,
+			expr = CASE WHEN $17 THEN COALESCE(NULLIF(EXCLUDED.expr, ''), event_rules.expr)
+				WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.expr ELSE event_rules.expr END,
+			duration = CASE WHEN $17 THEN COALESCE(NULLIF(EXCLUDED.duration, ''), event_rules.duration)
+				WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.duration ELSE event_rules.duration END,
+			alert_type = CASE WHEN $17 THEN COALESCE(NULLIF(EXCLUDED.alert_type, ''), event_rules.alert_type)
+				WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.alert_type ELSE event_rules.alert_type END,
 			source = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.source ELSE event_rules.source END,
 			category = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.category ELSE event_rules.category END,
 			metric_provider = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.metric_provider ELSE event_rules.metric_provider END,
@@ -154,6 +171,7 @@ func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any
 		RETURNING id`,
 		accountId, tenantId, alert, annotationsJSON, expr, duration, labelsJSON, source, category, severity, enabled,
 		alertType, nilIfEmpty(metricProvider), nilIfEmpty(metricProviderSource), nilIfEmpty(externalRuleId), providerConfigJSON,
+		isDefinition,
 	)
 	if err != nil {
 		return "", false, err
@@ -476,7 +494,10 @@ func CreateEventRule(context *security.RequestContext, eventRequest EventConfig)
 		eventRequest.AccountID, context.GetSecurityContext().GetTenantId(),
 		eventRequest.Source, eventRequest.Category, eventRequest.Severity, eventRequest.Enabled,
 		eventRequest.AlertType, eventRequest.MetricProvider, eventRequest.MetricProviderSource,
-		externalRuleId, eventRequest.ProviderConfig)
+		externalRuleId, eventRequest.ProviderConfig,
+		// A firing webhook reaches CreateEventRule/UpdateEventRule too, so this
+		// path keeps the source-based guard rather than claiming to be a definition.
+		false)
 	if err != nil {
 		return data, err
 	}
@@ -595,7 +616,10 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 		eventRequest.AccountID, context.GetSecurityContext().GetTenantId(),
 		eventRequest.Source, eventRequest.Category, eventRequest.Severity, eventRequest.Enabled,
 		eventRequest.AlertType, eventRequest.MetricProvider, eventRequest.MetricProviderSource,
-		externalRuleId, eventRequest.ProviderConfig)
+		externalRuleId, eventRequest.ProviderConfig,
+		// A firing webhook reaches CreateEventRule/UpdateEventRule too, so this
+		// path keeps the source-based guard rather than claiming to be a definition.
+		false)
 	if err != nil {
 		return data, err
 	}

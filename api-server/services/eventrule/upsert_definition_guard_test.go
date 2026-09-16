@@ -1,0 +1,124 @@
+package eventrule
+
+import (
+	"regexp"
+	"testing"
+
+	"nudgebee/services/internal/database"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// upsertEventRule decides whether a write may refresh a rule's definition
+// (expr / duration / alert_type) or only its firing-instance fields. That used
+// to be inferred from the source string ending in `_webhook`, which
+// misclassified SyncProviderRules: it writes authoritative provider
+// definitions under the provider's own *_webhook ruleSource, so every synced
+// expr was discarded on any rule that already had a row. For Elasticsearch
+// that left event_rules.expr pinned to the per-instance
+// `{{context.conditions}}` sentence the first firing happened to carry
+// ("Number of matching documents for group \"<some-pod>\" is greater than 50")
+// instead of the rule's real Kibana query.
+//
+// These tests pin the replacement signal — the explicit isDefinition argument
+// — at the two places it can silently regress: the bind position, and the SQL
+// branches that read it.
+
+// mockDB returns a DatabaseManager backed by a fresh sqlmock.
+//
+// upsertEventRule takes its manager as an argument and never resolves the
+// global metastore, so this stays local: no package-level hook to register, and
+// nothing for a concurrently-running test in this package to race against.
+func mockDB(t *testing.T) (*database.DatabaseManager, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	return &database.DatabaseManager{Db: sqlx.NewDb(db, "postgres")}, mock
+}
+
+// callUpsert drives upsertEventRule with the argument shape SyncProviderRules
+// and CreateEventRule both use, varying only the definition flag.
+func callUpsert(dbms *database.DatabaseManager, isDefinition bool) error {
+	_, _, err := upsertEventRule(dbms,
+		map[string]string{"summary": "NB test: stderr spike by pod"},
+		map[string]string{"severity": "critical"},
+		"NB test: stderr spike by pod",
+		`{"query":{"bool":{"filter":[{"term":{"stream":"stderr"}}]}}}`,
+		"5m",
+		"dfa1c8b5-8dd5-4e64-976c-fa7176f182b8", "b82de7ca-0b5b-4f6f-a202-b283a4b94e41",
+		"elasticsearch_webhook", "alert", "critical", true,
+		"log", "ES", "user",
+		"1412f337-a517-4098-9818-e61a839ff8e0", map[string]interface{}{"kibana_rule_type_id": ".es-query"},
+		isDefinition)
+	return err
+}
+
+// TestUpsertEventRuleBindsDefinitionFlagToEveryDefinitionColumn pins the flag
+// to all three columns it governs.
+//
+// database.prepareQueryForIn rewrites every `$N` occurrence to a positional `?`
+// and duplicates the argument behind it, so the single isDefinition parameter
+// arrives once per reference — three times, immediately after the sixteen real
+// columns. A column silently dropped from the guard shows up here as a missing
+// trailing flag rather than as a passing test.
+func TestUpsertEventRuleBindsDefinitionFlagToEveryDefinitionColumn(t *testing.T) {
+	for _, isDefinition := range []bool{true, false} {
+		dbms, mock := mockDB(t)
+
+		mock.ExpectQuery(`INSERT INTO event_rules`).
+			WithArgs(
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
+				// expr, duration, alert_type.
+				isDefinition, isDefinition, isDefinition,
+			).
+			WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("e10e6319-2547-4da4-94a5-3678b1ec0712"))
+
+		require.NoError(t, callUpsert(dbms, isDefinition))
+		assert.NoError(t, mock.ExpectationsWereMet(),
+			"isDefinition=%v must reach expr, duration and alert_type", isDefinition)
+	}
+}
+
+// TestUpsertEventRuleGuardsDefinitionFieldsOnTheFlag pins the SQL itself.
+//
+// sqlmock matches the expected query as a regular expression against the one
+// actually executed, so an expectation that does not appear in the statement
+// fails the call outright. Each fragment below is therefore a load-bearing
+// assertion about the emitted SQL.
+func TestUpsertEventRuleGuardsDefinitionFieldsOnTheFlag(t *testing.T) {
+	lit := regexp.QuoteMeta
+
+	patterns := map[string]string{
+		// All three definition columns must consult the flag before falling
+		// back to the source heuristic. A column left on the heuristic alone
+		// silently stops being refreshed by syncs — the exact failure this
+		// fixes, and one that leaves no error behind to notice. The parameter
+		// number is not pinned: prepareQueryForIn renumbers every placeholder.
+		"expr consults the flag":       `expr = CASE WHEN \$\d+ THEN ` + lit(`COALESCE(NULLIF(EXCLUDED.expr, ''), event_rules.expr)`),
+		"duration consults the flag":   `duration = CASE WHEN \$\d+ THEN ` + lit(`COALESCE(NULLIF(EXCLUDED.duration, ''), event_rules.duration)`),
+		"alert_type consults the flag": `alert_type = CASE WHEN \$\d+ THEN ` + lit(`COALESCE(NULLIF(EXCLUDED.alert_type, ''), event_rules.alert_type)`),
+		// The fallback must survive, or #33024 reopens and firing webhooks
+		// blank agent-synced PromQL again.
+		"firing guard remains the fallback": lit(`WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.expr ELSE event_rules.expr END`),
+	}
+
+	for name, pattern := range patterns {
+		t.Run(name, func(t *testing.T) {
+			dbms, mock := mockDB(t)
+			mock.ExpectQuery(pattern).
+				WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("e10e6319-2547-4da4-94a5-3678b1ec0712"))
+
+			require.NoError(t, callUpsert(dbms, true),
+				"emitted SQL must match: %s", pattern)
+			assert.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
