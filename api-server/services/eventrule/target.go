@@ -89,8 +89,43 @@ type RuleTarget struct {
 	Origin     string
 	Kind       RuleTargetKind
 	Locator    RuleLocator
-	Muted      bool
-	Operations RuleOperations
+	// PromRule is where a PrometheusRule-backed rule is defined (from sync).
+	PromRule PromRuleRef
+	// SendPromLocator: agent writes name the PrometheusRule (PromRule) instead of
+	// using the agent's own nudgebee-prometheus.rules.
+	SendPromLocator bool
+	Muted           bool
+	Operations      RuleOperations
+}
+
+// PromRuleRef locates a rule inside a PrometheusRule and says who manages that
+// PrometheusRule (k8s-collector sync: nudgebee | chart | gitops | helm |
+// unmanaged | unknown; empty until the first sync after this change).
+type PromRuleRef struct {
+	Namespace string
+	Name      string
+	Group     string
+	ManagedBy string
+}
+
+// AgentLocatorParams adds the PrometheusRule locator to an agent alert-rule
+// action when the target uses it.
+func (t *RuleTarget) AgentLocatorParams(params map[string]any) map[string]any {
+	if t == nil || !t.SendPromLocator {
+		return params
+	}
+	params["name"] = t.PromRule.Name
+	params["namespace"] = t.PromRule.Namespace
+	params["group"] = t.PromRule.Group
+	return params
+}
+
+// AgentCapabilities is what the account's k8s agent reports about alert-rule
+// writes (agent.connection_status, from agent telemetry).
+type AgentCapabilities struct {
+	LocatorWrites         bool
+	ClusterWrite          bool
+	InstallationNamespace string
 }
 
 // Capabilities is the public view of a resolved target.
@@ -223,11 +258,15 @@ type ruleRow struct {
 	IsEditable     sql.NullBool   `db:"is_editable"`
 	Ambiguous      sql.NullBool   `db:"ambiguous"`
 	Origin         sql.NullString `db:"origin"`
+	Namespace      sql.NullString `db:"namespace"`
+	CRName         sql.NullString `db:"cr_name"`
+	RuleGroup      sql.NullString `db:"rule_group"`
 }
 
 const ruleRowColumns = `id, account_id, alert, source, expr, duration, severity, category, alert_type,
 	external_rule_id, annotations::text AS annotations, labels::text AS labels,
-	provider_config::text AS provider_config, enabled, is_editable`
+	provider_config::text AS provider_config, enabled, is_editable,
+	namespace, name AS cr_name, "group" AS rule_group`
 
 // loadRuleRows reads rows by id within one tenant. The ambiguous/origin columns
 // are read when present; if the migration has not run yet the query is retried
@@ -258,6 +297,11 @@ func (r ruleRow) toTarget() *RuleTarget {
 		IsEditable: r.IsEditable.Bool,
 		Ambiguous:  r.Ambiguous.Bool,
 		Origin:     r.Origin.String,
+		PromRule: PromRuleRef{
+			Namespace: r.Namespace.String,
+			Name:      r.CRName.String,
+			Group:     r.RuleGroup.String,
+		},
 		Rule: toggledRule{
 			Alert:       r.Alert,
 			Source:      r.Source.String,
@@ -275,6 +319,9 @@ func (r ruleRow) toTarget() *RuleTarget {
 	}
 	if r.ProviderConfig.Valid && r.ProviderConfig.String != "" {
 		_ = json.Unmarshal([]byte(r.ProviderConfig.String), &t.Rule.ProviderConfig)
+	}
+	if managedBy, ok := t.Rule.ProviderConfig["managed_by"].(string); ok {
+		t.PromRule.ManagedBy = managedBy
 	}
 	t.Kind = targetKindForSource(t.Rule.Source, t.Rule.AlertType)
 	return t
@@ -359,9 +406,10 @@ func firstNonEmpty(values ...string) string {
 // capabilityEnv is everything outside the row that decides availability,
 // injected so the decision table is unit-testable.
 type capabilityEnv struct {
-	agentConnected  func(accountID string) bool
-	rulerConfigured func(accountID string) (bool, string)
-	hasGit          bool
+	agentConnected    func(accountID string) bool
+	agentCapabilities func(accountID string) AgentCapabilities
+	rulerConfigured   func(accountID string) (bool, string)
+	hasGit            bool
 }
 
 func unavailable(reason string) Capability { return Capability{Reason: reason} }
@@ -396,7 +444,7 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 		case !env.agentConnected(t.AccountID):
 			write = unavailable("k8s agent not connected — cannot change the PrometheusRule")
 		default:
-			write = available
+			write = promRuleWrite(t, env.agentCapabilities(t.AccountID))
 		}
 		ops.EditDefinition, ops.UpdateThreshold, ops.UpdateDuration, ops.DisableAtSource = write, write, write, write
 
@@ -468,6 +516,96 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 		ops.PR = unavailable(reason)
 	}
 	return ops
+}
+
+const agentTooOldReason = "the k8s agent is too old to change rules outside Nudgebee's own PrometheusRule — upgrade the agent"
+
+// isLegacyNudgebeeRule: a rule the agent writes without a locator — in its own
+// nudgebee-prometheus.rules, or stored before sync recorded where rules live.
+func isLegacyNudgebeeRule(ref PromRuleRef, installNS string) bool {
+	if ref.Name == "" {
+		return true
+	}
+	return ref.Name == nudgebeeRulesCR && (ref.Namespace == "" || installNS == "" || ref.Namespace == installNS)
+}
+
+const nudgebeeRulesCR = "nudgebee-prometheus.rules"
+
+// promRuleWrite decides a direct write to a PrometheusRule-backed rule (spec D5,
+// Q1): Argo CD / Flux → PR only; Helm and the agent chart → direct with a
+// warning that an upgrade reverts it; unknown ownership → PR only. It also sets
+// whether the write names the PrometheusRule.
+func promRuleWrite(t *RuleTarget, agent AgentCapabilities) Capability {
+	ref := t.PromRule
+	if !agent.LocatorWrites {
+		// Old agents only write their own PrometheusRule, which is right for
+		// rules that live there and silently wrong for any other.
+		if ref.ManagedBy == "" || ref.ManagedBy == managedByNudgebee {
+			if isLegacyNudgebeeRule(ref, agent.InstallationNamespace) {
+				return available
+			}
+		}
+		return unavailable(agentTooOldReason)
+	}
+	if ref.Name == "" {
+		// Stored before sync recorded the PrometheusRule: only the agent's own
+		// PrometheusRule is a safe guess.
+		return available
+	}
+	if ref.Namespace != "" && agent.InstallationNamespace != "" && ref.Namespace != agent.InstallationNamespace && !agent.ClusterWrite {
+		return unavailable("the k8s agent may only change PrometheusRules in its own namespace (read-only install)")
+	}
+	t.SendPromLocator = true
+	switch ref.ManagedBy {
+	case managedByNudgebee, managedByUnmanaged:
+		return available
+	case managedByChart:
+		return Capability{Available: true, Warning: "this rule comes from the Nudgebee agent chart; upgrading the chart restores its default"}
+	case managedByHelm:
+		return Capability{Available: true, Warning: "this PrometheusRule is managed by Helm; the next helm upgrade reverts the change unless it is also made in the chart values — consider raising a PR"}
+	case managedByGitOps:
+		t.SendPromLocator = false
+		return unavailable("this PrometheusRule is managed by Argo CD / Flux; change it in Git (raise a PR)")
+	case "":
+		if ref.Name == nudgebeeRulesCR {
+			return available
+		}
+		t.SendPromLocator = false
+		return unavailable("waiting for the next rule sync to learn who manages this PrometheusRule")
+	default:
+		t.SendPromLocator = false
+		return unavailable("Nudgebee cannot tell who manages this PrometheusRule; raise a PR instead")
+	}
+}
+
+const (
+	managedByNudgebee  = "nudgebee"
+	managedByChart     = "chart"
+	managedByGitOps    = "gitops"
+	managedByHelm      = "helm"
+	managedByUnmanaged = "unmanaged"
+)
+
+// loadAgentCapabilities reads the capabilities the account's k8s agent reported.
+// Missing keys (an agent older than the capability report) read as false.
+func loadAgentCapabilities(ctx stdctx.Context, db *sqlx.DB, accountID string) AgentCapabilities {
+	var raw sql.NullString
+	err := db.GetContext(ctx, &raw, `
+		SELECT connection_status::text FROM agent
+		WHERE cloud_account_id = $1 AND type = 'k8s'
+		ORDER BY last_connected_at DESC NULLS LAST LIMIT 1`, accountID)
+	if err != nil || !raw.Valid {
+		return AgentCapabilities{}
+	}
+	var status struct {
+		LocatorWrites         bool   `json:"alertRuleLocatorWrites"`
+		ClusterWrite          bool   `json:"prometheusRuleClusterWrite"`
+		InstallationNamespace string `json:"installationNamespace"`
+	}
+	if json.Unmarshal([]byte(raw.String), &status) != nil {
+		return AgentCapabilities{}
+	}
+	return AgentCapabilities(status)
 }
 
 // loadMutedRuleIDs returns which of the given event_rules ids have an enabled mute.
@@ -547,6 +685,7 @@ func resolveRuleTargets(ctx *security.RequestContext, db *sqlx.DB, ids []string,
 	}
 
 	agentCache := map[string]bool{}
+	agentCapsCache := map[string]AgentCapabilities{}
 	rulerCache := map[string]Capability{}
 	var hasGit *bool
 	env := capabilityEnv{
@@ -556,6 +695,14 @@ func resolveRuleTargets(ctx *security.RequestContext, db *sqlx.DB, ids []string,
 			}
 			v := isK8sAgentConnected(accountID)
 			agentCache[accountID] = v
+			return v
+		},
+		agentCapabilities: func(accountID string) AgentCapabilities {
+			if v, ok := agentCapsCache[accountID]; ok {
+				return v
+			}
+			v := loadAgentCapabilities(ctx.GetContext(), db, accountID)
+			agentCapsCache[accountID] = v
 			return v
 		},
 		rulerConfigured: func(accountID string) (bool, string) {

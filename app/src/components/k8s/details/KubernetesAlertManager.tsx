@@ -6,6 +6,7 @@ import CustomSearch from '@shared/CustomSearch';
 import { Button as DsButton } from '@ui/Button';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import { Label } from '@ui/Label';
+import { Banner } from '@ui/Banner';
 import { SeverityIcon } from '@ui/SeverityIcon';
 
 // API returns severity as 'Critical' / 'High' / 'Medium' / 'Low' / 'Info'
@@ -35,6 +36,7 @@ import {
   ALERT_RULE_MENU,
   AlertRuleItem,
   alertRuleStatusText,
+  alertRuleWarning,
   buildAlertRuleMenuItems,
   muteConfirmTitle,
   toggleConfirmTitle,
@@ -347,7 +349,11 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
               : "This alert will stop triggering until it's re-enabled."
             : 'This alert will resume triggering as configured.'
         }
-        additionalComponent={undefined}
+        additionalComponent={
+          alertRuleWarning(alertManagerObject, 'disable_at_source') ? (
+            <Banner tone='warning' surface='section' message={alertRuleWarning(alertManagerObject, 'disable_at_source')} />
+          ) : undefined
+        }
       />
       <Modal
         confirmText={muteTarget?.mute ? 'Mute' : 'Unmute'}

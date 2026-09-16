@@ -567,8 +567,10 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 	var annotations any = eventRequest.Annotations
 	externalRuleId := ""
 
+	var target *RuleTarget
 	if eventRequest.Id != "" {
-		target, err := ResolveRuleTarget(context, eventRequest.Id, ResolveOptions{})
+		var err error
+		target, err = ResolveRuleTarget(context, eventRequest.Id, ResolveOptions{})
 		if err != nil {
 			return data, err
 		}
@@ -614,6 +616,10 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 					"labels":      labels,
 				},
 			},
+		}
+		if target != nil {
+			// Edit the rule where it is defined, not a copy in the agent's own CR.
+			relayRequest.Body.ActionParams = target.AgentLocatorParams(relayRequest.Body.ActionParams)
 		}
 		if err := executeAgentAction(relayRequest); err != nil {
 			return data, err
@@ -814,26 +820,27 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 			Body: relay.ActionExecuteBody{
 				AccountID:  eventRequest.AccountID,
 				ActionName: "delete_alert_rule",
-				ActionParams: map[string]any{
-					// The stored name, never the request's: an empty alert makes the
-					// agent delete the whole PrometheusRule.
+				ActionParams: target.AgentLocatorParams(map[string]any{
+					// The stored name, never the request's: an empty alert made older
+					// agents delete the whole PrometheusRule.
 					"alert":     rule.Alert,
 					"group":     eventRequest.Group,
 					"namespace": eventRequest.Namespace,
-				},
+				}),
 			},
 		}
 		if eventRequest.Enable {
 			// Without this the enable branch fell through to delete_alert_rule and
 			// removed the PrometheusRule a second time.
 			relayRequest.Body.ActionName = "create_or_replace_alert_rule"
-			relayRequest.Body.ActionParams = map[string]any{
+			// With a locator the agent adds the rule back to its own group.
+			relayRequest.Body.ActionParams = target.AgentLocatorParams(map[string]any{
 				"alert":       rule.Alert,
 				"expr":        rule.Expr,
 				"duration":    rule.Duration,
 				"annotations": rule.Annotations,
 				"labels":      rule.Labels,
-			}
+			})
 		}
 
 		if err := executeAgentAction(relayRequest); err != nil {

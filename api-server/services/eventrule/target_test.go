@@ -17,9 +17,10 @@ import (
 
 func testEnv(agent, ruler, git bool) capabilityEnv {
 	return capabilityEnv{
-		agentConnected:  func(string) bool { return agent },
-		rulerConfigured: func(string) (bool, string) { return ruler, "no ruler configured" },
-		hasGit:          git,
+		agentConnected:    func(string) bool { return agent },
+		agentCapabilities: func(string) AgentCapabilities { return AgentCapabilities{} },
+		rulerConfigured:   func(string) (bool, string) { return ruler, "no ruler configured" },
+		hasGit:            git,
 	}
 }
 
@@ -391,4 +392,93 @@ func TestActionSucceeded(t *testing.T) {
 	err := relay.ActionSucceeded(map[string]any{"data": map[string]any{"success": false, "msg": "forbidden"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forbidden")
+}
+
+func TestPromRuleWrite(t *testing.T) {
+	newAgent := AgentCapabilities{LocatorWrites: true, ClusterWrite: true, InstallationNamespace: "nb"}
+	oldAgent := AgentCapabilities{InstallationNamespace: "nb"}
+	readOnlyAgent := AgentCapabilities{LocatorWrites: true, InstallationNamespace: "nb"}
+	ref := func(ns, name, managedBy string) PromRuleRef {
+		return PromRuleRef{Namespace: ns, Name: name, Group: "g", ManagedBy: managedBy}
+	}
+
+	tests := []struct {
+		name      string
+		ref       PromRuleRef
+		agent     AgentCapabilities
+		available bool
+		warning   string
+		reason    string
+		locator   bool
+	}{
+		{"own CR, new agent", ref("nb", nudgebeeRulesCR, "nudgebee"), newAgent, true, "", "", true},
+		{"own CR, old agent: legacy path", ref("nb", nudgebeeRulesCR, "nudgebee"), oldAgent, true, "", "", false},
+		{"row from before sync recorded the CR, old agent", PromRuleRef{}, oldAgent, true, "", "", false},
+		{"row from before sync recorded the CR, new agent", PromRuleRef{}, newAgent, true, "", "", false},
+		{"customer CR, old agent", ref("monitoring", "payments", "unmanaged"), oldAgent, false, "", "too old", false},
+		{"customer CR, not yet classified, old agent", ref("monitoring", "payments", ""), oldAgent, false, "", "too old", false},
+		{"unmanaged customer CR", ref("monitoring", "payments", "unmanaged"), newAgent, true, "", "", true},
+		{"helm: direct with warning", ref("monitoring", "kps", "helm"), newAgent, true, "helm upgrade", "", true},
+		{"agent chart: direct with warning", ref("nb", "nb-agent.rules", "chart"), newAgent, true, "chart", "", true},
+		{"argo / flux: PR only", ref("monitoring", "app", "gitops"), newAgent, false, "", "Argo CD / Flux", false},
+		{"unknown manager: PR only", ref("monitoring", "x", "unknown"), newAgent, false, "", "cannot tell", false},
+		{"not yet classified", ref("monitoring", "x", ""), newAgent, false, "", "next rule sync", false},
+		{"read-only install, other namespace", ref("monitoring", "payments", "unmanaged"), readOnlyAgent, false, "", "own namespace", false},
+		{"read-only install, own namespace", ref("nb", "custom", "unmanaged"), readOnlyAgent, true, "", "", true},
+		{"another agent's own CR in a shared cluster", ref("other-agent", nudgebeeRulesCR, "nudgebee"), newAgent, true, "", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			target := &RuleTarget{PromRule: tc.ref}
+			got := promRuleWrite(target, tc.agent)
+			assert.Equal(t, tc.available, got.Available, got.Reason)
+			if tc.warning != "" {
+				assert.Contains(t, got.Warning, tc.warning)
+			} else {
+				assert.Empty(t, got.Warning)
+			}
+			if tc.reason != "" {
+				assert.Contains(t, got.Reason, tc.reason)
+			}
+			assert.Equal(t, tc.locator, target.SendPromLocator)
+		})
+	}
+}
+
+func TestAgentLocatorParams(t *testing.T) {
+	target := &RuleTarget{PromRule: PromRuleRef{Namespace: "monitoring", Name: "payments", Group: "pay"}}
+	params := target.AgentLocatorParams(map[string]any{"alert": "A", "group": "ui-group", "namespace": "ui-ns"})
+	assert.Equal(t, map[string]any{"alert": "A", "group": "ui-group", "namespace": "ui-ns"}, params, "no locator unless the resolver chose it")
+
+	var none *RuleTarget
+	assert.Equal(t, map[string]any{"alert": "A"}, none.AgentLocatorParams(map[string]any{"alert": "A"}))
+
+	target.SendPromLocator = true
+	params = target.AgentLocatorParams(map[string]any{"alert": "A", "group": "ui-group", "namespace": "ui-ns"})
+	assert.Equal(t, map[string]any{"alert": "A", "name": "payments", "namespace": "monitoring", "group": "pay"}, params)
+}
+
+// The Prometheus branch of the decision table reads the agent's capabilities.
+func TestComputeOperations_PromUsesAgentCapabilities(t *testing.T) {
+	env := testEnv(true, false, true)
+	env.agentCapabilities = func(string) AgentCapabilities {
+		return AgentCapabilities{LocatorWrites: true, ClusterWrite: true, InstallationNamespace: "nb"}
+	}
+	gitops := resolved("prometheus", func(r *RuleTarget) {
+		r.PromRule = PromRuleRef{Namespace: "monitoring", Name: "app", Group: "g", ManagedBy: "gitops"}
+	})
+	ops := computeOperations(gitops, env)
+	assert.False(t, ops.EditDefinition.Available)
+	assert.False(t, ops.DisableAtSource.Available)
+	assert.True(t, ops.PR.Available)
+	assert.True(t, ops.Mute.Available)
+
+	helm := resolved("prometheus", func(r *RuleTarget) {
+		r.PromRule = PromRuleRef{Namespace: "monitoring", Name: "kps", Group: "g", ManagedBy: "helm"}
+	})
+	ops = computeOperations(helm, env)
+	assert.True(t, ops.DisableAtSource.Available)
+	assert.NotEmpty(t, ops.DisableAtSource.Warning)
+	assert.True(t, ops.PR.Available)
+	assert.True(t, helm.SendPromLocator)
 }

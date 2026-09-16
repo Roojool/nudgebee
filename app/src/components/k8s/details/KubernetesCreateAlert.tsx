@@ -22,6 +22,8 @@ import apiAccount from '@api1/account';
 import observability from '@api1/observability';
 import ReorderableList, { type DragHandleProps } from '@shared/ReorderableList';
 import { addFormError, removeFormError, type FormErrors } from './formErrorUtils';
+import { alertRuleWarning } from './alertRuleControls';
+import { Banner } from '@ui/Banner';
 
 interface KubernetesCreateAlertProps {
   accountId: string;
@@ -858,8 +860,11 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
     { label: 'hour', value: 'h' },
   ];
 
+  const editWarning = isCreateAlert ? undefined : alertRuleWarning(alertManagerObject, 'edit_definition');
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column' }}>
+      {editWarning && <Banner tone='warning' surface='section' message={editWarning} />}
       {isSubmitting && (
         <Box sx={{ width: '100%', position: 'absolute', top: 0, left: 0 }}>
           <ProgressLinear surface='page-top' />

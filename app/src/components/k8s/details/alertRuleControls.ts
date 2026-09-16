@@ -65,3 +65,10 @@ export const muteConfirmTitle = (item: AlertRuleItem | undefined, mute: boolean)
     ? `Mute "${item.alert}" in Nudgebee? New events are kept but marked Suppressed and send no notifications. The rule itself is not changed.`
     : `Unmute "${item.alert}"? New events will be handled normally again.`;
 };
+
+// A caution the backend attached to an available change (e.g. "the next helm
+// upgrade reverts it"). Shown next to the confirm / edit controls.
+export const alertRuleWarning = (item: AlertRuleItem | undefined, op: 'disable_at_source' | 'edit_definition'): string | undefined => {
+  const cap = item?.capabilities?.operations?.[op];
+  return cap?.available ? cap.warning || undefined : undefined;
+};

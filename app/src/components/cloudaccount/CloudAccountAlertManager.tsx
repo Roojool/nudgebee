@@ -6,6 +6,7 @@ import CustomSearch from '@shared/CustomSearch';
 import { Button as DsButton } from '@ui/Button';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import { Label } from '@ui/Label';
+import { Banner } from '@ui/Banner';
 import { SeverityIcon } from '@ui/SeverityIcon';
 
 // Cloud-alert severity values come from the API as 'Critical' / 'High' /
@@ -36,6 +37,7 @@ import {
   ALERT_RULE_MENU,
   AlertRuleItem,
   alertRuleStatusText,
+  alertRuleWarning,
   buildAlertRuleMenuItems,
   muteConfirmTitle,
   toggleConfirmTitle,
@@ -320,7 +322,11 @@ const CloudAccountAlertManager: React.FC<CloudAccountAlertManagerProps> = ({ acc
         handleSubmit={handleSubmit}
         open={disableAlert}
         dialogContent={''}
-        additionalComponent={undefined}
+        additionalComponent={
+          alertRuleWarning(alertManagerObject, 'disable_at_source') ? (
+            <Banner tone='warning' surface='section' message={alertRuleWarning(alertManagerObject, 'disable_at_source')} />
+          ) : undefined
+        }
       />
       <Modal
         confirmText={muteTarget?.mute ? 'Mute' : 'Unmute'}

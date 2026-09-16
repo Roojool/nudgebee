@@ -551,4 +551,18 @@ describe('CloudAccountAlertManager (integration)', () => {
     await waitFor(() => expect(snackbar.error).toHaveBeenCalledWith('Failed to mute CPU High: account unauthorized'));
     expect(screen.queryByText('Enabled · Muted')).not.toBeInTheDocument();
   });
+
+  it('shows the backend warning in the disable dialog', async () => {
+    k8sApi.getEventRuleCapabilities.mockResolvedValue({
+      'r-1': capabilitiesFor('r-1', {
+        disable_at_source: { available: true, warning: 'Nudgebee finds this Azure alert by name' },
+      }),
+      'r-2': capabilitiesFor('r-2'),
+    });
+    render(<CloudAccountAlertManager accountId='acc-1' />);
+    await waitFor(() => expect(screen.getByTestId('menu-Disable-CPU High')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('menu-Disable-CPU High'));
+    expect(screen.getByText('Nudgebee finds this Azure alert by name')).toBeInTheDocument();
+  });
 });

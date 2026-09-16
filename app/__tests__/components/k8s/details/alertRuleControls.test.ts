@@ -1,4 +1,10 @@
-import { alertRuleStatusText, buildAlertRuleMenuItems, muteConfirmTitle, toggleConfirmTitle } from '@components/k8s/details/alertRuleControls';
+import {
+  alertRuleStatusText,
+  alertRuleWarning,
+  buildAlertRuleMenuItems,
+  muteConfirmTitle,
+  toggleConfirmTitle,
+} from '@components/k8s/details/alertRuleControls';
 
 const ops = (available: boolean) => ({ available, reason: available ? undefined : 'no' });
 const item = (enabled: boolean, over: Record<string, boolean> = {}, muted = false) => ({
@@ -58,5 +64,23 @@ describe('confirm titles', () => {
     expect(toggleConfirmTitle(undefined)).toBe('');
     expect(muteConfirmTitle(undefined, true)).toBe('');
     expect(toggleConfirmTitle(item(true))).toBe('Disable the alert "A" where it is evaluated');
+  });
+});
+
+describe('alertRuleWarning', () => {
+  it('returns the warning of an available change only', () => {
+    const warned = item(true);
+    warned.capabilities.operations.disable_at_source = {
+      available: true,
+      reason: undefined,
+      warning: 'the next helm upgrade reverts the change',
+    } as any;
+    expect(alertRuleWarning(warned, 'disable_at_source')).toBe('the next helm upgrade reverts the change');
+    expect(alertRuleWarning(warned, 'edit_definition')).toBeUndefined();
+
+    const blocked = item(true, { disable: false });
+    (blocked.capabilities.operations.disable_at_source as any).warning = 'ignored';
+    expect(alertRuleWarning(blocked, 'disable_at_source')).toBeUndefined();
+    expect(alertRuleWarning(undefined, 'disable_at_source')).toBeUndefined();
   });
 });

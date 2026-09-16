@@ -1,7 +1,7 @@
 # Spec — Real alert-rule edit / disable for AWS, GCP, Azure and in-cluster Prometheus
 
 Epic: #38553 (phase 1). Baseline: `origin/main` @ `32a999003e`.
-Revision 3.3 (2026-09-16) — PR 2 findings folded in (see "Rev 3.3 corrections"). Revision 3.2 — PR 1 findings folded in (see "Rev 3.2 corrections"). Revision 3 — after two `/challenge` REVISE verdicts. Rev 2: mute vs disable-at-source split, no JSONB ambiguity flag, one availability function, customer CRs in scope. Rev 3/3.1: mute is a triage suppression rule (anchored, escaped alertname; one rule per source) (no new column, no ingestion filters); `enabled` ownership defined; GitOps classification via `managedFields`; agent delete payload made safe; rollout gaps closed.
+Revision 3.4 (2026-09-17) — PR 3 findings and the Q1 decision folded in (see "Rev 3.4 corrections"). Revision 3.3 — PR 2 findings folded in (see "Rev 3.3 corrections"). Revision 3.2 — PR 1 findings folded in (see "Rev 3.2 corrections"). Revision 3 — after two `/challenge` REVISE verdicts. Rev 2: mute vs disable-at-source split, no JSONB ambiguity flag, one availability function, customer CRs in scope. Rev 3/3.1: mute is a triage suppression rule (anchored, escaped alertname; one rule per source) (no new column, no ingestion filters); `enabled` ownership defined; GitOps classification via `managedFields`; agent delete payload made safe; rollout gaps closed.
 
 Out of scope: Datadog, New Relic, Dynatrace, Splunk, Grafana, Elasticsearch, Chronosphere, SigNoz, CubeAPM, Loki, agentless Prometheus (`prometheus_user`, `prometheus_alertmanager_webhook`), webhook-only sources. For those, phase 1 only (a) offers *mute* and (b) stops edit/disable from returning fake success.
 
@@ -120,5 +120,16 @@ Nubi may recommend **both** *Mute in Nudgebee* and *Disable at source* (plus thr
 - **GCP suggestions keyed by policy id** find their rule by `external_rule_id` / `labels.gcp_policy_id` when no rule has that alert name.
 - **Duration-only suggestions** (no threshold) used to fail in cloud-collector; the threshold is optional now.
 
-## Open questions
-- Q1. Helm-managed customer CRs: is "direct write with warning" acceptable, or PR-only?
+## Rev 3.4 corrections (found while building PR 3 and PR 4)
+
+- **No chart RBAC change.** The default agent ClusterRole already grants get/list/create/update/patch/delete on `prometheusrules` in every namespace; `runner.readOnly` grants cluster-wide get/list plus namespaced writes. The agent reports what is in effect instead of a new `alertRules.clusterWideWrite` value: `prometheusRuleClusterWrite` comes from a SelfSubjectAccessReview at startup.
+- **No `telemetry_handler.py` change.** The capability flags (`alertRuleLocatorWrites`, `prometheusRuleClusterWrite`) travel in `activity_stats`, which the collector already merges into `agent.connection_status` as-is. api-server reads them from there together with `installationNamespace`.
+- **Agent locator** (k8s-agent#616): `create_or_replace_alert_rule` / `delete_alert_rule` take an optional `name` / `namespace` / `group`. Edit patches only `expr` and `for` (an omitted duration keeps `for`), delete removes one rule and never the CR, and re-enable appends the rule back to its group. Missing and ambiguous rules are errors. A delete with no `alert` needs `delete_cr: true`.
+- **Pre-existing bug fixed by PR 4:** before the locator, disabling a rule defined in any PrometheusRule other than `nudgebee-prometheus.rules` was a silent no-op reported as success, and editing it wrote a duplicate into `nudgebee-prometheus.rules`.
+- **Ownership lives in `provider_config.managed_by`** (`nudgebee | chart | gitops | helm | unmanaged | unknown`) next to `origin`. `managedFields` managers observed on a dev cluster: `helm`, `kubectl-*`, `nudgebee-agent`, `OpenAPI-Generator`.
+- **Multi-agent clusters:** each agent namespace has its own `nudgebee-prometheus.rules`. When the same alert appears in several places, the copy in this agent's install namespace wins; otherwise the row is ambiguous.
+- **Sync column ownership:** the rules-API pass no longer writes `namespace` / `name` (it used to reset them to NULL whenever the CRD listing was missing). The CRD pass owns `namespace` / `name` / `group` / `is_editable` / `origin` / `ambiguous` / `provider_config.managed_by`; only the CRD pass sets `enabled` (true for rules present in a PrometheusRule) — the rules API lags a PrometheusRule edit, so it would re-enable a rule just disabled.
+
+## Decided
+
+- **Q1 (2026-09-17): Helm-managed customer PrometheusRules → direct write with a warning** that the next `helm upgrade` reverts it, **plus** the PR option. Argo CD / Flux → PR only. The agent chart's own rules → direct with a warning. Unknown manager → PR only. Rows not yet classified by sync → unavailable until the next sync, except for `nudgebee-prometheus.rules` itself.
