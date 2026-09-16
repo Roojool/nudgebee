@@ -118,13 +118,51 @@ func TestComputeOperations(t *testing.T) {
 			},
 		},
 		{
-			name:   "GCP with policy label: threshold with warning, no disable yet",
+			name:   "GCP with policy label: threshold edit and disable at source",
 			target: resolved("GCP_Metric_Alert", func(r *RuleTarget) { r.Rule.Labels["gcp_policy_id"] = "projects/p/alertPolicies/1" }),
 			env:    testEnv(false, false, false),
 			check: func(t *testing.T, ops RuleOperations) {
 				assert.True(t, ops.UpdateThreshold.Available)
-				assert.NotEmpty(t, ops.UpdateThreshold.Warning)
+				assert.True(t, ops.DisableAtSource.Available)
+				assert.False(t, ops.EditDefinition.Available)
+			},
+		},
+		{
+			name: "ambiguous GCP row ignores its own policy id",
+			target: resolved("GCP_Metric_Alert", func(r *RuleTarget) {
+				r.Ambiguous = true
+				r.Rule.Labels["gcp_policy_id"] = "projects/p/alertPolicies/1"
+			}),
+			env: testEnv(false, false, false),
+			check: func(t *testing.T, ops RuleOperations) {
+				assert.False(t, ops.UpdateThreshold.Available)
 				assert.False(t, ops.DisableAtSource.Available)
+				assert.Contains(t, ops.DisableAtSource.Reason, "more than one")
+			},
+		},
+		{
+			name: "AWS composite alarm has no threshold",
+			target: resolved("AWS_CloudWatch_Alarm", func(r *RuleTarget) {
+				r.Rule.Expr = `{"AlarmArn":"arn:aws:cloudwatch:us-east-1:1:alarm:c"}`
+				r.Rule.Labels["aws_alarm_type"] = "composite"
+			}),
+			env: testEnv(false, false, false),
+			check: func(t *testing.T, ops RuleOperations) {
+				assert.False(t, ops.UpdateThreshold.Available)
+				assert.Contains(t, ops.UpdateThreshold.Reason, "composite")
+				assert.True(t, ops.Mute.Available)
+			},
+		},
+		{
+			name: "ambiguous AWS row: the ARN in its definition is not trusted",
+			target: resolved("AWS_CloudWatch_Alarm", func(r *RuleTarget) {
+				r.Ambiguous = true
+				r.Rule.Expr = `{"AlarmArn":"arn:aws:cloudwatch:us-east-1:1:alarm:A"}`
+				r.Rule.Labels = map[string]string{"aws_region": "us-east-1", "aws_alarm": "A"}
+			}),
+			env: testEnv(false, false, false),
+			check: func(t *testing.T, ops RuleOperations) {
+				assert.False(t, ops.UpdateThreshold.Available)
 			},
 		},
 		{
@@ -133,16 +171,30 @@ func TestComputeOperations(t *testing.T) {
 			env:    testEnv(false, false, false),
 			check: func(t *testing.T, ops RuleOperations) {
 				assert.False(t, ops.UpdateThreshold.Available)
+				assert.False(t, ops.DisableAtSource.Available)
 				assert.True(t, ops.Mute.Available)
 			},
 		},
 		{
-			name:   "Azure found by name warns",
+			name:   "Azure found by name warns; disable offered too",
 			target: resolved("Azure_Monitor_Alert", nil),
 			env:    testEnv(false, false, false),
 			check: func(t *testing.T, ops RuleOperations) {
 				assert.True(t, ops.UpdateThreshold.Available)
 				assert.Contains(t, ops.UpdateThreshold.Warning, "by name")
+				assert.True(t, ops.DisableAtSource.Available)
+			},
+		},
+		{
+			name: "Azure with a synced ARM id: no warning",
+			target: resolved("Azure_Monitor_Alert", func(r *RuleTarget) {
+				id := "/subscriptions/s/resourceGroups/rg/providers/microsoft.insights/metricAlerts/HighCPU"
+				r.Rule.ExternalRuleID = &id
+			}),
+			env: testEnv(false, false, false),
+			check: func(t *testing.T, ops RuleOperations) {
+				assert.True(t, ops.DisableAtSource.Available)
+				assert.Empty(t, ops.DisableAtSource.Warning)
 			},
 		},
 		{
@@ -220,6 +272,26 @@ func TestBuildLocator(t *testing.T) {
 
 	gcp := resolved("GCP_Metric_Alert", nil)
 	assert.Equal(t, "projects/p/alertPolicies/9", buildLocator(gcp, ResolveOptions{AlertRuleKey: "projects/p/alertPolicies/9"}).GCPPolicy)
+}
+
+// An ambiguous row only trusts the id the firing event carried.
+func TestBuildLocator_Ambiguous(t *testing.T) {
+	aws := resolved("AWS_CloudWatch_Alarm", func(r *RuleTarget) {
+		r.Ambiguous = true
+		r.Rule.Expr = `{"AlarmArn":"arn:aws:cloudwatch:eu-west-1:1:alarm:A"}`
+	})
+	assert.Empty(t, aws.Locator.AWSAlarmARN)
+	assert.Equal(t, "arn:aws:cloudwatch:us-east-1:1:alarm:A",
+		buildLocator(aws, ResolveOptions{AlertRuleKey: "arn:aws:cloudwatch:us-east-1:1:alarm:A"}).AWSAlarmARN)
+
+	azure := resolved("Azure_Monitor_Alert", func(r *RuleTarget) { r.Ambiguous = true })
+	assert.Empty(t, azure.Locator.AzureName, "a shared name must not be used to find the alert")
+
+	provider, ref := (&RuleTarget{Kind: TargetAzure, Locator: RuleLocator{AzureName: "HighCPU"}}).CloudWriteRef()
+	assert.Equal(t, "azure_app_insights", provider)
+	assert.Equal(t, "HighCPU", ref)
+	provider, _ = (&RuleTarget{Kind: TargetPromCR}).CloudWriteRef()
+	assert.Empty(t, provider)
 }
 
 func TestTargetKindForSource(t *testing.T) {

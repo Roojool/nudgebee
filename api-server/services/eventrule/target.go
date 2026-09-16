@@ -177,6 +177,21 @@ func targetKindForSource(source, alertType string) RuleTargetKind {
 	return TargetUnsupported
 }
 
+// CloudWriteRef returns the alertrule provider key of a cloud target and the
+// reference cloud-collector finds the rule by (ARN, policy name, ARM id, or the
+// Azure alert name until its id is synced). Both are empty for other targets.
+func (t *RuleTarget) CloudWriteRef() (provider, ref string) {
+	switch t.Kind {
+	case TargetAWS:
+		return CloudProviderKey(t.Kind), t.Locator.AWSAlarmARN
+	case TargetGCP:
+		return CloudProviderKey(t.Kind), t.Locator.GCPPolicy
+	case TargetAzure:
+		return CloudProviderKey(t.Kind), firstNonEmpty(t.Locator.AzureID, t.Locator.AzureName)
+	}
+	return "", ""
+}
+
 // CloudProviderKey is the alertrule provider key for a cloud target.
 func CloudProviderKey(kind RuleTargetKind) string {
 	switch kind {
@@ -274,6 +289,26 @@ func nullStringPtr(v sql.NullString) *string {
 
 // buildLocator derives the upstream locator from the row (and the caller's hint).
 func buildLocator(t *RuleTarget, opts ResolveOptions) RuleLocator {
+	// An ambiguous row stands for several upstream rules: its own id, labels and
+	// definition describe only one of them, so only the id the caller got from
+	// the firing event (Alert Tuning) is trusted.
+	if t.Ambiguous {
+		loc := RuleLocator{}
+		switch t.Kind {
+		case TargetAWS:
+			if strings.HasPrefix(opts.AlertRuleKey, "arn:") {
+				loc.AWSAlarmARN = opts.AlertRuleKey
+			}
+		case TargetGCP:
+			if strings.HasPrefix(opts.AlertRuleKey, "projects/") {
+				loc.GCPPolicy = opts.AlertRuleKey
+			}
+		case TargetAzure:
+			loc.AzureID = azureIDFromKey(opts.AlertRuleKey)
+		}
+		return loc
+	}
+
 	loc := RuleLocator{ExternalID: derefString(t.Rule.ExternalRuleID)}
 	switch t.Kind {
 	case TargetAWS:
@@ -344,9 +379,6 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 	}
 
 	const ambiguousReason = "more than one upstream rule shares this name, so Nudgebee cannot tell which one to change"
-	notYet := func(what string) Capability {
-		return unavailable(what + " is not supported for this source yet")
-	}
 
 	switch t.Kind {
 	case TargetPromCR:
@@ -390,6 +422,8 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 		ops.DisableAtSource = unavailable("CloudWatch has no per-alarm disable, and disabling alarm actions would silence your own paging — use Mute instead")
 		write := available
 		switch {
+		case t.Rule.Labels["aws_alarm_type"] == "composite":
+			write = unavailable("a composite alarm combines other alarms and has no threshold of its own")
 		case t.Ambiguous && t.Locator.AWSAlarmARN == "":
 			write = unavailable(ambiguousReason)
 		case t.Locator.AWSAlarmARN == "" && (t.Locator.AWSRegion == "" || t.Locator.AWSAlarmName == ""):
@@ -400,21 +434,19 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 	case TargetGCP:
 		ops.PR = unavailable("PR apply is not supported for GCP alert policies")
 		ops.EditDefinition = unavailable("GCP alert policy thresholds are changed from Alert Tuning")
-		ops.DisableAtSource = notYet("Disabling a GCP alert policy")
-		write := Capability{Available: true, Warning: "direct apply for GCP is best-effort; verify the policy after applying"}
+		write := available
 		switch {
 		case t.Ambiguous && t.Locator.GCPPolicy == "":
 			write = unavailable(ambiguousReason)
 		case t.Locator.GCPPolicy == "":
 			write = unavailable("the alert policy id is not known")
 		}
-		ops.UpdateThreshold, ops.UpdateDuration = write, write
+		ops.UpdateThreshold, ops.UpdateDuration, ops.DisableAtSource = write, write, write
 
 	case TargetAzure:
 		ops.PR = unavailable("PR apply is not supported for Azure alerts")
 		ops.EditDefinition = unavailable("Azure alert thresholds are changed from Alert Tuning")
-		ops.DisableAtSource = notYet("Disabling an Azure alert")
-		write := Capability{Available: true, Warning: "direct apply for Azure is best-effort; verify the alert after applying"}
+		write := available
 		switch {
 		case t.Category == azureScheduledQueryCategory:
 			write = unavailable("log search (scheduled query) alerts cannot be changed from Nudgebee")
@@ -422,9 +454,10 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 		case t.Ambiguous:
 			write = unavailable(ambiguousReason)
 		default:
-			write.Warning = "Nudgebee finds this Azure alert by name; if another alert in your subscriptions has the same name, verify which one changed"
+			// cloud-collector refuses a name that matches more than one alert.
+			write.Warning = "Nudgebee finds this Azure alert by name because its resource id is not synced yet"
 		}
-		ops.UpdateThreshold, ops.UpdateDuration = write, write
+		ops.UpdateThreshold, ops.UpdateDuration, ops.DisableAtSource = write, write, write
 
 	default:
 		reason := "Nudgebee only holds a copy of this rule; change it in the system that evaluates it"

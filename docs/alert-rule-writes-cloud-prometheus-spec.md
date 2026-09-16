@@ -1,7 +1,7 @@
 # Spec — Real alert-rule edit / disable for AWS, GCP, Azure and in-cluster Prometheus
 
 Epic: #38553 (phase 1). Baseline: `origin/main` @ `32a999003e`.
-Revision 3.2 (2026-09-16) — PR 1 findings folded in (see "Rev 3.2 corrections"). Revision 3 — after two `/challenge` REVISE verdicts. Rev 2: mute vs disable-at-source split, no JSONB ambiguity flag, one availability function, customer CRs in scope. Rev 3/3.1: mute is a triage suppression rule (anchored, escaped alertname; one rule per source) (no new column, no ingestion filters); `enabled` ownership defined; GitOps classification via `managedFields`; agent delete payload made safe; rollout gaps closed.
+Revision 3.3 (2026-09-16) — PR 2 findings folded in (see "Rev 3.3 corrections"). Revision 3.2 — PR 1 findings folded in (see "Rev 3.2 corrections"). Revision 3 — after two `/challenge` REVISE verdicts. Rev 2: mute vs disable-at-source split, no JSONB ambiguity flag, one availability function, customer CRs in scope. Rev 3/3.1: mute is a triage suppression rule (anchored, escaped alertname; one rule per source) (no new column, no ingestion filters); `enabled` ownership defined; GitOps classification via `managedFields`; agent delete payload made safe; rollout gaps closed.
 
 Out of scope: Datadog, New Relic, Dynatrace, Splunk, Grafana, Elasticsearch, Chronosphere, SigNoz, CubeAPM, Loki, agentless Prometheus (`prometheus_user`, `prometheus_alertmanager_webhook`), webhook-only sources. For those, phase 1 only (a) offers *mute* and (b) stops edit/disable from returning fake success.
 
@@ -107,6 +107,18 @@ Nubi may recommend **both** *Mute in Nudgebee* and *Disable at source* (plus thr
 - **Azure is still found by name in PR 1.** Suggestions key Azure by alert name, and cloud-collector already searches every subscription by name; the resolver keeps that path with a warning until PR 2 stores the ARM id. `azure_monitor_webhook` rows resolve to Azure, as triage apply always routed them.
 - **Agent `success:false` check** is a helper (`relay.ActionSucceeded`) called by the alert-rule writes only. `relay.Execute` has 66 callers and is not changed in this PR.
 - **Updates keep unshown fields.** For a known row, the edit form's severity and three standard annotations are laid over the stored labels and annotations, both upstream and in `event_rules`.
+
+## Rev 3.3 corrections (found while building PR 2)
+
+- **PR 2 ships in two parts.** cloud-collector (#38587) first; the api-server wiring (GCP/Azure disable, exact revert, ambiguity, composite alarms) follows once PR 1 is merged, so each PR to `main` stays one commit.
+- **Only one GCP "enabled" filter is removed.** The rule listing now includes disabled policies. The second filter (`fetchAlertPoliciesForAccount`, used to attach policies to resources) stays: a disabled policy must not count as alarm coverage.
+- **Enable/disable is an explicit `set_enabled` field.** The existing `enabled` field is sent on every update (always `true` before PR 1), so honouring it would silently re-enable disabled rules.
+- **Revert state comes from the collector.** Every cloud update returns the values it replaced (`previous`); api-server stores them in `previous_provider_config` and a revert sends them back as `restore`. A restore mixed with new values is rejected. A `disable` suggestion is reverted by switching the rule back on.
+- **Ambiguous rows trust only the event's id.** Their own external id is NULL, and their labels/definition describe one of several rules, so only the firing event's ARN / policy name / ARM id is used.
+- **Composite CloudWatch alarms** have no threshold; edits are unavailable (mute still works).
+- **Azure name lookup refuses duplicates.** Until the ARM id is synced, a name that matches alerts in several subscriptions or resource groups is refused instead of editing the first match.
+- **GCP suggestions keyed by policy id** find their rule by `external_rule_id` / `labels.gcp_policy_id` when no rule has that alert name.
+- **Duration-only suggestions** (no threshold) used to fail in cloud-collector; the threshold is optional now.
 
 ## Open questions
 - Q1. Helm-managed customer CRs: is "direct write with warning" acceptable, or PR-only?

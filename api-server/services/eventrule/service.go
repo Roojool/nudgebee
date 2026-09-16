@@ -862,6 +862,22 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 		}
 	}
 
+	// Cloud rules have a native switch (GCP policy enabled, Azure alert enabled);
+	// the rule stays defined upstream and the next sync mirrors the new state.
+	if provider, ref := target.CloudWriteRef(); provider != "" {
+		enable := eventRequest.Enable
+		if _, err := alertrule.UpdateAlertRule(context, provider, "user", ref, alertrule.AlertRuleConfig{
+			AccountId:  eventRequest.AccountID,
+			Name:       rule.Alert,
+			AlertType:  rule.AlertType,
+			Severity:   rule.Severity,
+			Enabled:    enable,
+			SetEnabled: &enable,
+		}); err != nil {
+			return data, fmt.Errorf("failed to %s alert rule in %s: %w", op, provider, err)
+		}
+	}
+
 	var updatedId string
 	err = dbms.QueryRowAndScan(&updatedId, `
 		UPDATE event_rules SET enabled = $4, external_rule_id = COALESCE($5, external_rule_id), updated_at = now()
