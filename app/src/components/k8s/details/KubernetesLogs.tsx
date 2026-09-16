@@ -479,7 +479,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
                     lineHeight: '1.6',
                     overflowWrap: 'anywhere',
                     wordBreak: 'break-all',
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                   }}
                 />
                 {existingTicket && (
@@ -1287,7 +1287,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
               <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
                 {logProvider ? `${logProvider} query:` : 'Query:'}
               </Box>
-              <Box component='span' sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>
+              <Box component='span' sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>
                 {executedQuery}
               </Box>
             </Box>

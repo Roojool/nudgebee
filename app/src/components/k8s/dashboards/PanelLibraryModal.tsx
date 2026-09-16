@@ -318,7 +318,7 @@ const PanelLibraryModal: React.FC<Props> = ({ open, existingPanels, accountOptio
                       sx={{
                         maxHeight: 140,
                         overflow: 'auto',
-                        fontFamily: 'monospace',
+                        fontFamily: ds.font.mono,
                         fontSize: 11.5,
                         color: ds.gray[600],
                         whiteSpace: 'pre-wrap',

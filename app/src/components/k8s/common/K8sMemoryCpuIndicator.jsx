@@ -200,7 +200,7 @@ const K8sMemoryCpuIndicator = ({
                 aria-label={`Open ${title} utilization trend`}
                 size='small'
                 onClick={onOpenTrend}
-                sx={{ p: '2px', color: 'var(--ds-brand-400)' }}
+                sx={{ p: ds.space[0], color: 'var(--ds-brand-400)' }}
               >
                 <OpenInNewIcon sx={{ fontSize: ds.text.bodyLg }} />
               </IconButton>

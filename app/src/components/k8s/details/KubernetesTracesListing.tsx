@@ -993,7 +993,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                 <WidgetCard>
                   <Typography
                     sx={{
-                      fontFamily: 'monospace',
+                      fontFamily: ds.font.mono,
                       fontSize: 'var(--ds-text-body)',
                       lineHeight: '1.6',
                       wordBreak: 'break-word',
@@ -1095,7 +1095,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                 <WidgetCard>
                   <Typography
                     sx={{
-                      fontFamily: 'monospace',
+                      fontFamily: ds.font.mono,
                       fontSize: 'var(--ds-text-body)',
                       lineHeight: '1.6',
                       wordBreak: 'break-word',
@@ -1120,7 +1120,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                     <Typography sx={{ fontWeight: 'bold', mb: 'var(--ds-space-1)' }}>Headers:</Typography>
                     <Typography
                       sx={{
-                        fontFamily: 'monospace',
+                        fontFamily: ds.font.mono,
                         fontSize: 'var(--ds-text-body)',
                         lineHeight: '1.6',
                         wordBreak: 'break-word',
@@ -1144,7 +1144,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                     </Typography>
                     <Typography
                       sx={{
-                        fontFamily: 'monospace',
+                        fontFamily: ds.font.mono,
                         fontSize: 'var(--ds-text-body)',
                         lineHeight: '1.6',
                         wordBreak: 'break-word',
@@ -1173,7 +1173,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                     <Typography sx={{ fontWeight: 'bold', mb: 'var(--ds-space-1)' }}>Response:</Typography>
                     <Typography
                       sx={{
-                        fontFamily: 'monospace',
+                        fontFamily: ds.font.mono,
                         fontSize: 'var(--ds-text-body)',
                         lineHeight: '1.6',
                         whiteSpace: 'pre-wrap',

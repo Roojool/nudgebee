@@ -189,7 +189,7 @@ const ServiceMapLegends = ({ mode = 'service_map' }) => {
                     fontWeight: 'var(--ds-font-weight-semibold)',
                     fontSize: 'var(--ds-text-caption)',
                     color: ds.gray[700],
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     whiteSpace: 'nowrap',
                     minWidth: ds.space.mul(0, 65),
                   }}

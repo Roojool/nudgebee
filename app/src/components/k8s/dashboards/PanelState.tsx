@@ -93,7 +93,7 @@ const PanelState: React.FC<Props> = ({ tone, title, description, icon, action })
       <Box>
         <Typography sx={{ fontSize: 13, fontWeight: 600, color: palette.titleColor, lineHeight: 1.35 }}>{title}</Typography>
         {description && (
-          <Typography variant='caption' sx={{ color: ds.gray[500], display: 'block', mt: '2px' }}>
+          <Typography variant='caption' sx={{ color: ds.gray[500], display: 'block', mt: ds.space[0] }}>
             {description}
           </Typography>
         )}

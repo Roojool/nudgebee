@@ -272,7 +272,7 @@ export const PropertyFilterHelp = ({ heading }) => (
           backgroundColor: 'var(--ds-blue-100)',
           borderRadius: 'var(--ds-radius-sm)',
           padding: 'var(--ds-space-1) var(--ds-space-2)',
-          fontFamily: 'monospace',
+          fontFamily: ds.font.mono,
           fontSize: 'var(--ds-text-small)',
           color: 'var(--ds-gray-700)',
         }}
@@ -308,7 +308,7 @@ export const PropertyFilterHelp = ({ heading }) => (
               sx={{
                 fontSize: 'var(--ds-text-caption)',
                 fontWeight: 'var(--ds-font-weight-semibold)',
-                fontFamily: 'monospace',
+                fontFamily: ds.font.mono,
                 color: 'var(--ds-gray-700)',
                 backgroundColor: 'var(--ds-blue-100)',
                 border: '1px solid var(--ds-blue-300)',
@@ -1937,7 +1937,7 @@ const LogQueryBuilderAutocomplete = ({
                                 backgroundColor: 'var(--ds-blue-100)',
                                 borderRadius: 'var(--ds-radius-sm)',
                                 padding: 'var(--ds-space-1) var(--ds-space-2)',
-                                fontFamily: 'monospace',
+                                fontFamily: ds.font.mono,
                                 fontSize: 'var(--ds-text-small)',
                                 color: 'var(--ds-gray-700)',
                               }}
@@ -1979,7 +1979,7 @@ const LogQueryBuilderAutocomplete = ({
                                     sx={{
                                       fontSize: 'var(--ds-text-caption)',
                                       fontWeight: 'var(--ds-font-weight-semibold)',
-                                      fontFamily: 'monospace',
+                                      fontFamily: ds.font.mono,
                                       color: 'var(--ds-gray-700)',
                                       backgroundColor: 'var(--ds-blue-100)',
                                       border: '1px solid var(--ds-blue-300)',

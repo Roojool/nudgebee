@@ -569,7 +569,7 @@ const KubernetesInsertApplicationGroupingModal: React.FC<KubernetesInsertApplica
                         }}
                         onClick={() => handleCheckboxChange(workload)}
                       >
-                        <Box sx={{ pt: '2px' }} onClick={(e) => e.stopPropagation()}>
+                        <Box sx={{ pt: ds.space[0] }} onClick={(e) => e.stopPropagation()}>
                           <Checkbox
                             size='sm'
                             checked={checkWorkloadSelected(workload)}

@@ -12,7 +12,7 @@ import { ds } from '@utils/colors';
 // the dialog cannot promise one change and the server perform another.
 
 const labelSx = { fontSize: ds.text.small, color: ds.gray[600] };
-const valueSx = { fontSize: ds.text.small, fontWeight: ds.weight.medium, fontFamily: 'monospace' };
+const valueSx = { fontSize: ds.text.small, fontWeight: ds.weight.medium, fontFamily: ds.font.mono };
 
 const UndoConfirmDialog = ({ open, onClose, onConfirm, loading, label, actionTitle, target, preview }) => {
   if (!open) return null;

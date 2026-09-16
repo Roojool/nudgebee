@@ -212,7 +212,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
     {
       text: release.chart_version,
       component: (
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
           {release.chart_version}
         </Typography>
       ),
@@ -220,7 +220,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
     {
       text: release.kube_version || '-',
       component: (
-        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
           {release.kube_version || '-'}
         </Typography>
       ),
@@ -461,7 +461,7 @@ export const ClusterHealthWorkloadsContent: React.FC<{ accountId?: string }> = (
           {
             text: `${workload.available}/${workload.replicas}`,
             component: (
-              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
                 {workload.available}/{workload.replicas}
               </Typography>
             ),
@@ -741,7 +741,7 @@ export const ClusterHealthNodesContent: React.FC<{ accountId?: string }> = ({ ac
           {
             text: node.version,
             component: (
-              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>{node.version}</Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>{node.version}</Typography>
             ),
           },
           {
@@ -939,7 +939,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
       {
         text: `${health_counts.InService}/${lb.instances?.total_instances ?? 0}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {health_counts.InService}/{lb.instances?.total_instances ?? 0}
           </Typography>
         ),
@@ -987,7 +987,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
           <Typography
             sx={{
               fontSize: 'var(--ds-text-small)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: 'var(--ds-gray-700)',
               fontWeight: 'var(--ds-font-weight-medium)',
             }}
@@ -1050,7 +1050,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
           </Typography>
           <Typography
             variant='body2'
-            sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
+            sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-700)', wordBreak: 'break-all' }}
           >
             {loadBalancer.hostname}
           </Typography>
@@ -1254,7 +1254,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: node.kubelet_version,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {node.kubelet_version}
           </Typography>
         ),
@@ -1311,7 +1311,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: `${ng.min_size}/${ng.desired_size}/${ng.max_size}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {ng.min_size}/{ng.desired_size}/{ng.max_size}
           </Typography>
         ),
@@ -1319,7 +1319,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: ng.kubernetes_version,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {ng.kubernetes_version}
           </Typography>
         ),
@@ -1327,7 +1327,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
       {
         text: `${readyNodes}/${totalNodes}`,
         component: (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
             {readyNodes}/{totalNodes}
           </Typography>
         ),

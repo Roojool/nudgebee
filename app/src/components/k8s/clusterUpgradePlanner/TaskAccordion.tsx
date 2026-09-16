@@ -249,7 +249,7 @@ const TaskAccordion: React.FC<TaskAccordionProps> = ({
             {
               text: <Datetime value={audit.created_at} />,
               component: (
-                <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: 'monospace' }}>
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', fontFamily: ds.font.mono }}>
                   <Datetime value={audit.created_at} />
                 </Typography>
               ),

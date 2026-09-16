@@ -476,7 +476,7 @@ const KubernetesPlusMinusLogsGradual: React.FC<KubernetesPlusMinusLogsGradualPro
                           lineHeight: '1.6',
                           overflowWrap: 'anywhere',
                           wordBreak: 'break-all',
-                          fontFamily: 'monospace',
+                          fontFamily: ds.font.mono,
                         }}
                       />
                     </Box>

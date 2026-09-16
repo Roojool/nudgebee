@@ -220,7 +220,7 @@ const GroupHeader: React.FC<{ title: string; description: string }> = ({ title, 
     >
       {title}
     </Typography>
-    <Typography variant='caption' sx={{ display: 'block', mt: '2px', color: ds.gray[500], fontWeight: 400 }}>
+    <Typography variant='caption' sx={{ display: 'block', mt: ds.space[0], color: ds.gray[500], fontWeight: 400 }}>
       {description}
     </Typography>
   </Box>
@@ -743,7 +743,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                       </Form.Field>
                       <Form.Field
                         label={
-                          <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1] }}>
                             Accounts
                             <Tooltip
                               title={multiType ? 'Leave empty for all accounts of the chosen providers' : 'Leave empty for all accounts of this type'}
@@ -772,7 +772,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                     {providerType && (
                       <Form.Field
                         label={
-                          <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1] }}>
                             Provider
                             <Tooltip title='The backend this panel’s query is written for. One panel speaks one query language — for a second provider, add a second panel.'>
                               <Box component='span' sx={{ display: 'inline-flex', alignItems: 'center', color: ds.gray[400], cursor: 'help' }}>
@@ -889,7 +889,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                           <Box sx={{ p: 1.5, border: `1px solid ${ds.gray[300]}`, background: ds.background[200], borderRadius: ds.radius.md }}>
                             <Typography variant='body2' sx={{ color: ds.gray[700] }}>
                               Allowed: {commandHelp.allowed}. The result is a snapshot — this panel ignores the dashboard&apos;s time range. Example:{' '}
-                              <Box component='code' sx={{ fontFamily: 'monospace' }}>
+                              <Box component='code' sx={{ fontFamily: ds.font.mono }}>
                                 {commandHelp.example}
                               </Box>
                             </Typography>
@@ -1311,7 +1311,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                         <Typography variant='caption' sx={{ display: 'block', mt: 1, color: ds.gray[500] }}>
                           Attach the link to a column and its own values become the links; choose New column for a plain action column instead. Write
                           an in-app path and fill it from the row with{' '}
-                          <Box component='code' sx={{ fontFamily: 'monospace' }}>
+                          <Box component='code' sx={{ fontFamily: ds.font.mono }}>
                             {'{{column}}'}
                           </Box>
                           . Available here: {entityDraft.columns.map((c) => `{{${c}}}`).join(', ')}.

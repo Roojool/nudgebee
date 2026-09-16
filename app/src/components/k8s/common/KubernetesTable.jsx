@@ -1042,7 +1042,7 @@ const KubernetesLogDetails = ({ query }) => {
         )}
         {key === 'timestamp' && query.callback && <Typography style={{ fontWeight: 'bold', minWidth: ds.space.mul(0, 40) }} />}
         <Typography style={{ fontWeight: 'bold', minWidth: ds.space.mul(0, 65) }}>{key}:</Typography>
-        {key === 'timestamp' ? <Datetime value={new Date(value / 1000000)} /> : <span style={{ fontFamily: 'monospace' }}>{value}</span>}
+        {key === 'timestamp' ? <Datetime value={new Date(value / 1000000)} /> : <span style={{ fontFamily: ds.font.mono }}>{value}</span>}
       </Typography>
     </Grid>
   );
@@ -1083,7 +1083,7 @@ const KubernetesLogDetails = ({ query }) => {
             <Card variant='outlined' size='md' header={<Typography sx={{ fontWeight: 'bold' }}>Message</Typography>}>
               <MarkDowns
                 data={cleanupMessage(query.data.message)}
-                sx={{ width: '100%', wordBreak: 'break-word', overflowY: 'none', fontFamily: 'monospace' }}
+                sx={{ width: '100%', wordBreak: 'break-word', overflowY: 'none', fontFamily: ds.font.mono }}
               />
             </Card>
           </Grid>
@@ -1104,7 +1104,7 @@ const KubernetesLogPatternDetails = ({ query }) => {
     <Card variant='outlined' size='md' header={<Typography sx={{ fontWeight: 'bold' }}>Sample</Typography>}>
       <Typography
         sx={{
-          fontFamily: 'monospace',
+          fontFamily: ds.font.mono,
           fontSize: 'var(--ds-text-body)',
           lineHeight: '1.6',
           wordBreak: 'break-word',
