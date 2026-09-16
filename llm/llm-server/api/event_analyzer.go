@@ -2511,11 +2511,12 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 				// re-explores from scratch and can contradict the investigation
 				// (event ed0fd316: it found the retry the investigation asked for
 				// and stopped, never doing the other half of the plan).
-				changePlan.Evidence = collectInvestigationCodeCitations(ctx, dbManager, parentConversationId, rootcauseAgentName, changePlan.Files)
+				changePlan.Evidence = collectInvestigationCodeCitations(ctx, dbManager, parentConversationId, request.AccountId, rootcauseAgentName, changePlan.Files)
 				ctx.GetLogger().Info("analyzer: debug agent emitted a change plan",
 					"event_id", request.EventId, "kind", changePlan.Kind,
 					"files", strings.Join(changePlan.Files, ","),
-					"target_value", changePlan.TargetValue, "change_bytes", len(changePlan.Change))
+					"target_value", changePlan.TargetValue, "change_bytes", len(changePlan.Change),
+					"evidence_bytes", len(changePlan.Evidence))
 			} else {
 				ctx.GetLogger().Info("analyzer: no <change_plan> block in investigation",
 					"event_id", request.EventId, "investigation_bytes", len(investigationResponse))
@@ -3077,28 +3078,30 @@ func codeAgentOutcome(actualResponse map[string]any, response EventAnalysisRespo
 // Citations are filtered to the files the plan named; a citation for an
 // unrelated file is what would make the fix agent confidently answer about the
 // wrong code. Best-effort: on any error the query degrades to plan-only.
-func collectInvestigationCodeCitations(ctx *security.RequestContext, dbManager *common.DatabaseManager, conversationId, debugAgentName string, planFiles []string) string {
-	if dbManager == nil || conversationId == "" || debugAgentName == "" {
+func collectInvestigationCodeCitations(ctx *security.RequestContext, dbManager *common.DatabaseManager, sessionId, accountId, debugAgentName string, planFiles []string) string {
+	if dbManager == nil || sessionId == "" || accountId == "" || debugAgentName == "" {
 		return ""
 	}
-	if _, err := uuid.Parse(conversationId); err != nil {
-		return ""
-	}
+	// The pipeline addresses its conversation by session id ("event-<fingerprint>"),
+	// not by conversation UUID, so resolve it through llm_conversations. Filtering
+	// llm_conversation_messages.conversation_id on the session string matched
+	// nothing and silently dropped every citation (#38488 follow-up).
 	var responses []string
 	if err := dbManager.Db.Select(&responses, `
+		WITH investigation AS (
+		    SELECT m.id
+		    FROM llm_conversation_messages m
+		    JOIN llm_conversations c ON c.id = m.conversation_id
+		    WHERE c.session_id = $1 AND c.account_id = $2 AND m.agent_name = $3
+		    ORDER BY m.created_at DESC
+		    LIMIT 1)
 		SELECT COALESCE(a.response, '')
 		FROM llm_conversation_agent a
-		JOIN llm_conversation_messages m ON m.id = a.message_id
-		WHERE m.conversation_id = $1
-		  AND m.agent_name = $2
-		  AND m.id = (
-		      SELECT id FROM llm_conversation_messages
-		      WHERE conversation_id = $1 AND agent_name = $2
-		      ORDER BY created_at DESC LIMIT 1)
-		  AND a.agent_name = 'code_analyzer'
+		JOIN investigation i ON i.id = a.message_id
+		WHERE a.agent_name = 'code_analyzer'
 		  AND a.status = 'success'
-		ORDER BY a.created_at`, conversationId, debugAgentName); err != nil {
-		ctx.GetLogger().Warn("analyzer: unable to collect investigation code citations", "error", err, "conversation_id", conversationId)
+		ORDER BY a.created_at`, sessionId, accountId, debugAgentName); err != nil {
+		ctx.GetLogger().Warn("analyzer: unable to collect investigation code citations", "error", err, "session_id", sessionId)
 		return ""
 	}
 
