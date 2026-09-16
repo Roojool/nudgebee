@@ -2098,7 +2098,9 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 	return b.String()
 }
 
-func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Event, request EventAnalysisRequest, response EventAnalysisResponse, parsedLabels map[string]any, anaylsisRepo *events.EventAnalysisRepository, pending map[string]string, window investigationWindow, hasWindow bool) (string, string, bool, string, *tools.RunbookRef, *services_server.EventCodeCapabilities, error) {
+// capNamespace / capWorkload are the event's resolved workload
+// (resolveEventWorkload); the caller resolves them once and reuses them.
+func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Event, request EventAnalysisRequest, response EventAnalysisResponse, parsedLabels map[string]any, anaylsisRepo *events.EventAnalysisRepository, pending map[string]string, window investigationWindow, hasWindow bool, capNamespace, capWorkload string) (string, string, bool, string, *tools.RunbookRef, *services_server.EventCodeCapabilities, error) {
 	// runbookRef holds the runbook resolved from the event's runbook_url label
 	// (if any), so the caller can cite it in the synthesized analysis.
 	var runbookRef *tools.RunbookRef
@@ -2134,7 +2136,6 @@ func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Even
 	// no integration there is nothing to act on.
 	var codeCapabilities *services_server.EventCodeCapabilities
 	if isGitIntegrationConfigured(request.AccountId) {
-		capNamespace, capWorkload := resolveEventWorkload(ctx, event, parsedLabels)
 		if capNamespace != "" && capWorkload != "" {
 			if dbm, dbErr := common.GetDatabaseManager(common.Metastore); dbErr == nil {
 				if resolved, capErr := services_server.ResolveEventCodeCapabilities(ctx, dbm, request.AccountId, services_server.SourceCodeAnnotationOptions{
@@ -2183,6 +2184,8 @@ func generateEventAnalysisPrompt(ctx *security.RequestContext, event events.Even
 		"or not assessed. Render each candidate's alert name as a markdown link to its event page using that " +
 		"candidate's event_id from the tool output: [<alert title>](/investigate?id=<event_id>&accountId=" +
 		request.AccountId + "). If the tool returned no candidates, say so in one line."
+
+	eventAnalsysisPrompt = eventAnalsysisPrompt + buildConfirmingCheckBlock(capNamespace, capWorkload)
 
 	accountPrompt, _, _ := core.AgentAdditionalInstructionsAndToolsAndConfigs(ctx, request.AccountId, "event_log_analysis")
 	debugAnalysisEnabled := true
@@ -2578,7 +2581,8 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	// They are persisted below only on the branch that actually runs the agent, so
 	// recovered / re-polled investigations never touch the workspace.
 	pendingWorkspaceWrites := map[string]string{}
-	eventAnalsysisPrompt, accountPrompt, debugAnalysisEnabled, debugSkipReason, runbookRef, codeCapabilities, err := generateEventAnalysisPrompt(ctx, eventData, request, response, parsedLabels, eventAnalysisRepo, pendingWorkspaceWrites, window, hasWindow)
+	workloadNamespace, workloadName := resolveEventWorkload(ctx, eventData, parsedLabels)
+	eventAnalsysisPrompt, accountPrompt, debugAnalysisEnabled, debugSkipReason, runbookRef, codeCapabilities, err := generateEventAnalysisPrompt(ctx, eventData, request, response, parsedLabels, eventAnalysisRepo, pendingWorkspaceWrites, window, hasWindow, workloadNamespace, workloadName)
 	if err != nil {
 		return EventAnalysisResponse{}, err
 	}
@@ -2633,6 +2637,9 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		}
 		rootcauseAgentName := rootcauseAgent.GetName()
 		var investigationResponse string
+		// investigationMessageId is this run's message; empty when the answer was
+		// recovered from conversation history.
+		var investigationMessageId string
 		var hasInvestigation bool
 
 		if shouldRecoverStageFromConversation(eventAnalysisRepo, existingInvestigation, request.Regenerate) {
@@ -2688,6 +2695,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 				}
 			} else if len(rootcauseAnalysis.Response) > 0 && rootcauseAnalysis.Status == core.ConversationStatusCompleted {
 				investigationResponse = rootcauseAnalysis.Response[0]
+				investigationMessageId = rootcauseAnalysis.MessageId
 				hasInvestigation = true
 				// Attach the resolved runbook to the investigation conversation
 				// as a context reference (Additional Contexts panel), mirroring
@@ -2732,10 +2740,15 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 				ctx.GetLogger().Info("analyzer: no <change_plan> block in investigation",
 					"event_id", request.EventId, "investigation_bytes", len(investigationResponse))
 			}
-			cleaned := stripChangePlanBlock(investigationResponse)
+			// Phase 1 of the recurring-alert follow-up to #38489: record the check
+			// the investigation names as proof of its cause. Nothing reads it back
+			// yet; it is stored so its specificity and re-runnability can be
+			// measured on real investigations.
+			check := recordConfirmingCheck(ctx, dbManager, investigationResponse, investigationMessageId, request.EventId, request.AccountId, workloadNamespace, workloadName)
+			cleaned := stripConfirmingCheckBlock(stripChangePlanBlock(investigationResponse))
 			response.Summary = cleaned
 			investigationText = cleaned
-			err = eventAnalysisRepo.UpsertEventAnalysis(ctx, request.EventId, marshalCodeChangePlan(changePlan), cleaned, string(events.AnalysisStatusCompleted), eventData.Fingerprint, request.AccountId, eventData.AggregationKey, events.AnalysisTypeInvestigation)
+			err = eventAnalysisRepo.UpsertEventAnalysis(ctx, request.EventId, marshalInvestigationAnalysis(changePlan, check), cleaned, string(events.AnalysisStatusCompleted), eventData.Fingerprint, request.AccountId, eventData.AggregationKey, events.AnalysisTypeInvestigation)
 			if err != nil {
 				ctx.GetLogger().Error("unable to update status after root-cause", "error", err, "eventId", request.EventId)
 			}
