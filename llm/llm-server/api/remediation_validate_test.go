@@ -505,3 +505,39 @@ func TestCloudRestartAgainstAnOrdinaryCauseIsUntouched(t *testing.T) {
 	assert.NotContains(t, ruleNames(notes), "restart_cannot_fix_this_cause_demoted")
 	assert.Equal(t, Confidence(45), plan.Actions[0].Confidence)
 }
+
+// The prompt asks for a second action that reprocesses work stranded while the fault lasted. The
+// validator has never seen one, so this guards the shape end to end: the recovery action must
+// survive validation intact, with its read-only verify kept and no rollback invented for something
+// that has no inverse.
+func TestRecoveringStrandedWorkSurvivesValidation(t *testing.T) {
+	plan := &RemediationPlan{
+		Hypotheses: []RemediationHypothesis{{Hypothesis: "consumer throttled to zero", Confidence: 95}},
+		Actions: []RemediationAction{
+			{
+				Hypothesis:      "consumer throttled to zero",
+				Action:          "Delete reserved concurrency",
+				Kind:            RemediationKindFix,
+				Confidence:      95,
+				ExecuteCommand:  "aws lambda delete-function-concurrency --function-name invoice-processor --region us-east-1",
+				VerifyCommand:   "aws lambda get-function-concurrency --function-name invoice-processor --region us-east-1",
+				RollbackCommand: "aws lambda put-function-concurrency --function-name invoice-processor --reserved-concurrent-executions 0 --region us-east-1",
+			},
+			{
+				Hypothesis:     "consumer throttled to zero",
+				Action:         "Redrive dead-lettered invoices",
+				Kind:           RemediationKindFix,
+				Confidence:     80,
+				ExecuteCommand: "aws sqs start-message-move-task --source-arn arn:aws:sqs:us-east-1:123456789012:invoice-events-dlq --region us-east-1",
+				VerifyCommand:  "aws sqs list-message-move-tasks --source-arn arn:aws:sqs:us-east-1:123456789012:invoice-events-dlq --region us-east-1",
+			},
+		},
+	}
+	validatePlanCommands(plan)
+
+	require.Len(t, plan.Actions, 2, "the recovery action must not be dropped")
+	recovery := plan.Actions[1]
+	require.Contains(t, recovery.ExecuteCommand, "start-message-move-task")
+	require.Contains(t, recovery.VerifyCommand, "list-message-move-tasks", "a read-only task status check is a valid verify")
+	require.Empty(t, recovery.RollbackCommand, "moving messages back is not an inverse; none should be invented")
+}
