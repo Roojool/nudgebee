@@ -696,17 +696,34 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 		AccountMetadata: make([]AccountGraphMetadata, 0),
 	}
 
+	if req.Partial && len(req.AccountIDs) == 0 {
+		return nil, fmt.Errorf("partial build requires at least one account id")
+	}
+
 	// If no flow sources requested, default to all enabled registered flow sources.
 	// Done up-front so shouldIncrementSyncVersion and any logging below see the
 	// final set rather than an empty slice.
-	if len(req.FlowSources) == 0 {
-		req.FlowSources = s.defaultEnabledFlowSources()
+	//
+	// A partial build skips flow sources unless they were explicitly requested:
+	// flow sources observe traffic tenant-wide, so re-running them for one account
+	// costs a full tenant sweep for edges the hourly build refreshes anyway. Leaving
+	// the list empty also keeps successfulFlowSources empty, which makes the node
+	// sweep protect every flow-sourced row.
+	if !req.Partial {
+		if len(req.FlowSources) == 0 {
+			req.FlowSources = s.defaultEnabledFlowSources()
+		}
+		// Always-on flow sources (e.g. `manual`) get appended regardless of what
+		// the tenant filter said. This is the canonical injection point — every
+		// downstream check below (the Phase 2.5 gate, buildFlowRelationships, the
+		// "did flow sources successfully run?" tracking) sees the final list.
+		req.FlowSources = applyAlwaysOnFlowSources(req.FlowSources)
+	} else if len(req.FlowSources) > 0 {
+		// Partial build with flow sources explicitly requested: honour them, and
+		// still inject the always-on ones so the list means the same thing here as
+		// it does for a tenant-wide build.
+		req.FlowSources = applyAlwaysOnFlowSources(req.FlowSources)
 	}
-	// Always-on flow sources (e.g. `manual`) get appended regardless of what
-	// the tenant filter said. This is the canonical injection point — every
-	// downstream check below (the Phase 2.5 gate, buildFlowRelationships, the
-	// "did flow sources successfully run?" tracking) sees the final list.
-	req.FlowSources = applyAlwaysOnFlowSources(req.FlowSources)
 
 	// Fetch all active accounts for tenant
 	s.logger.Info("building knowledge graphs for all active accounts",
@@ -772,6 +789,16 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	// from this list (because it errored or wasn't run) protects its rows from
 	// being tombstoned this cycle.
 	successfulFlowSources := make([]string, 0, len(req.FlowSources))
+
+	// Context nodes are the other accounts' active nodes, loaded from the database
+	// for a partial build so the cross-source enrichers and cross-account rules can
+	// still match against them. contextIDs is what keeps them out of SaveNodes.
+	var contextIDs map[string]struct{}
+
+	// Cross-source enrichers that ran to completion this build. Feeds the scoped
+	// edge sweep's ran-set: an enricher that did not run must not have its edges
+	// tombstoned.
+	ranEnrichers := make([]string, 0, len(s.crossSourceEnrichers))
 
 	// Unified graph to hold all nodes and edges from all accounts and sources
 	unifiedGraph := &Graph{
@@ -907,9 +934,19 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	// integration's own ID (used purely as a dispatch/partition key — see
 	// TenantScopedSource).
 	// ========================================================================
-	s.logger.Info("Phase 1b: Building tenant-scoped integration graphs")
+	if req.Partial {
+		s.logger.Info("Phase 1b: skipped for partial build", "tenant_id", req.TenantID)
+	} else {
+		s.logger.Info("Phase 1b: Building tenant-scoped integration graphs")
+	}
 
 	for sourceName, source := range s.sources {
+		// Tenant-scoped integrations are configured per tenant, not per cloud
+		// account, so an account-scoped rebuild has nothing to say about them.
+		// They are skipped here and excluded from both sweeps below.
+		if req.Partial {
+			break
+		}
 		if s.getSourceCategory(sourceName) != SourceCategoryIntegration {
 			continue
 		}
@@ -995,6 +1032,29 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	}
 
 	// ========================================================================
+	// PHASE 2.0: Load the rest of the tenant as read-only context (partial builds)
+	// The enrichers and cross-account rules below only ever look at the in-memory
+	// node slice, so without this a partial build would silently drop every edge
+	// that crosses out of the rebuilt accounts.
+	// ========================================================================
+	if req.Partial {
+		contextNodes, ids, err := s.loadContextNodes(req.TenantID, req.AccountIDs)
+		if err != nil {
+			// Fatal for a partial build: continuing would compute an edge set that
+			// looks complete but is missing every cross-account relationship, and the
+			// scoped sweep would then tombstone the real ones as stale.
+			return nil, fmt.Errorf("failed to load context nodes for partial build: %w", err)
+		}
+		contextIDs = ids
+		unifiedGraph.Nodes = append(unifiedGraph.Nodes, contextNodes...)
+		s.logger.Info("Phase 2.0: loaded context nodes for partial build",
+			"tenant_id", req.TenantID,
+			"scope_account_ids", req.AccountIDs,
+			"context_nodes", len(contextNodes),
+			"total_nodes", len(unifiedGraph.Nodes))
+	}
+
+	// ========================================================================
 	// PHASE 2.1: Cross-source enrichment (AWS LoadBalancer -> K8s)
 	// Runs after all infrastructure sources complete, before flow sources
 	// Enables cross-account matching between different source types
@@ -1005,6 +1065,12 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 			"total_nodes", len(unifiedGraph.Nodes))
 
 		for _, enricher := range s.crossSourceEnrichers {
+			if req.Partial && tenantScopedEnricherNames[enricher.GetName()] {
+				s.logger.Info("skipping tenant-scoped enricher for partial build",
+					"enricher", enricher.GetName())
+				continue
+			}
+
 			startTime := time.Now()
 			enrichedNodes, enrichedEdges, err := enricher.EnrichCrossSources(
 				ctx,
@@ -1022,6 +1088,7 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 			newEdgeCount := len(enrichedEdges) - len(unifiedGraph.Edges)
 			unifiedGraph.Nodes = enrichedNodes
 			unifiedGraph.Edges = enrichedEdges
+			ranEnrichers = append(ranEnrichers, enricher.GetName())
 
 			s.logger.Info("cross-source enricher completed",
 				"enricher", enricher.GetName(),
@@ -1191,9 +1258,16 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 	// 	_ = os.WriteFile("nudgebee_graph.json", graphJSON, 0644)
 	// }
 
+	// Split out the nodes this build is allowed to persist. For a tenant-wide build
+	// contextIDs is empty and ownNodes is the whole slice; for a partial build the
+	// other accounts' context rows are withheld from SaveNodes (but still handed to
+	// SaveEdges as the endpoint universe — see saveGraphToDB).
+	ownNodes := splitOwnNodes(unifiedGraph.Nodes, contextIDs)
+	unifiedGraph.Edges = dropContextOnlyEdges(unifiedGraph.Edges, contextIDs)
+
 	// Save to database if requested
 	if req.SaveToDB {
-		nodesSaved, edgesSaved, err := s.saveGraphToDB(unifiedGraph, currentSyncVersion, s.logger)
+		nodesSaved, edgesSaved, err := s.saveGraphToDB(unifiedGraph, ownNodes, currentSyncVersion, s.logger)
 		if err != nil {
 			s.logger.Error("failed to save unified graph to database", "error", err)
 			response.Success = false
@@ -1223,7 +1297,7 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 			// Mark inactive nodes and update sync version if applicable
 			if shouldIncrement && filter != nil {
 				// Mark nodes that weren't updated in this sync as inactive
-				inactiveCount, err := s.markInactiveNodes(ctx, req.TenantID, req.AccountIDs, currentSyncVersion, req.Sources, successfulFlowSources)
+				inactiveCount, err := s.markInactiveNodes(ctx, req.TenantID, req.AccountIDs, currentSyncVersion, req.Sources, successfulFlowSources, !req.Partial)
 				if err != nil {
 					s.logger.Error("failed to mark inactive nodes", "error", err)
 					// Don't fail the entire operation, just log the error
@@ -1236,12 +1310,24 @@ func (s *Service) BuildGraphs(ctx *security.RequestContext, req *BuildRequest) (
 				// Mark infra edges that weren't re-stamped this sync as inactive.
 				// Behavioural edges (CALLS, PUBLISHES_TO, …) are excluded — they go
 				// through the time-based MarkStaleEdgesInactive sweep instead.
-				inactiveEdgeCount, err := s.markInactiveInfraEdges(req.TenantID, currentSyncVersion)
+				//
+				// A partial build sweeps only edges that (a) were stamped by a
+				// producer that actually ran and (b) belong to, or touch a node in,
+				// one of the rebuilt accounts. Anything else is left for the hourly
+				// tenant-wide build to reconcile.
+				var inactiveEdgeCount int64
+				if req.Partial {
+					ranSources := collectRanEdgeSources(response, ranEnrichers)
+					inactiveEdgeCount, err = s.markInactiveInfraEdgesScoped(req.TenantID, currentSyncVersion, req.AccountIDs, ranSources)
+				} else {
+					inactiveEdgeCount, err = s.markInactiveInfraEdges(req.TenantID, currentSyncVersion)
+				}
 				if err != nil {
 					s.logger.Error("failed to mark inactive infra edges", "error", err)
 				} else {
 					s.logger.Info("marked inactive infra edges",
 						"inactive_count", inactiveEdgeCount,
+						"partial", req.Partial,
 						"sync_version", currentSyncVersion)
 				}
 
@@ -1824,31 +1910,42 @@ func (s *Service) SaveNodes(nodes []*DbNode, syncVersion int64) error {
 	return nil
 }
 
-func (s *Service) saveGraphToDB(graph *Graph, syncVersion int64, logger *slog.Logger) (int, int, error) {
+// saveGraphToDB persists a built graph.
+//
+// ownNodes is the subset of graph.Nodes this build has authority to write. For a
+// tenant-wide build it is graph.Nodes itself; for a partial build it excludes the
+// context nodes loaded from other accounts. The distinction matters twice over:
+// SaveNodes must not rewrite another account's rows, while SaveEdges must still
+// SEE those rows, because it drops any edge whose endpoints are not in the slice
+// it is given — passing only ownNodes there would silently discard every
+// cross-account edge this build just computed.
+func (s *Service) saveGraphToDB(graph *Graph, ownNodes []*DbNode, syncVersion int64, logger *slog.Logger) (int, int, error) {
 	logger.Info("Saving knowledge graph to database",
-		"nodes_count", len(graph.Nodes),
+		"nodes_count", len(ownNodes),
+		"context_nodes_count", len(graph.Nodes)-len(ownNodes),
 		"edges_count", len(graph.Edges),
 		"tenant_id", graph.TenantID,
 		"cloud_account_id", graph.CloudAccountID,
 		"sync_version", syncVersion)
 
 	// Save nodes first (now using DbNode directly)
-	if err := s.SaveNodes(graph.Nodes, syncVersion); err != nil {
+	if err := s.SaveNodes(ownNodes, syncVersion); err != nil {
 		logger.Error("Failed to save nodes to database", "error", err)
 		return 0, 0, err
 	}
 
-	// Save edges (now using DbEdge directly)
+	// Save edges (now using DbEdge directly). graph.Nodes — own + context — is the
+	// endpoint universe SaveEdges validates against.
 	if err := s.SaveEdges(graph.Edges, graph.Nodes, syncVersion); err != nil {
 		logger.Error("Failed to save edges to database", "error", err)
-		return len(graph.Nodes), 0, err
+		return len(ownNodes), 0, err
 	}
 
 	logger.Info("Successfully saved knowledge graph to database",
-		"nodes_saved", len(graph.Nodes),
+		"nodes_saved", len(ownNodes),
 		"edges_saved", len(graph.Edges))
 
-	return len(graph.Nodes), len(graph.Edges), nil
+	return len(ownNodes), len(graph.Edges), nil
 }
 
 // markInactiveNodes flips nodes to is_active = false when they weren't re-stamped
@@ -1861,6 +1958,13 @@ func (s *Service) saveGraphToDB(graph *Graph, syncVersion int64, logger *slog.Lo
 //     cycle. Non-infra flow-sourced rows (Service, ExternalService, etc.) are still
 //     protected. Rows from a flow source that errored this cycle are protected to
 //     avoid mass-tombstoning on transient failure.
+//
+// sweepTenantScoped controls whether the account filter also admits rows stamped
+// by tenant-scoped producers (identity/ownership/github/gitlab/pagerduty). A
+// tenant-wide build passes true: those producers ran, so their stale rows must be
+// swept even though their cloud_account_id is never a member of accountIDs
+// (#35519). A partial build passes false: it never ran them, so admitting their
+// rows would tombstone the entire integration and ownership layer.
 func (s *Service) markInactiveNodes(
 	ctx *security.RequestContext,
 	tenantID string,
@@ -1868,6 +1972,7 @@ func (s *Service) markInactiveNodes(
 	syncVersion int64,
 	sources []string,
 	successfulFlowSources []string,
+	sweepTenantScoped bool,
 ) (int64, error) {
 	query := `
 	UPDATE knowledge_graph_node
@@ -1923,12 +2028,19 @@ func (s *Service) markInactiveNodes(
 		// this exception their stale rows could never be tombstoned (#35519).
 		tenantScopedSources := []string{"identity", "ownership", "github", "gitlab", "pagerduty"}
 		accountIdx := len(args) + 1
-		tenantSourceIdx := len(args) + 2
-		query += fmt.Sprintf(` AND (
+		if sweepTenantScoped {
+			tenantSourceIdx := len(args) + 2
+			query += fmt.Sprintf(` AND (
 			cloud_account_id = ANY($%d::uuid[])
 			OR (properties->>'source') = ANY($%d::text[])
 		)`, accountIdx, tenantSourceIdx)
-		args = append(args, pq.Array(accountIDs), pq.Array(tenantScopedSources))
+			args = append(args, pq.Array(accountIDs), pq.Array(tenantScopedSources))
+		} else {
+			// Partial build: the tenant-scoped producers did not run, so their rows
+			// are protected rather than swept.
+			query += fmt.Sprintf(" AND cloud_account_id = ANY($%d::uuid[])", accountIdx)
+			args = append(args, pq.Array(accountIDs))
+		}
 	}
 
 	s.logger.Info("marking inactive nodes",
@@ -1936,7 +2048,8 @@ func (s *Service) markInactiveNodes(
 		"sync_version", syncVersion,
 		"sources", sources,
 		"account_ids", accountIDs,
-		"successful_flow_sources", successfulFlowSources)
+		"successful_flow_sources", successfulFlowSources,
+		"sweep_tenant_scoped", sweepTenantScoped)
 
 	result, err := s.dbManager.Exec(query, args...)
 	if err != nil {

@@ -208,9 +208,25 @@ func handleKnowledgeGraphAction(actionPayload *ActionRequest, c *gin.Context, tr
 			ctx.GetLogger().Info("specific tenant_id provided for knowledge graph build", "tenant_id", specificTenantID)
 		}
 
+		// Optional scope: rebuild only these cloud accounts / sources. Naming an
+		// account implies a single tenant, so fall back to the caller's own tenant
+		// rather than fanning an account-scoped request out across every tenant.
+		scopeAccountIDs := stringSliceFromPayload(kgRequest["account_ids"])
+		scopeSources := stringSliceFromPayload(kgRequest["sources"])
+		scopeFlowSources := stringSliceFromPayload(kgRequest["flow_sources"])
+		if specificTenantID == "" && len(scopeAccountIDs) > 0 {
+			specificTenantID = ctx.GetSecurityContext().GetTenantId()
+		}
+
 		// If a specific tenant is requested, queue only that tenant
 		if specificTenantID != "" {
-			if err := kgqueue.PublishKGUpdate(ctx.GetContext(), specificTenantID, "cron"); err != nil {
+			if err := kgqueue.PublishKGUpdateMessage(ctx.GetContext(), kgqueue.KGUpdateMessage{
+				TenantID:    specificTenantID,
+				Source:      "manual",
+				AccountIDs:  scopeAccountIDs,
+				Sources:     scopeSources,
+				FlowSources: scopeFlowSources,
+			}); err != nil {
 				ctx.GetLogger().Error("failed to publish KG update message for specific tenant",
 					"tenant_id", specificTenantID,
 					"error", err)
@@ -218,7 +234,14 @@ func handleKnowledgeGraphAction(actionPayload *ActionRequest, c *gin.Context, tr
 				return
 			}
 
-			ctx.GetLogger().Info("queued KG update for specific tenant", "tenant_id", specificTenantID)
+			ctx.GetLogger().Info("queued KG update for specific tenant",
+				"tenant_id", specificTenantID,
+				"account_ids", scopeAccountIDs)
+
+			message := fmt.Sprintf("Queued KG update for tenant %s", specificTenantID)
+			if len(scopeAccountIDs) > 0 {
+				message = fmt.Sprintf("Queued KG update for tenant %s, accounts %v", specificTenantID, scopeAccountIDs)
+			}
 
 			c.JSON(200, map[string]any{
 				"data": map[string]any{
@@ -226,7 +249,8 @@ func handleKnowledgeGraphAction(actionPayload *ActionRequest, c *gin.Context, tr
 					"queued_count": 1,
 					"failed_count": 0,
 					"tenant_count": 1,
-					"message":      fmt.Sprintf("Queued KG update for tenant %s", specificTenantID),
+					"account_ids":  scopeAccountIDs,
+					"message":      message,
 				},
 			})
 			return
@@ -934,4 +958,28 @@ func processFiltersAsync(ctx *security.RequestContext, kgService *core.Service, 
 		"total_filters", totalFilters,
 		"success_count", successCount,
 		"failure_count", failureCount)
+}
+
+// stringSliceFromPayload reads an optional list-of-strings field out of a raw
+// JSON action payload, tolerating both a real []string and the []any that
+// encoding/json produces. Unknown element types are skipped rather than
+// rejected: a malformed scope entry should not fail an otherwise valid build
+// request.
+func stringSliceFromPayload(raw any) []string {
+	switch v := raw.(type) {
+	case nil:
+		return nil
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

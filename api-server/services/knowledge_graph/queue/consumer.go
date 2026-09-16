@@ -22,10 +22,12 @@ import (
 	"nudgebee/services/security"
 )
 
-// kgProcessingLockDuration is the window within which a new message for the same tenant
-// is dropped if a previous processing run has already started. This prevents concurrent
-// same-tenant graph builds, which cause PostgreSQL deadlocks on knowledge_graph_node upserts.
-const kgProcessingLockDuration = time.Hour
+// maxDrainsPerDelivery bounds how many follow-up builds one delivery will run
+// before handing the remainder back to the queue. Concurrent same-tenant builds
+// deadlock on knowledge_graph_node upserts, so a tenant is always built by one
+// worker at a time; this cap stops a steady stream of requests from pinning that
+// worker past RabbitMQ's consumer acknowledgement timeout.
+const maxDrainsPerDelivery = 3
 
 func init() {
 	err := common.MqConsume(
@@ -56,43 +58,99 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 		"correlation_id", message.CorrelationID,
 	)
 
-	// 2. Atomically claim processing slot for this tenant (DB-level row lock).
-	// Drops the message if another worker started processing this tenant within the lock window.
-	claimed, err := tryClaimTenantProcessing(message.TenantID, logger)
-	if err != nil {
-		logger.Error("kg_queue: failed to claim tenant processing slot", "error", err)
-		return nil // Don't requeue on DB errors, log and move on
-	}
-	if !claimed {
-		logger.Info("kg_queue: skipping - processing already started within lock window")
+	if message.TenantID == "" {
+		logger.Error("kg_queue: message has no tenant id, dropping")
 		return nil
 	}
 
-	// 3. Process KG update for tenant
-	logger.Info("kg_queue: starting KG update for tenant")
-	if err := processKGUpdateForTenant(msgCtx, message.TenantID, message.CorrelationID, logger); err != nil {
-		logger.Error("kg_queue: failed to process KG update", "error", err)
-		return nil // Ack to prevent infinite retry, error is logged
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		logger.Error("kg_queue: failed to get database manager", "error", err)
+		return nil // Don't requeue on DB errors, log and move on
+	}
+	requestRepo := core.NewBuildRequestRepository(dbms, logger)
+
+	// 2. Record the request durably before competing for the tenant. If another
+	// worker is mid-build it will drain this row when it finishes, so no request
+	// is ever silently dropped (which the old time-window claim did).
+	if err := requestRepo.Enqueue(core.BuildRequestSpec{
+		TenantID:      message.TenantID,
+		AccountIDs:    message.AccountIDs,
+		Sources:       message.Sources,
+		FlowSources:   message.FlowSources,
+		Trigger:       message.Source,
+		CorrelationID: message.CorrelationID,
+	}); err != nil {
+		logger.Error("kg_queue: failed to enqueue build request", "error", err)
+		return nil
 	}
 
-	logger.Info("kg_queue: successfully completed KG update")
+	// 3. Try to become the tenant's builder. Losing the race is the normal case
+	// under a burst and needs no retry — the winner drains what we just enqueued.
+	staleAfter := time.Duration(config.Config.KGUpdateProcessingTimeoutMinutes) * time.Minute
+	claim, claimed, err := requestRepo.TryClaim(message.TenantID, staleAfter)
+	if err != nil {
+		logger.Error("kg_queue: failed to claim tenant build", "error", err)
+		return nil
+	}
+	if !claimed {
+		logger.Info("kg_queue: another build is running for this tenant; request queued for it to drain")
+		return nil
+	}
+
+	// 4. Build, then drain anything queued while we were building.
+	for drains := 0; claim != nil; drains++ {
+		logger.Info("kg_queue: starting KG update for tenant",
+			"account_ids", claim.AccountIDs,
+			"partial", claim.Partial(),
+			"request_count", len(claim.RequestIDs),
+			"drain_index", drains)
+
+		buildErr := processKGUpdateForTenant(msgCtx, message.TenantID, message.CorrelationID, claim, logger)
+		if buildErr != nil {
+			logger.Error("kg_queue: failed to process KG update", "error", buildErr)
+		} else {
+			logger.Info("kg_queue: successfully completed KG update",
+				"account_ids", claim.AccountIDs,
+				"partial", claim.Partial())
+		}
+
+		next, finishErr := requestRepo.Finish(claim, buildErr)
+		if finishErr != nil {
+			logger.Error("kg_queue: failed to finish build request", "error", finishErr)
+			return nil
+		}
+		if next == nil {
+			return nil
+		}
+		if drains+1 >= maxDrainsPerDelivery {
+			// Hand the remainder back rather than hold this delivery open: the
+			// republished message lets any replica pick the work up on a fresh
+			// acknowledgement deadline.
+			if err := requestRepo.Release(next); err != nil {
+				logger.Error("kg_queue: failed to release drained claim", "error", err)
+				return nil
+			}
+			if err := PublishKGUpdateMessage(msgCtx, KGUpdateMessage{
+				TenantID: message.TenantID,
+				Source:   "drain-continuation",
+			}); err != nil {
+				logger.Error("kg_queue: failed to republish drain continuation", "error", err)
+			}
+			logger.Info("kg_queue: drain cap reached, remaining requests republished",
+				"max_drains", maxDrainsPerDelivery)
+			return nil
+		}
+		claim = next
+	}
+
 	return nil
 }
 
-// tryClaimTenantProcessing atomically acquires a DB-level row lock on the tenant's filter
-// rows and stamps last_process_started_at = NOW(). Returns false if another worker already
-// claimed processing within kgProcessingLockDuration (works across all replicas).
-func tryClaimTenantProcessing(tenantID string, logger *slog.Logger) (bool, error) {
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return false, err
-	}
-	filterRepo := core.NewFilterRepository(dbms, logger)
-	return filterRepo.TryClaimTenantProcessing(tenantID, kgProcessingLockDuration)
-}
-
-// processKGUpdateForTenant processes all enabled filters for a specific tenant
-func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlationID string, logger *slog.Logger) error {
+// processKGUpdateForTenant processes all enabled filters for a specific tenant,
+// narrowed to the claim's scope. A claim with no account ids reproduces the
+// historical tenant-wide build.
+func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlationID string, claim *core.BuildClaim, logger *slog.Logger) error {
 	// Get database manager
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
@@ -148,7 +206,7 @@ func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlati
 			"index", i+1,
 			"total", len(filters))
 
-		if err := processFilter(reqCtx, kgService, filter, logger); err != nil {
+		if err := processFilter(reqCtx, kgService, filter, claim, logger); err != nil {
 			logger.Error("kg_queue: filter processing failed",
 				"correlation_id", correlationID,
 				"filter_id", filter.ID,
@@ -174,12 +232,40 @@ func processKGUpdateForTenant(msgCtx context.Context, tenantID string, correlati
 	return nil
 }
 
-// processFilter processes a single filter (reuses logic from existing processFiltersAsync)
-func processFilter(ctx *security.RequestContext, kgService *core.Service,
-	filter *kgmodels.KnowledgeGraphTenantFilter, logger *slog.Logger) error {
-
-	// Convert filter to build request
+// buildRequestForFilter turns a tenant filter plus the claim's scope into the
+// BuildRequest to execute, or nil when this filter has nothing to do for this
+// claim.
+//
+// The filter decides what a tenant is ALLOWED to build; the claim decides what
+// was asked for this time. The result is the intersection — never the union: a
+// request naming an account or source the filter excludes yields nil (skip), so
+// a caller-supplied scope can only ever narrow a filter, never widen it.
+func buildRequestForFilter(filter *kgmodels.KnowledgeGraphTenantFilter, claim *core.BuildClaim, logger *slog.Logger) *core.BuildRequest {
 	accountIDs, sourcesFromFilter, flowSourcesFromFilter := filter.ToSlices()
+
+	partial := false
+	if len(claim.AccountIDs) > 0 {
+		accountIDs = intersectScope(accountIDs, claim.AccountIDs)
+		if len(accountIDs) == 0 {
+			logger.Info("kg_queue: filter does not cover any requested account, skipping",
+				"filter_name", filter.FilterName,
+				"requested_account_ids", claim.AccountIDs)
+			return nil
+		}
+		partial = true
+		// Flow sources observe traffic tenant-wide, so an account-scoped rebuild
+		// runs only the ones explicitly asked for (normally none).
+		flowSourcesFromFilter = claim.FlowSources
+	}
+	if len(claim.Sources) > 0 {
+		sourcesFromFilter = intersectScope(sourcesFromFilter, claim.Sources)
+		if len(sourcesFromFilter) == 0 {
+			logger.Info("kg_queue: filter does not allow any requested source, skipping",
+				"filter_name", filter.FilterName,
+				"requested_sources", claim.Sources)
+			return nil
+		}
+	}
 
 	// Set time range for last 24 hours
 	now := time.Now().UTC()
@@ -196,6 +282,7 @@ func processFilter(ctx *security.RequestContext, kgService *core.Service,
 		Filters:     make(map[string]string),
 		SaveToDB:    true,
 		TimeRange:   timeRange,
+		Partial:     partial,
 	}
 
 	// Copy additional filters from JSONB
@@ -206,13 +293,26 @@ func processFilter(ctx *security.RequestContext, kgService *core.Service,
 			}
 		}
 	}
+	return buildRequest
+}
+
+// processFilter processes a single filter (reuses logic from existing processFiltersAsync),
+// intersected with the claim's scope.
+func processFilter(ctx *security.RequestContext, kgService *core.Service,
+	filter *kgmodels.KnowledgeGraphTenantFilter, claim *core.BuildClaim, logger *slog.Logger) error {
+
+	buildRequest := buildRequestForFilter(filter, claim, logger)
+	if buildRequest == nil {
+		return nil
+	}
 
 	logger.Info("kg_queue: building knowledge graph for filter",
-		"tenant_id", filter.TenantID.String(),
+		"tenant_id", buildRequest.TenantID,
 		"filter_name", filter.FilterName,
-		"account_ids", accountIDs,
-		"sources", sourcesFromFilter,
-		"flow_sources", flowSourcesFromFilter)
+		"account_ids", buildRequest.AccountIDs,
+		"sources", buildRequest.Sources,
+		"flow_sources", buildRequest.FlowSources,
+		"partial", buildRequest.Partial)
 
 	// Build the graph
 	response, err := kgService.BuildGraphs(ctx, buildRequest)
@@ -228,4 +328,24 @@ func processFilter(ctx *security.RequestContext, kgService *core.Service,
 		"accounts_processed", response.AccountsProcessed)
 
 	return nil
+}
+
+// intersectScope returns the members of filterValues that are also in
+// requestValues. An empty filterValues means "no restriction", so the request's
+// own list is the answer.
+func intersectScope(filterValues, requestValues []string) []string {
+	if len(filterValues) == 0 {
+		return requestValues
+	}
+	allowed := make(map[string]struct{}, len(filterValues))
+	for _, v := range filterValues {
+		allowed[v] = struct{}{}
+	}
+	out := make([]string, 0, len(requestValues))
+	for _, v := range requestValues {
+		if _, ok := allowed[v]; ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
