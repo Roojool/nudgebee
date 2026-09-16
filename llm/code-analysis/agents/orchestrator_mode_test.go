@@ -28,11 +28,14 @@ func TestShouldFailIncompleteFixRequest(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "incomplete + fix without raise_pr does NOT fail (no PR expected)",
+			// #38488: a diff-only fix request (how the event-analysis pipeline
+			// calls us) must fail on an exhausted planner too — otherwise the
+			// placeholder requires_fix=false is reported as "no change needed".
+			name:       "incomplete + fix without raise_pr also fails",
 			incomplete: true,
 			mode:       ModeFix,
 			req:        NBAgentRequest{Mode: ModeFix, RaisePR: false},
-			want:       false,
+			want:       true,
 		},
 		{
 			name:       "complete analysis never fails regardless of mode",

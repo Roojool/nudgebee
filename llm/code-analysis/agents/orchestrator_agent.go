@@ -67,11 +67,16 @@ type NBAgentRequest struct {
 // resorted to its forced-submit hardcoded fallback. Returning the result of
 // requires_fix would be honoring a fabricated value; we fail loudly so the
 // caller sees a real error instead of the relevance-validator's off-topic
-// placeholder. Only fires when the caller explicitly asked for a PR (RaisePR)
-// and ran in fix mode — explore-mode requests still receive the partial
-// findings.
-func shouldFailIncompleteFixRequest(analysisIncomplete bool, mode string, request NBAgentRequest) bool {
-	return analysisIncomplete && mode == ModeFix && request.RaisePR
+// placeholder. Fires for every fix-mode request, whether or not a PR was asked
+// for — explore-mode requests still receive the partial findings.
+//
+// The RaisePR condition this used to carry made the event-analysis pipeline the
+// one caller that never got the guard: it runs fix mode with raise_pr=false
+// (diff-only), so an exhausted planner fell through to the !requires_fix branch
+// below and was reported as "no code change required" — a fabricated verdict
+// that llm-server stored and showed as "the change is already present" (#38488).
+func shouldFailIncompleteFixRequest(analysisIncomplete bool, mode string, _ NBAgentRequest) bool {
+	return analysisIncomplete && mode == ModeFix
 }
 
 // EffectiveMode returns the mode the orchestrator should run in.
@@ -460,17 +465,22 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 			"returning":          "specialist_result_directly",
 		})
 
-		// Add PR creation status if RaisePR was requested
-		if request.RaisePR {
-			var resultData map[string]any
-			if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil {
+		// Stamp the terminal no-op regardless of RaisePR: a diff-only fix request
+		// (raise_pr=false, how the event-analysis pipeline calls us) is just as
+		// entitled to an unambiguous outcome as one that asked for a PR. Without
+		// it the caller has to infer "no change needed" from the absence of a
+		// git_diff, which is indistinguishable from a run that failed (#38488).
+		// The analysis_incomplete case never reaches here — it fails above.
+		var resultData map[string]any
+		if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil && resultData != nil {
+			resultData["execution_status"] = ExecutionStatusNoOp
+			resultData["mode"] = mode
+			if request.RaisePR {
 				resultData["pr_creation_status"] = "skipped"
-				resultData["execution_status"] = ExecutionStatusNoOp
 				resultData["pr_creation_reason"] = "No code change required — the specialist determined the requested change is already present / no fix is needed."
-				resultData["mode"] = mode
-				if modifiedJSON, err := json.Marshal(resultData); err == nil {
-					return string(modifiedJSON), nil
-				}
+			}
+			if modifiedJSON, err := json.Marshal(resultData); err == nil {
+				return string(modifiedJSON), nil
 			}
 		}
 
@@ -764,9 +774,14 @@ func (a *OrchestratorAgent) buildFinalResponse(mergedData map[string]any) map[st
 		response["requires_fix"] = requiresFix
 	}
 
-	// Map CodeFixer execution fields
+	// Map CodeFixer execution fields. When the fixer produced a diff but nothing
+	// upstream stamped a status (the raise_pr=false path never reaches the PR
+	// bookkeeping below), fall back to success so every fix-mode response carries
+	// an outcome the caller can switch on rather than infer (#38488).
 	if execStatus, ok := mergedData["execution_status"].(string); ok && execStatus != "" {
 		response["execution_status"] = execStatus
+	} else if gitDiff, _ := mergedData["git_diff"].(string); strings.TrimSpace(gitDiff) != "" {
+		response["execution_status"] = ExecutionStatusSuccess
 	}
 	if execSummary, ok := mergedData["execution_summary"].(string); ok && execSummary != "" {
 		response["execution_summary"] = execSummary
@@ -1740,6 +1755,11 @@ func (a *OrchestratorAgent) executeFixAndReviewLoop(ctx context.Context, session
 // failure — the pipeline ran to completion and the result is correct. PR
 // followup mode already emits this value; the standard fix flow now does too.
 const ExecutionStatusNoOp = "no_op"
+
+// ExecutionStatusSuccess marks a fix-mode run that produced a diff. The fixer
+// already emits it on the PR path; buildFinalResponse falls back to it so a
+// diff-only run (raise_pr=false) is never returned without an outcome.
+const ExecutionStatusSuccess = "success"
 
 // ExecutionStatusFailed marks a run that could not do its job. Callers
 // (llm-server, then api-server's resolution bookkeeping) treat anything that is

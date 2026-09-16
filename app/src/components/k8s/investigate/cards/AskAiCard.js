@@ -743,6 +743,8 @@ class AskAiCard {
                     ? 'Reasoning behind the proposed code changes'
                     : localAiData?.file_details?.files?.[0]?.file_path
                     ? 'Code-level root cause identified'
+                    : source_updates?.outcome === 'failed'
+                    ? "Code check couldn't finish"
                     : 'No Code Changes Required'}
                 </Typography>
                 <MarkDowns data={source_updates.explanation} sx={{ fontSize: 'var(--ds-text-body)', lineHeight: 1.6 }} />
