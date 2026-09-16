@@ -766,7 +766,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                         </Typography>
                         {activeConfigTiers.map(({ tier, model }) => (
                           <Box key={tier} sx={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--ds-space-2)', py: ds.space[0] }}>
-                            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)', fontWeight: 500 }}>
+                            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)', fontWeight: ds.weight.medium }}>
                               {PICKER_TIER_LABELS[tier]}
                             </Typography>
                             <Typography
@@ -888,7 +888,7 @@ export const ModelPickerPopover: React.FC<ModelPickerPopoverProps> = ({
                     return (
                       <Box key={t} sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[0] }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)' }}>
-                          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)', fontWeight: 500 }}>
+                          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)', fontWeight: ds.weight.medium }}>
                             {PICKER_TIER_LABELS[t]}
                           </Typography>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', minWidth: 0 }}>

@@ -46,7 +46,7 @@ function getTooltipEl(): HTMLDivElement {
       borderRadius: 'var(--ds-radius-md)',
       boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
       padding: '8px 10px',
-      fontSize: '11px',
+      fontSize: 'var(--ds-text-caption)',
       fontFamily: 'inherit',
       zIndex: '9999',
       opacity: '0',

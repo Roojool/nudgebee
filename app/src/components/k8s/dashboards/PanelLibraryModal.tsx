@@ -228,7 +228,12 @@ const PanelLibraryModal: React.FC<Props> = ({ open, existingPanels, accountOptio
                           <Stack direction='row' alignItems='center' gap={1.5}>
                             <Box sx={{ minWidth: 0, flex: 1 }}>
                               <Typography
-                                sx={{ fontFamily: 'var(--ds-font-display)', fontSize: 'var(--ds-text-body)', fontWeight: 600, color: ds.gray[700] }}
+                                sx={{
+                                  fontFamily: 'var(--ds-font-display)',
+                                  fontSize: 'var(--ds-text-body)',
+                                  fontWeight: ds.weight.semibold,
+                                  color: ds.gray[700],
+                                }}
                                 noWrap
                               >
                                 {widget.panel.title}

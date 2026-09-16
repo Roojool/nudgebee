@@ -220,7 +220,7 @@ const GroupHeader: React.FC<{ title: string; description: string }> = ({ title, 
     >
       {title}
     </Typography>
-    <Typography variant='caption' sx={{ display: 'block', mt: ds.space[0], color: ds.gray[500], fontWeight: 400 }}>
+    <Typography variant='caption' sx={{ display: 'block', mt: ds.space[0], color: ds.gray[500], fontWeight: ds.weight.regular }}>
       {description}
     </Typography>
   </Box>
@@ -1236,7 +1236,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
 
                     <Box>
                       <Stack direction='row' alignItems='center' gap={1} sx={{ mb: 1 }}>
-                        <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: 13, fontWeight: 600, color: ds.gray[700] }}>
+                        <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: 13, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
                           Links
                         </Typography>
                         <Box sx={{ flex: 1 }} />

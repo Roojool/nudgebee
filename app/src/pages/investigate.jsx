@@ -3020,7 +3020,7 @@ const Investigate = () => {
                                           borderTop: runIndex === 0 ? 'none' : `1px solid ${ds.gray[200]}`,
                                         }}
                                       >
-                                        <Box sx={{ flexShrink: 0, pt: '2px' }}>
+                                        <Box sx={{ flexShrink: 0, pt: ds.space[0] }}>
                                           <Label tone={outcome.tone} text={outcome.label} size='sm' />
                                         </Box>
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0, flex: 1 }}>

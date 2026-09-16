@@ -92,7 +92,7 @@ const ViewTrendLink = ({ onClick }: { onClick: () => void }) => (
     }}
     style={{ whiteSpace: 'nowrap' }}
   >
-    <Box component='span' data-testid='view-usage-trend' sx={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+    <Box component='span' data-testid='view-usage-trend' sx={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[0] }}>
       <TrendingUpIcon sx={{ fontSize: ds.text.bodyLg }} />
       View usage trend
     </Box>

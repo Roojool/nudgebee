@@ -67,7 +67,7 @@ function IncidentGroupDrilldown({ eventId, accountId }) {
     return (
       <Box sx={{ p: 'var(--ds-space-3)' }}>
         <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[600] }}>No related alerts were linked to this alert.</Typography>
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[500], mt: '2px' }}>
+        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[500], mt: ds.space[0] }}>
           Alerts group when the same subject, a direct caller/callee, or (soon) the same failure across several subjects raises alerts within a
           15-minute window. Frequently-firing alerts are treated as background noise and never grouped.
         </Typography>

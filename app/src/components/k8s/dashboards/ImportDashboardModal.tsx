@@ -414,7 +414,7 @@ const ImportDashboardModal: React.FC<Props> = ({ open, accountOptions, onClose, 
               {sourceScopes.map((scope) => (
                 <Form.Row key={scope.key} ratio={[1, 1]}>
                   <Box sx={{ minWidth: 0 }}>
-                    <Typography sx={{ fontSize: 13, fontWeight: 600, color: ds.gray[700] }} noWrap title={scope.label}>
+                    <Typography sx={{ fontSize: 13, fontWeight: ds.weight.semibold, color: ds.gray[700] }} noWrap title={scope.label}>
                       {scope.label}
                     </Typography>
                     <Typography variant='caption' sx={{ color: ds.gray[500] }}>
@@ -495,7 +495,7 @@ const ImportDashboardModal: React.FC<Props> = ({ open, accountOptions, onClose, 
                 panels is worth knowing about while it can still be cancelled. */}
             {preview.warnings.length > 0 && (
               <Box sx={{ mt: 1.5, p: 1.5, border: `1px solid ${ds.amber[300]}`, background: ds.amber[100], borderRadius: ds.radius.md }}>
-                <Typography variant='body2' sx={{ color: ds.gray[700], fontWeight: 600, mb: 0.5 }}>
+                <Typography variant='body2' sx={{ color: ds.gray[700], fontWeight: ds.weight.semibold, mb: 0.5 }}>
                   What will not come across
                 </Typography>
                 <Box component='ul' sx={{ m: 0, pl: 2.5 }} data-testid='import-warnings'>

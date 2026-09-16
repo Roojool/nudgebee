@@ -1284,7 +1284,10 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           )}
           {executedQuery && (
             <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 'var(--ds-space-1)', px: 'var(--ds-space-2)', py: 'var(--ds-space-1)' }}>
-              <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+              <Box
+                component='span'
+                sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.semibold, color: ds.gray[600], whiteSpace: 'nowrap' }}
+              >
                 {logProvider ? `${logProvider} query:` : 'Query:'}
               </Box>
               <Box component='span' sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)', color: ds.gray[700], wordBreak: 'break-all' }}>

@@ -132,7 +132,7 @@ const GlobalContextCard = ({ context, onEdit, onDelete, hasAccess, showAccount }
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
               <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>Updated</Typography>
               <Tooltip title={formatExactDate(context.updated_at)} placement='top'>
-                <Typography sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: 500, color: 'var(--ds-gray-700)', cursor: 'default' }}>
+                <Typography sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-700)', cursor: 'default' }}>
                   {formatDate(context.updated_at)}
                 </Typography>
               </Tooltip>

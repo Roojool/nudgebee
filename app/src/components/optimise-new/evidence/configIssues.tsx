@@ -136,7 +136,7 @@ const IssueRow = ({ issue, last }: { issue: DedupedIssue; last: boolean }) => {
           {issue.code && <CodeChip code={issue.code} />}
           {issue.count > 1 && <CountChip count={issue.count} unit={dupUnit} />}
         </Box>
-        {where && <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: ds.font.mono, mt: '2px' }}>{where}</Typography>}
+        {where && <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: ds.font.mono, mt: ds.space[0] }}>{where}</Typography>}
       </Box>
     </Box>
   );

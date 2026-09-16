@@ -357,7 +357,7 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
               >
                 <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>Log Provider:</Typography>
                 <CloudProviderIcon cloud_provider={selectedOption?.iconKey || selectedProvider} width='18px' height='18px' />
-                <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[700] }}>
+                <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
                   {selectedOption?.label || snakeToTitleCase(selectedProvider)}
                 </Typography>
                 <KeyboardArrowDownIcon sx={{ fontSize: 18, color: ds.gray[500] }} />
@@ -428,7 +428,7 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
 
         {executedQuery && (
           <Box sx={{ display: 'flex', alignItems: 'baseline', gap: ds.space[1], mb: ds.space[2] }}>
-            <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
+            <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[600], whiteSpace: 'nowrap' }}>
               {`${selectedOption?.label || snakeToTitleCase(selectedProvider) || 'Query'} query:`}
             </Typography>
             <Typography sx={{ fontFamily: ds.font.mono, fontSize: ds.text.small, color: ds.gray[700], wordBreak: 'break-all' }}>

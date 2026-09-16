@@ -1482,7 +1482,7 @@ const VerticalAutoOptimizeSingleConfiguration = ({
                   disabled={reviewAutoOptimize}
                   minWidth={ds.space.mul(0, 115)}
                 />
-                <Typography sx={{ color: ds.gray[400], fontSize: 'var(--ds-text-small)', fontWeight: 400 }}>
+                <Typography sx={{ color: ds.gray[400], fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.regular }}>
                   Adds a resizePolicy to the PR so future pods resize without a restart on Kubernetes 1.35+.
                 </Typography>
               </Box>
@@ -1528,11 +1528,11 @@ const VerticalAutoOptimizeSingleConfiguration = ({
                 disabled={reviewAutoOptimize}
                 aria-label='In-place resize'
               />
-              <Typography sx={{ color: ds.brand[500], fontSize: 'var(--ds-text-title)', fontWeight: 600 }}>
+              <Typography sx={{ color: ds.brand[500], fontSize: 'var(--ds-text-title)', fontWeight: ds.weight.semibold }}>
                 {'In-place resize (zero-downtime)'}
               </Typography>
             </Box>
-            <Typography sx={{ color: ds.gray[400], fontSize: 'var(--ds-text-small)', fontWeight: 400 }}>
+            <Typography sx={{ color: ds.gray[400], fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.regular }}>
               When applying directly, resize pods without a restart on Kubernetes 1.35+. Older clusters automatically fall back to a rolling restart.
             </Typography>
           </Box>

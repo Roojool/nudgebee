@@ -495,7 +495,7 @@ const CloudMetricsViewer: React.FC<CloudMetricsViewerProps> = ({ accountId, prov
               >
                 <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>Metrics Provider:</Typography>
                 <CloudProviderIcon cloud_provider={selectedOption?.iconKey || selectedProvider} width='18px' height='18px' />
-                <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[700] }}>
+                <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
                   {selectedOption?.label || snakeToTitleCase(selectedProvider)}
                 </Typography>
                 <KeyboardArrowDownIcon sx={{ fontSize: 18, color: ds.gray[500] }} />

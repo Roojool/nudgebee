@@ -133,7 +133,7 @@ export const PotentialSavings = ({ clusterSummary = {} }) => {
           Savings{''}
         </Typography>
         <Currency
-          sx={{ color: 'var(--ds-brand-600)', fontSize: '36px', fontWeight: 600 }}
+          sx={{ color: 'var(--ds-brand-600)', fontSize: '36px', fontWeight: 'var(--ds-font-weight-semibold)' }}
           value={clusterSummary?.yearly_recommendation_saving}
           suffix='/yr'
         />

@@ -546,7 +546,7 @@ const ModelPricingTab = ({ stickyTable = false }) => {
             <Input label='Input rate' size='sm' type='number' value={draft.input} onChange={(v) => setDraft({ ...draft, input: v })} />
             <Input label='Output rate' size='sm' type='number' value={draft.output} onChange={(v) => setDraft({ ...draft, output: v })} />
 
-            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 500, color: 'var(--ds-gray-700)' }}>Prompt caching (optional)</Box>
+            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-700)' }}>Prompt caching (optional)</Box>
             <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
               Most providers bill cached prompt tokens at a discount. Leave blank to bill them at the input rate above.
             </Box>
@@ -566,7 +566,9 @@ const ModelPricingTab = ({ stickyTable = false }) => {
               help='Charged when tokens are first written to the cache. Anthropic bills this at 1.25x input; OpenAI-compatible providers do not charge it.'
             />
 
-            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 500, color: 'var(--ds-gray-700)' }}>Long-context tier (optional)</Box>
+            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-700)' }}>
+              Long-context tier (optional)
+            </Box>
             <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
               Some providers charge more once a prompt crosses a threshold. Leave blank for flat pricing.
             </Box>
@@ -592,7 +594,7 @@ const ModelPricingTab = ({ stickyTable = false }) => {
               onChange={(v) => setDraft({ ...draft, outputLong: v })}
             />
 
-            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 500, color: 'var(--ds-gray-700)' }}>Token limits (optional)</Box>
+            <Box sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-700)' }}>Token limits (optional)</Box>
             <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
               What llm-server requests as max output tokens and assumes as the context window. Leave blank to use the conservative fallbacks (4,096
               output / built-in context map) — too low for reasoning models, which spend output tokens thinking.

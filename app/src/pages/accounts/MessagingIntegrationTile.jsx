@@ -471,7 +471,7 @@ const MessagingIntegrationTile = ({
         subtitle={getIntegrationDescription(provider)}
         loader={isInstalling}
         actionButtons={
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', p: '12px 24px' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3], p: '12px 24px' }}>
             {inviteUrl ? (
               <DsButton id='done-install-modal-btn' size='md' tone='primary' onClick={closeInstallModal}>
                 Done

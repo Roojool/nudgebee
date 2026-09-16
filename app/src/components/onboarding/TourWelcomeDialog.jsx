@@ -44,7 +44,7 @@ const TourWelcomeDialog = ({ open, title, description, totalSteps, onStart, onSn
           >
             <SafeIcon src={nubiIconUrl} alt='' width={20} height={20} />
           </Box>
-          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], fontWeight: 500 }}>{persona}</Typography>
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], fontWeight: ds.weight.medium }}>{persona}</Typography>
         </Box>
       }
       actionButtons={

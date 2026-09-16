@@ -441,7 +441,7 @@ const CustomDashboards: React.FC = () => {
       value: d.title,
       component: (
         <Box sx={{ cursor: 'pointer', minWidth: 0 }} onClick={() => setRouteId(d.id)} data-testid={`open-dashboard-${d.id}`}>
-          <Typography sx={{ fontSize: 13, fontWeight: 600, color: ds.blue[500], overflowWrap: 'anywhere' }}>{d.title}</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: ds.weight.semibold, color: ds.blue[500], overflowWrap: 'anywhere' }}>{d.title}</Typography>
           {d.description && (
             <Tooltip title={d.description}>
               <Typography

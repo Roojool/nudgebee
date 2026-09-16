@@ -69,7 +69,7 @@ const REACT_FLOW_PRO_OPTIONS = { hideAttribution: true };
 // filter state that the existing Apply flow already consumes.
 const KgFilterSectionHeader = ({ heading, count, onClear, info }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-2)', minHeight: ds.space[5] }}>
-    <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 500, color: 'var(--ds-gray-600)' }}>{heading} filter</Typography>
+    <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: ds.weight.medium, color: 'var(--ds-gray-600)' }}>{heading} filter</Typography>
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
       {count > 1 && (
         <>
@@ -2395,7 +2395,7 @@ const ServiceMapContent = () => {
                     chosen Level.
                     <Box
                       component='ul'
-                      sx={{ m: 'var(--ds-space-2) 0 0', pl: 'var(--ds-space-4)', display: 'flex', flexDirection: 'column', gap: '2px' }}
+                      sx={{ m: 'var(--ds-space-2) 0 0', pl: 'var(--ds-space-4)', display: 'flex', flexDirection: 'column', gap: ds.space[0] }}
                     >
                       <li>
                         <b>Leading icon</b> — the source it came from (AWS / GCP / Azure / K8s / GitHub / …)

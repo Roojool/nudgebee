@@ -116,7 +116,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
               borderRadius: '999px',
               backgroundColor: isFull ? ds.amber[100] : ds.gray[200],
               color: isFull ? ds.amber[700] : ds.gray[700],
-              fontSize: '11px',
+              fontSize: ds.text.caption,
               fontWeight: 'var(--ds-font-weight-medium)',
               lineHeight: 1,
             }}
@@ -204,12 +204,12 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         component='span'
                         sx={{
                           fontFamily: ds.font.sans,
-                          fontSize: '11px',
+                          fontSize: ds.text.caption,
                           fontWeight: 'var(--ds-font-weight-medium)',
                           color: ds.gray[700],
                           backgroundColor: ds.gray[200],
-                          borderRadius: '4px',
-                          px: '4px',
+                          borderRadius: ds.radius.sm,
+                          px: ds.space[1],
                           py: '1px',
                           flexShrink: 0,
                           lineHeight: 1.2,
@@ -261,7 +261,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   </Box>
                 )}
                 {/* Actions: Send now, Edit, Delete */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[0], flexShrink: 0 }}>
                   <Tooltip title='Send now' placement='top'>
                     <IconButton
                       size='small'
@@ -273,7 +273,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         onSendNow(msg.id);
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[600],
                         '&:hover': { color: ds.brand[500], backgroundColor: ds.gray[100] },
                       }}
@@ -293,7 +293,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         onEdit(msg.id);
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[600],
                         '&:hover': { color: ds.gray[700], backgroundColor: ds.gray[100] },
                       }}
@@ -318,7 +318,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         }
                       }}
                       sx={{
-                        p: '4px',
+                        p: ds.space[1],
                         color: ds.gray[500],
                         '&:hover': { color: ds.red[500] || '#EF4444', backgroundColor: ds.gray[100] },
                       }}

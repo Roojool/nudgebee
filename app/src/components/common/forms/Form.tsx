@@ -381,7 +381,7 @@ function Field({ label, description, required, badge, helperText, error, id, chi
       >
         {label}
         {required && (
-          <Box component='span' sx={{ color: 'var(--ds-red-500)', ml: '2px' }} aria-hidden='true'>
+          <Box component='span' sx={{ color: 'var(--ds-red-500)', ml: 'var(--ds-space-0)' }} aria-hidden='true'>
             *
           </Box>
         )}

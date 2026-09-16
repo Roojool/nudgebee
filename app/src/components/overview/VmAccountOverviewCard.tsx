@@ -96,7 +96,7 @@ const VmAccountOverviewCard = ({ accountId, accountName, summary, loading = fals
                 <Typography
                   sx={{
                     fontSize: 'var(--ds-text-heading)',
-                    fontWeight: 500,
+                    fontWeight: ds.weight.medium,
                     color: 'var(--ds-brand-500)',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
