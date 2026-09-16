@@ -14,7 +14,9 @@ name: Migrations-Validate
 #      apply-time dialect breaks such as an explicit BEGIN/COMMIT in a file
 #      (incompatible with atlas --tx-mode file) — `atlas migrate validate`
 #      and `lint` do NOT catch that class; only a real apply does.
-#   5. atlas migrate lint (advisory) — surfaces destructive / data-dependent
+#   5. Account delete plan — the Go test that checks account deletion's table
+#      list against the foreign keys of the database built in step 4.
+#   6. atlas migrate lint (advisory) — surfaces destructive / data-dependent
 #      changes on new files for reviewer attention. Non-blocking: legitimate
 #      DROP migrations are common here, so lint informs rather than gates.
 
@@ -26,6 +28,8 @@ on:
       - "api-server/migrations/atlas.hcl"
       - "api-server/migrations/run-migrations.sh"
       - "api-server/migrations/validate_migrations.py"
+      # The account delete plan is checked against the migrated schema below.
+      - "api-server/services/account/**"
       - ".github/workflows/migrations-validate.yaml"
 
 concurrency:
@@ -118,6 +122,26 @@ jobs:
           # Invoke via bash to match the image CMD (["/bin/bash","./run-migrations.sh"]);
           # the script is committed 100644, so `./run-migrations.sh` would EACCES.
           bash ./run-migrations.sh
+
+      # Account deletion clears an account's rows from a hand-kept, ordered table
+      # list (api-server/services/account). A migration that adds a table with a
+      # RESTRICT / NO ACTION foreign key into anything that list clears, without
+      # listing the table, makes every account with a row in it impossible to
+      # delete; that happened three times before this check. It reads the
+      # catalog of the database the step above just built, so it covers what
+      # the migrations create, not objects that only exist on older databases.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: api-server/services/go.sum
+
+      - name: Check the account delete plan against the migrated schema
+        working-directory: ./api-server/services
+        env:
+          APP_DATABASE_URL: postgres://postgres:postgres@localhost:5432/appdb?sslmode=disable
+          REQUIRE_DB_TESTS: "true"
+        run: go test ./account/ -run 'TestAccountDeletePlanCoversForeignKeys_DB' -count=1 -v
 
       # Advisory only (continue-on-error). Surfaces destructive / data-dependent
       # / backward-incompatible changes on migrations added in this PR, on a
