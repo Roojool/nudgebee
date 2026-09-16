@@ -48,7 +48,7 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		}
 	}
 
-	if !found {
+	if !found && request.AccountId != "" {
 		// check if it's a builtin tool like load_skills, search_skills or shell_execute
 		if strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, "search_skills") || strings.EqualFold(toolName, toolcore.ToolExecuteShellCommand) {
 			policy := request.KnowledgePolicy
@@ -66,7 +66,7 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		}
 	}
 
-	if !found {
+	if !found && request.AccountId != "" {
 		// Watch tools are globally injected via FilterAndInjectDefaultTools when
 		// WatchEnabled is on. Mirror that whitelist here so the auth check accepts
 		// them — otherwise the LLM emits a watch_resource action that gets rejected
@@ -81,7 +81,7 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		}
 	}
 
-	if !found {
+	if !found && request.AccountId != "" {
 		// update_notebook is injected by the react_4 planner (ensureNotebookTool) for
 		// notebook-enabled agents, exactly like the watch tools above — it is a control
 		// tool and never appears in an agent's declared GetSupportedTools. Without this

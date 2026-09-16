@@ -179,7 +179,7 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 				already := lo.ContainsBy(toolList, func(t toolcore.NBTool) bool {
 					return t != nil && strings.EqualFold(t.Name(), watchToolName)
 				})
-				if already {
+				if already || accountId == "" {
 					continue
 				}
 				if accountId != "" {
