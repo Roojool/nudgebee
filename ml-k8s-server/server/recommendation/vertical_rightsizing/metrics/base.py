@@ -80,6 +80,12 @@ class PrometheusMetric(BaseMetric):
     pods_batch_size: Optional[int] = 50
     warning_on_no_data: bool = True
 
+    # Ceiling on (subquery points x pods) for one query, used by
+    # `_effective_batch_size` to shrink batches for long-window percentile
+    # queries. Purely a cost knob: it changes how the same samples are fetched,
+    # never which samples the recommendation sees.
+    MAX_SUBQUERY_SAMPLES: int = 200_000
+
     def __init__(
         self,
         prometheus: Any,
@@ -114,6 +120,50 @@ class PrometheusMetric(BaseMetric):
         """
 
         pass
+
+    def _effective_batch_size(
+        self,
+        query: str,
+        duration_str: str,
+        step_str: str,
+        period: datetime.timedelta,
+        step: datetime.timedelta,
+    ) -> Optional[int]:
+        """
+        How many pods to put in one query.
+
+        `pods_batch_size` alone is the wrong bound for the percentile loaders,
+        because a subquery re-evaluates its inner expression once per step across
+        the whole window: its cost is (window / step) x (series matched), not
+        (series matched). A `[14d:75s]` percentile over a 50-pod batch is ~800k
+        inner samples on a single Prometheus query goroutine. In production that
+        ran past the caller's budget, and because the relay holds a RabbitMQ
+        prefetch slot for the whole wait, those queries were also starving the
+        same tenant's other requests.
+
+        Splitting further is safe to do purely for cost: every subquery here
+        groups `by (container, pod, job)`, so a pod's series is identical
+        whichever batch it lands in, and `combine_batches` just merges the
+        per-pod results. Prometheus evaluates separate queries concurrently but
+        a single query largely serially, so smaller batches convert one long
+        query into several shorter parallel ones.
+
+        Loaders whose query has no subquery keep `pods_batch_size` unchanged.
+        The check reads the rendered query rather than a per-class flag so a
+        loader that grows a subquery later cannot forget to opt in.
+        """
+        if self.pods_batch_size is None:
+            return None
+
+        if f"[{duration_str}:{step_str}]" not in query:
+            return self.pods_batch_size
+
+        step_seconds = step.total_seconds()
+        if step_seconds <= 0:
+            return self.pods_batch_size
+
+        points = max(1, int(period.total_seconds() // step_seconds))
+        return max(1, min(self.pods_batch_size, self.MAX_SUBQUERY_SAMPLES // points))
 
     def _step_to_string(self, step: datetime.timedelta) -> str:
         """
@@ -187,11 +237,12 @@ class PrometheusMetric(BaseMetric):
         start_time = end_time - period
 
         # Here if we split the object into multiple sub-objects, we query each sub-object recursively.
-        if self.pods_batch_size is not None and object.pods_count > self.pods_batch_size:
+        batch_size = self._effective_batch_size(query, duration_str, step_str, period, step)
+        if batch_size is not None and object.pods_count > batch_size:
             results = await asyncio.gather(
                 *[
                     self.load_data(splitted_object, period, step)
-                    for splitted_object in object.split_into_batches(self.pods_batch_size)
+                    for splitted_object in object.split_into_batches(batch_size)
                 ]
             )
             return self.combine_batches(results)
