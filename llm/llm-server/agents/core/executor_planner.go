@@ -4588,10 +4588,8 @@ func (e *plannerExecutor) fastSummarizeTool(action NBAgentPlannerToolAction, que
 	_, span := e.ctx.GetTracer().Start(e.ctx.GetContext(), "Agent:FastSummarize")
 	defer span.End()
 
-	systemPrompt := "You are a helpful SRE assistant. Provide a concise and accurate summary of the provided context to answer the user's question. Preserve all technical details and data. Use Markdown format."
-
 	messageContent := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
+		llms.TextParts(llms.ChatMessageTypeSystem, groundedSummarySystemPrompt),
 		llms.TextParts(llms.ChatMessageTypeHuman, fmt.Sprintf("<context>%s</context>", queryContext)),
 		llms.TextParts(llms.ChatMessageTypeHuman, action.ToolInput),
 	}
