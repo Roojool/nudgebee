@@ -7,6 +7,7 @@ import (
 	"nudgebee/services/eventrule"
 	"nudgebee/services/observability"
 	"nudgebee/services/security"
+	"nudgebee/services/triage"
 	"strings"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// maxCapabilityRuleIDs bounds one eventrules_get_capabilities call (one Alert Manager page).
+const maxCapabilityRuleIDs = 500
 
 func handleEventRuleAction(actionPayload *ActionRequest, c *gin.Context, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	relayRequest := actionPayload.Input
@@ -220,6 +224,61 @@ func handleEventRuleAction(actionPayload *ActionRequest, c *gin.Context, tracer 
 			return
 		}
 		c.JSON(200, results)
+		return
+
+	case "eventrules_get_capabilities":
+		var capRequest struct {
+			RuleIDs []string `json:"rule_ids"`
+		}
+		if relayRequest["request"] != nil {
+			relayRequest = relayRequest["request"].(map[string]interface{})
+		}
+		if err := common.UnmarshalMapToStruct(relayRequest, &capRequest); err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		if len(capRequest.RuleIDs) > maxCapabilityRuleIDs {
+			c.JSON(400, common.ErrorActionBadRequest("too many rule_ids"))
+			return
+		}
+		capabilities, err := eventrule.GetRuleCapabilities(ctx, capRequest.RuleIDs)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		c.JSON(200, map[string]any{"capabilities": capabilities})
+		return
+
+	case "eventrules_update_mute":
+		var muteRequest triage.UpdateRuleMuteRequest
+		if relayRequest["request"] != nil {
+			relayRequest = relayRequest["request"].(map[string]interface{})
+		}
+		if err := common.UnmarshalMapToStruct(relayRequest, &muteRequest); err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		capabilities, err := triage.UpdateRuleMute(ctx, muteRequest)
+		defer func() {
+			auditEvent.AccountId = muteRequest.AccountID
+			auditEvent.EventAction = audit.EventActionUpdate
+			auditEvent.EventTime = time.Now()
+			// A rejected mute has no resolved rule; the audit target is required.
+			auditEvent.EventTarget = capabilities.Alert
+			if auditEvent.EventTarget == "" {
+				auditEvent.EventTarget = muteRequest.RuleID
+			}
+			auditEvent.EventState = muteRequest
+			if auditErr := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); auditErr != nil {
+				ctx.GetLogger().Error("failed to create audit event for alert rule mute", "error", auditErr)
+			}
+		}()
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			auditEvent.EventStatus = audit.EventStatusFailure
+			return
+		}
+		c.JSON(200, capabilities)
 		return
 
 	default:

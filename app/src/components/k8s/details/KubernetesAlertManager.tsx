@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import k8sApi from '@api1/kubernetes1';
+import k8sApi, { firstGraphQLError } from '@api1/kubernetes1';
 import { ListingLayout } from '@ui/ListingLayout';
 import FilterDropdown from '@ui/FilterDropdown';
 import CustomSearch from '@shared/CustomSearch';
@@ -31,6 +31,14 @@ import CustomTable from '@shared/tables/CustomTable2';
 import { useRouter } from 'next/router';
 import { toast as snackbar } from '@ui/Toast';
 import { isValidSeverity, safeJSONParse, snakeToTitleCase } from 'src/utils/common';
+import {
+  ALERT_RULE_MENU,
+  AlertRuleItem,
+  alertRuleStatusText,
+  buildAlertRuleMenuItems,
+  muteConfirmTitle,
+  toggleConfirmTitle,
+} from './alertRuleControls';
 
 interface KubernetesAlertManagerProps {
   accountId: string;
@@ -50,7 +58,7 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
   const router = useRouter();
   const k8sAlertManager = 'k8sMgr';
 
-  const [data, setData] = useState([]);
+  const [data, setData] = useState<any[][]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -70,32 +78,41 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
   const [rowsPerPage, setRowsPerPage] = useState(apiUser.getUserPreferencesTablePageSize());
   const [alertNames, setAlertNames] = useState<string[]>([]);
   const [agentPlaybookOnEvents, setAgentPlaybookOnEvents] = useState<any[]>([]);
+  const [muteTarget, setMuteTarget] = useState<{ item: AlertRuleItem; mute: boolean } | null>(null);
 
-  const getMenuItems = (item: any) => {
-    if (!hasWriteAccess(accountId)) {
-      return [];
-    }
-    const menus = [
-      {
-        label: item?.enabled ? 'Disable' : 'Enable',
-        id: 'toggle-enabled',
-      },
-    ];
-    if (item?.enabled) {
-      menus.push({
-        label: 'Edit',
-        id: 'edit',
-      });
-    }
-    return menus;
+  const getMenuItems = (item: AlertRuleItem) => buildAlertRuleMenuItems(item, hasWriteAccess(accountId));
+
+  const statusCell = (item: AlertRuleItem) => ({ component: <Label margin='auto' text={alertRuleStatusText(item)} /> });
+  // rowItem lets later patches (capabilities, toggle, mute) find and rebuild the row.
+  const menuCell = (item: AlertRuleItem) => ({
+    rowItem: item,
+    component: <ThreeDotsMenu sx={{ ...action.primary }} onMenuClick={onMenuClick} data={item} menuItems={getMenuItems(item)} />,
+  });
+
+  const replaceRowItems = (updatedById: Record<string, AlertRuleItem>) => {
+    setData((prevData: any) =>
+      prevData.map((row: any) => {
+        const updated = updatedById[row[6]?.rowItem?.id];
+        if (!updated) {
+          return row;
+        }
+        const newRow = [...row];
+        newRow[4] = statusCell(updated);
+        newRow[6] = menuCell(updated);
+        return newRow;
+      })
+    );
   };
 
   const onMenuClick = (menuItem: any, data: any) => {
-    if (menuItem.id === 'toggle-enabled') {
+    if (menuItem.id === ALERT_RULE_MENU.mute || menuItem.id === ALERT_RULE_MENU.unmute) {
+      setMuteTarget({ item: data, mute: menuItem.id === ALERT_RULE_MENU.mute });
+    }
+    if (menuItem.id === ALERT_RULE_MENU.toggle) {
       setDisableAlert(true);
       setAlertManagerObject(data);
     }
-    if (menuItem.id === 'edit') {
+    if (menuItem.id === ALERT_RULE_MENU.edit) {
       setIsCreateAlert(false);
       setOpenCreateNewAlertModal(true);
       setAlertManagerObject(data);
@@ -149,23 +166,27 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
         const agentPlaybooks = res?.data?.data?.agent_playbook || [];
         if (agentPlaybooks) {
           setAgentPlaybookOnEvents(agentPlaybooks);
-          for (const itemData of data as any) {
-            const item = agentPlaybooks.find((g: any) => g.alert_name == itemData[0].drilldownQuery.name);
-            const actionParamParsed = typeof item?.action_params === 'string' ? safeJSONParse(item.action_params) : item?.action_params;
-            if (actionParamParsed && Array.isArray(actionParamParsed) && actionParamParsed.length > 0) {
-              itemData[5] = {
-                component: actionParamParsed
-                  .map((obj: any) => {
-                    const dynamicKey = Object.keys(obj)[0];
-                    return obj[dynamicKey]?.title || snakeToTitleCase(dynamicKey);
-                  })
-                  .join(', '),
-              };
-            } else {
-              itemData[5] = { text: '-' };
-            }
-          }
-          setData([...data]);
+          // Functional update: the capabilities patch may have replaced rows since this effect started.
+          setData((prevData: any) =>
+            prevData.map((row: any) => {
+              const itemData = [...row];
+              const item = agentPlaybooks.find((g: any) => g.alert_name == itemData[0].drilldownQuery.name);
+              const actionParamParsed = typeof item?.action_params === 'string' ? safeJSONParse(item.action_params) : item?.action_params;
+              if (actionParamParsed && Array.isArray(actionParamParsed) && actionParamParsed.length > 0) {
+                itemData[5] = {
+                  component: actionParamParsed
+                    .map((obj: any) => {
+                      const dynamicKey = Object.keys(obj)[0];
+                      return obj[dynamicKey]?.title || snakeToTitleCase(dynamicKey);
+                    })
+                    .join(', '),
+                };
+              } else {
+                itemData[5] = { text: '-' };
+              }
+              return itemData;
+            })
+          );
         }
       });
   }, [alertNames]);
@@ -192,27 +213,32 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
         setLoading(false);
         setTotalCount(res?.data?.event_rules_aggregate?.aggregate?.count);
         const alertNames = [] as string[];
-        const data = res?.data?.event_rules.map((item: any) => {
+        const items: AlertRuleItem[] = res?.data?.event_rules || [];
+        const data = items.map((item: any) => {
           alertNames.push(item.alert);
-          const tooltipText = item?.enabled ? 'Enabled' : 'Disabled';
           return [
             { component: <Text value={item.alert} />, drilldownQuery: { name: item.alert } },
             { component: <Text value={item.category} /> },
             { component: <Text value={item?.source || '-'} /> },
             { component: <SeverityIcon level={toDsSeverityLevel(item?.severity)} />, data: item?.severity },
-            {
-              component: <Label margin='auto' text={tooltipText} />,
-            },
+            statusCell(item),
             {
               text: '--',
             },
-            {
-              component: <ThreeDotsMenu sx={{ ...action.primary }} onMenuClick={onMenuClick} data={item} menuItems={getMenuItems(item)} />,
-            },
+            menuCell(item),
           ];
         });
         setData(data);
         setAlertNames(alertNames);
+        k8sApi.getEventRuleCapabilities(items.map((item) => item.id)).then((capabilities) => {
+          const updated: Record<string, AlertRuleItem> = {};
+          items.forEach((item) => {
+            if (capabilities[item.id]) {
+              updated[item.id] = { ...item, capabilities: capabilities[item.id] };
+            }
+          });
+          replaceRowItems(updated);
+        });
       })
       .catch(() => {
         setLoading(false);
@@ -243,50 +269,56 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
     setDisableAlert(false);
   };
 
-  const updateAlertEnabledInPlace = (alertName: string, updatedItem: any) => {
-    setData((prevData: any) =>
-      prevData.map((row: any) => {
-        if (row[0]?.drilldownQuery?.name !== alertName) {
-          return row;
-        }
-        const newRow = [...row];
-        newRow[4] = { component: <Label margin='auto' text={updatedItem.enabled ? 'Enabled' : 'Disabled'} /> };
-        newRow[6] = {
-          component: <ThreeDotsMenu sx={{ ...action.primary }} onMenuClick={onMenuClick} data={updatedItem} menuItems={getMenuItems(updatedItem)} />,
-        };
-        return newRow;
-      })
-    );
-  };
-
   const handleSubmit = () => {
-    const previousItem = alertManagerObject;
-    const wasEnabled = alertManagerObject.enabled;
+    const previousItem: AlertRuleItem = alertManagerObject;
+    const wasEnabled = previousItem.enabled;
     const request: any = {
       accountId: accountId,
-      alert: alertManagerObject.alert,
+      alert: previousItem.alert,
       enable: !wasEnabled,
-      id: alertManagerObject?.id,
-      namespace: alertManagerObject?.namespace || '',
-      group: alertManagerObject?.group || '',
+      id: previousItem?.id,
+      namespace: previousItem?.namespace || '',
+      group: previousItem?.group || '',
     };
 
-    updateAlertEnabledInPlace(alertManagerObject.alert, { ...alertManagerObject, enabled: !wasEnabled });
+    replaceRowItems({ [previousItem.id]: { ...previousItem, enabled: !wasEnabled } });
     handleCloseAlertPopUp();
-    snackbar.success(`Rule ${alertManagerObject.alert} ${!wasEnabled ? 'Enabled' : 'Disabled'} Successful`);
 
+    const failed = (reason?: string) => {
+      snackbar.error(`Failed to ${wasEnabled ? 'disable' : 'enable'} ${previousItem.alert}${reason ? `: ${reason}` : ''}`);
+      replaceRowItems({ [previousItem.id]: previousItem });
+    };
     k8sApi
       .disableAlertManager(request)
       .then((res: any) => {
-        if (res?.data.errors || res?.data.errors?.length > 0 || res?.data?.data?.errors) {
-          snackbar.error(`Failed to ${wasEnabled ? 'Disable' : 'Enable'} Alert Rule`);
-          updateAlertEnabledInPlace(previousItem.alert, previousItem);
+        if (res instanceof Error || res?.data?.errors?.length > 0 || res?.data?.data?.errors) {
+          failed(firstGraphQLError(res));
+          return;
         }
+        snackbar.success(`Rule ${previousItem.alert} ${wasEnabled ? 'disabled' : 'enabled'}`);
       })
-      .catch(() => {
-        snackbar.error(`Failed to ${wasEnabled ? 'Disable' : 'Enable'} Alert Rule`);
-        updateAlertEnabledInPlace(previousItem.alert, previousItem);
-      });
+      .catch(() => failed());
+  };
+
+  const handleMute = () => {
+    if (!muteTarget) {
+      return;
+    }
+    const { item, mute } = muteTarget;
+    setMuteTarget(null);
+    k8sApi
+      .updateEventRuleMute({ rule_id: item.id, account_id: accountId, muted: mute })
+      .then((res: any) => {
+        const capabilities = res?.data?.data?.mute;
+        if (res instanceof Error || res?.data?.errors?.length > 0 || !capabilities) {
+          const reason = firstGraphQLError(res);
+          snackbar.error(`Failed to ${mute ? 'mute' : 'unmute'} ${item.alert}${reason ? `: ${reason}` : ''}`);
+          return;
+        }
+        replaceRowItems({ [item.id]: { ...item, capabilities } });
+        snackbar.success(`${item.alert} ${mute ? 'muted' : 'unmuted'}`);
+      })
+      .catch(() => snackbar.error(`Failed to ${mute ? 'mute' : 'unmute'} ${item.alert}`));
   };
 
   const onClickLoader = (loaderStatus: boolean) => {
@@ -303,7 +335,7 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
       <NDialog
         buttonText='Confirm'
         handleClose={handleCloseAlertPopUp}
-        dialogTitle={`${alertManagerObject?.enabled ? 'Disable' : 'Enable'} the alert "${alertManagerObject?.alert}"`}
+        dialogTitle={toggleConfirmTitle(alertManagerObject)}
         handleSubmit={handleSubmit}
         open={disableAlert}
         dialogContent={
@@ -316,6 +348,14 @@ const KubernetesAlertManager: React.FC<KubernetesAlertManagerProps> = ({ account
             : 'This alert will resume triggering as configured.'
         }
         additionalComponent={undefined}
+      />
+      <Modal
+        confirmText={muteTarget?.mute ? 'Mute' : 'Unmute'}
+        handleClose={() => setMuteTarget(null)}
+        title={muteConfirmTitle(muteTarget?.item, !!muteTarget?.mute)}
+        onConfirm={handleMute}
+        open={!!muteTarget}
+        width='md'
       />
       <Modal
         width='md'

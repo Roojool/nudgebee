@@ -172,10 +172,12 @@ func getSuggestionForApply(ctx context.Context, db *sqlx.DB, alertRuleKey, cloud
 // event_rules per source, an alert the webhook reports and the rule Nudgebee (or
 // the sync) holds for it are two rows, and applying against the webhook row would
 // only update the local cache while reporting success.
-// LoadSourceRule loads the event_rules row that backs a suggestion, by (alert, account_id).
-// alert is the cached alert_name (the AlarmName the engine extracted) which is what
-// event_rules keys on for every source (including GCP, where alert_name is the policy name).
-func LoadSourceRule(ctx context.Context, db *sqlx.DB, accountID, alert string) (*SourceRule, error) {
+// LoadSourceRule loads the event_rules row that backs a suggestion, by (alert, account_id)
+// within the caller's tenant. alert is the cached alert_name (the AlarmName the engine
+// extracted) which is what event_rules keys on for every source (including GCP, where
+// alert_name is the policy name). A row stored under the suggestion's own source wins
+// over a same-named rule from another source.
+func LoadSourceRule(ctx context.Context, db *sqlx.DB, tenantID, accountID, alert, source string) (*SourceRule, error) {
 	var row struct {
 		ID                   string  `db:"id"`
 		Source               *string `db:"source"`
@@ -197,9 +199,9 @@ func LoadSourceRule(ctx context.Context, db *sqlx.DB, accountID, alert string) (
 		       metric_provider, metric_provider_source, external_rule_id, provider_config,
 		       annotations, labels, enabled
 		FROM event_rules
-		WHERE alert = $1 AND account_id = $2
-		ORDER BY (COALESCE(source, '') LIKE '%\_webhook') ASC, enabled DESC
-		LIMIT 1`, alert, accountID)
+		WHERE alert = $1 AND account_id = $2 AND tenant_id = $3
+		ORDER BY (COALESCE(source, '') = $4) DESC, (COALESCE(source, '') LIKE '%\_webhook') ASC, enabled DESC
+		LIMIT 1`, alert, accountID, tenantID, source)
 	if err != nil {
 		return nil, err
 	}

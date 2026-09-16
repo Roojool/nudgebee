@@ -471,9 +471,8 @@ func CreateEventRule(context *security.RequestContext, eventRequest EventConfig)
 				},
 			},
 		}
-		_, err2 := relay.Execute(relayRequest)
-		if err2 != nil {
-			return data, err2
+		if err := executeAgentAction(relayRequest); err != nil {
+			return data, err
 		}
 	}
 
@@ -561,10 +560,43 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 
 	context.GetLogger().Info("UpdateEventRule", "data", slog.AnyValue(eventRequest))
 
-	normalizeEventSource(&eventRequest)
+	// Labels and annotations sent upstream and stored. The edit form carries only
+	// severity and the three standard annotations, so for a known row the stored
+	// maps are the base and the form's values are laid over them.
+	var labels any = eventRequest.Labels
+	var annotations any = eventRequest.Annotations
+	externalRuleId := ""
 
-	// 1. Prometheus: sync via relay (existing path)
-	if eventRequest.Source == agentEventSourceName {
+	if eventRequest.Id != "" {
+		target, err := ResolveRuleTarget(context, eventRequest.Id, ResolveOptions{})
+		if err != nil {
+			return data, err
+		}
+		if target.AccountID != eventRequest.AccountID {
+			return data, ErrRuleNotFound
+		}
+		if err := requireOperation(target.Operations.EditDefinition, "edit"); err != nil {
+			return data, err
+		}
+		if eventRequest.Alert != target.Rule.Alert {
+			// The row is keyed by name: a "rename" would write a second rule.
+			return data, fmt.Errorf("renaming an alert rule is not supported")
+		}
+		// The stored source decides the route; the form may send a stale or default one.
+		eventRequest.Source = target.Rule.Source
+		externalRuleId = derefString(target.Rule.ExternalRuleID)
+		labels, annotations = mergeRuleMetadata(target.Rule, eventRequest)
+	} else {
+		normalizeEventSource(&eventRequest)
+		if kind := targetKindForSource(eventRequest.Source, eventRequest.AlertType); kind != TargetPromCR &&
+			kind != TargetPromRuler && kind != TargetExternal {
+			return data, fmt.Errorf("%w: edit: source %q is not changed by Nudgebee", ErrOperationUnavailable, eventRequest.Source)
+		}
+	}
+	kind := targetKindForSource(eventRequest.Source, eventRequest.AlertType)
+
+	// 1. Agent Prometheus: write the PrometheusRule through the relay.
+	if kind == TargetPromCR {
 		if !isK8sAgentConnected(eventRequest.AccountID) {
 			return data, errNoAgentForPrometheusRule
 		}
@@ -578,58 +610,50 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 					"alert":       eventRequest.Alert,
 					"expr":        eventRequest.Expr,
 					"duration":    eventRequest.Duration,
-					"annotations": eventRequest.Annotations,
-					"labels":      eventRequest.Labels,
+					"annotations": annotations,
+					"labels":      labels,
 				},
 			},
 		}
-		_, err2 := relay.Execute(relayRequest)
-		if err2 != nil {
-			return data, err2
+		if err := executeAgentAction(relayRequest); err != nil {
+			return data, err
 		}
 	}
 
-	// 2. External providers: update alert rule in external system
-	externalRuleId := ""
-	if isExternalProviderSource(eventRequest.Source) {
-		// Fetch existing external_rule_id from DB
-		dbmsLookup, err := database.GetDatabaseManager(database.Metastore)
-		if err == nil {
-			// Scoped by source: since the unique key became
-			// (account, tenant, source, alert), the same alert name can exist
-			// under both a provider source and its *_webhook twin, and only the
-			// provider row carries the external_rule_id we are about to update.
-			lookupErr := dbmsLookup.QueryRowAndScan(&externalRuleId,
+	// 2. External providers (and the account's own ruler): the provider write
+	// must succeed before the local copy changes.
+	if kind == TargetPromRuler || kind == TargetExternal {
+		if externalRuleId == "" {
+			dbmsLookup, err := database.GetDatabaseManager(database.Metastore)
+			if err != nil {
+				return data, fmt.Errorf("failed to get database manager: %w", err)
+			}
+			// Scoped by source: the same alert name can exist under both a
+			// provider source and its *_webhook twin, and only the provider row
+			// carries the external_rule_id.
+			if err := dbmsLookup.QueryRowAndScan(&externalRuleId,
 				"SELECT COALESCE(external_rule_id, '') FROM event_rules WHERE account_id = $1 AND tenant_id = $2 AND alert = $3 AND source = $4",
-				eventRequest.AccountID, context.GetSecurityContext().GetTenantId(), eventRequest.Alert, eventRequest.Source)
-			if lookupErr != nil {
-				context.GetLogger().Error("UpdateEventRule: failed to lookup external_rule_id", "error", lookupErr)
+				eventRequest.AccountID, context.GetSecurityContext().GetTenantId(), eventRequest.Alert, eventRequest.Source); err != nil {
+				return data, fmt.Errorf("UpdateEventRule: failed to look up the provider rule id: %w", err)
 			}
 		}
-
-		if externalRuleId != "" {
-			provider, providerSource := resolveProviderFromSource(eventRequest.Source)
-			_, err := alertrule.UpdateAlertRule(context, provider, providerSource, externalRuleId, alertrule.AlertRuleConfig{
-				AccountId: eventRequest.AccountID,
-				Name:      eventRequest.Alert,
-				AlertType: eventRequest.AlertType,
-				Query:     eventRequest.Expr,
-				Severity:  eventRequest.Severity,
-				Duration:  eventRequest.Duration,
-				Annotations: map[string]string{
-					"description": eventRequest.Annotations.Description,
-					"summary":     eventRequest.Annotations.Summary,
-				},
-				Labels: map[string]string{
-					"severity": eventRequest.Labels.Severity,
-				},
-				Enabled:        eventRequest.Enabled,
-				ProviderConfig: eventRequest.ProviderConfig,
-			})
-			if err != nil {
-				context.GetLogger().Error("UpdateEventRule: failed to update external rule", "error", err)
-				// Continue with local update even if external update fails
-			}
+		if externalRuleId == "" {
+			return data, fmt.Errorf("%w: edit: this rule has no id in the provider", ErrOperationUnavailable)
+		}
+		provider, providerSource := resolveProviderFromSource(eventRequest.Source)
+		if _, err := alertrule.UpdateAlertRule(context, provider, providerSource, externalRuleId, alertrule.AlertRuleConfig{
+			AccountId:      eventRequest.AccountID,
+			Name:           eventRequest.Alert,
+			AlertType:      eventRequest.AlertType,
+			Query:          eventRequest.Expr,
+			Severity:       eventRequest.Severity,
+			Duration:       eventRequest.Duration,
+			Annotations:    toStringMap(annotations),
+			Labels:         toStringMap(labels),
+			Enabled:        eventRequest.Enabled,
+			ProviderConfig: eventRequest.ProviderConfig,
+		}); err != nil {
+			return data, fmt.Errorf("failed to update alert rule in %s: %w", provider, err)
 		}
 	}
 
@@ -638,7 +662,7 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 		return data, fmt.Errorf("failed to get database manager: %w", err)
 	}
 
-	ruleId, ok, err := upsertEventRule(dbms, eventRequest.Annotations, eventRequest.Labels,
+	ruleId, ok, err := upsertEventRule(dbms, annotations, labels,
 		eventRequest.Alert, eventRequest.Expr, eventRequest.Duration,
 		eventRequest.AccountID, context.GetSecurityContext().GetTenantId(),
 		eventRequest.Source, eventRequest.Category, eventRequest.Severity, eventRequest.Enabled,
@@ -661,7 +685,7 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 	}
 	data["response"] = playbookId != ""
 
-	if eventRequest.Source == agentEventSourceName {
+	if kind == TargetPromCR {
 		// call async refresh of agent playbooks with a bounded context
 		logger := context.GetLogger()
 		go func() {
@@ -714,35 +738,6 @@ func (r toggledRule) toAlertRuleConfig(accountID string) alertrule.AlertRuleConf
 	}
 }
 
-func loadRuleForToggle(dbms *database.DatabaseManager, id string) (toggledRule, error) {
-	var (
-		rule                        toggledRule
-		expr, duration, severity    *string
-		alertType                   *string
-		annotationsJSON, labelsJSON *string
-		providerConfigJSON          *string
-	)
-	err := dbms.Db.QueryRow(`
-		SELECT alert, source, expr, duration, severity, alert_type, external_rule_id,
-		       annotations::text, labels::text, provider_config::text
-		FROM event_rules WHERE id = $1`, id).
-		Scan(&rule.Alert, &rule.Source, &expr, &duration, &severity, &alertType,
-			&rule.ExternalRuleID, &annotationsJSON, &labelsJSON, &providerConfigJSON)
-	if err != nil {
-		return rule, err
-	}
-	rule.Expr = derefString(expr)
-	rule.Duration = derefString(duration)
-	rule.Severity = derefString(severity)
-	rule.AlertType = derefString(alertType)
-	rule.Annotations = unmarshalStringMap(annotationsJSON)
-	rule.Labels = unmarshalStringMap(labelsJSON)
-	if providerConfigJSON != nil && *providerConfigJSON != "" {
-		_ = json.Unmarshal([]byte(*providerConfigJSON), &rule.ProviderConfig)
-	}
-	return rule, nil
-}
-
 func derefString(v *string) string {
 	if v == nil {
 		return ""
@@ -783,24 +778,36 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 
 	context.GetLogger().Info("DisableEventRule", "data", eventRequest)
 
-	// Get source and external_rule_id of event rule
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		return data, err
 	}
 
-	rule, err := loadRuleForToggle(dbms, eventRequest.Id)
+	target, err := ResolveRuleTarget(context, eventRequest.Id, ResolveOptions{})
 	if err != nil {
-		context.GetLogger().Error("eventrule: unable to find source of event rule", "error", err, "id", eventRequest.Id)
-		return data, errors.New("unable to find source of event rule")
+		context.GetLogger().Error("eventrule: unable to resolve event rule", "error", err, "id", eventRequest.Id)
+		return data, err
 	}
+	if target.AccountID != eventRequest.AccountID {
+		return data, ErrRuleNotFound
+	}
+	op := "disable"
+	if eventRequest.Enable {
+		op = "enable"
+	}
+	// Enabling is offered on the same terms as disabling: it re-creates the rule
+	// where it is evaluated, so a source Nudgebee cannot write to gets neither.
+	if err := requireOperation(target.Operations.DisableAtSource, op); err != nil {
+		return data, err
+	}
+	rule := target.Rule
 	eventSource := rule.Source
 	externalRuleId := rule.ExternalRuleID
 
 	// The rule has to exist again wherever it is evaluated, not just be flagged
 	// enabled here. Disabling deletes it from that system, so enabling must put it
 	// back — otherwise the rule reads as on and never fires.
-	if eventSource == agentEventSourceName {
+	if target.Kind == TargetPromCR {
 		relayRequest := relay.RelayExecuteRequest{
 			NoSinks: true,
 			Cache:   false,
@@ -808,7 +815,9 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 				AccountID:  eventRequest.AccountID,
 				ActionName: "delete_alert_rule",
 				ActionParams: map[string]any{
-					"alert":     eventRequest.Alert,
+					// The stored name, never the request's: an empty alert makes the
+					// agent delete the whole PrometheusRule.
+					"alert":     rule.Alert,
 					"group":     eventRequest.Group,
 					"namespace": eventRequest.Namespace,
 				},
@@ -827,22 +836,18 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 			}
 		}
 
-		_, err2 := relay.Execute(relayRequest)
-		if err2 != nil {
-			return data, err2
+		if err := executeAgentAction(relayRequest); err != nil {
+			return data, err
 		}
 	}
 
 	// External providers own the rule; keep their copy in step with the toggle.
-	if isExternalProviderSource(eventSource) {
+	if target.Kind == TargetPromRuler || target.Kind == TargetExternal {
 		provider, providerSource := resolveProviderFromSource(eventSource)
 		switch {
 		case eventRequest.Enable:
 			result, createErr := alertrule.CreateAlertRule(context, provider, providerSource, rule.toAlertRuleConfig(eventRequest.AccountID))
 			if createErr != nil {
-				// Deliberately NOT the log-and-continue the delete path uses: a rule
-				// left enabled but absent upstream is exactly the silent no-op this
-				// guards against, so the toggle fails and stays off.
 				return data, fmt.Errorf("failed to re-create alert rule in %s: %w", provider, createErr)
 			}
 			// The id can legitimately change (the Cortex ruler keys on the group name,
@@ -851,10 +856,8 @@ func DisableEventRule(context *security.RequestContext, eventRequest DisableEven
 			externalRuleId = &newID
 			context.GetLogger().Info("DisableEventRule: external rule re-created", "provider", provider, "external_rule_id", newID)
 		case externalRuleId != nil && *externalRuleId != "":
-			err := alertrule.DeleteAlertRule(context, provider, providerSource, eventRequest.AccountID, *externalRuleId)
-			if err != nil {
-				context.GetLogger().Error("DisableEventRule: failed to delete external rule", "provider", provider, "external_rule_id", *externalRuleId, "error", err)
-				// Continue with local disable even if external delete fails
+			if err := alertrule.DeleteAlertRule(context, provider, providerSource, eventRequest.AccountID, *externalRuleId); err != nil {
+				return data, fmt.Errorf("failed to delete alert rule in %s: %w", provider, err)
 			}
 		}
 	}

@@ -79,7 +79,7 @@ func ApplyThresholdSuggestion(ctx *security.RequestContext, req ApplyThresholdRe
 		return ApplyThresholdResult{}, fmt.Errorf("blocked: this is a high-risk (dangerous) suggestion and requires explicit override")
 	}
 
-	rule, err := LoadSourceRule(ctx.GetContext(), db, req.CloudAccountID, sug.AlertName)
+	rule, err := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), req.CloudAccountID, sug.AlertName, sug.Source)
 	if err != nil {
 		return ApplyThresholdResult{}, fmt.Errorf("source rule not found for alert %q: %w", sug.AlertName, err)
 	}
@@ -184,7 +184,7 @@ func RevertThresholdSuggestion(ctx *security.RequestContext, alertRuleKey, cloud
 		return ApplyThresholdResult{}, fmt.Errorf("no previous threshold recorded; cannot revert")
 	}
 
-	rule, err := LoadSourceRule(ctx.GetContext(), db, cloudAccountID, sug.AlertName)
+	rule, err := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), cloudAccountID, sug.AlertName, sug.Source)
 	if err != nil {
 		return ApplyThresholdResult{}, fmt.Errorf("source rule not found: %w", err)
 	}
@@ -294,7 +294,7 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 		return out, nil
 	}
 
-	rule, ruleErr := LoadSourceRule(ctx.GetContext(), db, cloudAccountID, sug.AlertName)
+	rule, ruleErr := LoadSourceRule(ctx.GetContext(), db, sc.GetTenantId(), cloudAccountID, sug.AlertName, sug.Source)
 
 	// Dry-run preview (no write).
 	if ruleErr == nil {
@@ -307,45 +307,34 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 		out.PreviewError = fmt.Sprintf("source rule not found: %v", ruleErr)
 	}
 
-	// Direct availability per source.
+	// Direct availability comes from the same resolver Alert Manager uses, so the
+	// two screens never disagree about whether a change can reach the source.
 	direct := ApplyOption{Method: "direct"}
-	switch {
-	case ruleErr != nil:
+	if ruleErr != nil {
 		direct.Reason = "no editable rule found for this alert"
-	case promQLSources[sug.Source]:
-		// The rule row decides the write path: prometheus_user goes to the account's
-		// own ruler (Mimir / Cortex / Grafana Cloud) over the direct integration,
-		// anything else is a PrometheusRule CR pushed through the k8s agent.
-		if rule.Source == "prometheus_user" {
-			ok, reason := alertrule.PrometheusRulerConfigured(ctx, cloudAccountID)
-			direct.Available = ok
-			direct.Reason = reason
-		} else if eventrule.IsK8sAgentConnected(cloudAccountID) {
-			direct.Available = true
-		} else {
-			direct.Reason = "k8s agent not connected — cannot push the PrometheusRule change"
+	} else if target, terr := eventrule.ResolveRuleTarget(ctx, rule.ID, eventrule.ResolveOptions{AlertRuleKey: sug.AlertRuleKey}); terr != nil {
+		direct.Reason = fmt.Sprintf("cannot resolve the source rule: %v", terr)
+	} else {
+		c := directCapability(target.Operations, sug.RecommendationType)
+		direct.Available = c.Available
+		direct.Reason = c.Reason
+		if c.Available && c.Warning != "" {
+			direct.Reason = c.Warning
 		}
-	case sug.Source == "AWS_CloudWatch_Alarm":
-		direct.Available = true // IAM denials surface at apply time
-	case azureSources[sug.Source], sug.Source == "GCP_Metric_Alert":
-		// Cloud-collector write path for Azure/GCP is best-effort; offer direct but warn.
-		direct.Available = true
-		direct.Reason = "direct apply for this provider is best-effort; verify after applying"
-	default:
-		direct.Reason = fmt.Sprintf("direct apply not supported for source %q", sug.Source)
 	}
 	if out.PreviewError != "" && direct.Available {
 		direct.Available = false
-		if direct.Reason == "" {
-			direct.Reason = "cannot build the rewritten rule: " + out.PreviewError
-		}
+		direct.Reason = "cannot build the rewritten rule: " + out.PreviewError
 	}
 
-	// PR availability — a git integration must be configured for the tenant.
+	// PR availability — PromQL rule files only, and a git integration must be configured.
 	pr := ApplyOption{Method: "pr"}
-	if hasGitIntegration(ctx.GetContext(), db, sc.GetTenantId()) {
+	switch {
+	case !promQLSources[sug.Source]:
+		pr.Reason = fmt.Sprintf("PR apply is supported only for Prometheus rule files, not %q", sug.Source)
+	case eventrule.HasGitIntegration(ctx.GetContext(), db, sc.GetTenantId()):
 		pr.Available = true
-	} else {
+	default:
 		pr.Reason = "no GitHub/GitLab integration configured"
 	}
 
@@ -353,20 +342,37 @@ func GetThresholdApplyOptions(ctx *security.RequestContext, alertRuleKey, cloudA
 	return out, nil
 }
 
-// hasGitIntegration reports whether the tenant has an enabled github/gitlab integration.
-func hasGitIntegration(ctx context.Context, db *sqlx.DB, tenantID string) bool {
-	var count int
-	err := db.GetContext(ctx, &count, `
-		SELECT COUNT(*) FROM integrations
-		WHERE tenant_id = $1 AND status = 'enabled' AND type IN ('github', 'gitlab')`, tenantID)
-	if err != nil {
-		return false
+// directCapability is the resolver operation a suggestion's direct apply needs.
+func directCapability(ops eventrule.RuleOperations, recommendationType string) eventrule.Capability {
+	switch recommendationType {
+	case "disable":
+		return ops.DisableAtSource
+	case "increase_duration":
+		return ops.UpdateDuration
+	case "tune_both":
+		if !ops.UpdateDuration.Available {
+			return ops.UpdateDuration
+		}
 	}
-	return count > 0
+	return ops.UpdateThreshold
 }
 
-// applyDirect writes the rewritten rule back through the existing eventrule write-back path.
+// applyDirect writes the rewritten rule back to the system that evaluates it. The
+// resolver decides the route and whether it is allowed; every failure is returned so
+// apply/revert status is never faked.
 func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *SourceRule, rewritten *RewrittenRule) error {
+	target, err := eventrule.ResolveRuleTarget(ctx, rule.ID, eventrule.ResolveOptions{AlertRuleKey: sug.AlertRuleKey})
+	if err != nil {
+		return fmt.Errorf("resolve source rule: %w", err)
+	}
+	recommendation := sug.RecommendationType
+	if rewritten.Disable {
+		recommendation = "disable"
+	}
+	if c := directCapability(target.Operations, recommendation); !c.Available {
+		return fmt.Errorf("%w: %s", eventrule.ErrOperationUnavailable, c.Reason)
+	}
+
 	if rewritten.Disable {
 		_, err := eventrule.DisableEventRule(ctx, eventrule.DisableEventConfig{
 			Alert:     sug.AlertName,
@@ -378,36 +384,49 @@ func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *So
 		return err
 	}
 
-	// Cloud-provider sources (GCP/AWS/Azure) must be written back to the provider's
-	// monitoring API. The generic UpdateEventRule path only pushes Prometheus rules (via
-	// relay) and otherwise just upserts the internal event_rules cache — for cloud sources
-	// its external-provider branch never fires (the source names differ from the canonical
-	// provider keys and event_rules.external_rule_id is empty), so the real alert was left
-	// untouched while the apply was still reported as successful. Route cloud sources to
-	// the provider write explicitly, using the suggestion's alert_rule_key as the external
-	// rule id, and surface any failure so apply/revert status is never faked.
-	if provider, ok := cloudAlertProvider(rule.Source); ok {
-		_, err := alertrule.UpdateAlertRule(ctx, provider, "user", sug.AlertRuleKey, alertrule.AlertRuleConfig{
+	// Cloud-provider sources (GCP/AWS/Azure) are written through cloud-collector with
+	// the locator the resolver derived (event ARN / policy name / ARM id).
+	if provider := eventrule.CloudProviderKey(target.Kind); provider != "" {
+		externalID := target.Locator.AWSAlarmARN
+		switch target.Kind {
+		case eventrule.TargetGCP:
+			externalID = target.Locator.GCPPolicy
+		case eventrule.TargetAzure:
+			externalID = firstNonEmptyString(target.Locator.AzureID, target.Locator.AzureName)
+		}
+		providerConfig := map[string]interface{}{}
+		for k, v := range rewritten.ProviderConfig {
+			providerConfig[k] = v
+		}
+		if target.Kind == eventrule.TargetAWS && externalID == "" {
+			providerConfig["region"] = target.Locator.AWSRegion
+		}
+		name := sug.AlertName
+		if target.Locator.AWSAlarmName != "" {
+			name = target.Locator.AWSAlarmName
+		}
+		_, err := alertrule.UpdateAlertRule(ctx, provider, "user", externalID, alertrule.AlertRuleConfig{
 			AccountId:      sug.CloudAccountID,
-			Name:           sug.AlertName,
+			Name:           name,
 			AlertType:      rule.AlertType,
 			Query:          rewritten.Expr,
 			Severity:       rule.Severity,
 			Duration:       rewritten.Duration,
-			Enabled:        true,
-			ProviderConfig: rewritten.ProviderConfig,
+			Enabled:        target.Enabled,
+			ProviderConfig: providerConfig,
 		})
 		return err
 	}
 
 	cfg := eventrule.EventConfig{
+		Id:                   rule.ID,
 		Alert:                sug.AlertName,
 		AccountID:            sug.CloudAccountID,
 		Source:               rule.Source,
 		Expr:                 rewritten.Expr,
 		Category:             rule.Category,
 		Severity:             rule.Severity,
-		Enabled:              true,
+		Enabled:              rule.Enabled,
 		AlertType:            rule.AlertType,
 		MetricProvider:       rule.MetricProvider,
 		MetricProviderSource: rule.MetricProviderSource,
@@ -417,7 +436,8 @@ func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *So
 	if rewritten.Duration != "" {
 		cfg.Duration = rewritten.Duration
 	}
-	// Preserve existing annotations/labels so the write-back does not wipe them.
+	// UpdateEventRule keeps the stored labels/annotations for a known row; these
+	// fill the fields its edit form would otherwise send.
 	cfg.Annotations.Description = rule.AnnDescription
 	cfg.Annotations.Summary = rule.AnnSummary
 	cfg.Annotations.Runbook = rule.AnnRunbook
@@ -426,23 +446,8 @@ func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *So
 		cfg.Severity = rule.LabelSeverity
 	}
 
-	_, err := eventrule.UpdateEventRule(ctx, cfg)
+	_, err = eventrule.UpdateEventRule(ctx, cfg)
 	return err
-}
-
-// cloudAlertProvider maps a triage suggestion source to the canonical alertrule provider
-// key used by alertrule.UpdateAlertRule (which delegates AWS/GCP/Azure to cloud-collector).
-// Returns ok=false for non-cloud sources (Prometheus/PromQL), which take the relay path.
-func cloudAlertProvider(source string) (string, bool) {
-	switch {
-	case source == "GCP_Metric_Alert":
-		return "gcp_monitoring", true
-	case source == "AWS_CloudWatch_Alarm":
-		return "aws_cloudwatch", true
-	case azureSources[source]:
-		return "azure_app_insights", true
-	}
-	return "", false
 }
 
 // applyViaPR routes the rewritten rule through the GitOps PR path.
@@ -523,4 +528,13 @@ func markApplyFailed(ctx context.Context, db *sqlx.DB, req ApplyThresholdRequest
 		WHERE alert_rule_key = $1 AND cloud_account_id = $2`,
 		req.AlertRuleKey, req.CloudAccountID, req.Method, errMsg)
 	return err
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

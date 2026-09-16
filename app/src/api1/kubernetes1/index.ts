@@ -92,6 +92,44 @@ mutation DisableAlertManagerRule {
 }
 `;
 
+export const GET_EVENT_RULE_CAPABILITIES = `
+query GetEventRuleCapabilities {
+  capabilities: eventrules_get_capabilities(request: __REQUEST__)
+}
+`;
+
+export const UPDATE_EVENT_RULE_MUTE = `
+mutation UpdateEventRuleMute {
+  mute: eventrules_update_mute(request: __REQUEST__)
+}
+`;
+
+export interface EventRuleCapability {
+  available: boolean;
+  reason?: string;
+  warning?: string;
+}
+
+export interface EventRuleCapabilities {
+  rule_id: string;
+  alert: string;
+  source: string;
+  target: string;
+  muted: boolean;
+  operations: {
+    edit_definition: EventRuleCapability;
+    update_threshold: EventRuleCapability;
+    update_duration: EventRuleCapability;
+    disable_at_source: EventRuleCapability;
+    mute: EventRuleCapability;
+    pr: EventRuleCapability;
+  };
+}
+
+// The first GraphQL error message, so a rejected rule change shows the server's reason.
+export const firstGraphQLError = (res: any): string | undefined =>
+  res?.data?.errors?.[0]?.message || res?.data?.data?.errors?.[0]?.message || res?.response?.data?.errors?.[0]?.message;
+
 export const LIST_ACC = `
 query ListAcc($limit: Int, $offset: Int) {
   accounts_list(where: __WHERE__, order_by: [{column: "created_at", order: desc}] limit: $limit, offset: $offset) {
@@ -612,6 +650,35 @@ const apiKubernetes1 = {
           distinct_source: rawData?.distinct_source?.rows,
           distinct_severity: rawData?.distinct_severity?.rows,
         },
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  // Which rule changes Nudgebee can really make, keyed by rule id. An empty map
+  // (request failed) hides every write control rather than offering fake ones.
+  async getEventRuleCapabilities(ruleIds: string[]): Promise<Record<string, EventRuleCapabilities>> {
+    if (!ruleIds.length) {
+      return {};
+    }
+    try {
+      const response = await queryGraphQL(
+        GET_EVENT_RULE_CAPABILITIES.replace('__REQUEST__', gqlStringify({ rule_ids: ruleIds })),
+        'GetEventRuleCapabilities',
+        {}
+      );
+      const list: EventRuleCapabilities[] = response?.data?.data?.capabilities?.capabilities || [];
+      return Object.fromEntries(list.map((c) => [c.rule_id, c]));
+    } catch (error) {
+      console.warn('failed to fetch alert rule capabilities', error);
+      return {};
+    }
+  },
+  async updateEventRuleMute(data: { rule_id: string; account_id: string; muted: boolean }) {
+    try {
+      const response = await queryGraphQL(UPDATE_EVENT_RULE_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventRuleMute', {});
+      return {
+        data: response?.data,
       };
     } catch (error) {
       return error;

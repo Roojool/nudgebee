@@ -982,3 +982,26 @@ func ExecuteProxy(accountID string, action string, datasourceID string, params m
 
 	return result, nil
 }
+
+// ActionSucceeded returns an error when an Execute response reports that the
+// agent ran the action and it failed (data.success == false). Execute itself only
+// fails on transport errors, so a write action that the agent rejected otherwise
+// looks like a success to the caller.
+func ActionSucceeded(response map[string]any) error {
+	data, ok := response["data"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	success, present := data["success"]
+	if !present || success == nil {
+		return nil
+	}
+	if ok, isBool := success.(bool); isBool && ok {
+		return nil
+	}
+	msg := data["msg"]
+	if msg == nil || msg == "" {
+		msg = data["error_code"]
+	}
+	return fmt.Errorf("agent reported failure: %v", msg)
+}

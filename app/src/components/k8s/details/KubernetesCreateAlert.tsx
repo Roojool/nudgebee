@@ -636,6 +636,8 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
 
     setIsSubmitting(true);
     const data: any = {
+      // Updates are routed by the stored rule, not by the form's source.
+      ...(!isCreateAlert && alertManagerObject?.id ? { id: alertManagerObject.id } : {}),
       annotations: {
         description: alertDescription,
         summary: alertSummary,

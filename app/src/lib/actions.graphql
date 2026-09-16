@@ -517,6 +517,18 @@ type Mutation {
 }
 
 type Query {
+  eventrules_get_capabilities(
+    request: EventRulesGetCapabilitiesRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_update_mute(
+    request: EventRulesUpdateMuteRequest!
+  ): jsonb
+}
+
+type Query {
   anomaly_grouping_v2(
     where: ListAnomalyWhereRequest
   ): AnomalyGroupingsResponse
@@ -3336,6 +3348,7 @@ input AlertRule {
 }
 
 input UpdateAlertRule {
+  id: String
   annotations: Annotations!
   expr: String!
   labels: Labels!
@@ -3367,6 +3380,16 @@ input QueryWhereBooleanRequest {
   _eq: Boolean
   _neq: Boolean
   _is_null: Boolean
+}
+
+input EventRulesGetCapabilitiesRequest {
+  rule_ids: [String!]!
+}
+
+input EventRulesUpdateMuteRequest {
+  rule_id: String!
+  account_id: String!
+  muted: Boolean!
 }
 
 input DisableAlertRule {
