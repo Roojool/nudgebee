@@ -35,6 +35,7 @@ import KnowledgeContextTags from '@components/llm/KnowledgeContextTags';
 import ScopeChip from '@components/llm/ScopeChip';
 import KnowledgePolicySettings from '@components/llm/KnowledgePolicySettings';
 import { formatTrigger, formatDuration, formatDocuments } from '@components/llm/kbLoadHistoryFormat';
+import { isKbRetriggerDisabled } from '@components/llm/kbRetrigger';
 import KBDocumentsModal from '@components/llm/KBDocumentsModal';
 
 const MAX_CONTENT_LENGTH = 5000;
@@ -121,20 +122,15 @@ const getKbStatusTone = (status) =>
 
 // Three-dots menu items for a KB (retrigger / history / delete), gated by type + access.
 const getKbMenuItems = (knowledgeBase, hasAccess) => [
-  // Retrigger only for integration KBs — manual KBs have no external source to re-sync
-  ...(knowledgeBase.kb_type === 'integration'
-    ? [
-        {
-          label: 'Retrigger',
-          value: 'retrigger',
-          icon: RefreshIcon,
-          // An archived KB's integration is disabled — nothing to re-sync. A
-          // switched-off KB is refused by the backend for the same reason
-          // (re-indexing content nothing can read), so don't offer it here.
-          disabled: knowledgeBase.status === 'processing' || knowledgeBase.status === 'archived' || knowledgeBase.enabled === false,
-        },
-      ]
-    : []),
+  // Retrigger for every KB: a user-created KB has no source to re-sync, but its
+  // stored content still needs re-embedding when its vectors are lost or the
+  // way content is indexed changes.
+  {
+    label: 'Retrigger',
+    value: 'retrigger',
+    icon: RefreshIcon,
+    disabled: isKbRetriggerDisabled(knowledgeBase, hasAccess),
+  },
   {
     label: 'Load History',
     value: 'history',
