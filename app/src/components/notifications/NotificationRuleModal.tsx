@@ -136,6 +136,10 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const [msWebhookTargets, setMsWebhookTargets] = useState<Option[]>([]);
   const [selectedMsWebhookTarget, setSelectedMsWebhookTarget] = useState<string>('');
   const [msWebhookToggle, setMsWebhookToggle] = useState<boolean>(false);
+  const [slackWebhookTargets, setSlackWebhookTargets] = useState<Option[]>([]);
+  const [selectedSlackWebhookTarget, setSelectedSlackWebhookTarget] = useState<string>('');
+  const [slackWebhookToggle, setSlackWebhookToggle] = useState<boolean>(false);
+  const [loadingSlackWebhookTargets, setLoadingSlackWebhookTargets] = useState<boolean>(false);
   const [loadingChannelList, setLoadingChannelList] = useState({
     slack: false,
     ms_teams: false,
@@ -160,6 +164,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     basedOnValue !== 'daily_recap' && slackToggle && 'Slack',
     basedOnValue !== 'daily_recap' && teamsToggle && 'MS Teams',
     basedOnValue !== 'daily_recap' && msWebhookToggle && 'MS Teams Webhook',
+    basedOnValue !== 'daily_recap' && slackWebhookToggle && 'Slack Webhook',
     basedOnValue !== 'daily_recap' && gChatToggle && 'Google Chat',
     basedOnValue !== 'daily_recap' && discordToggle && 'Discord',
     basedOnValue === 'daily_recap' && emailToggle && 'Email',
@@ -180,6 +185,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     msChannelId: '',
     msWebhookToggle: false,
     selectedMsWebhookTarget: '',
+    slackWebhookToggle: false,
+    selectedSlackWebhookTarget: '',
     gChatToggle: false,
     selectedGChatChannel: '',
     discordToggle: false,
@@ -199,6 +206,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setMSChannelId(defaultFormState.msChannelId);
     setMsWebhookToggle(defaultFormState.msWebhookToggle);
     setSelectedMsWebhookTarget(defaultFormState.selectedMsWebhookTarget);
+    setSlackWebhookToggle(defaultFormState.slackWebhookToggle);
+    setSelectedSlackWebhookTarget(defaultFormState.selectedSlackWebhookTarget);
     setGChatToggle(defaultFormState.gChatToggle);
     setSelectedGChatChannel(defaultFormState.selectedGChatChannel);
     setDiscordToggle(defaultFormState.discordToggle);
@@ -221,6 +230,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
           msChannelId,
           msWebhookToggle,
           selectedMsWebhookTarget,
+          slackWebhookToggle,
+          selectedSlackWebhookTarget,
           gChatToggle,
           selectedGChatChannel,
           discordToggle,
@@ -245,6 +256,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setMSChannelId(oldState.msChannelId);
     setMsWebhookToggle(oldState.msWebhookToggle);
     setSelectedMsWebhookTarget(oldState.selectedMsWebhookTarget);
+    setSlackWebhookToggle(oldState.slackWebhookToggle);
+    setSelectedSlackWebhookTarget(oldState.selectedSlackWebhookTarget);
     setGChatToggle(oldState.gChatToggle);
     setSelectedGChatChannel(oldState.selectedGChatChannel);
     setDiscordToggle(oldState.discordToggle);
@@ -647,6 +660,15 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         setMsWebhookTargets(rows.filter((r: any) => r.status !== 'disabled').map((r: any) => ({ label: r.name, value: r.id })));
       })
       .catch(() => setMsWebhookTargets([]));
+    setLoadingSlackWebhookTargets(true);
+    apiIntegrations
+      .listIntegrations({ type: 'slack_webhook', limit: 200 })
+      .then((res: any) => {
+        const rows = res?.data?.data?.integrations_list?.rows || [];
+        setSlackWebhookTargets(rows.filter((r: any) => r.status !== 'disabled').map((r: any) => ({ label: r.name, value: r.id })));
+      })
+      .catch(() => setSlackWebhookTargets([]))
+      .finally(() => setLoadingSlackWebhookTargets(false));
   }, [open]);
 
   const fetchCluster = (notificationRuleObject: any) => {
@@ -728,6 +750,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setMsWebhookToggle(false);
     setSelectedMsWebhookTarget('');
     setMsWebhookTargets([]);
+    setSlackWebhookToggle(false);
+    setSelectedSlackWebhookTarget('');
+    setSlackWebhookTargets([]);
     setGChatToggle(false);
     setDiscordToggle(false);
     setEmailToggle(false);
@@ -771,6 +796,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       } else if (item.platform === 'ms_teams_webhook' && item.channels?.webhook_target_id) {
         setSelectedMsWebhookTarget(item.channels.webhook_target_id);
         setMsWebhookToggle(true);
+      } else if (item.platform === 'slack_webhook' && item.channels?.webhook_target_id) {
+        setSelectedSlackWebhookTarget(item.channels.webhook_target_id);
+        setSlackWebhookToggle(true);
       }
       if (item.channels.id && item.platform == 'google_chat') {
         setSelectedGChatChannel(item.channels.id);
@@ -814,7 +842,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (!isValidString(notificationName)) {
       error.notificationName = 'Rule name must start with letter or number and can include spaces, underscores, and hyphens.';
     }
-    if (!suppressed && !slackToggle && !teamsToggle && !msWebhookToggle && !gChatToggle && !discordToggle && !emailToggle) {
+    if (!suppressed && !slackToggle && !teamsToggle && !msWebhookToggle && !slackWebhookToggle && !gChatToggle && !discordToggle && !emailToggle) {
       error.general = 'Please enable at least one notification platform or email';
     }
 
@@ -831,6 +859,14 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (msWebhookToggle && !selectedMsWebhookTarget) {
       error.msWebhook = 'Select an MS Teams webhook target';
       snackbar.error('Select an MS Teams webhook target');
+    }
+
+    if (slackWebhookToggle && loadingSlackWebhookTargets) {
+      error.slackWebhook = 'Still loading Slack webhook targets — try again in a moment';
+      snackbar.error('Still loading Slack webhook targets — try again in a moment');
+    } else if (slackWebhookToggle && !selectedSlackWebhookTarget) {
+      error.slackWebhook = 'Select a Slack webhook target';
+      snackbar.error('Select a Slack webhook target');
     }
 
     if (gChatToggle && !selectedGChatChannel) {
@@ -1006,6 +1042,19 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         });
       }
     }
+    if (selectedSlackWebhookTarget && slackWebhookToggle && !suppressed) {
+      const target = slackWebhookTargets.find((item: any) => item.value === selectedSlackWebhookTarget);
+      if (!target) {
+        snackbar.warning('Slack webhook target is no longer available and will be removed from this rule.');
+        setSlackWebhookToggle(false);
+        setSelectedSlackWebhookTarget('');
+      } else {
+        queryParams.mappings.push({
+          channels: { webhook_target_id: target.value, name: target.label },
+          platform: 'slack_webhook',
+        });
+      }
+    }
     // email mapping object
     if ((email || selectedExclusionEmails.length > 0) && emailToggle && !suppressed) {
       const emailChannels = {
@@ -1149,6 +1198,16 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       });
     }
   }, [selectedMsWebhookTarget, msWebhookToggle, errors.msWebhook]);
+
+  useEffect(() => {
+    if (errors.slackWebhook && (!slackWebhookToggle || selectedSlackWebhookTarget)) {
+      setErrors((prev: any) => {
+        const newErrors = { ...prev };
+        delete newErrors.slackWebhook;
+        return newErrors;
+      });
+    }
+  }, [selectedSlackWebhookTarget, slackWebhookToggle, errors.slackWebhook]);
 
   useEffect(() => {
     if (errors.gChat && (!gChatToggle || selectedGChatChannel)) {
@@ -1695,6 +1754,50 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
               </Box>
             )}
 
+            {/* Slack Webhook Badge — hidden for daily_recap (email-only). Shown
+                when a target is selected even if the list is empty (deleted/disabled
+                target on a rehydrated rule) so the stale selection stays removable. */}
+            {basedOnValue !== 'daily_recap' && (slackWebhookToggle || slackWebhookTargets.length > 0) && (
+              <Box
+                id='slack-webhook-badge'
+                onClick={() => setActiveChannel(activeChannel === 'slack_webhook' ? null : 'slack_webhook')}
+                sx={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: ds.space[1],
+                  px: ds.space.mul(0, 5),
+                  py: ds.space[1],
+                  borderRadius: 'var(--ds-radius-xl)',
+                  border: `1.5px solid ${getBadgeBorderColor(activeChannel === 'slack_webhook', !!selectedSlackWebhookTarget)}`,
+                  backgroundColor: activeChannel === 'slack_webhook' ? ds.blue[100] : ds.background[100],
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                  '&:hover': {
+                    borderColor: getBadgeHoverBorderColor(activeChannel === 'slack_webhook', !!selectedSlackWebhookTarget),
+                  },
+                }}
+              >
+                <SafeIcon src={SlackIcon} alt='Slack Webhook' width={14} height={14} />
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[700] }}>
+                  Slack Webhook
+                </Typography>
+                {selectedSlackWebhookTarget && (
+                  <>
+                    <CheckCircleOutlineIcon sx={{ fontSize: 14, color: 'var(--ds-green-500)', ml: ds.space[0] }} />
+                    <CloseIcon
+                      sx={{ fontSize: 13, color: 'var(--ds-gray-400)', ml: ds.space[0], '&:hover': { color: 'var(--ds-red-500)' } }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedSlackWebhookTarget('');
+                        setSlackWebhookToggle(false);
+                        if (activeChannel === 'slack_webhook') setActiveChannel(null);
+                      }}
+                    />
+                  </>
+                )}
+              </Box>
+            )}
+
             {/* Google Chat Badge — hidden for daily_recap (email-only) */}
             {basedOnValue !== 'daily_recap' && (gChatChannelList.length > 0 || loadingChannelList.google_chat) && (
               <Box
@@ -1945,6 +2048,40 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
                     {errors.msWebhook && (
                       <FormHelperText error sx={{ mt: ds.space[1] }}>
                         {errors.msWebhook}
+                      </FormHelperText>
+                    )}
+                  </Box>
+                </Box>
+              )}
+
+              {/* Slack Webhook Config */}
+              {activeChannel === 'slack_webhook' && (
+                <Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[3] }}>
+                    <SafeIcon src={SlackIcon} alt='Slack Webhook' width={16} height={16} />
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                      Slack Webhook Configuration
+                    </Typography>
+                  </Box>
+                  <Box sx={{ maxWidth: ds.space.mul(1, 80) }}>
+                    <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Webhook target</InputLabel>
+                    <Box sx={{ width: '60%' }}>
+                      <Select
+                        id='slack-webhook-target'
+                        placeholder='Webhook target'
+                        onChange={(value) => {
+                          setSelectedSlackWebhookTarget(value);
+                          if (value) setSlackWebhookToggle(true);
+                          else setSlackWebhookToggle(false);
+                        }}
+                        value={selectedSlackWebhookTarget || null}
+                        options={slackWebhookTargets}
+                        size='sm'
+                      />
+                    </Box>
+                    {errors.slackWebhook && (
+                      <FormHelperText error sx={{ mt: ds.space[1] }}>
+                        {errors.slackWebhook}
                       </FormHelperText>
                     )}
                   </Box>

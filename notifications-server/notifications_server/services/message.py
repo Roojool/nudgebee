@@ -16,6 +16,7 @@ from sqlalchemy import select
 from notifications_server.clients.google_chat_client import GoogleChatClient
 from notifications_server.clients.google_chat_app_client import GoogleChatAppClient
 from notifications_server.clients.ms_teams_client import MsTeamsClient
+from notifications_server.clients.slack_client import SlackClient
 from notifications_server.configs import settings
 
 from notifications_server.models.enums import PlatformTypes
@@ -33,6 +34,7 @@ from notifications_server.message_templates.slack.finding import (
     get_slack_finding_message,
     get_slack_resolved_finding_reply,
 )
+from notifications_server.message_templates.slack.webhook_sanitize import strip_interactive_slack_elements
 from notifications_server.models.db_base import BaseDB
 from notifications_server.models.models import (
     SentNotifications,
@@ -48,6 +50,7 @@ from notifications_server.services.messaging_installations import (
     WEBHOOK_PLATFORM_TYPES,
     load_integration_installations_async,
     load_ms_teams_webhook_installations_async,
+    load_slack_webhook_installations_async,
     persist_messaging_token_async,
 )
 
@@ -867,6 +870,7 @@ class MessageService:
         # in get_channels_from_request_or_defaults (never a tenant default).
         if requested is None or requested in WEBHOOK_PLATFORM_TYPES:
             integration_installs += await load_ms_teams_webhook_installations_async(session, tenant_id)
+            integration_installs += await load_slack_webhook_installations_async(session, tenant_id)
         if not integration_installs:
             return installs
         overridden = {ip.platform for ip in integration_installs}
@@ -976,6 +980,7 @@ class MessageService:
             PlatformTypes.SLACK.value: self._send_finding_to_slack,
             PlatformTypes.MS_TEAMS.value: self._send_finding_to_teams,
             PlatformTypes.MS_TEAMS_WEBHOOK.value: self._send_finding_to_teams_webhook,
+            PlatformTypes.SLACK_WEBHOOK.value: self._send_finding_to_slack_webhook,
             PlatformTypes.GOOGLE_CHAT.value: self._send_finding_to_gchat,
             PlatformTypes.DISCORD.value: self._send_finding_to_discord,
         }.get(platform)
@@ -1146,6 +1151,31 @@ class MessageService:
 
         return success_response("ms_teams_webhook", channel_id=str(ip.id)), None
 
+    async def _send_finding_to_slack_webhook(self, session, tenant_id, ip, finding, _):
+        """POST a finding card to ip.webhook_url. Reuses the slack finding
+        template, minus anything needing the app's interactivity endpoint (see
+        strip_interactive_slack_elements) - webhooks don't thread, so no
+        sent_notification row."""
+        if not getattr(ip, "webhook_url", None):
+            return None, None
+
+        message, output_blocks, attachments = get_slack_finding_message(self.slack_app, ip, finding)
+        payload = strip_interactive_slack_elements(
+            {"text": message or None, "blocks": output_blocks or None, "attachments": attachments or None}
+        )
+        payload = {key: value for key, value in payload.items() if value}
+
+        response = await asyncio.to_thread(
+            SlackClient.post_to_slack_webhook,
+            ip.webhook_url,
+            payload,
+            tenant_id,
+        )
+        if not (response is not None and 200 <= response.status_code < 300):
+            return None, None
+
+        return success_response("slack_webhook", channel_id=str(ip.id)), None
+
     @staticmethod
     async def _resolve_default_gchat_space(session, tenant_id):
         """Tenant's default Google Chat space (single binding = implicit default; else
@@ -1300,10 +1330,14 @@ class MessageService:
                 if not ip.to_channel:
                     continue
 
-                # Webhooks reuse the ms_teams templates (only the transport differs).
-                template_key = (
-                    PlatformTypes.MS_TEAMS.value if ip.platform == PlatformTypes.MS_TEAMS_WEBHOOK.value else ip.platform
-                )
+                # Webhooks reuse the app-install templates (only the transport, and for
+                # Slack the interactivity, differ).
+                if ip.platform == PlatformTypes.MS_TEAMS_WEBHOOK.value:
+                    template_key = PlatformTypes.MS_TEAMS.value
+                elif ip.platform == PlatformTypes.SLACK_WEBHOOK.value:
+                    template_key = PlatformTypes.SLACK.value
+                else:
+                    template_key = ip.platform
                 template_func = template_mapping[notification_type].get(template_key)
                 if not template_func:
                     LOG.warning(
@@ -1334,6 +1368,8 @@ class MessageService:
                 return await self.send_teams_template_notification(ip, template_func, param_value, session, tenant)
             case PlatformTypes.MS_TEAMS_WEBHOOK.value:
                 return await self.send_teams_webhook_template_notification(ip, template_func, param_value, tenant)
+            case PlatformTypes.SLACK_WEBHOOK.value:
+                return await self.send_slack_webhook_template_notification(ip, template_func, param_value, tenant)
             case PlatformTypes.GOOGLE_CHAT.value:
                 return await self.send_google_chat_template_notification(
                     ip, template_func, param_value, session, tenant
@@ -1464,6 +1500,23 @@ class MessageService:
 
         reason = response.text[:512] if response is not None else "Unable to send teams webhook notification"
         return failed_response("ms_teams_webhook", reason=reason)
+
+    async def send_slack_webhook_template_notification(self, ip, template_func, param_value, tenant):
+        """Template send via webhook: same slack template, minus interactive
+        elements the webhook has no app behind to service, POSTed to
+        ip.webhook_url."""
+        if not getattr(ip, "webhook_url", None):
+            return failed_response("slack_webhook", reason="Webhook target has no URL")
+
+        payload = strip_interactive_slack_elements(template_func(param_value))
+
+        response = await asyncio.to_thread(SlackClient.post_to_slack_webhook, ip.webhook_url, payload, tenant)
+
+        if response is not None and 200 <= response.status_code < 300:
+            return success_response("slack_webhook", channel_id=str(ip.id))
+
+        reason = response.text[:512] if response is not None else "Unable to send slack webhook notification"
+        return failed_response("slack_webhook", reason=reason)
 
     async def send_google_chat_template_notification(self, ip, template_func, param_value, session, tenant_id):
         if not GoogleChatAppClient.is_enabled():

@@ -38,9 +38,14 @@ MESSAGING_PLATFORMS = ("slack", "ms_teams", "discord")
 MS_TEAMS_WEBHOOK_TYPE = "ms_teams_webhook"
 MS_TEAMS_WEBHOOK_URL_FIELD = "webhook_url"
 
+# Slack incoming channel webhooks: same shape as MS_TEAMS_WEBHOOK_TYPE above,
+# distinct from the "slack" OAuth bot install type.
+SLACK_WEBHOOK_TYPE = "slack_webhook"
+SLACK_WEBHOOK_URL_FIELD = "webhook_url"
+
 # Every "is this a webhook?" guard in the send path checks membership here, so a
 # second webhook platform joins routing just by being added.
-WEBHOOK_PLATFORM_TYPES = frozenset({MS_TEAMS_WEBHOOK_TYPE})
+WEBHOOK_PLATFORM_TYPES = frozenset({MS_TEAMS_WEBHOOK_TYPE, SLACK_WEBHOOK_TYPE})
 
 # Config-value field names. The encrypted set must mirror the IsEncrypted fields
 # declared in api-server slack.go / ms_teams.go.
@@ -267,6 +272,47 @@ async def load_ms_teams_webhook_installations_async(session, tenant_id) -> List[
             inst = build_webhook_installation(integ, _decrypt_config(cfg_by_integration.get(integ.id, [])))
         except Exception:
             LOG.exception("messaging installation: failed to load ms_teams_webhook %s; skipping", integ.id)
+            continue
+        if inst.webhook_url:
+            result.append(inst)
+    return result
+
+
+async def load_slack_webhook_installations_async(session, tenant_id) -> List[MessagingPlatform]:
+    """Async: every slack_webhook target for the tenant, URL decrypted."""
+    if not tenant_id:
+        return []
+    integ_result = await session.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.type == SLACK_WEBHOOK_TYPE,
+            Integration.status != "disabled",
+        )
+    )
+    integ_rows = integ_result.scalars().all()
+    if not integ_rows:
+        return []
+
+    cfg_result = await session.execute(
+        select(IntegrationConfigValue).where(
+            IntegrationConfigValue.integration_id.in_([integ.id for integ in integ_rows])
+        )
+    )
+    cfg_by_integration: Dict[Any, List[IntegrationConfigValue]] = {}
+    for cfg in cfg_result.scalars().all():
+        cfg_by_integration.setdefault(cfg.integration_id, []).append(cfg)
+
+    result: List[MessagingPlatform] = []
+    for integ in integ_rows:
+        try:
+            inst = build_webhook_installation(
+                integ,
+                _decrypt_config(cfg_by_integration.get(integ.id, [])),
+                platform=SLACK_WEBHOOK_TYPE,
+                url_field=SLACK_WEBHOOK_URL_FIELD,
+            )
+        except Exception:
+            LOG.exception("messaging installation: failed to load slack_webhook %s; skipping", integ.id)
             continue
         if inst.webhook_url:
             result.append(inst)

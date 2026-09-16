@@ -184,7 +184,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace && request.IntegrationId == "" {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "bound")
 		}
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		return
@@ -241,7 +241,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		if request.IntegrationName == integrations.IntegrationGoogleChatSpace {
 			notifyGoogleChatBinding(ctx.GetSecurityContext().GetTenantId(), request.IntegrationConfigName, "unbound")
 		}
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		return
@@ -346,7 +346,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		}
 
 		c.JSON(200, map[string]string{"status": "success"})
-		if request.IntegrationName == integrations.IntegrationMsTeamsWebhook {
+		if integrations.IsWebhookMessagingIntegration(request.IntegrationName) {
 			notifyMessagingCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		}
 		// Audit is persisted by core.UpdateIntegrationConfigStatus (CreateAudit,

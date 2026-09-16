@@ -21,6 +21,7 @@ import { safeJSONParse, toKebabCase } from 'src/utils/common';
 import ChannelAccountMapping from '@components/notifications/ChannelAccountMapping';
 import WatchedChannels from '@components/notifications/WatchedChannels';
 import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
+import SlackWebhookTargets from '@components/notifications/SlackWebhookTargets';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { EmptyState } from '@ui/EmptyState';
 import CheckIcon from '@mui/icons-material/Check';
@@ -721,6 +722,8 @@ const MessagingIntegrationTile = ({
       {provider === 'slack' && <WatchedChannels provider={provider} isConfigured={installationData?.length > 0} />}
 
       {provider === 'ms_teams' && <MsTeamsWebhookTargets />}
+
+      {provider === 'slack' && <SlackWebhookTargets />}
     </>
   );
 };
