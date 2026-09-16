@@ -4053,15 +4053,22 @@ func fetchLLMIntegrationConfigByAccount(ctx *security.RequestContext, dbManager 
 //
 // The choice is: the integration flagged default_llm_provider on its account
 // link row; otherwise the account's only enabled LLM integration, since linking
-// exactly one provider to an account is itself the operator's choice for it.
+// exactly one provider to an account is itself the operator's choice for it;
+// otherwise the tenant default provider when it is among the account's links,
+// because the integrations list shows that provider as "Default" for every
+// account it is linked to, whether or not the link row carries the flag.
 //
-// Every no-single-answer shape ("several flagged", "several linked and none
-// flagged") falls through to ENV, the documented final fallback, rather than
-// guessing — picking one anyway would silently bind an account to a credential
-// its operator didn't choose.
+// Every remaining no-single-answer shape ("several flagged", "several linked,
+// none flagged, tenant default not among them") falls through to ENV, the
+// documented final fallback, rather than guessing — picking one anyway would
+// silently bind an account to a credential its operator didn't choose.
 func selectAccountLLMIntegration(ctx *security.RequestContext, dbManager *common.DatabaseManager, accountId string) (string, error) {
-	query := `SELECT i.id, ia.default_llm_provider FROM integrations i
+	// tenant_default mirrors the integration's own default_llm_provider config
+	// value, which the "Default LLM provider" checkbox keeps unique per tenant.
+	query := `SELECT i.id, ia.default_llm_provider, COALESCE(icv.value = 'true', false) AS tenant_default
+			  FROM integrations i
 			  JOIN integrations_cloud_accounts ia ON i.id = ia.integration_id
+			  LEFT JOIN integration_config_values icv ON icv.integration_id = i.id AND icv.name = 'default_llm_provider'
 			  WHERE i."type" = 'llm' AND i.status = 'enabled' AND ia.cloud_account_id = :ac_id`
 	params := map[string]any{"ac_id": accountId}
 
@@ -4082,17 +4089,21 @@ func selectAccountLLMIntegration(ctx *security.RequestContext, dbManager *common
 		}
 	}()
 
-	var all, defaults []string
+	var all, defaults, tenantDefaults []string
 	for rows.Next() {
 		var id string
 		var isDefault sql.NullBool
-		if err := rows.Scan(&id, &isDefault); err != nil {
+		var isTenantDefault bool
+		if err := rows.Scan(&id, &isDefault, &isTenantDefault); err != nil {
 			slog.Error("Failed to scan LLM integration row", "error", err, "accountId", accountId)
 			return "", err
 		}
 		all = append(all, id)
 		if isDefault.Valid && isDefault.Bool {
 			defaults = append(defaults, id)
+		}
+		if isTenantDefault {
+			tenantDefaults = append(tenantDefaults, id)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -4109,8 +4120,10 @@ func selectAccountLLMIntegration(ctx *security.RequestContext, dbManager *common
 		return "", nil
 	case len(all) == 1:
 		return all[0], nil
+	case len(tenantDefaults) == 1:
+		return tenantDefaults[0], nil
 	case len(all) > 1:
-		slog.Warn("LLM config: account has several enabled integrations but none flagged default; falling back to ENV",
+		slog.Warn("LLM config: account has several enabled integrations, none flagged default and none the tenant default; falling back to ENV",
 			"accountId", accountId, "count", len(all))
 		return "", nil
 	}
