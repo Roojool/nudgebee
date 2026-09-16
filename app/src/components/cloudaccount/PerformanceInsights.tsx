@@ -130,7 +130,7 @@ const SqlQueryCell = ({ query }: { query: PerformanceQuery }) => {
           <Typography
             sx={{
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               color: ds.gray[500],
               fontStyle: 'italic',
             }}
@@ -149,7 +149,7 @@ const SqlQueryCell = ({ query }: { query: PerformanceQuery }) => {
         <Typography
           sx={{
             fontSize: ds.text.small,
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
             maxHeight: ds.space.mul(0, 30),

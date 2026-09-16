@@ -431,7 +431,7 @@ const CloudLogsViewer: React.FC<CloudLogsViewerProps> = ({ accountId, provider }
             <Typography sx={{ fontSize: ds.text.small, fontWeight: 600, color: ds.gray[600], whiteSpace: 'nowrap' }}>
               {`${selectedOption?.label || snakeToTitleCase(selectedProvider) || 'Query'} query:`}
             </Typography>
-            <Typography sx={{ fontFamily: 'monospace', fontSize: ds.text.small, color: ds.gray[700], wordBreak: 'break-all' }}>
+            <Typography sx={{ fontFamily: ds.font.mono, fontSize: ds.text.small, color: ds.gray[700], wordBreak: 'break-all' }}>
               {executedQuery}
             </Typography>
           </Box>

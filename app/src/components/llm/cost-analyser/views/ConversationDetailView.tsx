@@ -2139,7 +2139,7 @@ function BackingCallsDrawer({
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--ds-space-3)' }}>
           <Box>
             <SectionTitle>Backing calls</SectionTitle>
-            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', fontFamily: ds.font.mono, wordBreak: 'break-all' }}>
               {agentId}
             </Box>
           </Box>

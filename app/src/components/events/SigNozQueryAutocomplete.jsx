@@ -573,7 +573,7 @@ const SigNozQueryAutocomplete = ({ accountId, onQueryChange, queryItems }) => {
           InputProps={{
             startAdornment: <InputAdornment position='start'>{getStepIcon()}</InputAdornment>,
             sx: {
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               fontSize: ds.text.bodyLg,
             },
           }}
@@ -656,7 +656,7 @@ const SigNozQueryAutocomplete = ({ accountId, onQueryChange, queryItems }) => {
                     primary={suggestion.value}
                     secondary={suggestion.description}
                     primaryTypographyProps={{
-                      fontFamily: 'monospace',
+                      fontFamily: ds.font.mono,
                       fontSize: ds.text.bodyLg,
                       fontWeight: 'medium',
                     }}
@@ -683,7 +683,7 @@ const SigNozQueryAutocomplete = ({ accountId, onQueryChange, queryItems }) => {
                 deleteIcon={<CloseIcon />}
                 color='primary'
                 sx={{
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   '& .MuiChip-label': { fontSize: ds.text.small },
                 }}
               />
@@ -729,7 +729,7 @@ const SigNozQueryAutocomplete = ({ accountId, onQueryChange, queryItems }) => {
                         <Typography
                           variant='caption'
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: ds.font.mono,
                             fontSize: ds.text.small,
                             flex: 1,
                             wordBreak: 'break-word',
@@ -797,7 +797,7 @@ const SigNozQueryAutocomplete = ({ accountId, onQueryChange, queryItems }) => {
                   color='secondary'
                   variant='outlined'
                   sx={{
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     cursor: 'help',
                     '& .MuiChip-label': {
                       fontSize: ds.text.small,

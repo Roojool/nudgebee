@@ -535,7 +535,7 @@ const KnowledgeBaseFormModal = ({
                       borderRadius: ds.radius.sm,
                       fontSize: 'var(--ds-text-caption)',
                       color: 'var(--ds-brand-400)',
-                      fontFamily: 'monospace',
+                      fontFamily: ds.font.mono,
                     }}
                   >
                     e.g. aws_ec2_runbook

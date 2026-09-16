@@ -2143,7 +2143,7 @@ const IntegrationDynamicFormModal = ({
                 sx={{
                   color: ds.gray[600],
                   fontSize: 'var(--ds-text-body)',
-                  fontFamily: 'monospace',
+                  fontFamily: ds.font.mono,
                   lineHeight: 1.6,
                   flex: 1,
                   m: 0,

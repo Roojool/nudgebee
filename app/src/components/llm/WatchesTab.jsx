@@ -108,7 +108,7 @@ function WatchRow({ watch: w, onCancel }) {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <StatusPill status={w.status} />
           <Tooltip title={hoverDetails} placement='right'>
-            <Typography sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
+            <Typography sx={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
               {w.id.slice(0, 8)}…
             </Typography>
           </Tooltip>
@@ -154,7 +154,7 @@ function WatchRow({ watch: w, onCancel }) {
             p: 1,
             bgcolor: 'var(--ds-gray-100)',
             borderRadius: 1,
-            fontFamily: 'monospace',
+            fontFamily: 'var(--ds-font-mono)',
             fontSize: 'var(--ds-text-caption)',
             color: 'var(--ds-gray-500)',
             whiteSpace: 'pre-wrap',

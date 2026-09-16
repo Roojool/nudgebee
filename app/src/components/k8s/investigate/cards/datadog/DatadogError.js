@@ -141,7 +141,7 @@ class DatadogError {
                   variant='body2'
                   component='code'
                   sx={{
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     backgroundColor: 'var(--ds-background-300)',
                     p: 'var(--ds-space-1) var(--ds-space-1)',
                     borderRadius: 'var(--ds-radius-sm)',

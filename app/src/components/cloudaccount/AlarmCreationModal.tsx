@@ -376,7 +376,7 @@ const AlarmCreationModal: React.FC<AlarmCreationModalProps> = ({
           <Typography variant='caption' sx={{ color: ds.gray[600], display: 'block', mb: ds.space[1] }}>
             Expression
           </Typography>
-          <Typography variant='body2' sx={{ fontFamily: 'monospace', bgcolor: ds.gray[100], p: ds.space[2], borderRadius: ds.radius.sm }}>
+          <Typography variant='body2' sx={{ fontFamily: ds.font.mono, bgcolor: ds.gray[100], p: ds.space[2], borderRadius: ds.radius.sm }}>
             {metric.expression}
           </Typography>
         </Box>
@@ -442,7 +442,7 @@ const AlarmCreationModal: React.FC<AlarmCreationModalProps> = ({
             id: metric.id,
             label: (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-                <Typography variant='body2' sx={{ fontWeight: ds.weight.semibold, fontFamily: 'monospace' }}>
+                <Typography variant='body2' sx={{ fontWeight: ds.weight.semibold, fontFamily: ds.font.mono }}>
                   {metric.id}
                 </Typography>
                 {metric.expression && (

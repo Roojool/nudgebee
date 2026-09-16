@@ -169,7 +169,7 @@ const CloudLogsQueryHelp: React.FC<CloudLogsQueryHelpProps> = ({ provider, onIns
             border: `1px solid ${ds.gray[200]}`,
           }}
         >
-          <Typography sx={{ fontSize: ds.text.caption, fontFamily: 'monospace', whiteSpace: 'pre-line', mb: ds.space[3], color: ds.gray[600] }}>
+          <Typography sx={{ fontSize: ds.text.caption, fontFamily: ds.font.mono, whiteSpace: 'pre-line', mb: ds.space[3], color: ds.gray[600] }}>
             {syntaxInfo?.syntax}
           </Typography>
           <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, mb: ds.space[2], color: ds.gray[700] }}>Examples</Typography>
@@ -192,7 +192,7 @@ const CloudLogsQueryHelp: React.FC<CloudLogsQueryHelpProps> = ({ provider, onIns
                   </DsChip>
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography sx={{ fontSize: ds.text.caption, fontFamily: 'monospace', color: ds.gray[700], wordBreak: 'break-all' }}>
+                  <Typography sx={{ fontSize: ds.text.caption, fontFamily: ds.font.mono, color: ds.gray[700], wordBreak: 'break-all' }}>
                     {example.query}
                   </Typography>
                   <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], mt: ds.space[1] }}>{example.description}</Typography>

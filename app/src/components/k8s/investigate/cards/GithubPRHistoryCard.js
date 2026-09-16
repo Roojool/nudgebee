@@ -151,7 +151,7 @@ class GithubPRHistoryCard {
         },
         {
           component: (
-            <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-brand-500)', fontFamily: 'monospace' }}>
+            <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-brand-500)', fontFamily: ds.font.mono }}>
               {run.commit_sha?.substring(0, 7)}
             </Typography>
           ),

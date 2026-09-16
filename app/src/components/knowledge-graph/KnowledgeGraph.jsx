@@ -581,7 +581,7 @@ const BreadcrumbTooltipContent = memo(({ node }) => {
             fontSize: 'var(--ds-text-caption)',
             color: 'var(--ds-gray-300)',
             wordBreak: 'break-all',
-            fontFamily: 'monospace',
+            fontFamily: ds.font.mono,
           }}
         >
           {node.uniqueKey || node.label}

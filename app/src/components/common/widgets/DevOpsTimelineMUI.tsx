@@ -220,7 +220,7 @@ const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
                 minWidth={ds.space.mul(0, 70)}
                 pt={ds.space[1]}
               >
-                <Typography variant='caption' sx={{ fontFamily: 'monospace', fontSize: 'var(--ds-text-small)' }}>
+                <Typography variant='caption' sx={{ fontFamily: ds.font.mono, fontSize: 'var(--ds-text-small)' }}>
                   {formatDate(item.timestamp)}
                 </Typography>
               </Box>

@@ -250,7 +250,7 @@ const SingleFileDiff = ({ gitDiff, fileName = 'code', defaultExpanded = true, ti
           <Typography
             sx={{
               fontSize: 'var(--ds-text-body-lg)',
-              fontFamily: 'monospace',
+              fontFamily: 'var(--ds-font-mono)',
               flex: 1,
               color: 'var(--ds-gray-600)',
             }}
@@ -263,7 +263,7 @@ const SingleFileDiff = ({ gitDiff, fileName = 'code', defaultExpanded = true, ti
               fontSize: 'var(--ds-text-small)',
               marginLeft: 'var(--ds-space-4)',
               color: 'var(--ds-green-500)',
-              fontFamily: 'monospace',
+              fontFamily: 'var(--ds-font-mono)',
             }}
           >
             +{parsedDiff.additions}
@@ -274,7 +274,7 @@ const SingleFileDiff = ({ gitDiff, fileName = 'code', defaultExpanded = true, ti
               fontSize: 'var(--ds-text-small)',
               marginLeft: 'var(--ds-space-2)',
               color: 'var(--ds-red-500)',
-              fontFamily: 'monospace',
+              fontFamily: 'var(--ds-font-mono)',
             }}
           >
             -{parsedDiff.deletions}
@@ -285,7 +285,7 @@ const SingleFileDiff = ({ gitDiff, fileName = 'code', defaultExpanded = true, ti
       {expanded && (
         <Box
           sx={{
-            fontFamily: 'monospace',
+            fontFamily: 'var(--ds-font-mono)',
             fontSize: 'var(--ds-text-small)',
             overflow: 'auto',
           }}

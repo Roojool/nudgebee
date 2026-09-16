@@ -528,7 +528,7 @@ const RightSizingEvidence = ({ recommendation, estimatedSavings, fullRecommendat
 const PercentileItem = ({ label, value }: { label: string; value: string }) => (
   <Box sx={{ display: 'flex', justifyContent: 'space-between', py: ds.space[1] }}>
     <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500] }}>{label}</Typography>
-    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[700], fontWeight: ds.weight.medium, fontFamily: 'monospace' }}>{value}</Typography>
+    <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[700], fontWeight: ds.weight.medium, fontFamily: ds.font.mono }}>{value}</Typography>
   </Box>
 );
 
@@ -564,7 +564,7 @@ const UtilizationBar = ({
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: ds.space[1] }}>
         <Typography sx={{ fontSize: ds.text.caption, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>{label} Usage (P99)</Typography>
-        <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: 'monospace' }}>
+        <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], fontFamily: ds.font.mono }}>
           {fmt(usage)} / {fmt(allocated)} {unit} ({pct.toFixed(0)}%)
         </Typography>
       </Box>

@@ -67,7 +67,7 @@ const terminalBarSx = {
 
 const terminalCodeSx = {
   m: 0,
-  fontFamily: 'monospace',
+  fontFamily: ds.font.mono,
   fontSize: 'var(--ds-text-small)',
   lineHeight: 1.65,
   color: 'var(--ds-brand-150)',
@@ -102,7 +102,7 @@ const WhyNote = ({ children }) => (
     <Box
       component='span'
       sx={{
-        fontFamily: 'monospace',
+        fontFamily: ds.font.mono,
         fontSize: '9px',
         fontWeight: 'var(--ds-font-weight-medium)',
         letterSpacing: '0.11em',
@@ -808,7 +808,7 @@ helm repo update`;
                 Run the command on any machine with{' '}
                 <code
                   style={{
-                    fontFamily: 'monospace',
+                    fontFamily: ds.font.mono,
                     fontSize: '11.5px',
                     background: 'var(--ds-background-300)',
                     padding: 'var(--ds-space-1) var(--ds-space-1)',
@@ -891,7 +891,7 @@ helm repo update`;
                         <TerminalDots />
                         <Typography
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: ds.font.mono,
                             fontSize: 'var(--ds-text-caption)',
                             color: 'var(--ds-brand-300)',
                             letterSpacing: '0.3px',
@@ -958,7 +958,7 @@ helm repo update`;
                         <TerminalDots />
                         <Typography
                           sx={{
-                            fontFamily: 'monospace',
+                            fontFamily: ds.font.mono,
                             fontSize: 'var(--ds-text-caption)',
                             color: 'var(--ds-brand-300)',
                             letterSpacing: '0.3px',

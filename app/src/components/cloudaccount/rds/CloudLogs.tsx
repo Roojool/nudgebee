@@ -136,7 +136,7 @@ const CloudLogs: React.FC<CloudLogsProps> = ({ accountId, resourceId, region, se
             component='pre'
             sx={{
               fontSize: ds.text.small,
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-all',
               m: 0,
@@ -187,7 +187,7 @@ const CloudLogs: React.FC<CloudLogsProps> = ({ accountId, resourceId, region, se
             icon={<HelpOutlineIcon fontSize='small' />}
             aria-label='Query syntax help'
             tooltip={
-              <Typography sx={{ whiteSpace: 'pre-line', fontSize: ds.text.caption, fontFamily: 'monospace' }}>{cloudConfig.queryHelp}</Typography>
+              <Typography sx={{ whiteSpace: 'pre-line', fontSize: ds.text.caption, fontFamily: ds.font.mono }}>{cloudConfig.queryHelp}</Typography>
             }
             tooltipPlacement='bottom'
             onClick={() => undefined}

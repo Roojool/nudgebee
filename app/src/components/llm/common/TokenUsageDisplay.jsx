@@ -559,7 +559,7 @@ export const ConversationTokenUsage = ({ tokenUsageData, isLoading = false, foll
               rowGap: ds.space[0],
               columnGap: ds.space[3],
               fontSize: 'var(--ds-text-caption)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
             }}
           >
             {/* Table Header */}
@@ -1004,7 +1004,7 @@ export const MessageTokenUsage = ({ messageData, onHover, isLoading = false }) =
               rowGap: ds.space[0],
               columnGap: ds.space[3],
               fontSize: 'var(--ds-text-caption)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
             }}
           >
             {/* Table Header */}
@@ -1135,7 +1135,7 @@ export const MessageTokenUsage = ({ messageData, onHover, isLoading = false }) =
               rowGap: ds.space[0],
               columnGap: ds.space[3],
               fontSize: 'var(--ds-text-caption)',
-              fontFamily: 'monospace',
+              fontFamily: ds.font.mono,
             }}
           >
             {/* Table Header */}
