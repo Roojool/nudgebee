@@ -1,10 +1,12 @@
 package eventrule
 
 import (
+	"log/slog"
 	"regexp"
 	"testing"
 
 	"nudgebee/services/internal/database"
+	"nudgebee/services/security"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jmoiron/sqlx"
@@ -120,5 +122,49 @@ func TestUpsertEventRuleGuardsDefinitionFieldsOnTheFlag(t *testing.T) {
 				"emitted SQL must match: %s", pattern)
 			assert.NoError(t, mock.ExpectationsWereMet())
 		})
+	}
+}
+
+// TestUpsertEventRuleRejectsBlankAlert pins the guard against nameless rules.
+//
+// alert is part of the ON CONFLICT key, so an empty (or whitespace) name is one
+// shared slot per account that every unresolved webhook overwrites. The write
+// must be refused before any SQL runs — sqlmock fails the test on any query
+// it was not told to expect.
+func TestUpsertEventRuleRejectsBlankAlert(t *testing.T) {
+	for _, alert := range []string{"", "   "} {
+		dbms, mock := mockDB(t)
+
+		_, ok, err := upsertEventRule(dbms,
+			map[string]string{}, map[string]string{"severity": "warning"},
+			alert, "", "0",
+			"a2a30b02-0f67-42e5-a2ab-c658230fd798", "890cad87-c452-4aa7-b84a-742cee0454a1",
+			"datadog_webhook", "alert", "warning", true,
+			"", "", "", "", nil, false)
+
+		assert.ErrorIs(t, err, ErrBlankAlertName, "alert=%q", alert)
+		assert.False(t, ok)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	}
+}
+
+// TestCreateEventRuleRejectsBlankAlertBeforeExternalCreate pins the fail-fast
+// check at the top of CreateEventRule.
+//
+// For an external-provider source the rule is created in the provider before
+// the local write. If the blank name were only caught by upsertEventRule, the
+// provider rule would already exist and the local write would then fail,
+// orphaning it. Returning ErrBlankAlertName — rather than a provider or config
+// error — proves the call never got that far.
+func TestCreateEventRuleRejectsBlankAlertBeforeExternalCreate(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin(slog.Default(), nil, nil)
+	for _, alert := range []string{"", "  "} {
+		_, err := CreateEventRule(ctx, EventConfig{
+			Alert:     alert,
+			AccountID: "a2a30b02-0f67-42e5-a2ab-c658230fd798",
+			Source:    "datadog",
+			AlertType: "metric",
+		})
+		assert.ErrorIs(t, err, ErrBlankAlertName, "alert=%q", alert)
 	}
 }

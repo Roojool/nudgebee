@@ -109,6 +109,14 @@ var logActions = map[string]bool{
 // `*_webhook` source (see syncableProviders.ruleSource), so keying the guard
 // below on the source string alone silently discarded every synced expr.
 func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any, alert, expr, duration, accountId, tenantId, source, category, severity string, enabled bool, alertType, metricProvider, metricProviderSource, externalRuleId string, providerConfig map[string]interface{}, isDefinition bool) (string, bool, error) {
+	// alert is part of the ON CONFLICT key, so a blank one is not "a rule with no
+	// name" — it is a single shared slot that every unnamed write for the account
+	// overwrites. A webhook whose alert-name lookup failed (e.g. Datadog with no
+	// API integration on the account) would otherwise keep rewriting one
+	// nameless, query-less row for whichever monitor fired last.
+	if strings.TrimSpace(alert) == "" {
+		return "", false, ErrBlankAlertName
+	}
 	annotationsJSON, err := common.MarshalJson(annotations)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to marshal annotations: %w", err)
@@ -178,6 +186,11 @@ func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any
 	}
 	return id, id != "", nil
 }
+
+// ErrBlankAlertName is returned when an event rule write carries no alert
+// name. Callers that can legitimately fail to resolve a name should skip the
+// write instead of calling in with an empty one.
+var ErrBlankAlertName = errors.New("event rule alert name is empty")
 
 func nilIfEmpty(s string) *string {
 	if s == "" {
@@ -425,6 +438,13 @@ func CreateEventRule(context *security.RequestContext, eventRequest EventConfig)
 		return data, fmt.Errorf("account unauthorized")
 	}
 
+	// Fail fast on a blank name: below, the relay and external-provider branches
+	// create the rule in the other system before the local write, so letting
+	// upsertEventRule reject it would leave an orphaned external rule behind.
+	if strings.TrimSpace(eventRequest.Alert) == "" {
+		return data, ErrBlankAlertName
+	}
+
 	context.GetLogger().Info("CreateEventRule", "data", eventRequest)
 
 	normalizeEventSource(&eventRequest)
@@ -530,6 +550,13 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 
 	if !context.GetSecurityContext().HasAccountAccess(eventRequest.AccountID, security.SecurityAccessTypeUpdate) {
 		return data, common.ErrorUnauthorized("unauthorized")
+	}
+
+	// Fail fast on a blank name: below, the relay and external-provider branches
+	// create the rule in the other system before the local write, so letting
+	// upsertEventRule reject it would leave an orphaned external rule behind.
+	if strings.TrimSpace(eventRequest.Alert) == "" {
+		return data, ErrBlankAlertName
 	}
 
 	context.GetLogger().Info("UpdateEventRule", "data", slog.AnyValue(eventRequest))

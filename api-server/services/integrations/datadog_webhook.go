@@ -1603,7 +1603,14 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		}
 	}
 
-	if p.Incident.IncidentPublicID == "" {
+	// alertName comes only from the Datadog event fetched above. When that fetch
+	// did not happen — most often because the account has no Datadog API
+	// integration linked — there is no name and no monitor query to record, so
+	// skip the rule rather than write a nameless one.
+	if p.Incident.IncidentPublicID == "" && strings.TrimSpace(alertName) == "" {
+		sc.GetLogger().Warn("datadogwebhook: skipping event rule, alert name unresolved", "account_id", accountId, "event_id", p.ID)
+	}
+	if p.Incident.IncidentPublicID == "" && strings.TrimSpace(alertName) != "" {
 		go func() {
 			alertQuery := ""
 			alertMessage := ""
