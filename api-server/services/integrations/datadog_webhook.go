@@ -1970,21 +1970,18 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 	}
 
 	fingerprint := p.Event.AggregKey
-	ruleId := alertName
 	findingId := p.ID
+	isIncident := false
 	if monitorID != "" && p.EventType != "notification" {
 		fingerprint = fmt.Sprintf("%s-%s", monitorID, p.Event.AggregKey)
 	} else if p.Incident.IncidentPublicID != "" {
-		ruleId = "datadog_incident"
+		isIncident = true
 		findingId = p.Incident.IncidentUUID
 		fingerprint = p.Incident.IncidentUUID
 	}
-	// Fallback: ensure ruleId is never empty — use monitorID or cleanTitle
-	if ruleId == "" && monitorID != "" {
-		ruleId = monitorID
-	}
-	if ruleId == "" {
-		ruleId = cleanTitle
+	ruleId, ruleIdIsFallback := datadogRuleID(alertName, monitorID, cleanTitle, isIncident)
+	if ruleIdIsFallback {
+		labels[event.LabelUnstableAggregationKey] = "true"
 	}
 	// Fallback: ensure fingerprint is never empty
 	if fingerprint == "" && monitorID != "" {
@@ -2266,4 +2263,26 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		EventSubjectOwnerKind: subjectOwnerKind,
 	}
 	return []core.EventIncomingWebhook{event}, nil
+}
+
+// datadogRuleID picks the event's rule id, which becomes its aggregation key
+// and therefore its workflow "event type".
+//
+// The monitor name is the real key: it is what the webhook's own event rule is
+// named after. When the name could not be fetched (typically no Datadog API
+// integration on the account) the id falls back to the monitor ID, then to the
+// rendered title. fallback reports that case: such a key never matches the
+// monitor's event rule, so it must not be registered as an event type, or every
+// monitor gains a second, query-less rule named after a bare ID.
+func datadogRuleID(alertName, monitorID, cleanTitle string, isIncident bool) (ruleID string, fallback bool) {
+	if isIncident {
+		return "datadog_incident", false
+	}
+	if strings.TrimSpace(alertName) != "" {
+		return alertName, false
+	}
+	if monitorID != "" {
+		return monitorID, true
+	}
+	return cleanTitle, true
 }

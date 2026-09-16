@@ -242,20 +242,15 @@ func TestDatadog_QueryAlertNoApiKey(t *testing.T) {
 	assert.Equal(t, "266154777", monitorID)
 
 	// ruleId derivation — no alertName (no API), falls back to monitorID
-	ruleId := ""
 	fingerprint := p.Event.AggregKey
 	if monitorID != "" && p.EventType != "notification" {
 		fingerprint = fmt.Sprintf("%s-%s", monitorID, p.Event.AggregKey)
 	}
-	if ruleId == "" && monitorID != "" {
-		ruleId = monitorID
-	}
-	if ruleId == "" {
-		ruleId = cleanTitle
-	}
+	ruleId, fallback := datadogRuleID("", monitorID, cleanTitle, false)
 
 	assert.NotEmpty(t, ruleId, "ruleId should not be empty without API key")
 	assert.Equal(t, "266154777", ruleId, "ruleId should fallback to monitorID")
+	assert.True(t, fallback, "a monitor-ID ruleId must be flagged so it is not registered as an event type")
 	assert.Contains(t, fingerprint, "266154777", "fingerprint should contain monitorID")
 }
 
@@ -637,4 +632,34 @@ func TestParseMetricFromMonitorQuery(t *testing.T) {
 
 	_, err := parseMetricFromMonitorQuery("")
 	assert.Error(t, err)
+}
+
+// TestDatadogRuleID pins which rule ids count as the monitor's real key.
+//
+// Only the monitor name matches the event rule the webhook writes. Anything
+// else is flagged as a fallback so event-type registration skips it — without
+// that, an account whose Datadog lookup fails gains one extra, query-less rule
+// per monitor, named after a bare monitor ID.
+func TestDatadogRuleID(t *testing.T) {
+	cases := []struct {
+		name                        string
+		alertName, monitorID, title string
+		incident                    bool
+		wantID                      string
+		wantFallback                bool
+	}{
+		{"monitor name wins", "Trace Error", "11576363", "Trace Error on svc", false, "Trace Error", false},
+		{"no name falls back to monitor id", "", "11576363", "Trace Error on svc", false, "11576363", true},
+		{"whitespace name is no name", "  ", "11576363", "Trace Error on svc", false, "11576363", true},
+		{"no name and no id falls back to title", "", "", "Trace Error on svc", false, "Trace Error on svc", true},
+		{"incident uses the fixed incident key", "", "", "Some incident", true, "datadog_incident", false},
+		{"incident ignores a resolved name", "Trace Error", "11576363", "x", true, "datadog_incident", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, fallback := datadogRuleID(tc.alertName, tc.monitorID, tc.title, tc.incident)
+			assert.Equal(t, tc.wantID, id)
+			assert.Equal(t, tc.wantFallback, fallback)
+		})
+	}
 }

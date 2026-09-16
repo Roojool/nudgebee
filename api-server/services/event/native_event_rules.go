@@ -13,11 +13,13 @@ const defaultNativeEventRuleSource = "nudgebee"
 // LabelUnstableAggregationKey marks an event whose aggregation_key was derived
 // from a per-delivery or per-incident identifier rather than a stable alert
 // identity — a random Zenduty incident unique_id, say, when label enrichment
-// failed and no alertname could be recovered.
+// failed and no alertname could be recovered, or a bare Datadog monitor ID
+// used because the monitor's name could not be fetched.
 //
-// Such a key is different on every firing of the same underlying alert, so it
-// must never be registered as an event type: EventRuleExists can never match it
-// and registration would mint one event_rules row per firing. Producers set it;
+// Such a key never matches the alert's real event rule — the Zenduty one differs
+// on every firing, the Datadog one differs from the monitor-name rule the
+// webhook writes — so it must never be registered as an event type:
+// registration would mint an extra, query-less event_rules row. Producers set it;
 // registerNativeEventTypeRule is the only consumer today.
 const LabelUnstableAggregationKey = "nb_unstable_aggregation_key"
 
