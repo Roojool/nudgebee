@@ -500,9 +500,13 @@ func DeleteAccount(context *security.RequestContext, query AccountDeleteRequest)
 		return AccountDeleteResponse{}, err
 	}
 
-	createdBy := context.GetSecurityContext().GetUserId()
-	tenant := context.GetSecurityContext().GetTenantId()
-	if createdBy == "" && tenant == "" && !context.GetSecurityContext().IsSuperAdmin() {
+	// Only a super admin, or an admin of the caller's own tenant, may delete an
+	// account. The roles come from the calling service (the app gateway, or an
+	// in-cluster caller holding the action token), so this backs up that token
+	// rather than replacing it.
+	sc := context.GetSecurityContext()
+	tenant := sc.GetTenantId()
+	if !sc.HasTenantAccess(security.SecurityAccessTypeDelete) || (tenant == "" && !sc.IsSuperAdmin()) {
 		return AccountDeleteResponse{}, fmt.Errorf("Unauthorized")
 	}
 
@@ -514,11 +518,13 @@ func DeleteAccount(context *security.RequestContext, query AccountDeleteRequest)
 
 	context.GetLogger().Info("deleting account", "account_id", query.Id)
 
+	// A super admin deletes across tenants: tenant_delete runs as one, whatever
+	// tenant its own session carries. Everyone else only inside their tenant.
 	var accountDetailRow *sqlx.Row
-	if tenant != "" {
-		accountDetailRow = databaseManager.Db.QueryRowx("SELECT * FROM cloud_accounts WHERE id = $1 AND tenant = $2", query.Id, tenant)
-	} else {
+	if sc.IsSuperAdmin() {
 		accountDetailRow = databaseManager.Db.QueryRowx("SELECT * FROM cloud_accounts WHERE id = $1", query.Id)
+	} else {
+		accountDetailRow = databaseManager.Db.QueryRowx("SELECT * FROM cloud_accounts WHERE id = $1 AND tenant = $2", query.Id, tenant)
 	}
 
 	if accountDetailRow.Err() != nil {
