@@ -29,8 +29,12 @@ Resumable and idempotent: a collection already stamped with the target model is
 skipped, and a complete staging collection from an interrupted run is reused
 rather than re-embedded, so a crash costs the collection in flight at worst.
 
-Gated behind ``RAG_EMBEDDING_MIGRATION_ENABLED``, default OFF: this rewrites
-every collection and is not something to switch on implicitly.
+Gated behind ``RAG_EMBEDDING_MIGRATION_ENABLED``. It defaults ON only for the
+on-device provider, which is also the default provider: an install that
+inherits it has vectors from some other model, and for those the rewrite is
+what keeps retrieval working at all. Any explicitly chosen provider was picked
+against known data and keeps the opt-in, because this rewrites every
+collection.
 """
 
 import contextlib
@@ -186,8 +190,24 @@ class Pending(NamedTuple):
 
 
 def is_enabled() -> bool:
-    """Opt-in only. Defaults OFF because this rewrites every collection."""
-    return os.environ.get("RAG_EMBEDDING_MIGRATION_ENABLED", "false").lower() == "true"
+    """On by default for the on-device provider, opt-in for every other one.
+
+    On-device is also the default *provider*, so an install that inherits it
+    holds vectors built by whatever it used before. Leaving those unmigrated is
+    not a rebuild deferred, it is retrieval silently returning nothing: the
+    query lands in a space the stored points are not in. Hours of background
+    rebuilding is the cheaper failure, so that case opts itself in.
+
+    Every other provider is a deliberate choice made against known data, and
+    keeps the explicit opt-in the rewrite deserves.
+
+    An explicit RAG_EMBEDDING_MIGRATION_ENABLED wins in both directions.
+    """
+    from utils.config import Config
+
+    implied = Config.embeddings_provider.strip().lower() == "ondevice"
+    configured = os.environ.get("RAG_EMBEDDING_MIGRATION_ENABLED", "true" if implied else "false")
+    return configured.strip().lower() == "true"
 
 
 def model_identity(embeddings: Any) -> str:

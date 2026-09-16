@@ -120,11 +120,12 @@ class Config:
     nudgebee_encryption_key = os.environ.get("NUDGEBEE_ENCRYPTION_KEY", "")
 
     # Embeddings
-    embeddings_provider = os.environ.get("EMBEDDINGS_PROVIDER", "bedrock")
+    embeddings_provider = os.environ.get("EMBEDDINGS_PROVIDER", "ondevice")
     # Model Name for different embeddings providers
+    # Ondevice (default) - any sentence-transformers id, e.g. 'BAAI/bge-small-en-v1.5',
     # Bedrock - 'amazon.titan-embed-text-v2:0', Azure - 'text-embedding-ada-002',
     # Huggingface - 'text-embedding-ada-002', Ollama - 'nb-text-embeddings', OpenAI - 'text-embedding-ada-002'
-    embeddings_model_id = os.environ.get("EMBEDDINGS_MODEL_NAME", "amazon.titan-embed-text-v2:0")
+    embeddings_model_id = os.environ.get("EMBEDDINGS_MODEL_NAME", "BAAI/bge-small-en-v1.5")
     embeddings_api_endpoint = os.environ.get("EMBEDDINGS_PROVIDER_API_ENDPOINT", "")
     embeddings_api_key = os.environ.get("EMBEDDINGS_PROVIDER_API_KEY", "")
     embeddings_api_version = os.environ.get("EMBEDDINGS_PROVIDER_API_VERSION", "")  # Azure - '2023-05-15'

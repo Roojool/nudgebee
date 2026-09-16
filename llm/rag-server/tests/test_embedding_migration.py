@@ -259,9 +259,35 @@ def test_background_run_never_raises_into_the_caller():
     assert not thread.is_alive(), "the worker must exit rather than hang"
 
 
-def test_migration_is_off_unless_explicitly_enabled(monkeypatch):
+def test_migration_defaults_on_for_ondevice_and_off_for_a_chosen_provider(monkeypatch):
+    """On-device is the default provider, so inheriting it means the stored
+    vectors came from something else and only a rebuild restores retrieval.
+    A provider someone chose was chosen against known data, so it stays opt-in.
+    """
+    from utils.config import Config
+
     monkeypatch.delenv("RAG_EMBEDDING_MIGRATION_ENABLED", raising=False)
+
+    monkeypatch.setattr(Config, "embeddings_provider", "ondevice")
+    assert em.is_enabled() is True
+
+    # Secret values arrive base64-decoded and have carried trailing newlines
+    # before; a stray one must not silently turn the rebuild off.
+    monkeypatch.setattr(Config, "embeddings_provider", "ondevice\n")
+    assert em.is_enabled() is True
+
+    monkeypatch.setattr(Config, "embeddings_provider", "bedrock")
     assert em.is_enabled() is False
+
+
+def test_explicit_migration_setting_overrides_the_provider_default(monkeypatch):
+    from utils.config import Config
+
+    monkeypatch.setattr(Config, "embeddings_provider", "ondevice")
+    monkeypatch.setenv("RAG_EMBEDDING_MIGRATION_ENABLED", "false")
+    assert em.is_enabled() is False
+
+    monkeypatch.setattr(Config, "embeddings_provider", "bedrock")
     monkeypatch.setenv("RAG_EMBEDDING_MIGRATION_ENABLED", "true")
     assert em.is_enabled() is True
 
