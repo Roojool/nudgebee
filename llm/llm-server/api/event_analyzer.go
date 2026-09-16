@@ -2320,6 +2320,49 @@ func appendRunbookReference(detailed string, ref *tools.RunbookRef) string {
 	return strings.TrimRight(detailed, "\n") + "\n\n---\n\n**📖 Runbook reference" + src + ":** [" + label + "](" + ref.URL + ")\n"
 }
 
+// buildEventSummaryQuery is the step-1 prompt of the automatic analysis pipeline.
+//
+// It is framed as an on-call brief on purpose. Step 1 is the only stage that runs
+// the events agent, so it is still where the triage tools get exercised — but the
+// triage *mechanics* (score-factor arithmetic, triage rule ids, nb_status internals,
+// dedup-chain bookkeeping) are internal bookkeeping already stored in structured
+// columns, and the earlier version of this query asked for them in prose. Measured
+// over 423 dev summaries, that pushed ~77% of the summary body into triage narration
+// before the reader learned what was broken — and because the summary is fed verbatim
+// into the investigation prompt and into synthesizeDetailedResponse, every later stage
+// paid for it too. The tools are still called; only their output framing is
+// constrained. Degrades to a plain summary when no triage data is recorded yet.
+func buildEventSummaryQuery(eventId string) string {
+	return "Get the details of Event with id - " + eventId + ". " +
+		"Write it up as an on-call brief for an engineer who was just paged and has never seen this alert before.\n\n" +
+		"Reply with EXACTLY these five sections, in this order, using these headings verbatim as markdown H3 headings " +
+		"(`### What is broken`) and `- ` bullets under each. Do not number the sections, do not bold the headings, " +
+		"do not add sections of your own:\n" +
+		"### What is broken\n" +
+		"The affected resource, the symptom, and the measured value against the threshold that fired. Include the " +
+		"specific failing identifier the alert carries when there is one — endpoint/path and status code, container " +
+		"name, volume, query, error message — and the actual measured value, not just the threshold.\n" +
+		"### Since when\n" +
+		"Call get_event_triage_explanation and state the firing history in ONE bullet: first seen, occurrence number in " +
+		"the current chain, how often it has fired recently.\n" +
+		"### What changed just before\n" +
+		"Call get_event_incident_assembly and report its cause tiers (cause.config_changes and cause.upstream): changes " +
+		"and deploys on the affected resource itself or on something it depends on, each with how long before the alert " +
+		"it happened. If nothing qualifies, say so in one bullet.\n" +
+		"### What else is firing\n" +
+		"From the same get_event_incident_assembly result, list the same_incident entries (other signals and cross-source " +
+		"copies of this same incident) and the impact entries (alerts on things that depend on this resource), each with " +
+		"its subject and how long before or after this alert it fired. Nearest in time first, at most 5 bullets, and say " +
+		"which are confirmed part of this incident versus unconfirmed candidates — the assembly groups by timing and " +
+		"topology, not by proven causality. SKIP the chronic tier entirely — those fire at their normal background rate " +
+		"and are not part of this incident. Omit anything you cannot tie to this event. If nothing qualifies, say so in " +
+		"one bullet.\n" +
+		"### Priority\n" +
+		"The computed priority and score, in ONE bullet.\n\n" +
+		"Do NOT include a section on how Nudgebee triaged the event. Do NOT reproduce the score-factor arithmetic, " +
+		"triage rule ids, nb_status internals or deduplication-chain mechanics — they are internal bookkeeping, not " +
+		"incident content. Keep the whole brief under 300 words, in short bullets."
+}
 func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request EventAnalysisRequest) (EventAnalysisResponse, error) {
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
@@ -2484,19 +2527,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		if hasSummary {
 			ctx.GetLogger().Info("analyzer: recovered summary from conversation history", "session_id", parentConversationId)
 		} else {
-			// Beyond fetching the event's details, ask the events agent to explain
-			// Nudgebee's auto-triage decision. Step 1 is the only stage of the
-			// automatic pipeline that runs the events agent, so it is where the
-			// triage tools (get_event_triage_explanation) get exercised — recording *why*
-			// an event was suppressed/duplicated/scored into the summary (and thus
-			// event_log_analysis and the synthesized detailed response), not just in
-			// interactive chat. Degrades to a plain summary when no triage data is
-			// recorded yet.
-			summaryQuery := "Get the details of Event with id - " + eventData.Id +
-				". Also explain how Nudgebee auto-triaged this event: its triage status (nb_status), " +
-				"computed priority and the score_factors that produced it, and the deduplication chain and " +
-				"firing history behind the decision. Use get_event_triage_explanation for the dedup chain and " +
-				"firing history, and get_event_incident_assembly for what else is involved in the same incident."
+			summaryQuery := buildEventSummaryQuery(eventData.Id)
 			summaryResp, err := core.HandleConversationSessionRequest(ctx, eventSummaryAgent, request.UserId, request.AccountId, parentConversationId, summaryQuery, core.ConversationSessionRequestWithSource(core.ConversationSourceInvestigation), core.ConversationSessionRequestWithEnableCritique(false), core.ConversationSessionRequestWithConfig(toolcore.NBQueryConfig{Labels: parsedLabels}), core.ConversationSessionRequestWithoutConversationHistory())
 			if err != nil {
 				if errors.Is(err, core.ErrConversationInProgress) {
