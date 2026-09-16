@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { Alert, Box, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import { Select } from '@ui/Select';
+import { Banner } from '@ui/Banner';
 import { Button } from '@ui/Button';
 import {
   ContentCopy,
@@ -1703,21 +1704,31 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
                   falls back to the current draft and may differ from what
                   actually ran. */}
           {executionData?.definition_source === 'draft_run' && (
-            <Alert severity='info' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This was a draft run (“Run current”) of an unpublished definition. The canvas shows the exact draft that ran, not the live version.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='info'
+                surface='section'
+                message='This was a draft run (“Run current”) of an unpublished definition. The canvas shows the exact draft that ran, not the live version.'
+              />
+            </Box>
           )}
           {executionData?.definition_source === 'legacy_live_snapshot' && (
-            <Alert severity='info' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This execution predates version tracking — showing the live version snapshot taken at backfill time, which may differ from the exact
-              definition that ran.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='info'
+                surface='section'
+                message='This execution predates version tracking — showing the live version snapshot taken at backfill time, which may differ from the exact definition that ran.'
+              />
+            </Box>
           )}
           {executionData?.definition_source === 'live_fallback' && (
-            <Alert severity='warning' sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
-              This execution predates version tracking and the live snapshot is unavailable — the canvas below reflects the current workflow draft and
-              may differ from what actually ran.
-            </Alert>
+            <Box sx={{ margin: 'var(--ds-space-2) var(--ds-space-4)' }}>
+              <Banner
+                tone='warning'
+                surface='section'
+                message='This execution predates version tracking and the live snapshot is unavailable — the canvas below reflects the current workflow draft and may differ from what actually ran.'
+              />
+            </Box>
           )}
 
           {/* Canvas has nothing to draw: either no execution is selected (most

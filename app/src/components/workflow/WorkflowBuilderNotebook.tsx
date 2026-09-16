@@ -14,8 +14,9 @@ import {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useRouter } from 'next/router';
-import { Alert, Box, Typography, CircularProgress, Drawer, Divider } from '@mui/material';
+import { Box, Typography, CircularProgress, Drawer, Divider } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
+import { Banner } from '@ui/Banner';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
@@ -3601,10 +3602,17 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
 
       {/* Config placeholder warning for AI-generated workflows */}
       {configPlaceholders.length > 0 && !configWarningDismissed && (
-        <Alert severity='info' onClose={() => setConfigWarningDismissed(true)} sx={{ borderRadius: 0 }}>
-          This workflow uses configuration placeholders: <strong>{configPlaceholders.join(', ')}</strong>. Please ensure these are set in the Config
-          Manager before running.
-        </Alert>
+        <Banner
+          tone='info'
+          dismissible
+          onDismiss={() => setConfigWarningDismissed(true)}
+          message={
+            <>
+              This workflow uses configuration placeholders: <strong>{configPlaceholders.join(', ')}</strong>. Please ensure these are set in the
+              Config Manager before running.
+            </>
+          }
+        />
       )}
 
       {/* Content Area - Sidebar + Main Content */}
