@@ -43,17 +43,15 @@ let cachedAccountId = "";
 // DataContext has restored the saved selection — it then adopts the FIRST k8s account and
 // persists it, switching the run's cluster. Proved in CI on PR #36608.
 export async function resolveAccountId(page: Page): Promise<string> {
+  // Runs before the cache check: a cached id skips navigation, but every test gets a fresh
+  // page, and the session global-setup saved can expire mid-run (CI: ~1.5h in), landing the
+  // caller on /signin?error=SessionRequired. doFullLogin is memoized per Page, so this is a
+  // no-op for callers that already logged in.
+  await new LoginPage(page).doFullLogin();
+
   if (cachedAccountId) return cachedAccountId;
 
   const cluster = requireCluster();
-
-  // This helper navigates and then asserts on where it landed, so it has to establish the
-  // session itself rather than assume a caller did. A caller that resolves the account id
-  // before opening its own page (Analytics does) otherwise lands on
-  // /signin?error=SessionRequired and fails as "never gained an ?accountId=", which names the
-  // wrong cause. doFullLogin is memoized per Page, so this is a no-op for callers that
-  // already logged in.
-  await new LoginPage(page).doFullLogin();
 
   await page.goto("/home");
   await expect(page, ADOPTION_HINT).toHaveURL(/[?&]accountId=[^&#]+/, { timeout: 60000 });
