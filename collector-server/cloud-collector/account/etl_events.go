@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -860,75 +861,20 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 		return providers.ListEventRules{}, err
 	}
 
-	errorList := []error{}
-	currentTime := time.Now().UTC().Format(time.RFC3339)
-	args := []map[string]any{}
-
-	// Use a map to deduplicate rules by (account_id, tenant_id, source, alert) to avoid
-	// "ON CONFLICT DO UPDATE command cannot affect row a second time" error
 	tenantId := ctx.GetSecurityContext().GetTenantId()
-	seenRules := make(map[string]bool)
-
-	for _, rule := range rules.Items {
-		// Create a unique key for deduplication based on the conflict clause
-		ruleKey := fmt.Sprintf("%s:%s:%s:%s", accountId, tenantId, rule.Source, rule.Name)
-		if seenRules[ruleKey] {
-			ctx.GetLogger().Warn("skipping duplicate rule in batch", "accountId", accountId, "tenantId", tenantId, "alert", rule.Name)
-			continue
+	args, errorList := buildEventRuleRows(rules.Items, accountId, tenantId, time.Now().UTC().Format(time.RFC3339))
+	for _, row := range args {
+		if row["ambiguous"] == true {
+			ctx.GetLogger().Warn("StoreEventRules: several upstream rules share one name; stored as ambiguous",
+				"component", funcName, "accountId", accountId, "alert", row["alert"], "source", row["source"])
 		}
-		seenRules[ruleKey] = true
-
-		annotations := map[string]string{
-			"summary":     rule.Summary,
-			"description": rule.Description,
-		}
-
-		annotationsStr, err := common.MarshalJson(annotations)
-		if err != nil {
-			ctx.GetLogger().Error("unable to marshal annotations for DB", "error", err)
-			errorList = append(errorList, err)
-			continue
-		}
-
-		labelsStr, err := common.MarshalJson(rule.Labels)
-		if err != nil {
-			ctx.GetLogger().Error("unable to marshal labels for DB", "error", err)
-			errorList = append(errorList, err)
-			continue
-		}
-
-		args = append(args, map[string]any{
-			"id":          uuid.NewString(),
-			"created_at":  currentTime,
-			"updated_at":  currentTime,
-			"tenant_id":   tenantId,
-			"account_id":  accountId,
-			"alert":       rule.Name,
-			"annotations": string(annotationsStr),
-			"expr":        rule.Expr,
-			"duration":    fmt.Sprintf("%vs", int(rule.Duration.Seconds())),
-			"labels":      string(labelsStr),
-			"source":      rule.Source,
-			"category":    rule.Category,
-			"severity":    rule.Severity,
-			"enabled":     true,
-		})
 	}
 
 	if len(errorList) > 0 {
 		return providers.ListEventRules{}, errors.Join(errorList...)
 	}
 
-	result, err := dbms.NamedExec(`insert into event_rules (id, created_at, updated_at, tenant_id, account_id, alert, annotations, expr, duration, labels, source, category, severity, enabled)
-		values (:id, :created_at, :updated_at, :tenant_id, :account_id, :alert, :annotations, :expr, :duration, :labels, :source, :category, :severity, :enabled)
-		-- Must name exactly the columns of event_rules_account_tenant_source_alert_key
-		-- (migration V873). Postgres infers the arbiter index by exact column match, so a
-		-- stale target raises 42P10 at plan time and fails the whole batch.
-		on conflict (account_id, tenant_id, source, alert)
-		do update set updated_at = excluded.updated_at, alert = excluded.alert, annotations = excluded.annotations, expr = excluded.expr, duration = excluded.duration, labels = excluded.labels, source = excluded.source, category = excluded.category, severity = excluded.severity`,
-		args,
-	)
-
+	result, err := upsertEventRuleRows(dbms, args)
 	if err != nil {
 		ctx.GetLogger().Error("StoreEventRules: failed to insert/update event rules", "error", err, "component", funcName)
 	} else {
@@ -939,4 +885,104 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 	// Still surface a partial listing so the caller logs the failed regions.
 	return rules, errors.Join(err, listErr)
 
+}
+
+// eventRuleRowKey is the event_rules conflict key within one account and tenant.
+func eventRuleRowKey(rule providers.EventRule) string {
+	return rule.Source + "\x00" + rule.Name
+}
+
+// buildEventRuleRows turns listed rules into event_rules rows, one per
+// (account, tenant, source, alert) — the table's unique key; a batch naming a key
+// twice fails with "ON CONFLICT DO UPDATE command cannot affect row a second
+// time". When several upstream rules collapse into one row (the same alarm name
+// in two AWS regions, two Azure resource groups, ...) the row is marked ambiguous
+// and carries no external id, so no write lands on an arbitrary one of them.
+func buildEventRuleRows(rules []providers.EventRule, accountId, tenantId, now string) ([]map[string]any, []error) {
+	errorList := []error{}
+	rows := []map[string]any{}
+	rowByKey := map[string]map[string]any{}
+
+	for _, rule := range rules {
+		key := eventRuleRowKey(rule)
+		if row, seen := rowByKey[key]; seen {
+			row["ambiguous"] = true
+			row["external_rule_id"] = nil
+			// Live if any of the collapsed rules is live.
+			row["enabled"] = row["enabled"].(bool) || !rule.Disabled
+			continue
+		}
+
+		annotationsStr, err := common.MarshalJson(map[string]string{
+			"summary":     rule.Summary,
+			"description": rule.Description,
+		})
+		if err != nil {
+			errorList = append(errorList, fmt.Errorf("marshal annotations for %q: %w", rule.Name, err))
+			continue
+		}
+		labelsStr, err := common.MarshalJson(rule.Labels)
+		if err != nil {
+			errorList = append(errorList, fmt.Errorf("marshal labels for %q: %w", rule.Name, err))
+			continue
+		}
+
+		var externalID any
+		if rule.ExternalID != "" {
+			externalID = rule.ExternalID
+		}
+		row := map[string]any{
+			"id":               uuid.NewString(),
+			"created_at":       now,
+			"updated_at":       now,
+			"tenant_id":        tenantId,
+			"account_id":       accountId,
+			"alert":            rule.Name,
+			"annotations":      string(annotationsStr),
+			"expr":             rule.Expr,
+			"duration":         fmt.Sprintf("%vs", int(rule.Duration.Seconds())),
+			"labels":           string(labelsStr),
+			"source":           rule.Source,
+			"category":         rule.Category,
+			"severity":         rule.Severity,
+			"enabled":          !rule.Disabled,
+			"external_rule_id": externalID,
+			"ambiguous":        false,
+			"origin":           eventRuleOriginProvider,
+		}
+		rowByKey[key] = row
+		rows = append(rows, row)
+	}
+	return rows, errorList
+}
+
+// eventRuleOriginProvider marks a rule whose definition the provider owns.
+const eventRuleOriginProvider = "provider"
+
+// The sync owns enabled and external_rule_id for these rows: they mirror the
+// provider on every run, so a rule turned off in the cloud console reads as off.
+const upsertEventRulesBase = `insert into event_rules (id, created_at, updated_at, tenant_id, account_id, alert, annotations, expr, duration, labels, source, category, severity, enabled, external_rule_id%s)
+		values (:id, :created_at, :updated_at, :tenant_id, :account_id, :alert, :annotations, :expr, :duration, :labels, :source, :category, :severity, :enabled, :external_rule_id%s)
+		-- Must name exactly the columns of event_rules_account_tenant_source_alert_key
+		-- (migration V873). Postgres infers the arbiter index by exact column match, so a
+		-- stale target raises 42P10 at plan time and fails the whole batch.
+		on conflict (account_id, tenant_id, source, alert)
+		do update set updated_at = excluded.updated_at, alert = excluded.alert, annotations = excluded.annotations, expr = excluded.expr, duration = excluded.duration, labels = excluded.labels, source = excluded.source, category = excluded.category, severity = excluded.severity,
+			enabled = excluded.enabled, external_rule_id = excluded.external_rule_id%s`
+
+var (
+	upsertEventRulesSQL = fmt.Sprintf(upsertEventRulesBase, ", ambiguous, origin", ", :ambiguous, :origin",
+		", ambiguous = excluded.ambiguous, origin = excluded.origin")
+	// upsertEventRulesLegacySQL runs while the ambiguous/origin columns (migration
+	// V941) do not exist yet, so the collector can roll out before the migration.
+	upsertEventRulesLegacySQL = fmt.Sprintf(upsertEventRulesBase, "", "", "")
+)
+
+func upsertEventRuleRows(dbms *common.DatabaseManager, rows []map[string]any) (sql.Result, error) {
+	result, err := dbms.NamedExec(upsertEventRulesSQL, rows)
+	var pqErr *pq.Error
+	if err != nil && errors.As(err, &pqErr) && pqErr.Code == "42703" {
+		return dbms.NamedExec(upsertEventRulesLegacySQL, rows)
+	}
+	return result, err
 }

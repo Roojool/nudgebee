@@ -8,32 +8,31 @@ import (
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"nudgebee/collector/cloud/providers"
 )
 
-// UpdateGCPAlertPolicyThreshold patches the threshold (and optional duration) on every
-// threshold condition of an existing GCP alert policy and writes it back via the Cloud
-// Monitoring API using the account's credentials.
+// UpdateGCPAlertPolicyThreshold changes the threshold, evaluation duration and/or the
+// enabled switch of an existing GCP alert policy and writes back only those fields
+// (update mask), so notification channels, documentation and other conditions stay as
+// they are. It returns the values it replaced so a revert can restore them.
 //
 // policyName is the fully-qualified policy resource name
-// (projects/<project>/alertPolicies/<id>) — it is the alert_rule_key carried from the
-// suggestion. The existing policy is fetched first so condition names (and every other
-// field) are preserved; only thresholdValue/duration are mutated, keeping the update a
-// true patch rather than a replace.
-func UpdateGCPAlertPolicyThreshold(ctx providers.CloudProviderContext, account providers.Account, policyName string, newThreshold float64, newDurationMin int) error {
+// (projects/<project>/alertPolicies/<id>).
+func UpdateGCPAlertPolicyThreshold(ctx providers.CloudProviderContext, account providers.Account, policyName string, change providers.AlertRuleChange) (map[string]any, error) {
 	if policyName == "" {
-		return fmt.Errorf("alert policy name is required")
+		return nil, fmt.Errorf("alert policy name is required")
 	}
 
 	session, err := getGcloudSessionFromAccount(ctx, account)
 	if err != nil {
-		return fmt.Errorf("failed to get gcloud session: %w", err)
+		return nil, fmt.Errorf("failed to get gcloud session: %w", err)
 	}
 
 	client, err := monitoring.NewAlertPolicyClient(ctx.GetContext(), session.Opts...)
 	if err != nil {
-		return fmt.Errorf("failed to create alert policy client: %w", err)
+		return nil, fmt.Errorf("failed to create alert policy client: %w", err)
 	}
 	defer func() {
 		if cerr := client.Close(); cerr != nil {
@@ -43,32 +42,87 @@ func UpdateGCPAlertPolicyThreshold(ctx providers.CloudProviderContext, account p
 
 	policy, err := client.GetAlertPolicy(ctx.GetContext(), &monitoringpb.GetAlertPolicyRequest{Name: policyName})
 	if err != nil {
-		return fmt.Errorf("failed to get alert policy %q: %w", policyName, err)
+		return nil, fmt.Errorf("failed to get alert policy %q: %w", policyName, err)
 	}
 
-	updated := 0
-	for _, cond := range policy.GetConditions() {
-		mt := cond.GetConditionThreshold()
-		if mt == nil {
-			continue
-		}
-		mt.ThresholdValue = newThreshold
-		if newDurationMin > 0 {
-			mt.Duration = durationpb.New(time.Duration(newDurationMin) * time.Minute)
-		}
-		updated++
-	}
-	if updated == 0 {
-		return fmt.Errorf("alert policy %q has no threshold condition to update", policyName)
+	previous, paths, err := applyGCPPolicyChange(policy, change)
+	if err != nil {
+		return nil, fmt.Errorf("alert policy %q: %w", policyName, err)
 	}
 
 	if _, err := client.UpdateAlertPolicy(ctx.GetContext(), &monitoringpb.UpdateAlertPolicyRequest{
 		AlertPolicy: policy,
-		UpdateMask:  &fieldmaskpb.FieldMask{Paths: []string{"conditions"}},
+		UpdateMask:  &fieldmaskpb.FieldMask{Paths: paths},
 	}); err != nil {
-		return fmt.Errorf("failed to update alert policy %q: %w", policyName, err)
+		return nil, fmt.Errorf("failed to update alert policy %q: %w", policyName, err)
 	}
 
-	ctx.GetLogger().Info("updated GCP alert policy threshold", "policy", policyName, "threshold", newThreshold, "conditions", updated)
-	return nil
+	ctx.GetLogger().Info("updated GCP alert policy", "policy", policyName, "fields", paths)
+	return previous, nil
+}
+
+// applyGCPPolicyChange mutates the fetched policy and returns the replaced values and
+// the update-mask paths. Pure, so the guards are testable without GCP.
+func applyGCPPolicyChange(policy *monitoringpb.AlertPolicy, change providers.AlertRuleChange) (map[string]any, []string, error) {
+	threshold := change.Threshold
+	durationSeconds := change.DurationMinutes * 60
+	enabled := change.Enabled
+	if r := change.Restore; len(r) > 0 {
+		if v, ok := providers.RestoreNumber(r, "threshold"); ok {
+			threshold = &v
+		}
+		if v, ok := providers.RestoreNumber(r, "duration_seconds"); ok {
+			durationSeconds = int(v)
+		}
+		if v, ok := r["enabled"].(bool); ok {
+			enabled = &v
+		}
+	}
+
+	var conds []*monitoringpb.AlertPolicy_Condition_MetricThreshold
+	for _, cond := range policy.GetConditions() {
+		if mt := cond.GetConditionThreshold(); mt != nil {
+			conds = append(conds, mt)
+		}
+	}
+
+	previous := map[string]any{"enabled": policy.GetEnabled() == nil || policy.GetEnabled().GetValue()}
+	if len(conds) > 0 {
+		previous["threshold"] = conds[0].GetThresholdValue()
+		previous["duration_seconds"] = float64(conds[0].GetDuration().AsDuration() / time.Second)
+	}
+
+	var paths []string
+	if threshold != nil || durationSeconds > 0 {
+		if len(conds) == 0 {
+			return nil, nil, fmt.Errorf("%w: policy has no metric threshold condition", providers.ErrAlertRuleChangeUnsupported)
+		}
+		// One value for several conditions would silently change what each of
+		// them means; only a policy whose conditions agree gets a single edit.
+		for _, mt := range conds[1:] {
+			if threshold != nil && mt.GetThresholdValue() != conds[0].GetThresholdValue() {
+				return nil, nil, fmt.Errorf("%w: policy conditions use different thresholds", providers.ErrAlertRuleChangeUnsupported)
+			}
+			if durationSeconds > 0 && mt.GetDuration().AsDuration() != conds[0].GetDuration().AsDuration() {
+				return nil, nil, fmt.Errorf("%w: policy conditions use different durations", providers.ErrAlertRuleChangeUnsupported)
+			}
+		}
+		for _, mt := range conds {
+			if threshold != nil {
+				mt.ThresholdValue = *threshold
+			}
+			if durationSeconds > 0 {
+				mt.Duration = durationpb.New(time.Duration(durationSeconds) * time.Second)
+			}
+		}
+		paths = append(paths, "conditions")
+	}
+	if enabled != nil {
+		policy.Enabled = wrapperspb.Bool(*enabled)
+		paths = append(paths, "enabled")
+	}
+	if len(paths) == 0 {
+		return nil, nil, fmt.Errorf("%w: nothing to change", providers.ErrAlertRuleChangeUnsupported)
+	}
+	return previous, paths, nil
 }

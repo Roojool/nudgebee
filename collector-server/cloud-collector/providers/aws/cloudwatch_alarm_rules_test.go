@@ -40,6 +40,7 @@ func TestDescribeRegionAlarmRules_MetricAndCompositeAcrossPages(t *testing.T) {
 			{
 				MetricAlarms: []cwtypes.MetricAlarm{{
 					AlarmName: aws.String("orders-rds-cpu-high"),
+					AlarmArn:  aws.String("arn:aws:cloudwatch:us-east-1:123456789012:alarm:orders-rds-cpu-high"),
 					Namespace: aws.String("AWS/RDS"),
 					Threshold: aws.Float64(80),
 					Period:    aws.Int32(300),
@@ -58,6 +59,8 @@ func TestDescribeRegionAlarmRules_MetricAndCompositeAcrossPages(t *testing.T) {
 	rules, err := describeRegionAlarmRules(context.Background(), slog.Default(), client, "us-east-1", "123456789012")
 	require.NoError(t, err)
 	require.Len(t, rules, 2)
+	// api-server writes back through the ARN, so sync must store it.
+	assert.Equal(t, "arn:aws:cloudwatch:us-east-1:123456789012:alarm:orders-rds-cpu-high", rules[0].ExternalID)
 
 	assert.ElementsMatch(t, []cwtypes.AlarmType{cwtypes.AlarmTypeMetricAlarm, cwtypes.AlarmTypeCompositeAlarm}, client.alarmTypes,
 		"composite alarms are only returned when requested explicitly")

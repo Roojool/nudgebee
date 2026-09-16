@@ -1132,12 +1132,17 @@ func handleCloudProviderApis(r *gin.Engine, tracer *trace.Tracer, meter *metric.
 		resp, err := account.UpdateAlertRule(ctx, request)
 		if err != nil {
 			ctx.GetLogger().Error("error updating alert rule", "error", err)
-			c.JSON(500, buildApiResponse(nil, err))
+			status := 500
+			if errors.Is(err, providers.ErrAlertRuleChangeUnsupported) {
+				status = 400
+			}
+			c.JSON(status, buildApiResponse(nil, err))
 			return
 		}
 		c.JSON(200, buildApiResponse(map[string]interface{}{
 			"external_rule_id": resp.ExternalRuleId,
 			"status":           resp.Status,
+			"previous":         resp.Previous,
 		}))
 	})
 

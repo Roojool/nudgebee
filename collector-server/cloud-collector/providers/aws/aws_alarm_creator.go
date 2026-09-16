@@ -262,23 +262,18 @@ func parseStatistic(stat string) (types.Statistic, error) {
 	}
 }
 
-// UpdateCloudWatchAlarmThreshold changes only the threshold (and optionally the evaluation
-// window) of an existing alarm. CloudWatch's PutMetricAlarm replaces the whole alarm, so we
-// first DescribeAlarms to capture the current definition, override the threshold/period, and
-// re-put — preserving every other field (metric, dimensions, actions, statistic, etc.).
-// newDurationMin <= 0 leaves the evaluation window unchanged.
-func UpdateCloudWatchAlarmThreshold(ctx context.Context, account providers.Account, alarmName, region string, newThreshold float64, newDurationMin int) error {
+// UpdateCloudWatchAlarmThreshold changes the threshold and/or evaluation window of an
+// existing metric alarm and keeps every other field (actions, dimensions, missing-data
+// handling) as it is. It returns the values it replaced so a revert can restore them.
+func UpdateCloudWatchAlarmThreshold(ctx context.Context, account providers.Account, alarmName, region string, change providers.AlertRuleChange) (map[string]any, error) {
+	if change.Enabled != nil {
+		// DisableAlarmActions would also silence the customer's own paging.
+		return nil, fmt.Errorf("%w: CloudWatch alarms have no per-alarm disable", providers.ErrAlertRuleChangeUnsupported)
+	}
 	existing, err := DescribeCloudWatchAlarm(ctx, account, alarmName, region)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	cfg, err := getAwsConfigFromAccount(ctx, account)
-	if err != nil {
-		return fmt.Errorf("failed to create AWS config: %w", err)
-	}
-	cfg.Region = region
-	cwClient := cloudwatch.NewFromConfig(cfg)
 
 	input := &cloudwatch.PutMetricAlarmInput{
 		AlarmName:                        existing.AlarmName,
@@ -301,28 +296,99 @@ func UpdateCloudWatchAlarmThreshold(ctx context.Context, account providers.Accou
 		EvaluateLowSampleCountPercentile: existing.EvaluateLowSampleCountPercentile,
 		Metrics:                          existing.Metrics,
 		ThresholdMetricId:                existing.ThresholdMetricId,
-		Threshold:                        aws.Float64(newThreshold),
+		Threshold:                        existing.Threshold,
+	}
+	previous := cloudWatchAlarmWindow(existing)
+
+	if err := applyCloudWatchAlarmChange(input, change); err != nil {
+		return nil, err
 	}
 
-	// Optionally widen the evaluation window. For a single-datapoint alarm with a known
-	// period, map the requested minutes to EvaluationPeriods.
-	if newDurationMin > 0 && existing.Period != nil && *existing.Period > 0 {
-		periodSec := int(*existing.Period)
-		evalPeriods := (newDurationMin * 60) / periodSec
-		if evalPeriods < 1 {
-			evalPeriods = 1
+	cfg, err := getAwsConfigFromAccount(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AWS config: %w", err)
+	}
+	cfg.Region = region
+	if _, err := cloudwatch.NewFromConfig(cfg).PutMetricAlarm(ctx, input); err != nil {
+		return nil, fmt.Errorf("failed to update CloudWatch alarm: %w", err)
+	}
+	return previous, nil
+}
+
+// cloudWatchAlarmWindow is what a revert needs to put an alarm back exactly.
+func cloudWatchAlarmWindow(alarm *types.MetricAlarm) map[string]any {
+	out := map[string]any{}
+	if alarm.Threshold != nil {
+		out["threshold"] = *alarm.Threshold
+	}
+	if alarm.EvaluationPeriods != nil {
+		out["evaluation_periods"] = *alarm.EvaluationPeriods
+	}
+	if alarm.DatapointsToAlarm != nil {
+		out["datapoints_to_alarm"] = *alarm.DatapointsToAlarm
+	}
+	return out
+}
+
+// applyCloudWatchAlarmChange mutates a PutMetricAlarm input built from the existing
+// alarm. Pure, so the window arithmetic is testable without AWS.
+func applyCloudWatchAlarmChange(input *cloudwatch.PutMetricAlarmInput, change providers.AlertRuleChange) error {
+	if change.Threshold != nil {
+		if input.ThresholdMetricId != nil {
+			return fmt.Errorf("%w: alarm uses an anomaly detection band, not a static threshold", providers.ErrAlertRuleChangeUnsupported)
 		}
-		input.EvaluationPeriods = aws.Int32(int32(evalPeriods))
-		// Keep DatapointsToAlarm consistent (cannot exceed EvaluationPeriods).
-		if input.DatapointsToAlarm == nil || int(*input.DatapointsToAlarm) > evalPeriods {
-			input.DatapointsToAlarm = aws.Int32(int32(evalPeriods))
-		}
+		input.Threshold = aws.Float64(*change.Threshold)
 	}
 
-	if _, err := cwClient.PutMetricAlarm(ctx, input); err != nil {
-		return fmt.Errorf("failed to update CloudWatch alarm threshold: %w", err)
+	if restore := change.Restore; len(restore) > 0 {
+		if v, ok := providers.RestoreNumber(restore, "threshold"); ok && input.ThresholdMetricId == nil {
+			input.Threshold = aws.Float64(v)
+		}
+		if v, ok := providers.RestoreNumber(restore, "evaluation_periods"); ok {
+			input.EvaluationPeriods = aws.Int32(int32(v))
+			input.DatapointsToAlarm = nil
+			if dp, ok := providers.RestoreNumber(restore, "datapoints_to_alarm"); ok {
+				input.DatapointsToAlarm = aws.Int32(int32(dp))
+			}
+		}
+		return nil
+	}
+
+	if change.DurationMinutes > 0 {
+		// A metric-math alarm has no top-level period; its window lives in the
+		// metric queries, which this edit does not rewrite.
+		if input.Period == nil || *input.Period <= 0 {
+			return fmt.Errorf("%w: the evaluation window of a metric-math alarm cannot be changed here", providers.ErrAlertRuleChangeUnsupported)
+		}
+		oldEval := int32(1)
+		if input.EvaluationPeriods != nil && *input.EvaluationPeriods > 0 {
+			oldEval = *input.EvaluationPeriods
+		}
+		input.EvaluationPeriods, input.DatapointsToAlarm = scaleEvaluationWindow(*input.Period, oldEval, input.DatapointsToAlarm, change.DurationMinutes)
 	}
 	return nil
+}
+
+// scaleEvaluationWindow maps a window in minutes onto evaluation periods and keeps
+// the alarm's "M of N" ratio: 3-of-3 over 10 periods becomes 10-of-10, not 3-of-10,
+// which would make the alarm fire on far sparser breaches than before. A nil
+// DatapointsToAlarm means "all N" to CloudWatch and stays nil.
+func scaleEvaluationWindow(periodSec, oldEval int32, oldDatapoints *int32, minutes int) (*int32, *int32) {
+	eval := int32(minutes * 60 / int(periodSec))
+	if eval < 1 {
+		eval = 1
+	}
+	if oldDatapoints == nil {
+		return aws.Int32(eval), nil
+	}
+	dp := (int64(*oldDatapoints)*int64(eval) + int64(oldEval) - 1) / int64(oldEval)
+	if dp < 1 {
+		dp = 1
+	}
+	if dp > int64(eval) {
+		dp = int64(eval)
+	}
+	return aws.Int32(eval), aws.Int32(int32(dp))
 }
 
 // UpdateCloudWatchAlarm updates an existing CloudWatch alarm

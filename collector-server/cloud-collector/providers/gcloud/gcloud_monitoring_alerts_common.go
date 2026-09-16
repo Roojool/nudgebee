@@ -52,12 +52,6 @@ func getGCPAlertPolicies(ctx providers.CloudProviderContext, account providers.A
 			return providers.ListEventRules{}, fmt.Errorf("failed to list alert policies: %w", err)
 		}
 
-		// Skip disabled policies
-		if policy.GetEnabled() != nil && !policy.GetEnabled().GetValue() {
-			ctx.GetLogger().Debug("skipping disabled alert policy", "policyName", policy.GetName())
-			continue
-		}
-
 		// Extract policy details
 		policyName := policy.GetDisplayName()
 		if policyName == "" {
@@ -130,6 +124,10 @@ func getGCPAlertPolicies(ctx providers.CloudProviderContext, account providers.A
 			Severity:    severity,
 			Category:    serviceName,
 			Duration:    duration,
+			ExternalID:  policy.GetName(),
+			// Disabled policies are listed too, so a policy turned off in the
+			// console reads as disabled instead of keeping its stale row.
+			Disabled: policy.GetEnabled() != nil && !policy.GetEnabled().GetValue(),
 			Labels: map[string]string{
 				"gcp_project":       session.ProjectId,
 				"gcp_policy_name":   policyName,

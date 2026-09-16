@@ -1474,6 +1474,8 @@ func (a *azureProvider) ListEventRules(ctx providers.CloudProviderContext, accou
 					Category:    "Azure Metric Alert",
 					Severity:    eventSeverity,
 					Labels:      labels,
+					ExternalID:  annotations["alert_id"],
+					Disabled:    alert.Properties.Enabled != nil && !*alert.Properties.Enabled,
 				})
 			}
 		}
@@ -1566,6 +1568,8 @@ func (a *azureProvider) ListEventRules(ctx providers.CloudProviderContext, accou
 					Category:    "Azure Scheduled Query Alert",
 					Severity:    eventSeverity,
 					Labels:      labels,
+					ExternalID:  annotations["alert_id"],
+					Disabled:    rule.Properties.Enabled != nil && !*rule.Properties.Enabled,
 				})
 			}
 		}

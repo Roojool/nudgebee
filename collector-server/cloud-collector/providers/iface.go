@@ -388,6 +388,12 @@ type EventRule struct {
 	Duration    time.Duration           `json:"duration"`
 	Labels      map[string]string       `json:"labels"`
 	Severity    EventDefinitionSeverity `json:"severity" validate:"required"`
+	// ExternalID is the provider's own id for the rule (AWS alarm ARN, GCP
+	// policy resource name, Azure ARM id); api-server writes back through it.
+	ExternalID string `json:"external_id,omitempty"`
+	// Disabled is true when the rule exists upstream but does not evaluate.
+	// The zero value keeps providers that cannot tell reporting "enabled".
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 type EventSummary struct {
@@ -806,3 +812,56 @@ type ProcessedEventHandler interface {
 	// This provides tenant-safe account resolution for events with token-based routing (GCP, Azure)
 	GetAccountFromExternalId(pCtx CloudProviderContext, externalId string, accountNumber string) (Account, error)
 }
+
+// AlertRuleChange is one write to an existing provider alert rule. Nil / zero
+// fields are left as they are upstream.
+type AlertRuleChange struct {
+	Threshold *float64
+	// DurationMinutes is a requested evaluation window; providers map it onto
+	// what they support (AWS evaluation periods, Azure window sizes).
+	DurationMinutes int
+	// Enabled switches the rule on or off where the provider has such a switch.
+	Enabled *bool
+	// Restore carries the exact provider values a previous write returned, so a
+	// revert puts back what was there rather than an approximation of it.
+	Restore map[string]any
+}
+
+// IsEmpty reports whether the change would write nothing.
+func (c AlertRuleChange) IsEmpty() bool {
+	return c.Threshold == nil && c.DurationMinutes <= 0 && c.Enabled == nil && len(c.Restore) == 0
+}
+
+// Validate rejects a change that mixes a restore with explicit values: which one
+// should win is ambiguous, and applying either silently would hide the other.
+func (c AlertRuleChange) Validate() error {
+	if c.IsEmpty() {
+		return fmt.Errorf("%w: nothing to change (no threshold, duration, enabled switch or restore)", ErrAlertRuleChangeUnsupported)
+	}
+	if len(c.Restore) > 0 && (c.Threshold != nil || c.DurationMinutes > 0 || c.Enabled != nil) {
+		return fmt.Errorf("%w: restore cannot be combined with other changes", ErrAlertRuleChangeUnsupported)
+	}
+	return nil
+}
+
+// RestoreNumber reads a numeric value from a Restore map. Values normally arrive
+// through JSON as float64, but a caller building the map in Go may use ints.
+func RestoreNumber(m map[string]any, key string) (float64, bool) {
+	switch v := m[key].(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	}
+	return 0, false
+}
+
+// ErrAlertRuleChangeUnsupported marks a change the provider rule cannot take;
+// it is a request problem, not a transient failure.
+var ErrAlertRuleChangeUnsupported = errors.New("alert rule change not supported")
