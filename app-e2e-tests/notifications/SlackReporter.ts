@@ -156,6 +156,45 @@ export default class SlackReporter implements Reporter {
     }
   }
 
+  /**
+   * Posts the summary with the bot token and returns the message id, or null
+   * when no bot is configured or Slack refuses — in which case the caller
+   * falls back to the webhook. Never throws.
+   */
+  private async postSummaryViaBot(
+    payload: Record<string, unknown>
+  ): Promise<string | null> {
+    const token = process.env.SLACK_BOT_TOKEN?.trim();
+    const channel = process.env.SLACK_REPORT_CHANNEL_ID?.trim();
+    if (!token || !channel) return null;
+
+    try {
+      const res = await axios.post(
+        "https://slack.com/api/chat.postMessage",
+        // link_names is what turns the plain "@qa" in the greeting into a real
+        // mention. Incoming webhooks do it by default and chat.postMessage does
+        // not, so without this the switch would quietly stop notifying anyone.
+        { channel, link_names: true, ...payload },
+        {
+          timeout: SlackReporter.SLACK_TIMEOUT_MS,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const data = res.data as { ok?: boolean; ts?: string; error?: string };
+      if (data?.ok && data.ts) return data.ts;
+      console.warn(
+        `[SlackReporter] Bot post rejected (${data?.error ?? "unknown"}) — falling back to the webhook.`
+      );
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message ?? String(err);
+      console.warn(`[SlackReporter] Bot post failed (${msg}) — falling back to the webhook.`);
+    }
+    return null;
+  }
+
   // ── Lifecycle: onTestEnd ───────────────────────────────────────────────
 
   async onTestEnd(test: TestCase, result: TestResult): Promise<void> {
@@ -321,27 +360,43 @@ export default class SlackReporter implements Reporter {
       });
     }
 
-    await this.postToSlack(
-      webhookUrl,
-      {
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: `*Execution Finished* (${time})`,
-            },
+    const summaryPayload = {
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Execution Finished* (${time})`,
           },
-        ],
-        attachments: [
-          {
-            color,
-            blocks: attachmentBlocks,
-          },
-        ],
-      },
-      "Execution summary"
-    );
+        },
+      ],
+      attachments: [
+        {
+          color,
+          blocks: attachmentBlocks,
+        },
+      ],
+    };
+
+    // Posted through the bot when one is configured, purely so the message id
+    // comes back: CI attaches the HTML report to this message's thread, and an
+    // incoming webhook never tells you what it just posted. The webhook remains
+    // the fallback, so a missing or rejected token still gets the summary out.
+    const messageTs = await this.postSummaryViaBot(summaryPayload);
+    if (messageTs) {
+      try {
+        mkdirSync(PLAYWRIGHT_REPORT_DIR, { recursive: true });
+        writeFileSync(
+          path.join(PLAYWRIGHT_REPORT_DIR, "slack-message.json"),
+          JSON.stringify({ ts: messageTs }),
+          "utf-8"
+        );
+      } catch {
+        // Only costs the report its thread; the summary is already posted.
+      }
+    } else {
+      await this.postToSlack(webhookUrl, summaryPayload, "Execution summary");
+    }
 
     console.log("[SlackReporter] Execution summary sent.");
   }
@@ -515,7 +570,7 @@ export default class SlackReporter implements Reporter {
       return "Congratulations @qa: All test cases passed!";
     }
     if (failed > 0 || apiFailures > 0) {
-      return "Attention required @qa: Some test cases are failing";
+      return "Attention required @qa: Some test cases are failing — the report is in this thread";
     }
     return "Heads up @qa: Some test cases were skipped";
   }
