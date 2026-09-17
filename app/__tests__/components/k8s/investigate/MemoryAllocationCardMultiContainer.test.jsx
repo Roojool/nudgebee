@@ -4,6 +4,23 @@ import '@testing-library/jest-dom';
 
 const mockGetK8sWorkload = jest.fn();
 
+// jsdom has no canvas; stand the chart in with its data so the sparkline path
+// is exercised instead of failing inside its error boundary.
+jest.mock('chart.js', () => ({
+  Chart: { register: jest.fn() },
+  CategoryScale: jest.fn(),
+  LinearScale: jest.fn(),
+  PointElement: jest.fn(),
+  LineElement: jest.fn(),
+  Filler: jest.fn(),
+  Title: jest.fn(),
+  Tooltip: jest.fn(),
+  Legend: jest.fn(),
+  Colors: jest.fn(),
+}));
+jest.mock('react-chartjs-2', () => ({
+  Line: ({ data, id }) => <div data-testid={`line-chart-${id}`} data-points={data.datasets[0]?.data?.length ?? 0} />,
+}));
 jest.mock('@api1/tickets', () => ({
   __esModule: true,
   default: { listTicketConfigsForCreate: jest.fn(() => Promise.resolve({ data: [] })) },
@@ -167,6 +184,43 @@ describe('Tune Resource Configuration — multi-container pod', () => {
     // The allocation comes from the OOMKilled table: 2048MB request, 8192MB limit.
     const killed = card.podMemoryAllocationItem.find((item) => item.container === 'prometheus');
     expect(killed).toMatchObject({ request: 2048 * 1024 * 1024, limits: 8192 * 1024 * 1024 });
+  });
+
+  it('shows what the pod used next to the proposal when the container has no series', async () => {
+    const podUsage = {
+      type: 'json',
+      data: JSON.stringify({
+        name: 'pod_node_metrics',
+        resource_type: 'memory',
+        data: {
+          memory_usage: {
+            series_list_result: [
+              { metric: {}, timestamps: [1789606329, 1789606389, 1789606449], values: ['5000000000', '8485283840', '6000000000'] },
+            ],
+          },
+          memory_limit: { series_list_result: [{ metric: {}, timestamps: [1789606329], values: ['8589934592'] }] },
+        },
+      }),
+    };
+    const card = new MemoryAllocationCard();
+    const withPod = [...evidences, podUsage];
+    await card.canRenderContent(withPod, { ...event, evidences: withPod });
+    const Resolve = card.getResolveComponent();
+    render(<Resolve open onCloseComponent={jest.fn()} />);
+    await waitFor(() => expect(inputValues()).toMatchObject({ memoryLimit: '9011.2' }));
+
+    expect(screen.getByTestId('line-chart-tune-memory-usage')).toHaveAttribute('data-points', '3');
+    const facts = screen.getByTestId('memory-usage-facts');
+    expect(facts).toHaveTextContent('Highest 8,092 MB');
+    expect(facts).toHaveTextContent('Whole pod, all containers');
+    // 9,011.2 − 8,092.1 MB of headroom, and the reservation well below real use.
+    const check = screen.getByTestId('memory-headroom-check');
+    expect(check).toHaveTextContent('Limit is 919 MB above the most the pod has used (8,092 MB).');
+    expect(check).toHaveTextContent('Reserves 2,253 MB while the pod has used up to 8,092 MB.');
+
+    // Typing a limit below the peak flips the check.
+    fireEvent.change(document.querySelector('input[name="memoryLimit"]'), { target: { value: '4000' } });
+    await waitFor(() => expect(screen.getByTestId('memory-headroom-check')).toHaveTextContent('it would run out of memory again'));
   });
 
   it('lists spec containers the evidence never mentioned', async () => {

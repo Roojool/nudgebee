@@ -6,6 +6,7 @@ import apiRecommendations from '@api1/recommendation';
 import { Modal } from '@ui/Modal';
 import { Select } from '@ui/Select';
 import { Label } from '@ui/Label';
+import { MemoryHeadroomCheck, MemoryUsageFacts } from './MemoryUsageFacts';
 import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX, CI_REQUEST_ANNOTATIONS } from '@lib/annotationKeys';
 import k8sApi from '@api1/kubernetes';
@@ -194,6 +195,8 @@ const KubernetesRightSizingPopupForm = ({
     const values = [a, b].map((v) => (typeof v === 'string' ? parseFloat(v) : v)).filter((v) => Number.isFinite(v));
     return values.length ? Math.max(...values) : null;
   };
+  // What the container actually used — only the event path carries it.
+  const memoryUsage = recommendationSource === 'event' ? data?.memory?.usage : undefined;
   const memNbalgoBase = higherOf(data?.memory?.nbalgoBase, currentMemRequest);
   // The limit's base is the current LIMIT, not the request — sharing one base
   // collapses a 192Mi limit onto the request's value.
@@ -808,7 +811,6 @@ const KubernetesRightSizingPopupForm = ({
             padding: 'var(--ds-space-4) var(--ds-space-6)',
           },
         },
-        height: '700px',
       }}
     >
       {/* One row: which container, then how to apply — the modal has no height to spare. */}
@@ -818,13 +820,13 @@ const KubernetesRightSizingPopupForm = ({
           alignItems: 'center',
           justifyContent: containerChoices.length > 0 ? 'space-between' : 'center',
           flexWrap: 'wrap',
-          gap: 'var(--ds-space-4)',
+          gap: ds.space[4],
           my: 2,
         }}
       >
         {containerChoices.length > 0 && (
-          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--ds-space-3)' }}>
-            <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', color: ds.gray[700] }}>Container</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: ds.space[3] }}>
+            <Typography sx={{ fontSize: ds.text.bodyLg, color: ds.gray[700] }}>Container</Typography>
             {containerChoices.length > 1 && onContainerChange && containerChoices.length <= MAX_CONTAINER_BUTTONS ? (
               // Every container visible at once, the one that was killed marked.
               <ToggleButtonGroup
@@ -833,7 +835,7 @@ const KubernetesRightSizingPopupForm = ({
                 value={tunedContainer}
                 onChange={(_, value) => value && onContainerChange(value)}
                 aria-label='Container'
-                sx={{ button: { textTransform: 'none', gap: 'var(--ds-space-2)', height: '32px' } }}
+                sx={{ button: { textTransform: 'none', gap: ds.space[2], height: '32px' } }}
               >
                 {containerChoices.map((name) => (
                   <ToggleButton key={name} value={name}>
@@ -857,9 +859,7 @@ const KubernetesRightSizingPopupForm = ({
               />
             ) : (
               <>
-                <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
-                  {tunedContainer}
-                </Typography>
+                <Typography sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>{tunedContainer}</Typography>
                 {tunedContainer === alertContainer && (
                   <Label tone='critical' size='sm' textTransform='none'>
                     Out of memory
@@ -1057,6 +1057,12 @@ const KubernetesRightSizingPopupForm = ({
                   currentData={allocatedData}
                   activeButton={selectedButtons}
                   handleInputChange={handleInputChange}
+                  currentMemoryExtra={memoryUsage && <MemoryUsageFacts usage={memoryUsage} limitMb={currentMemLimit} />}
+                  recommendedMemoryExtra={
+                    memoryUsage && (
+                      <MemoryHeadroomCheck usage={memoryUsage} request={updatedData?.memory?.request} limit={updatedData?.memory?.limit} />
+                    )
+                  }
                 />
               </Box>
             </Box>

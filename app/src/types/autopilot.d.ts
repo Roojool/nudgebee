@@ -42,4 +42,8 @@ interface VerticalAutopPilotFormProps {
   handleUpdateData: (data: any) => void;
   showKeepPreviousCpuLimit?: boolean;
   showKeepPreviousMemLimit?: boolean;
+  /** Rendered inside the memory "Current" card, below the current values. */
+  currentMemoryExtra?: React.ReactNode;
+  /** Rendered at the bottom of the memory "Recommended" card. */
+  recommendedMemoryExtra?: React.ReactNode;
 }
