@@ -82,6 +82,8 @@ const DEFAULT_EXPANDABLE = {};
 const DEFAULT_HEADERS = [];
 const DEFAULT_TABLE_DATA = [];
 const AUTO_PAGINATE_THRESHOLD = 10;
+const DEFAULT_EMPTY_HEADING = 'No Data Available';
+const DEFAULT_EMPTY_SUBHEADING = 'Please check back later or try refreshing the page';
 
 const TabPanel = (props) => {
   const { children, value, index, ...other } = props;
@@ -570,8 +572,8 @@ const CustomTable = ({
   showUpdatedEmptyData = false,
   showEmptyStateText = false,
   emptyStateText = 'No Data Available',
-  emptyHeading = 'No Data Available',
-  emptySubHeading = 'Please check back later or try refreshing the page',
+  emptyHeading = DEFAULT_EMPTY_HEADING,
+  emptySubHeading = DEFAULT_EMPTY_SUBHEADING,
   showUpdatedTable = false,
   onRowClick,
   tabPadding,
@@ -945,7 +947,20 @@ const CustomTable = ({
         </Typography>
       );
     } else if (showUpdatedEmptyData) {
-      content = <EmptyData img={ThumbsUp} heading='All good here!' subHeading='No recommendations available' />;
+      // 'All good here!' is only right for a recommendation table, where empty
+      // means nothing to fix. A caller with something else to say (a findings
+      // list where empty can mean "no scan yet" or "filter matched nothing")
+      // passes its own emptyHeading/emptySubHeading, which must win — callers
+      // that don't set either prop get the defaults below instead of undefined,
+      // so "custom" means "differs from those defaults".
+      const hasCustomEmptyCopy = emptyHeading !== DEFAULT_EMPTY_HEADING || emptySubHeading !== DEFAULT_EMPTY_SUBHEADING;
+      content = (
+        <EmptyData
+          img={ThumbsUp}
+          heading={hasCustomEmptyCopy ? emptyHeading : 'All good here!'}
+          subHeading={hasCustomEmptyCopy ? emptySubHeading : 'No recommendations available'}
+        />
+      );
     } else {
       content = <EmptyData id={id} img={DataNotAvailable} heading={emptyHeading} subHeading={emptySubHeading} />;
     }

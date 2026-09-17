@@ -409,6 +409,12 @@ const VmVulnerabilities = ({
     return { cloudResourceId: group.key };
   };
 
+  // An empty result reads as "no open vulnerabilities" (good news) only when
+  // nothing narrowed the query — otherwise it just means the filter (severity,
+  // status, VM, package, or a deep-link scope) matched nothing, which
+  // CustomTable's showUpdatedEmptyData path can't tell apart on its own.
+  const isFiltered = Boolean(severity || vmFilter || packageFilter || scopeLabel || statusFilter === 'Dismissed');
+
   const groupData = groups.map((group) => {
     const groupSeverity = severityFromWeight(group.max_severity_weight);
     const cells: any[] = [
@@ -452,8 +458,12 @@ const VmVulnerabilities = ({
             }
           : undefined
       }
-      emptyHeading='No open vulnerabilities'
-      emptySubHeading='Findings appear here after a VM package scan matches installed packages against the CVE database.'
+      emptyHeading={isFiltered ? 'No vulnerabilities match these filters' : 'No open vulnerabilities'}
+      emptySubHeading={
+        isFiltered
+          ? 'Try adjusting or clearing the Severity, Status, VM, or Package filters.'
+          : 'Findings appear here after a VM package scan matches installed packages against the CVE database.'
+      }
       showUpdatedEmptyData={true}
     />
   );

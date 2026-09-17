@@ -13,6 +13,7 @@
  * `recommendation_groupings_v2` actions — this module adds no new RPC surface.
  */
 import { gqlStringify, queryGraphQL } from '@lib/HttpService';
+import apiHome from '@api1/home';
 
 /** rule_name every package-vulnerability finding is written under. */
 export const VULNERABILITY_RULE = 'vm_package_vulnerability';
@@ -91,6 +92,22 @@ query VulnerabilitySeverityGroupings {
   }
 }`;
 
+const FIND_RESOURCE_BY_PROVIDER_ID = `
+query FindResourceByProviderId($limit: Int) {
+  resources: cloud_resources_list_v2(where: __WHERE__, limit: $limit, offset: 0) {
+    rows {
+      id
+      account
+    }
+  }
+}`;
+
+export interface LinkedHost {
+  accountId: string;
+  accountName: string;
+  cloudResourceId: string;
+}
+
 const safeParse = (value: any) => {
   if (typeof value !== 'string') return value;
   try {
@@ -167,6 +184,38 @@ const apiVulnerabilities = {
       bySeverity[row.severity] = (bySeverity[row.severity] || 0) + (row.count || 0);
     }
     return bySeverity;
+  },
+
+  /**
+   * A host can exist as two different `cloud_resourses` rows when a discovery
+   * agent's scan target isn't associated with the cloud account it scans (see
+   * #38470): a cloud-collector copy and a self-hosted-scan copy, sharing the
+   * same provider instance id but sitting under different accounts. Findings
+   * only ever attach to whichever copy the scan actually wrote to, so a host
+   * queried by the wrong copy's `resourceId` looks clean even with real open
+   * findings. This looks for another account's copy of `providerResourceId`
+   * (no `account` filter — the query framework's tenant/ACL scoping already
+   * limits `cloud_resources_list_v2` to accounts the caller can read) that
+   * actually has open findings, so the UI can point at it instead.
+   */
+  async findLinkedHost({ accountId, providerResourceId }: { accountId: string; providerResourceId?: string }): Promise<LinkedHost | null> {
+    if (!accountId || !providerResourceId) return null;
+    const where = { resourse_id: { _eq: providerResourceId }, account: { _neq: accountId } };
+    const response = await queryGraphQL(FIND_RESOURCE_BY_PROVIDER_ID.replaceAll('__WHERE__', gqlStringify(where)), 'FindResourceByProviderId', {
+      limit: 5,
+    });
+    const candidates = response?.data?.data?.resources?.rows || [];
+    if (!candidates.length) return null;
+
+    for (const candidate of candidates) {
+      if (!candidate?.id || !candidate?.account) continue;
+      const { total } = await apiVulnerabilities.list({ accountId: candidate.account, resourceId: candidate.id, limit: 1 });
+      if (!total) continue;
+      const accounts = await apiHome.getCloudAccounts();
+      const account = (accounts || []).find((a: any) => a.id === candidate.account);
+      return { accountId: candidate.account, accountName: account?.account_name || candidate.account, cloudResourceId: candidate.id };
+    }
+    return null;
   },
 
   /** resource id → severity counts, for badging a resource listing. */

@@ -969,8 +969,17 @@ const InstancesView = (props: {
                 componentFn: function (_opt: any, drilldownQuery: any, _row: any) {
                   // drilldownQuery.id, not resourse_id: findings are keyed to the
                   // cloud_resourses row (a UUID), while resourse_id is the
-                  // provider-side instance id (i-0abc…).
-                  return <VulnerabilityTable accountId={props?.accountId ?? ''} resourceId={drilldownQuery?.id} embedded />;
+                  // provider-side instance id (i-0abc…) — passed separately as
+                  // providerResourceId so a #38470 duplicate under another
+                  // account can still be found by that shared instance id.
+                  return (
+                    <VulnerabilityTable
+                      accountId={props?.accountId ?? ''}
+                      resourceId={drilldownQuery?.id}
+                      providerResourceId={drilldownQuery?.resourse_id}
+                      embedded
+                    />
+                  );
                 },
               },
               {
