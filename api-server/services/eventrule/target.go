@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"nudgebee/services/internal/database"
@@ -157,22 +158,39 @@ type ResolveOptions struct {
 
 // muteEventSources maps a rule source to the event sources whose events carry
 // that rule's alert name as aggregation_key. Mute is offered only for these:
-// for webhook sources the key is often a monitor or incident id (verified on
-// dev: datadog_webhook 44%, zenduty_webhook 60%), so a name-based mute would
-// silently miss events.
+// for datadog/zenduty-only rules the key is often a monitor or incident id
+// (verified on dev: datadog_webhook 44%, zenduty_webhook 60%), so a name-based
+// mute of those rules would silently miss events.
+//
+// A Prometheus rule's firings often reach Nudgebee through a webhook instead of
+// the agent: on dev (14 days) 16,117 pagerduty_webhook events, 99% named after a
+// prometheus rule, against 316 agent-delivered ones. Its mute therefore covers
+// those deliveries too. The match is the exact, anchored alert name, so adding a
+// source can only widen coverage, never suppress another alert.
+var promMuteSources = []string{
+	agentEventSourceName,
+	"prometheus_alertmanager_webhook",
+	"pagerduty_webhook",
+	"zenduty_webhook",
+}
+
 var muteEventSources = map[string][]string{
-	"AWS_CloudWatch_Alarm": {"AWS_CloudWatch_Alarm", "AWS_EventBridge"},
-	"AWS_EventBridge":      {"AWS_EventBridge"},
-	"GCP_Metric_Alert":     {"GCP_Metric_Alert"},
-	"Azure_Monitor_Alert":  {"Azure_Monitor_Alert"},
-	agentEventSourceName:   {agentEventSourceName},
-	legacyUISourceName:     {agentEventSourceName},
+	"AWS_CloudWatch_Alarm":            {"AWS_CloudWatch_Alarm", "AWS_EventBridge"},
+	"AWS_EventBridge":                 {"AWS_EventBridge"},
+	"GCP_Metric_Alert":                {"GCP_Metric_Alert"},
+	"Azure_Monitor_Alert":             {"Azure_Monitor_Alert"},
+	agentEventSourceName:              promMuteSources,
+	legacyUISourceName:                promMuteSources,
+	"prometheus_alertmanager_webhook": promMuteSources,
+	// pagerduty_webhook events are keyed by the alert name (100% on dev).
+	"pagerduty_webhook": promMuteSources,
 }
 
 // MuteEventSources returns the event sources a mute of this rule source covers,
 // or nil when mute is not offered for it.
 func MuteEventSources(ruleSource string) []string {
-	return muteEventSources[ruleSource]
+	// A copy: several rule sources share one slice.
+	return slices.Clone(muteEventSources[ruleSource])
 }
 
 // legacyUISourceName is the source older UI-created PrometheusRule entries were

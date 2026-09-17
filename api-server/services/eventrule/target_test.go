@@ -309,8 +309,20 @@ func TestTargetKindForSource(t *testing.T) {
 
 func TestMuteEventSources(t *testing.T) {
 	assert.Equal(t, []string{"AWS_CloudWatch_Alarm", "AWS_EventBridge"}, MuteEventSources("AWS_CloudWatch_Alarm"))
-	assert.Equal(t, []string{"prometheus"}, MuteEventSources("nudgebee"))
+	// Prometheus firings also arrive through Alertmanager-fed webhooks (on dev,
+	// mostly PagerDuty); a mute that only covered agent delivery let them through.
+	promSources := []string{"prometheus", "prometheus_alertmanager_webhook", "pagerduty_webhook", "zenduty_webhook"}
+	assert.Equal(t, promSources, MuteEventSources("prometheus"))
+	assert.Equal(t, promSources, MuteEventSources("nudgebee"))
+	assert.Equal(t, promSources, MuteEventSources("pagerduty_webhook"))
+	assert.Equal(t, promSources, MuteEventSources("prometheus_alertmanager_webhook"))
 	assert.Nil(t, MuteEventSources("datadog_webhook"))
+	assert.Nil(t, MuteEventSources("zenduty_webhook"))
+
+	// Callers get their own slice.
+	got := MuteEventSources("prometheus")
+	got[0] = "changed"
+	assert.Equal(t, promSources, MuteEventSources("pagerduty_webhook"))
 }
 
 // AC-10: the lookup is bound to the caller's tenant, and a row in an account the
