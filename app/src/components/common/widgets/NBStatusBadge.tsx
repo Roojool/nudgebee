@@ -8,6 +8,7 @@ import Tooltip from '@ui/Tooltip';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import apiTriage from 'src/api1/triage';
 import { Label, type LabelTone } from '@ui/Label';
+import { formatClock } from '@shared/format/Datetime';
 import { DropdownMenu, type DropdownMenuItem } from '@ui/DropdownMenu';
 import { ds } from '@utils/colors';
 
@@ -157,7 +158,8 @@ const NBStatusBadge: React.FC<NBStatusBadgeProps> = ({
 
   const snoozeTooltip =
     currentStatus === 'SNOOZED' && snoozedUntil
-      ? `Until ${new Date(snoozedUntil).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+      ? // Offset-less server string: new Date() would read it as local time.
+        `Until ${formatClock(snoozedUntil)}`
       : '';
 
   // Build DropdownMenu items from allowed status transitions

@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
-import Datetime from '@shared/format/Datetime';
+import Datetime, { formatClock, formatClockCompact, formatTooltip } from '@shared/format/Datetime';
 
 jest.mock('@ui/Tooltip', () => ({
   __esModule: true,
@@ -237,5 +237,38 @@ describe('Datetime', () => {
       render(<Datetime value={past(30 * ONE_SEC)} baseDate={BASE} suffix='elapsed' showTooltip={false} />);
       expect(screen.getByText('elapsed')).toBeInTheDocument();
     });
+  });
+});
+
+describe('formatClock', () => {
+  it('reads an offset-less server timestamp as UTC', () => {
+    // 02:02 UTC — the shape the events table emits (column type `timestamp`).
+    expect(formatClock('2026-09-17 02:02:08')).toBe(formatTooltip(new Date('2026-09-17T02:02:08Z')));
+  });
+
+  it('leaves a value that already carries an offset alone', () => {
+    expect(formatClock('2026-09-17T02:02:08Z')).toBe(formatTooltip(new Date('2026-09-17T02:02:08Z')));
+  });
+
+  it('returns the empty value instead of a NaN date', () => {
+    expect(formatClock('garbage-not-a-date')).toBe('');
+    expect(formatClock(undefined)).toBe('');
+    expect(formatClock(null, '-')).toBe('-');
+  });
+});
+
+describe('formatClockCompact', () => {
+  it('fits the sidebar: day, month and time, no year in the current year', () => {
+    const thisYear = new Date().getFullYear();
+    expect(formatClockCompact(`${thisYear}-09-17 02:02:08`)).toMatch(/^17 Sep \d{2}:\d{2}$/);
+  });
+
+  it('carries the year when it is not the current one', () => {
+    expect(formatClockCompact('2019-01-05 12:00:00')).toMatch(/^05 Jan 2019 \d{2}:\d{2}$/);
+  });
+
+  it('is empty rather than NaN for a missing or broken value', () => {
+    expect(formatClockCompact(null)).toBe('');
+    expect(formatClockCompact('garbage-not-a-date')).toBe('');
   });
 });

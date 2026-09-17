@@ -36,7 +36,6 @@ import { ANNOTATIONS } from '@lib/annotationKeys';
 import UndoConfirmDialog from '@components/k8s/investigate/UndoConfirmDialog';
 import RecurrenceSince from '@components/k8s/investigate/RecurrenceSince';
 import apiRecommendations from '@api1/recommendation';
-import apiTriage from '@api1/triage';
 import { hasReadAccess, hasWriteAccess, hasFeatureAccess } from '@lib/auth';
 import InvestigateResolution from '@components/k8s/investigate/InvestigateResolution';
 import { Card } from '@ui/Card';
@@ -473,7 +472,6 @@ const Investigate = () => {
   const [isTrendChartLoading, setIsTrendChartLoading] = useState(false);
   const [isUpdateEvent, setIsUpdateEvent] = useState(false);
   const [isClassifyModalOpen, setIsClassifyModalOpen] = useState(false);
-  const [recurrenceInfo, setRecurrenceInfo] = useState(null);
   const [eventResolutions, setEventResolutions] = useState([]);
   const [knowledgeBase, setKnowledgeBase] = useState([]);
   const [kbLoading, setKbLoading] = useState(false);
@@ -945,9 +943,6 @@ const Investigate = () => {
     let cancelled = false;
     resetState();
     loadData(id);
-    apiTriage.getRecurrenceInfo(id).then((info) => {
-      if (!cancelled && isMountedRef.current) setRecurrenceInfo(info);
-    });
     apiRecommendations.listEventResolutions(id).then((resolutions) => {
       // Only mark this id "loaded" once the fetch actually lands uncancelled —
       // setting it synchronously up front let React StrictMode's dev-mode
@@ -1527,11 +1522,13 @@ const Investigate = () => {
         let last7Days = response?.data?.similar_issue_on_same_service_in_7days?.aggregate?.count;
         let last1Days = response?.data?.similar_issue_on_same_service_in_1days?.aggregate?.count;
         const othersData = [];
+        // Not this problem repeating — every alert of this rule on this service in
+        // the window before it. Labelled in the sidebar as such.
         if (last7Days !== 0) {
-          othersData.push(`${last7Days} in Past 7 days`);
+          othersData.push(`${last7Days} in the week before`);
         }
         if (last1Days !== 0) {
-          othersData.push(`${last1Days} in Past 1 days`);
+          othersData.push(`${last1Days} in the day before`);
         }
         setOthersData(othersData);
         const result = row?.evidences;
@@ -2157,8 +2154,6 @@ const Investigate = () => {
             row={row}
             podDetails={podDetails}
             othersData={othersData}
-            matchedOptions={matchedOptions}
-            recurrenceInfo={recurrenceInfo}
             alertLabels={alertLabels}
             alertRules={alertRules}
             queryParam={queryParam}

@@ -4,12 +4,12 @@ import Tooltip from '@ui/Tooltip';
 import KeyboardDoubleArrowLeftIcon from '@mui/icons-material/KeyboardDoubleArrowLeft';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
 import { useRouter } from 'next/router';
-import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined';
 import OwnerBadge from '@components/ownership/OwnerBadge';
 import useResourceOwner, { sourceText } from '@hooks/useResourceOwner';
 import PropTypes from 'prop-types';
 import { ds } from 'src/utils/colors';
-import Datetime from '@shared/format/Datetime';
+import Datetime, { formatClock, formatClockCompact } from '@shared/format/Datetime';
+import { splitInternalLabels } from './sidebarLabels';
 import Text from '@shared/format/Text';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { Label } from '@ui/Label';
@@ -19,15 +19,14 @@ import NBStatusBadge from '@shared/widgets/NBStatusBadge';
 import ScoreDisplay from '@shared/widgets/ScoreDisplay';
 import PriorityPinControl from '@shared/widgets/PriorityPinControl';
 import InvestigateDropdown from '@components/k8s/investigate/InvestigateDropdown';
-import { EventStateRows, LinkedEventState } from '@components/k8s/investigate/EventStateRows';
+import { EventOccurrenceRows, EventStateRows, useEventOccurrence } from '@components/k8s/investigate/EventStateRows';
 import k8sApi from '@api1/kubernetes';
 import { hasWriteAccess, getUserSession } from '@lib/auth';
 import { snackbar } from '@shared/snackbarService';
 import { exitCodeMapping, snakeToTitleCase } from 'src/utils/common';
 import { hasEventSubjectLink } from 'src/utils/eventSubjectLink';
 import TroubleShootIcon from '@assets/home/node-errors-icon.svg';
-import CubeIcon from '@assets/kubernetes/cube-icon.svg';
-import { BarsBlueOutlineIcon, ErrorFillIcon, FileOutlineIcon, GraphOutlineIcon, infoIcon, LastStateIcon } from '@assets';
+import { infoIcon } from '@assets';
 
 // buildOwnershipLevels returns the ownership chain to resolve for the investigated
 // resource, most specific rung first, skipping any rung whose key is unavailable.
@@ -59,12 +58,61 @@ export function buildOwnershipLevels({ isK8s, cloudResourceId, cloudAccountId, n
   return levels;
 }
 
+// One label/value row. minmax(0, 1fr) so a long value wraps or ellipsizes
+// instead of widening the panel.
+const rowSx = {
+  display: 'grid',
+  alignItems: 'flex-start',
+  gridTemplateColumns: `${ds.space.mul(1, 25)} minmax(0, 1fr)`,
+  columnGap: ds.space[2],
+};
+const valueTextSx = { color: ds.gray[700], lineHeight: '1.4' };
+
+const Row = ({ label, children, testId }) => (
+  <Box sx={rowSx} data-testid={testId}>
+    <Text value={label} secondaryText />
+    <Box sx={{ minWidth: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: ds.space[1] }}>{children}</Box>
+  </Box>
+);
+Row.propTypes = { label: PropTypes.string, children: PropTypes.node, testId: PropTypes.string };
+
+// "pod" → "Pod", "ec2_instance" → "Ec2 Instance"; "Where" when the event has no type.
+const subjectLabel = (type) => {
+  const words = String(type || '')
+    .split(/[_\s]+/)
+    .filter(Boolean);
+  if (words.length === 0) return 'Where';
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+};
+
+// Short, labelled groups instead of one long list: the reader scans the
+// headings to find the fact they need.
+const Section = ({ title, children, testId }) => (
+  <Box
+    data-testid={testId}
+    sx={{ mt: ds.space[5], pt: ds.space[3], borderTop: `0.5px solid ${ds.gray[200]}`, display: 'flex', flexDirection: 'column', gap: ds.space[2] }}
+  >
+    <Typography
+      sx={{ fontSize: ds.text.caption, fontWeight: ds.weight.semibold, letterSpacing: '0.07em', textTransform: 'uppercase', color: ds.gray[500] }}
+    >
+      {title}
+    </Typography>
+    {children}
+  </Box>
+);
+Section.propTypes = { title: PropTypes.string, children: PropTypes.node, testId: PropTypes.string };
+
+const Disclosure = ({ open, onToggle, label, testId }) => (
+  <Button tone='link' size='xs' onClick={onToggle} data-testid={testId} aria-expanded={open}>
+    {`${label} ${open ? '▾' : '▸'}`}
+  </Button>
+);
+Disclosure.propTypes = { open: PropTypes.bool, onToggle: PropTypes.func, label: PropTypes.string, testId: PropTypes.string };
+
 function InvestigateSidebar({
   row,
   podDetails,
   othersData,
-  matchedOptions,
-  recurrenceInfo,
   alertLabels,
   alertRules,
   queryParam,
@@ -80,6 +128,10 @@ function InvestigateSidebar({
 }) {
   const router = useRouter();
   const [showAll, setShowAll] = useState(false);
+  const [showInternal, setShowInternal] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [showLabels, setShowLabels] = useState(false);
+  const occurrence = useEventOccurrence(row);
   const [showChain, setShowChain] = useState(false);
 
   const {
@@ -219,7 +271,13 @@ function InvestigateSidebar({
   };
 
   const incidentMemberIds = useMemo(() => incidentMembers.map((m) => String(m.id)), [incidentMembers]);
-  const labels = useMemo(() => mapLabels(alertLabels), [alertLabels]);
+  // Nudgebee's own bookkeeping keys are not alert labels: a triage rule id of all
+  // zeros on the first screen reads as a broken value, and a routing key printed
+  // here is an integration secret on screen.
+  const [publicLabels, internalLabels] = useMemo(() => splitInternalLabels(alertLabels), [alertLabels]);
+
+  const labels = useMemo(() => mapLabels(publicLabels), [publicLabels]);
+  const internalLabelChips = useMemo(() => mapLabels(internalLabels), [internalLabels]);
   const visibleLabels = useMemo(() => (showAll ? labels : labels.slice(0, 5)), [labels, showAll]);
   const toggleShow = () => setShowAll((prev) => !prev);
 
@@ -249,6 +307,15 @@ function InvestigateSidebar({
     );
   }
 
+  const hasCrashDetails = podDetails?.data?.containers?.some(
+    (pd) => pd?.status?.reason || (pd?.status?.exitCode !== undefined && pd?.status?.exitCode !== null) || pd?.name || pd?.status?.state
+  );
+  const hasLastState = podDetails?.data?.containers?.some(
+    (pd) => pd?.lastStatus && (pd.lastStatus.state || pd.lastStatus.exitCode !== undefined || pd.lastStatus.reason)
+  );
+  const restarts = podDetails?.data?.restarts;
+  const showHowOften = !!occurrence || (isK8s && (restarts > 0 || othersData?.length > 0));
+
   return (
     <Box sx={{ position: 'sticky !important', top: `${ds.space.mul(0, 37)} !important` }}>
       <Box
@@ -258,7 +325,8 @@ function InvestigateSidebar({
           borderRadius: 'var(--ds-radius-lg)',
           padding: '0 var(--ds-space-4) var(--ds-space-4) var(--ds-space-4)',
           maxHeight: `calc(100vh - ${ds.space.mul(0, 55)})`,
-          overflowX: 'auto',
+          overflowY: 'auto',
+          overflowX: 'hidden',
           '::-webkit-scrollbar': { width: ds.space[1] },
         }}
       >
@@ -298,771 +366,314 @@ function InvestigateSidebar({
           </Box>
         </Box>
 
-        <>
-          <Box sx={{ mt: 'var(--ds-space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
-            <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-              <Text value={'Where'} secondaryText />
-              <Box
-                role='button'
-                tabIndex={0}
-                onClick={onPodClick}
-                onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onPodClick(e)}
-                sx={{ cursor: 'pointer' }}
-                data-testid='pod-name-link'
-              >
-                <Text
-                  value={row?.subject_name ? row?.subject_name : '-'}
-                  secondaryText
-                  showAutoEllipsis
-                  sx={{
-                    color: hasEventSubjectLink(row) ? ds.blue[600] : ds.gray[700],
-                    lineHeight: '1.4',
-                  }}
-                />
-              </Box>
-            </Box>
-            <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-              <Text value={'When'} secondaryText />
+        {/* The facts that decide what to do next. */}
+        <Box sx={{ mt: ds.space[3], display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+          {/* Where it is and whose it is, first. The subject's type labels the
+              row ("Pod", "Deployment", "Ec2 Instance"); rows without a value are
+              skipped rather than shown as "-". */}
+          <Row label={subjectLabel(row?.subject_type)}>
+            <Box
+              role='button'
+              tabIndex={0}
+              onClick={onPodClick}
+              onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onPodClick(e)}
+              sx={{ cursor: 'pointer', minWidth: 0 }}
+              data-testid='pod-name-link'
+            >
               <Text
-                value={
-                  row?.starts_at ? (
-                    <Datetime
-                      value={row?.starts_at}
-                      sx={{ fontSize: 'var(--ds-text-small)' }}
-                      sxSuffix={{ color: ds.gray[700], fontSize: 'var(--ds-text-small)' }}
-                    />
-                  ) : (
-                    ''
-                  )
-                }
+                value={row?.subject_name ? row?.subject_name : '-'}
+                secondaryText
+                showAutoEllipsis
+                copyableTooltip
+                sx={{ color: hasEventSubjectLink(row) ? ds.blue[600] : ds.gray[700], lineHeight: '1.4' }}
               />
             </Box>
-            <EventStateRows
-              row={row}
-              canToggleStatus={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
-              closedByName={closedByName}
-              onToggleStatus={handleToggleAlertStatus}
-            />
-            <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-              <Text value={'Severity'} secondaryText />
-              <Box>
-                <Label text={row?.priority || '-'} margin='0' width={ds.space.mul(0, 21)} />
-              </Box>
-            </Box>
-
-            {row?.computed_score !== null && row?.computed_score !== undefined && (
-              <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Triage Score'} secondaryText />
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
-                  <ScoreDisplay
-                    score={row?.computed_score}
-                    priority={row?.computed_priority}
-                    scoreFactors={row?.score_factors}
-                    confidence={row?.score_confidence}
-                  >
-                    <PriorityPinControl
-                      eventId={row?.id}
-                      accountId={row?.cloud_account_id || router.query.accountId}
-                      currentPriority={row?.computed_priority}
-                      currentScore={row?.computed_score}
-                      currentScoreFactors={row?.score_factors}
-                      canWrite={hasWriteAccess(router.query.accountId)}
-                      onChanged={(newPriority, newScore, newFactors) => {
-                        onRowChange?.((prev) => ({
-                          ...prev,
-                          computed_priority: newPriority,
-                          computed_score: newScore,
-                          score_factors: newFactors,
-                        }));
-                      }}
-                      align='end'
-                    />
-                  </ScoreDisplay>
-                </Box>
-              </Box>
-            )}
-
-            <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-              <Text value={'Triage Status'} secondaryText />
-              <Box>
-                <NBStatusBadge
-                  eventId={row?.id}
-                  currentStatus={row?.nb_status || 'OPEN'}
-                  snoozedUntil={row?.snoozed_until}
-                  onStatusChange={(newStatus, snoozedUntil) => {
-                    onRowChange((prev) => ({ ...prev, nb_status: newStatus, snoozed_until: snoozedUntil ?? null }));
-                  }}
-                  onCreateTicket={!row?.ticket_id ? () => onCreateTicket(row) : undefined}
-                />
-              </Box>
-            </Box>
-
-            {row?.labels?.nb_duplicate_of && (
-              <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Duplicate of'} secondaryText />
-                <Box
-                  sx={{
-                    minHeight: ds.space.mul(0, 9),
-                    fontSize: 'var(--ds-text-body)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    flexWrap: 'wrap',
-                    gap: 'var(--ds-space-2)',
-                  }}
-                >
-                  <Link
-                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                    href={`/investigate?id=${row.labels.nb_duplicate_of}&accountId=${row?.cloud_account_id}`}
-                    openInNew={true}
-                  >
-                    <Label text={'View Original Event'} margin='0' />
-                  </Link>
-                  <LinkedEventState eventId={row.labels.nb_duplicate_of} accountId={row?.cloud_account_id} />
-                </Box>
-              </Box>
-            )}
-
-            {row?.incident_leader_id && (
-              <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Alert group'} secondaryText />
-                <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
-                  <Link
-                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                    href={`/investigate?id=${row.incident_leader_id}&accountId=${row?.cloud_account_id}`}
-                    openInNew={true}
-                  >
-                    <Label text={'View Leader Event'} margin='0' />
-                  </Link>
-                </Box>
-              </Box>
-            )}
-
-            {recurrenceInfo?.isRecurrence && (
-              <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Recurrence'} secondaryText />
-                <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-                    <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.amber[500] }}>⚠️ Previously resolved</Typography>
-                    <Link
-                      style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                      href={`/investigate?id=${recurrenceInfo.previousEventId}&accountId=${row?.cloud_account_id}`}
-                      openInNew={true}
-                    >
-                      <Label text={'View Previous'} margin='0' variant='yellow' />
-                    </Link>
-                  </Box>
-                </Box>
-              </Box>
-            )}
-
-            {row?.labels?.nb_triage_rule_id && (
-              <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Triage Rule'} secondaryText />
-                <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
-                  <Link
-                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                    href={`${detailsPathPrefix}/${row?.cloud_account_id}#events/triage-rules`}
-                    openInNew={true}
-                  >
-                    <Label text={'View Triage Rule'} margin='0' />
-                  </Link>
-                </Box>
-              </Box>
-            )}
-
-            {/* Rule */}
-            <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-              <Text value={'Rule'} secondaryText />
-              <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
-                {row?.source === 'automation' && row?.labels?.automation_id ? (
-                  <Link
-                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                    href={`/automation/${row.labels.automation_id}?executionId=${row.labels.automation_execution_id || ''}&accountId=${
-                      row?.cloud_account_id || ''
-                    }#executions`}
-                    openInNew={true}
-                    id='rule-automation-link'
-                  >
-                    <Label
-                      text={row.labels.automation_name || row?.aggregation_key || '-'}
-                      margin='0'
-                      height='auto'
-                      wordBreak='break-word'
-                      customLabelStyle={fitCustomLabelStyles}
-                      displayTooltip={isCloud}
-                      tooltipCharLimit={isCloud ? 25 : undefined}
-                    />
-                  </Link>
-                ) : row.aggregation_key && alertRules?.includes(row.aggregation_key) ? (
-                  <Link
-                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                    href={`${detailsPathPrefix}/${row?.cloud_account_id}?name=${row?.aggregation_key}#monitoring/alert-manager`}
-                    openInNew={true}
-                  >
-                    <Label
-                      text={(row?.aggregation_key?.includes('_') ? snakeToTitleCase(row?.aggregation_key) : row?.aggregation_key) || '-'}
-                      margin='0'
-                      height='auto'
-                      wordBreak='break-word'
-                      customLabelStyle={fitCustomLabelStyles}
-                      displayTooltip={isCloud}
-                      tooltipCharLimit={isCloud ? 25 : undefined}
-                    />
-                  </Link>
-                ) : (
-                  <Label
-                    text={(row?.aggregation_key?.includes('_') ? snakeToTitleCase(row?.aggregation_key) : row?.aggregation_key) || '-'}
-                    margin='0'
-                    height='auto'
-                    wordBreak='break-word'
-                    customLabelStyle={fitCustomLabelStyles}
-                    displayTooltip={isCloud}
-                    tooltipCharLimit={isCloud ? 25 : undefined}
-                  />
-                )}
-              </Box>
-            </Box>
-          </Box>
-
-          {/* K8s-only: Crash Details, Last State, Impact sections */}
-          {isK8s && (
-            <>
-              {podDetails?.data?.containers?.some(
-                (pd) => pd?.status?.reason || (pd?.status?.exitCode !== undefined && pd?.status?.exitCode !== null) || pd?.name || pd?.status?.state
-              ) && (
-                <Box
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    background: ds.background[100],
-                    gap: 'var(--ds-space-1)',
-                    mb: 'var(--ds-space-4)',
-                    mt: 'var(--ds-space-5)',
-                    '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-                  }}
-                >
-                  <SafeIcon src={ErrorFillIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-                  <Typography
-                    sx={{
-                      color: ds.gray[700],
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'var(--ds-font-weight-medium)',
-                      lineHeight: 'normal',
-                      minWidth: ds.space.mul(0, 51),
-                    }}
-                  >
-                    Crash Details
-                  </Typography>
-                </Box>
+          </Row>
+          {row?.subject_namespace && (
+            // Cloud events keep the service name and region in these fields.
+            <Row label={isCloud ? 'Service' : 'Namespace'}>
+              <Text value={row.subject_namespace} secondaryText showAutoEllipsis sx={valueTextSx} />
+            </Row>
+          )}
+          {row?.subject_node && (
+            <Row label={isCloud ? 'Region' : 'Node'}>
+              <Text value={row.subject_node} copyableTooltip showAutoEllipsis sx={{ fontSize: ds.text.small, ...valueTextSx }} />
+            </Row>
+          )}
+          {row?.cluster && (
+            <Row label='Cluster'>
+              <Text value={row.cluster} secondaryText showAutoEllipsis sx={valueTextSx} />
+            </Row>
+          )}
+          {showOwner && (
+            <Row label='Owner'>
+              {ownerLoading ? (
+                <Text value={'Resolving…'} secondaryText />
+              ) : owner ? (
+                <OwnerBadge owner={owner} hideHint />
+              ) : (
+                <Text value={'Unassigned'} secondaryText sx={valueTextSx} />
               )}
+            </Row>
+          )}
+          <Box sx={{ borderTop: `0.5px solid ${ds.gray[200]}`, my: ds.space[1] }} />
+          <Row label='When'>
+            {/* Relative answers "is this fresh", the clock time "which moment"; the
+                full form with timezone and year is the hover. */}
+            {row?.starts_at && (
+              <Datetime value={row?.starts_at} sx={{ fontSize: ds.text.small }} sxSuffix={{ color: ds.gray[700], fontSize: ds.text.small }} />
+            )}
+            {formatClockCompact(row?.starts_at) && (
+              <Tooltip title={formatClock(row.starts_at)} arrow placement='bottom'>
+                <Box component='span' sx={{ display: 'inline-flex' }}>
+                  <Text
+                    value={`· ${formatClockCompact(row.starts_at)}`}
+                    secondaryText
+                    sx={{ ...valueTextSx, whiteSpace: 'nowrap', cursor: 'default' }}
+                  />
+                </Box>
+              </Tooltip>
+            )}
+          </Row>
+          <EventStateRows
+            row={row}
+            canToggleStatus={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
+            closedByName={closedByName}
+            onToggleStatus={handleToggleAlertStatus}
+          />
+          <Row label='Severity'>
+            <Label text={row?.priority || '-'} margin='0' />
+          </Row>
+          <Row label='Triage'>
+            {row?.computed_score !== null && row?.computed_score !== undefined && (
+              <ScoreDisplay
+                score={row?.computed_score}
+                priority={row?.computed_priority}
+                scoreFactors={row?.score_factors}
+                confidence={row?.score_confidence}
+              >
+                <PriorityPinControl
+                  eventId={row?.id}
+                  accountId={row?.cloud_account_id || router.query.accountId}
+                  currentPriority={row?.computed_priority}
+                  currentScore={row?.computed_score}
+                  currentScoreFactors={row?.score_factors}
+                  canWrite={hasWriteAccess(router.query.accountId)}
+                  onChanged={(newPriority, newScore, newFactors) => {
+                    onRowChange?.((prev) => ({ ...prev, computed_priority: newPriority, computed_score: newScore, score_factors: newFactors }));
+                  }}
+                  align='end'
+                />
+              </ScoreDisplay>
+            )}
+            <NBStatusBadge
+              eventId={row?.id}
+              currentStatus={row?.nb_status || 'OPEN'}
+              snoozedUntil={row?.snoozed_until}
+              onStatusChange={(newStatus, snoozedUntil) => {
+                onRowChange((prev) => ({ ...prev, nb_status: newStatus, snoozed_until: snoozedUntil ?? null }));
+              }}
+              onCreateTicket={!row?.ticket_id ? () => onCreateTicket(row) : undefined}
+            />
+          </Row>
+        </Box>
 
-              {podDetails?.data?.containers?.length > 0 && (
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
-                  {podDetails?.data?.containers?.map((pd, index) => (
-                    <React.Fragment key={pd?.name || index}>
-                      <Box
-                        sx={{
-                          display: 'grid',
-                          flexDirection: 'column',
-                          alignItems: 'flex-start',
-                          gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-                          gap: 'var(--ds-space-1)',
-                        }}
-                      >
-                        {pd?.name && (
-                          <>
-                            {pd?.status?.reason && (
-                              <>
-                                <Text value={'Reason'} secondaryText />
-                                <Label
-                                  variant={'red'}
-                                  customLabelStyle={{ padding: 'var(--ds-space-1) var(--ds-space-1)' }}
-                                  text={pd.status.reason}
-                                />
-                              </>
-                            )}
-                            <>
-                              <Text value={'Container'} secondaryText />
-                              <Text
-                                value={pd.name}
-                                copyableTooltip
-                                showAutoEllipsis
-                                sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700], lineHeight: '1.4' }}
-                              />
-                            </>
-                            {pd?.status?.exitCode !== undefined && pd?.status?.exitCode !== null && (
-                              <>
-                                <Text value={'Exit code'} secondaryText />
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                                  <Text value={pd.status.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
-                                  <Tooltip title={exitCodeMapping[pd.status.exitCode] || 'Unknown'} arrow placement='bottom'>
-                                    <SafeIcon
-                                      src={infoIcon}
-                                      alt='info'
-                                      style={{ width: '13px', height: '13px', cursor: 'pointer', filter: 'opacity(0.5)' }}
-                                    />
-                                  </Tooltip>
-                                </Box>
-                              </>
-                            )}
-                            {pd?.status?.state && (
-                              <>
-                                <Text value={'Status'} secondaryText />
-                                <Text value={pd.status.state} secondaryText sx={{ color: ds.gray[700] }} />
-                              </>
-                            )}
-                          </>
-                        )}
-                      </Box>
-                    </React.Fragment>
+        {showHowOften && (
+          <Section title='How often' testId='sidebar-how-often'>
+            <EventOccurrenceRows occurrence={occurrence} accountId={row?.cloud_account_id} />
+            {isK8s && restarts > 0 && (
+              <Row label='Restarts'>
+                <Text value={restarts} secondaryText sx={{ ...valueTextSx, color: restarts > 1 ? ds.red[500] : ds.gray[700] }} />
+              </Row>
+            )}
+            {isK8s && othersData?.length > 0 && (
+              // Every alert of this rule on this service before the event — a
+              // different population from Firings, so a separate row.
+              <Row label='Same rule here'>
+                <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+                  {othersData.map((item) => (
+                    <Text key={item} value={item} secondaryText sx={valueTextSx} />
                   ))}
                 </Box>
-              )}
+              </Row>
+            )}
+          </Section>
+        )}
 
-              {podDetails?.data?.containers?.some(
-                (pd) => pd?.lastStatus && (pd.lastStatus.state || pd.lastStatus.exitCode !== undefined || pd.lastStatus.reason)
-              ) && (
-                <Box
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    background: ds.background[100],
-                    gap: 'var(--ds-space-1)',
-                    mb: 'var(--ds-space-4)',
-                    mt: 'var(--ds-space-5)',
-                    '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-                  }}
-                >
-                  <SafeIcon src={LastStateIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-                  <Typography
-                    sx={{
-                      color: ds.gray[700],
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'var(--ds-font-weight-medium)',
-                      lineHeight: 'normal',
-                      minWidth: ds.space.mul(0, 35),
-                    }}
-                  >
-                    Last State
-                  </Typography>
-                </Box>
-              )}
-
-              {podDetails?.data?.containers?.map((pd, index) => (
-                <Box key={pd?.name || index}>
-                  <Box className='container-box' sx={{ mb: ds.space[2], fontSize: 'var(--ds-text-body)' }}>
-                    <Box>
-                      {pd?.name && pd?.lastStatus && Object.values(pd.lastStatus).some((v) => v !== null && v !== undefined) && (
-                        <Box
-                          sx={{
-                            display: 'grid',
-                            flexDirection: 'column',
-                            alignItems: 'flex-start',
-                            gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-                            gap: 'var(--ds-space-1)',
-                          }}
-                        >
-                          {pd.lastStatus.state && (
+        {isK8s && hasCrashDetails && (
+          <Section title='Container' testId='sidebar-container'>
+            {podDetails?.data?.containers?.length > 0 && (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
+                {podDetails?.data?.containers?.map((pd, index) => (
+                  <React.Fragment key={pd?.name || index}>
+                    <Box
+                      sx={{
+                        display: 'grid',
+                        flexDirection: 'column',
+                        alignItems: 'flex-start',
+                        gridTemplateColumns: `${ds.space.mul(1, 25)} minmax(0, 1fr)`,
+                        gap: 'var(--ds-space-1)',
+                      }}
+                    >
+                      {pd?.name && (
+                        <>
+                          {pd?.status?.reason && (
                             <>
-                              <Text value={'State'} secondaryText />
-                              <Text value={pd.lastStatus.state} secondaryText sx={{ color: ds.gray[700] }} />
+                              <Text value={'Reason'} secondaryText />
+                              <Label variant={'red'} customLabelStyle={{ padding: 'var(--ds-space-1) var(--ds-space-1)' }} text={pd.status.reason} />
                             </>
                           )}
-                          {pd.lastStatus.exitCode !== undefined && (
+                          <>
+                            <Text value={'Container'} secondaryText />
+                            <Text
+                              value={pd.name}
+                              copyableTooltip
+                              showAutoEllipsis
+                              sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700], lineHeight: '1.4' }}
+                            />
+                          </>
+                          {pd?.status?.exitCode !== undefined && pd?.status?.exitCode !== null && (
                             <>
-                              <Text value={'Exit Code'} secondaryText />
+                              <Text value={'Exit code'} secondaryText />
                               <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                                <Text value={pd.lastStatus.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
-                                <Tooltip title={exitCodeMapping[pd.lastStatus.exitCode] || 'Unknown'} arrow placement='bottom'>
+                                <Text value={pd.status.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
+                                <Tooltip title={exitCodeMapping[pd.status.exitCode] || 'Unknown'} arrow placement='bottom'>
                                   <SafeIcon
                                     src={infoIcon}
                                     alt='info'
-                                    style={{ width: '12px', height: '12px', cursor: 'pointer', filter: 'opacity(0.5)' }}
+                                    style={{ width: '13px', height: '13px', cursor: 'pointer', filter: 'opacity(0.5)' }}
                                   />
                                 </Tooltip>
                               </Box>
                             </>
                           )}
-                          {pd.lastStatus.reason && (
+                          {pd?.status?.state && (
                             <>
-                              <Text value={'Reason'} secondaryText />
-                              <Text value={pd.lastStatus.reason} secondaryText sx={{ color: ds.gray[700] }} />
+                              <Text value={'Status'} secondaryText />
+                              <Text value={pd.status.state} secondaryText sx={{ color: ds.gray[700] }} />
                             </>
                           )}
-                        </Box>
+                        </>
                       )}
                     </Box>
-                  </Box>
-                </Box>
-              ))}
-
-              {podDetails?.data?.containers?.some(
-                (pd) => pd?.status?.state && ((podDetails?.data?.restarts != null && podDetails?.data?.restarts > 0) || othersData?.length > 0)
-              ) && (
-                <Box
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    background: ds.background[100],
-                    gap: 'var(--ds-space-1)',
-                    mb: 'var(--ds-space-4)',
-                    mt: 'var(--ds-space-5)',
-                    '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-                  }}
-                >
-                  <SafeIcon src={GraphOutlineIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-                  <Typography
-                    sx={{
-                      color: ds.gray[700],
-                      fontSize: 'var(--ds-text-body-lg)',
-                      fontWeight: 'var(--ds-font-weight-medium)',
-                      lineHeight: 'normal',
-                      minWidth: ds.space.mul(1, 15),
-                    }}
-                  >
-                    Impact
-                  </Typography>
-                </Box>
-              )}
-
-              <Box
-                sx={{
-                  display: 'grid',
-                  flexDirection: 'column',
-                  alignItems: 'flex-start',
-                  gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-                  gap: 'var(--ds-space-1)',
-                }}
-              >
-                {podDetails?.data?.restarts != null && podDetails?.data?.restarts > 0 && (
-                  <>
-                    <Text value={'Restarts'} secondaryText />
-                    <Text
-                      value={podDetails?.data?.restarts}
-                      secondaryText
-                      sx={{ color: podDetails?.data?.restarts > 1 ? ds.red[500] : ds.gray[700] }}
-                    />
-                  </>
-                )}
-                {othersData?.length > 0 && (
-                  <>
-                    <Text value={'Frequency'} secondaryText />
-                    <Box>
-                      {othersData?.map((item) => (
-                        <Text key={item} value={item} secondaryText sx={{ color: ds.gray[700] }} />
-                      ))}
-                    </Box>
-                  </>
-                )}
+                  </React.Fragment>
+                ))}
               </Box>
-            </>
-          )}
-
-          {/* Context section */}
-          {(row?.cluster || row?.subject_namespace || row?.subject_node || matchedOptions.filter((o) => o.infoData?.length > 0).length > 0) && (
-            <Box
-              sx={{
-                display: 'flex',
-                alignItems: 'center',
-                background: ds.background[100],
-                gap: 'var(--ds-space-1)',
-                mb: 'var(--ds-space-4)',
-                mt: 'var(--ds-space-5)',
-                '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-              }}
-            >
-              <SafeIcon src={FileOutlineIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-              <Typography
-                sx={{
-                  color: ds.gray[700],
-                  fontSize: 'var(--ds-text-body-lg)',
-                  fontWeight: 'var(--ds-font-weight-medium)',
-                  lineHeight: 'normal',
-                  minWidth: ds.space.mul(0, 27),
-                }}
-              >
-                Context
-              </Typography>
-            </Box>
-          )}
-
-          <Box
-            sx={{
-              display: 'grid',
-              flexDirection: 'column',
-              alignItems: 'flex-start',
-              gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-              gap: 'var(--ds-space-1)',
-            }}
-          >
-            {isK8s && podDetails?.data?.qosClass && (
-              <>
-                <Text value={'Cluster'} secondaryText />
-                <Text value={row?.cluster || '-'} secondaryText sx={{ color: ds.gray[700] }} />
-              </>
             )}
-            {row?.subject_namespace && (
-              <>
-                <Text value={'Namespace'} secondaryText />
-                <Text value={row?.subject_namespace || '-'} secondaryText sx={{ color: ds.gray[700] }} />
-              </>
-            )}
-            {row?.subject_node && (
-              <>
-                <Text value={'Node'} secondaryText />
-                <Text
-                  value={row?.subject_node || '-'}
-                  copyableTooltip
-                  showAutoEllipsis
-                  sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700], lineHeight: '1.4' }}
-                />
-              </>
-            )}
-          </Box>
+          </Section>
+        )}
 
-          {/* Ownership section — who is accountable for the affected resource, and how
-              that was derived. Deliberately narrower than the recommendation drawer's
-              card: no chain, because at this width the repeated owner name and the rung
-              labels read as competing values rather than a hierarchy. Hidden entirely
-              when there is nothing to resolve or the resolve failed. */}
-          {showOwner && (
-            <>
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  background: ds.background[100],
-                  gap: 'var(--ds-space-1)',
-                  mb: 'var(--ds-space-4)',
-                  mt: 'var(--ds-space-5)',
-                  '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-                }}
-              >
-                <PersonOutlineOutlinedIcon sx={{ width: '16px', height: '16px', color: ds.gray[700] }} />
-                <Typography
-                  sx={{
-                    color: ds.gray[700],
-                    fontSize: 'var(--ds-text-body-lg)',
-                    fontWeight: 'var(--ds-font-weight-medium)',
-                    lineHeight: 'normal',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  Ownership
-                </Typography>
-              </Box>
-
-              <Box
-                sx={{
-                  display: 'grid',
-                  flexDirection: 'column',
-                  alignItems: 'flex-start',
-                  gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-                  gap: 'var(--ds-space-1)',
-                }}
-              >
-                <Text value={'Owner'} secondaryText />
-                {/* No hint on the chip — the Source row below spells the derivation out,
-                    and a trailing "rule" next to a name reads as a second value. */}
-                {ownerLoading ? (
-                  <Text value={'Resolving…'} secondaryText />
-                ) : owner ? (
-                  <OwnerBadge owner={owner} hideHint />
-                ) : (
-                  <Text value={'— Unassigned'} secondaryText sx={{ color: ds.gray[700] }} />
-                )}
-
-                {!ownerLoading && (
-                  <>
-                    <Text value={'Source'} secondaryText />
-                    <Text value={sourceText(ownerLevels, ownerEffectiveIndex)} secondaryText sx={{ color: ds.gray[700] }} />
-                  </>
-                )}
-
-                {/* The chain, behind a disclosure. Closed by default so the two-line
-                    answer above stays the whole visible block — at this width an
-                    always-open tree competes with it. Only offered when there is more
-                    than one rung to distinguish. */}
-                {!ownerLoading && ownerLevels.length > 1 && (
-                  <Box sx={{ gridColumn: '1 / -1', mt: 'var(--ds-space-1)' }}>
-                    <Button
-                      tone='link'
-                      size='xs'
-                      onClick={() => setShowChain((prev) => !prev)}
-                      data-testid='ownership-chain-toggle'
-                      aria-expanded={showChain}
-                    >
-                      {showChain ? 'Hide chain' : 'Show chain'}
-                    </Button>
-
-                    {showChain && (
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', mt: 'var(--ds-space-1)' }}>
-                        {ownerLevels.map((l, i) => (
-                          <Box
-                            key={l.level}
-                            sx={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 'var(--ds-space-1)',
-                              minWidth: 0,
-                              pl: `calc(var(--ds-space-2) * ${i})`,
-                            }}
-                          >
-                            {i > 0 && <Text value={'└'} secondaryText />}
-                            <Text value={l.level} secondaryText />
-                            {l.own ? <OwnerBadge owner={l.own} hideHint /> : <Text value={'—'} secondaryText />}
-                            {i === ownerEffectiveIndex && (
-                              <Label size='sm' tone='info'>
-                                effective
-                              </Label>
-                            )}
-                          </Box>
-                        ))}
+        {isK8s && hasLastState && (
+          <Section title='Previous run'>
+            {podDetails?.data?.containers?.map((pd, index) => (
+              <Box key={pd?.name || index}>
+                <Box className='container-box' sx={{ mb: ds.space[2], fontSize: 'var(--ds-text-body)' }}>
+                  <Box>
+                    {pd?.name && pd?.lastStatus && Object.values(pd.lastStatus).some((v) => v !== null && v !== undefined) && (
+                      <Box
+                        sx={{
+                          display: 'grid',
+                          flexDirection: 'column',
+                          alignItems: 'flex-start',
+                          gridTemplateColumns: `${ds.space.mul(1, 25)} minmax(0, 1fr)`,
+                          gap: 'var(--ds-space-1)',
+                        }}
+                      >
+                        {pd.lastStatus.state && (
+                          <>
+                            <Text value={'State'} secondaryText />
+                            <Text value={pd.lastStatus.state} secondaryText sx={{ color: ds.gray[700] }} />
+                          </>
+                        )}
+                        {pd.lastStatus.exitCode !== undefined && (
+                          <>
+                            <Text value={'Exit Code'} secondaryText />
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
+                              <Text value={pd.lastStatus.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
+                              <Tooltip title={exitCodeMapping[pd.lastStatus.exitCode] || 'Unknown'} arrow placement='bottom'>
+                                <SafeIcon
+                                  src={infoIcon}
+                                  alt='info'
+                                  style={{ width: '12px', height: '12px', cursor: 'pointer', filter: 'opacity(0.5)' }}
+                                />
+                              </Tooltip>
+                            </Box>
+                          </>
+                        )}
+                        {pd.lastStatus.reason && (
+                          <>
+                            <Text value={'Reason'} secondaryText />
+                            <Text value={pd.lastStatus.reason} secondaryText sx={{ color: ds.gray[700] }} />
+                          </>
+                        )}
                       </Box>
                     )}
                   </Box>
-                )}
-              </Box>
-            </>
-          )}
-
-          {/* Others section */}
-          {(row?.subject_name || row?.subject_type || podDetails?.data?.qosClass || podDetails?.data?.containers?.[0]?.imageName) && (
-            <Box
-              sx={{
-                display: 'flex',
-                alignItems: 'center',
-                background: ds.background[100],
-                gap: 'var(--ds-space-1)',
-                mb: 'var(--ds-space-4)',
-                mt: 'var(--ds-space-5)',
-                '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-              }}
-            >
-              <SafeIcon src={BarsBlueOutlineIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-              <Typography
-                sx={{
-                  color: ds.gray[700],
-                  fontSize: 'var(--ds-text-body-lg)',
-                  fontWeight: 'var(--ds-font-weight-medium)',
-                  lineHeight: 'normal',
-                  minWidth: ds.space.mul(0, 25),
-                }}
-              >
-                Others
-              </Typography>
-            </Box>
-          )}
-          <Box
-            sx={{
-              display: 'grid',
-              flexDirection: 'column',
-              alignItems: 'flex-start',
-              gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
-              gap: 'var(--ds-space-1)',
-            }}
-          >
-            {isK8s && podDetails?.data?.containers?.[0]?.imageName && (
-              <>
-                <Text value={'Image Name'} secondaryText />
-                <Text
-                  value={podDetails?.data?.containers[0].imageName || '-'}
-                  showAutoEllipsis
-                  sx={{ fontSize: 'var(--ds-text-small)', wordBreak: 'break-word', whiteSpace: 'normal', width: '100%', lineHeight: '1.4' }}
-                />
-              </>
-            )}
-            {row?.subject_node && (
-              <>
-                <Text value={'Subject Type'} secondaryText />
-                <Text value={row?.subject_type || '-'} secondaryText sx={{ color: ds.gray[700] }} />
-              </>
-            )}
-            {row?.subject_name && (
-              <>
-                <Text value={'Subject'} secondaryText />
-                <Text
-                  value={row?.subject_name || '-'}
-                  copyableTooltip
-                  showAutoEllipsis
-                  sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700], lineHeight: '1.4' }}
-                />
-              </>
-            )}
-            {podDetails?.data?.qosClass && (
-              <>
-                <Text value={'QOS Class'} secondaryText />
-                <Text value={podDetails?.data?.qosClass} secondaryText sx={{ color: ds.gray[700] }} />
-              </>
-            )}
-            {row?.description && (
-              <>
-                {investigateDescription.containerId && (
-                  <>
-                    <Text value={'Container Id'} secondaryText />
-                    <Text
-                      value={investigateDescription.containerId || '-'}
-                      copyableTooltip
-                      showAutoEllipsis
-                      sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700] }}
-                    />
-                  </>
-                )}
-                {investigateDescription.failureCount && (
-                  <>
-                    <Text value={'Failure Count'} secondaryText />
-                    <Text className='text-value' value={investigateDescription.failureCount} secondaryText sx={{ color: ds.gray[700] }} />
-                  </>
-                )}
-                {isCloud && (
-                  <>
-                    <Text value={'Description'} secondaryText />
-                    <Text value={investigateDescription.logSample} showAutoEllipsis sx={{ fontSize: 'var(--ds-text-small)' }} />
-                  </>
-                )}
-              </>
-            )}
-          </Box>
-
-          {/* Alert labels */}
-          {Object.keys(alertLabels).length > 0 && (
-            <>
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  background: ds.background[100],
-                  gap: 'var(--ds-space-1)',
-                  mb: 'var(--ds-space-4)',
-                  mt: 'var(--ds-space-5)',
-                  '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
-                  '& img': {
-                    filter: 'brightness(0) saturate(100%) invert(44%) sepia(99%) saturate(2351%) hue-rotate(201deg) brightness(98%) contrast(97%)',
-                  },
-                }}
-              >
-                <SafeIcon src={CubeIcon} alt='issue.svg' style={{ width: '16px', height: '16px' }} />
-                <Typography
-                  sx={{
-                    color: ds.gray[700],
-                    fontSize: 'var(--ds-text-body-lg)',
-                    fontWeight: 'var(--ds-font-weight-medium)',
-                    lineHeight: 'normal',
-                    minWidth: ds.space.mul(0, 43),
-                  }}
-                >
-                  Alert labels
-                </Typography>
-              </Box>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--ds-space-1)' }}>{visibleLabels}</Box>
-              {labels.length > 5 && (
-                <Box mt={ds.space[2]}>
-                  <Button tone='link' size='xs' onClick={toggleShow} data-testid='toggle-labels-btn'>
-                    Show {showAll ? 'Less' : `More (${labels.length - 5})`}
-                  </Button>
                 </Box>
-              )}
-            </>
+              </Box>
+            ))}
+          </Section>
+        )}
+
+        <Section title='Related' testId='sidebar-related'>
+          <Row label='Rule'>
+            {row?.source === 'automation' && row?.labels?.automation_id ? (
+              <Link
+                style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
+                href={`/automation/${row.labels.automation_id}?executionId=${row.labels.automation_execution_id || ''}&accountId=${
+                  row?.cloud_account_id || ''
+                }#executions`}
+                openInNew={true}
+                id='rule-automation-link'
+              >
+                <Label
+                  text={row.labels.automation_name || row?.aggregation_key || '-'}
+                  margin='0'
+                  height='auto'
+                  wordBreak='break-word'
+                  customLabelStyle={fitCustomLabelStyles}
+                  displayTooltip={isCloud}
+                  tooltipCharLimit={isCloud ? 25 : undefined}
+                />
+              </Link>
+            ) : row.aggregation_key && alertRules?.includes(row.aggregation_key) ? (
+              <Link
+                style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
+                href={`${detailsPathPrefix}/${row?.cloud_account_id}?name=${row?.aggregation_key}#monitoring/alert-manager`}
+                openInNew={true}
+              >
+                <Label
+                  text={(row?.aggregation_key?.includes('_') ? snakeToTitleCase(row?.aggregation_key) : row?.aggregation_key) || '-'}
+                  margin='0'
+                  height='auto'
+                  wordBreak='break-word'
+                  customLabelStyle={fitCustomLabelStyles}
+                  displayTooltip={isCloud}
+                  tooltipCharLimit={isCloud ? 25 : undefined}
+                />
+              </Link>
+            ) : (
+              <Label
+                text={(row?.aggregation_key?.includes('_') ? snakeToTitleCase(row?.aggregation_key) : row?.aggregation_key) || '-'}
+                margin='0'
+                height='auto'
+                wordBreak='break-word'
+                customLabelStyle={fitCustomLabelStyles}
+                displayTooltip={isCloud}
+                tooltipCharLimit={isCloud ? 25 : undefined}
+              />
+            )}
+          </Row>
+          {row?.incident_leader_id && (
+            <Row label='Grouped under'>
+              <Link
+                style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
+                href={`/investigate?id=${row.incident_leader_id}&accountId=${row?.cloud_account_id}`}
+                openInNew={true}
+              >
+                <Text value={'leader event'} secondaryText sx={{ color: ds.blue[600] }} />
+              </Link>
+            </Row>
           )}
           {row?.incident_member_count > 0 && incidentMembers.length > 0 && (
             <InvestigateDropdown
@@ -1076,7 +687,9 @@ function InvestigateSidebar({
               optionsOverride={incidentMembers.map((m) => ({
                 value: String(m.id),
                 label: m.title || m.aggregation_key,
-                subtext: m.starts_at ? new Date(m.starts_at).toLocaleString() : undefined,
+                // parseDateValue, not new Date: these strings carry no offset, and
+                // reading them as local shifts every grouped alert by the offset.
+                subtext: formatClock(m.starts_at) || undefined,
               }))}
             />
           )}
@@ -1088,7 +701,142 @@ function InvestigateSidebar({
             resetStateWhenItemSelected={onResetState}
             excludeIds={incidentMemberIds}
           />
-        </>
+
+          {/* References rather than decisions: each opens on demand. */}
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: ds.space[3], mt: ds.space[1] }}>
+            <Disclosure open={showDetails} onToggle={() => setShowDetails((prev) => !prev)} label='Details' testId='toggle-details-btn' />
+            {labels.length > 0 && (
+              <Disclosure
+                open={showLabels}
+                onToggle={() => setShowLabels((prev) => !prev)}
+                label={`Alert labels (${labels.length})`}
+                testId='toggle-alert-labels-btn'
+              />
+            )}
+            {internalLabelChips.length > 0 && (
+              <Disclosure
+                open={showInternal}
+                onToggle={() => setShowInternal((prev) => !prev)}
+                label={`Internal fields (${internalLabelChips.length})`}
+                testId='toggle-internal-labels-btn'
+              />
+            )}
+          </Box>
+
+          {showDetails && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }} data-testid='sidebar-details'>
+              {row?.labels?.nb_triage_rule_id && (
+                <Row label='Triage rule'>
+                  <Link
+                    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
+                    href={`${detailsPathPrefix}/${row?.cloud_account_id}#events/triage-rules`}
+                    openInNew={true}
+                  >
+                    <Text value={'open'} secondaryText sx={{ color: ds.blue[600] }} />
+                  </Link>
+                </Row>
+              )}
+              {showOwner && !ownerLoading && (
+                <Row label='Owner source'>
+                  <Text value={sourceText(ownerLevels, ownerEffectiveIndex)} secondaryText sx={valueTextSx} />
+                </Row>
+              )}
+              {showOwner && (
+                <Box sx={{ display: 'grid' }}>
+                  {!ownerLoading && ownerLevels.length > 1 && (
+                    <Box sx={{ gridColumn: '1 / -1', mt: 'var(--ds-space-1)' }}>
+                      <Button
+                        tone='link'
+                        size='xs'
+                        onClick={() => setShowChain((prev) => !prev)}
+                        data-testid='ownership-chain-toggle'
+                        aria-expanded={showChain}
+                      >
+                        {showChain ? 'Hide chain' : 'Show chain'}
+                      </Button>
+
+                      {showChain && (
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', mt: 'var(--ds-space-1)' }}>
+                          {ownerLevels.map((l, i) => (
+                            <Box
+                              key={l.level}
+                              sx={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 'var(--ds-space-1)',
+                                minWidth: 0,
+                                pl: `calc(var(--ds-space-2) * ${i})`,
+                              }}
+                            >
+                              {i > 0 && <Text value={'└'} secondaryText />}
+                              <Text value={l.level} secondaryText />
+                              {l.own ? <OwnerBadge owner={l.own} hideHint /> : <Text value={'—'} secondaryText />}
+                              {i === ownerEffectiveIndex && (
+                                <Label size='sm' tone='info'>
+                                  effective
+                                </Label>
+                              )}
+                            </Box>
+                          ))}
+                        </Box>
+                      )}
+                    </Box>
+                  )}
+                </Box>
+              )}
+              {isK8s && podDetails?.data?.containers?.[0]?.imageName && (
+                <Row label='Image'>
+                  <Text
+                    value={podDetails.data.containers[0].imageName}
+                    showAutoEllipsis
+                    copyableTooltip
+                    sx={{ fontSize: ds.text.small, ...valueTextSx }}
+                  />
+                </Row>
+              )}
+              {podDetails?.data?.qosClass && (
+                <Row label='QOS class'>
+                  <Text value={podDetails.data.qosClass} secondaryText sx={valueTextSx} />
+                </Row>
+              )}
+              {investigateDescription.containerId && (
+                <Row label='Container id'>
+                  <Text
+                    value={investigateDescription.containerId}
+                    copyableTooltip
+                    showAutoEllipsis
+                    sx={{ fontSize: ds.text.small, ...valueTextSx }}
+                  />
+                </Row>
+              )}
+              {investigateDescription.failureCount && (
+                <Row label='Failure count'>
+                  <Text value={investigateDescription.failureCount} secondaryText sx={valueTextSx} />
+                </Row>
+              )}
+              {isCloud && row?.description && (
+                <Row label='Description'>
+                  <Text value={investigateDescription.logSample} showAutoEllipsis sx={{ fontSize: ds.text.small }} />
+                </Row>
+              )}
+            </Box>
+          )}
+
+          {showLabels && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: ds.space[1] }}>{visibleLabels}</Box>
+              {labels.length > 5 && (
+                <Box>
+                  <Button tone='link' size='xs' onClick={toggleShow} data-testid='toggle-labels-btn'>
+                    Show {showAll ? 'Less' : `More (${labels.length - 5})`}
+                  </Button>
+                </Box>
+              )}
+            </Box>
+          )}
+
+          {showInternal && <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: ds.space[1] }}>{internalLabelChips}</Box>}
+        </Section>
       </Box>
     </Box>
   );
@@ -1098,8 +846,6 @@ InvestigateSidebar.propTypes = {
   row: PropTypes.object,
   podDetails: PropTypes.object,
   othersData: PropTypes.array,
-  matchedOptions: PropTypes.array,
-  recurrenceInfo: PropTypes.object,
   alertLabels: PropTypes.object,
   alertRules: PropTypes.array,
   queryParam: PropTypes.object,

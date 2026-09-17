@@ -1,4 +1,4 @@
-import { describeEventState, describeRecurredSince, formatDuration } from '@components/k8s/investigate/eventState';
+import { describeEventState, describeOccurrence, formatDuration } from '@components/k8s/investigate/eventState';
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -68,25 +68,40 @@ describe('describeEventState', () => {
   });
 });
 
-describe('describeRecurredSince', () => {
+describe('describeOccurrence', () => {
+  const first = { id: 'e0', starts_at: '2026-09-13 02:03:00' };
   const latest = { id: 'e2', status: 'FIRING', starts_at: '2026-09-14 09:03:00' };
 
-  it('says nothing when it never recurred', () => {
-    expect(describeRecurredSince({ count: 0, ownState: 'ended', now: NOW })).toBeNull();
+  it('says nothing when this is the only firing', () => {
+    expect(describeOccurrence({ before: 1, after: 0, first, now: NOW })).toBeNull();
   });
 
-  // The case a reader walks away from: this one is closed, the problem is back.
-  it('flags an ended event whose problem came back, with the latest occurrence', () => {
-    const r = describeRecurredSince({ count: 3, latest, ownState: 'ended', now: NOW });
-    expect(r.cameBack).toBe(true);
-    expect(r.text).toBe('3× since · last 20m ago');
-    expect(r.latestOpen).toBe(true);
+  // The count before and after come from one population — same fingerprint — so
+  // position and total are comparable. The old row mixed two definitions.
+  it('places the event in the run of firings', () => {
+    const r = describeOccurrence({ before: 3, after: 3, first, latest, now: NOW });
+    expect(r.text).toBe('3rd of 6 since 13 Sep');
+    expect(r.lastSeen).toBe('20m ago');
+    expect(r.firstId).toBe('e0');
     expect(r.latestId).toBe('e2');
+    expect(r.total).toBe(6);
   });
 
-  it('reports recurrences of an open event without calling it a comeback', () => {
-    const r = describeRecurredSince({ count: 1, latest: { ...latest, status: 'CLOSED' }, ownState: 'open', now: NOW });
-    expect(r.cameBack).toBe(false);
-    expect(r.text).toBe('1× since · last 20m ago');
+  it('uses the right ordinal', () => {
+    expect(describeOccurrence({ before: 1, after: 1, first, now: NOW }).text).toContain('1st of 2');
+    expect(describeOccurrence({ before: 2, after: 1, first, now: NOW }).text).toContain('2nd of 3');
+    expect(describeOccurrence({ before: 11, after: 1, first, now: NOW }).text).toContain('11th of 12');
+    expect(describeOccurrence({ before: 21, after: 1, first, now: NOW }).text).toContain('21st of 22');
+  });
+
+  // A failed lookup leaves the count at 0; saying "0th of 3" would be worse than
+  // saying nothing.
+  it('says nothing when the backward lookup produced no count', () => {
+    expect(describeOccurrence({ before: 0, after: 5, first, latest, now: NOW })).toBeNull();
+  });
+
+  it('omits the last-seen part when the newest occurrence is the first one', () => {
+    const r = describeOccurrence({ before: 1, after: 1, first, latest: first, now: NOW });
+    expect(r.lastSeen).toBe('');
   });
 });

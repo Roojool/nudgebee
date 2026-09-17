@@ -11,16 +11,22 @@ import { Link } from '@ui/Link';
 import { ds } from '@utils/colors';
 import { infoIcon } from '@assets';
 import AlertStatusBadge from '@shared/widgets/AlertStatusBadge';
-import { describeEventState, describeRecurredSince } from './eventState';
+import { describeEventState, describeOccurrence } from './eventState';
 
 // Same grid as the sidebar's other rows, so the key lines up with its value.
-const rowSx = { display: 'grid', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` };
+// minmax(0, 1fr): a plain 1fr track grows to its content and pushed the whole
+// panel into horizontal scroll.
+const rowSx = { display: 'grid', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} minmax(0, 1fr)`, columnGap: ds.space[2] };
 const valueSx = { display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)', minWidth: 0, minHeight: ds.space.mul(0, 9) };
 const detailSx = { color: ds.gray[700], whiteSpace: 'nowrap' };
 
 // Anything created within this long after the event is the event itself: created_at carries
 // microseconds, the filter only milliseconds.
 const SELF_CREATED_AT_SLACK_MS = 1000;
+// How far back to look for earlier firings of the same fingerprint. The row says
+// "since <date>", so a bounded window states what it counted rather than implying
+// all of history.
+const HISTORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 // The badge takes over for FIRING/CLOSED — the two statuses the Close/Open
 // toggle actually knows how to act on — so "State" doubles as the Alert
@@ -57,74 +63,106 @@ StateLine.propTypes = {
   onToggle: PropTypes.func,
 };
 
-/** "State" and "Recurred" rows: is this still going on, has it ended, did it come back. */
-export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleStatus }) => {
-  const [recurred, setRecurred] = useState(null);
+/**
+ * Where this event sits in the run of firings of the same problem: same
+ * fingerprint over the window before it (including it) and everything after.
+ * null until known, and null when this is the only firing.
+ */
+export const useEventOccurrence = (row) => {
+  const [history, setHistory] = useState(null);
   const accountId = row?.cloud_account_id;
   const isDemo = accountId === 'demo';
   const createdMs = row?.created_at ? parseDateValue(row.created_at).getTime() : NaN;
-  const state = describeEventState({ status: row?.status, startsAt: row?.starts_at, endsAt: row?.ends_at });
 
   useEffect(() => {
-    setRecurred(null);
+    setHistory(null);
+    // Demo groupings are canned mock data; counting them would invent recurrences.
     if (isDemo || !accountId || !row?.fingerprint || !Number.isFinite(createdMs)) return undefined;
     let cancelled = false;
-    apiKubernetes
-      .getK8sEventGroupings(
+    const columns = ['id', 'status', 'starts_at'];
+    const groupings = (startDate, endDate, order) =>
+      apiKubernetes.getK8sEventGroupings(
         1,
         0,
-        { account_id: accountId, fingerprint: row.fingerprint, start_date: new Date(createdMs + SELF_CREATED_AT_SLACK_MS), end_date: new Date() },
-        ['id', 'status', 'starts_at'],
-        ['id', 'status', 'starts_at'],
-        { name: 'starts_at', order: 'desc' }
-      )
-      .then((res) => {
+        { account_id: accountId, fingerprint: row.fingerprint, start_date: startDate, end_date: endDate },
+        columns,
+        columns,
+        { name: 'starts_at', order }
+      );
+    Promise.all([
+      groupings(new Date(createdMs - HISTORY_WINDOW_MS), new Date(createdMs + SELF_CREATED_AT_SLACK_MS), 'asc'),
+      // +1ms: the filter is inclusive at both ends, so without it an event created
+      // exactly on the boundary would be counted in both windows.
+      groupings(new Date(createdMs + SELF_CREATED_AT_SLACK_MS + 1), new Date(), 'desc'),
+    ])
+      .then(([earlier, later]) => {
         if (cancelled) return;
-        setRecurred({
-          count: Number(res?.data?.event_groupings_aggregate?.aggregate?.count) || 0,
-          latest: res?.data?.event_groupings?.[0],
+        const count = (res) => Number(res?.data?.event_groupings_aggregate?.aggregate?.count) || 0;
+        setHistory({
+          before: count(earlier),
+          after: count(later),
+          first: earlier?.data?.event_groupings?.[0],
+          latest: later?.data?.event_groupings?.[0],
         });
       })
       // A failed lookup must not put a claim on screen, but it must not vanish either.
-      .catch((err) => console.error('Failed to look up recurrences for fingerprint', row?.fingerprint, err));
+      .catch((err) => console.error('Failed to look up occurrences for fingerprint', row?.fingerprint, err));
     return () => {
       cancelled = true;
     };
   }, [accountId, isDemo, row?.fingerprint, createdMs]);
 
-  const recurredSince = recurred && state ? describeRecurredSince({ ...recurred, ownState: state.state }) : null;
+  return history ? describeOccurrence(history) : null;
+};
 
+/** "State" row: is this still going on, or has it ended. */
+export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleStatus }) => {
+  const state = describeEventState({ status: row?.status, startsAt: row?.starts_at, endsAt: row?.ends_at });
+  if (!state) return null;
+  return (
+    <Box sx={rowSx}>
+      <Text value={'State'} secondaryText />
+      <StateLine
+        state={state}
+        testId='event-lifecycle-state'
+        eventId={row?.id}
+        rawStatus={row?.status}
+        canToggle={canToggleStatus}
+        closedByName={closedByName}
+        onToggle={onToggleStatus}
+      />
+    </Box>
+  );
+};
+
+const eventLink = (id, accountId, text) => (
+  <Link
+    style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
+    href={`/investigate?id=${id}&accountId=${accountId}`}
+    openInNew={true}
+  >
+    <Text value={text} secondaryText sx={{ color: ds.blue[600] }} />
+  </Link>
+);
+
+/** "Firings" and "Last one" rows for the How often section. Plain text, no chip. */
+export const EventOccurrenceRows = ({ occurrence, accountId }) => {
+  if (!occurrence) return null;
   return (
     <>
-      {state && (
-        <Box sx={rowSx}>
-          <Text value={'State'} secondaryText />
-          <StateLine
-            state={state}
-            testId='event-lifecycle-state'
-            eventId={row?.id}
-            rawStatus={row?.status}
-            canToggle={canToggleStatus}
-            closedByName={closedByName}
-            onToggle={onToggleStatus}
-          />
+      <Box sx={rowSx}>
+        <Text value={'Firings'} secondaryText />
+        <Box sx={{ ...valueSx, flexWrap: 'wrap', rowGap: ds.space[1] }} data-testid='event-occurrence'>
+          <Text value={occurrence.text} secondaryText sx={{ color: ds.gray[700], fontWeight: ds.weight.semibold }} />
+          {occurrence.firstId && eventLink(occurrence.firstId, accountId, 'first')}
         </Box>
-      )}
-      {recurredSince && (
+      </Box>
+      {occurrence.lastSeen && (
         <Box sx={rowSx}>
-          <Text value={recurredSince.cameBack ? 'Came back' : 'Recurred'} secondaryText />
-          <Box sx={valueSx} data-testid='event-recurred-since'>
-            {recurredSince.latestId ? (
-              <Link
-                style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
-                href={`/investigate?id=${recurredSince.latestId}&accountId=${accountId}`}
-                openInNew={true}
-              >
-                <Label text={recurredSince.text} margin='0' tone='warning' />
-              </Link>
-            ) : (
-              <Label text={recurredSince.text} margin='0' tone='warning' />
-            )}
+          <Text value={'Last one'} secondaryText />
+          <Box sx={{ ...valueSx, flexWrap: 'wrap', rowGap: ds.space[1] }} data-testid='event-occurrence-latest'>
+            <Text value={occurrence.lastSeen} secondaryText sx={{ color: ds.gray[700] }} />
+            {occurrence.latestId && eventLink(occurrence.latestId, accountId, 'open')}
           </Box>
         </Box>
       )}
@@ -132,39 +170,14 @@ export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleSta
   );
 };
 
+EventOccurrenceRows.propTypes = {
+  occurrence: PropTypes.object,
+  accountId: PropTypes.string,
+};
+
 EventStateRows.propTypes = {
   row: PropTypes.object,
   canToggleStatus: PropTypes.bool,
   closedByName: PropTypes.string,
   onToggleStatus: PropTypes.func,
-};
-
-/** The state of another event (e.g. the original of a duplicate), shown beside its link. */
-export const LinkedEventState = ({ eventId, accountId }) => {
-  const [linked, setLinked] = useState(null);
-
-  useEffect(() => {
-    setLinked(null);
-    if (!eventId || accountId === 'demo') return undefined;
-    let cancelled = false;
-    apiKubernetes
-      .getEventState(eventId)
-      .then((ev) => {
-        if (!cancelled && ev) setLinked(ev);
-      })
-      .catch((err) => console.error('Failed to get state for linked event', eventId, err));
-    return () => {
-      cancelled = true;
-    };
-  }, [eventId, accountId]);
-
-  const state = linked ? describeEventState({ status: linked.status, startsAt: linked.starts_at, endsAt: linked.ends_at }) : null;
-  if (!state) return null;
-  const text = state.state === 'open' ? 'Open' : state.endedAgo ? `Ended ${state.endedAgo}` : 'Ended';
-  return <Label tone={state.tone} text={text} margin='0' />;
-};
-
-LinkedEventState.propTypes = {
-  eventId: PropTypes.string,
-  accountId: PropTypes.string,
 };

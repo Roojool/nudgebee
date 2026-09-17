@@ -9,7 +9,7 @@
 // event is described as "no end reported", and whether the problem is actually still occurring is
 // answered by recurrence: newer events with the same fingerprint.
 
-import { formatTooltip, parseDateValue } from '@shared/format/Datetime';
+import { formatClockCompact, formatTooltip, parseDateValue } from '@shared/format/Datetime';
 
 const SEC = 1000;
 const MIN = 60 * SEC;
@@ -77,29 +77,45 @@ export function describeEventState({ status, startsAt, endsAt, now = Date.now() 
 }
 
 /**
- * Describe newer occurrences of the same problem.
+ * Place this event in the run of firings of the same problem.
+ *
+ * Counted over ONE population — events with the same fingerprint, before and
+ * after this one — so the position and the total mean the same thing. The dedup
+ * chain's own occurrence_number cannot be mixed in: it resets to 1 whenever the
+ * chain restarts (resolved, or quiet past the source's dedup window), so
+ * "3rd of 6" built from both numbers would be wrong on exactly the alerts that
+ * repeat.
  *
  * @param {object} input
- * @param {number} input.count      events with the same fingerprint created after this one
- * @param {object} [input.latest]   the newest of them: { id, status, starts_at }
- * @param {string} input.ownState   this event's state from describeEventState ('open' | 'ended')
- * @returns {null | { tone: string, text: string, latestId?: string, latestOpen: boolean, cameBack: boolean }}
+ * @param {number} input.before  same fingerprint up to and including this event
+ * @param {number} input.after   same fingerprint after it
+ * @param {object} [input.first] the oldest one seen: { id, starts_at }
+ * @param {object} [input.latest] the newest one seen: { id, starts_at }
+ * @returns {null | { text: string, lastSeen: string, firstId?: string, latestId?: string, total: number }}
  */
-export function describeRecurredSince({ count, latest, ownState, now = Date.now() }) {
-  if (!count || count <= 0) return null;
-  const latestStartMs = toMs(latest?.starts_at);
-  const latestOpen = String(latest?.status || '').toUpperCase() === 'FIRING';
-  // Short enough to fit the sidebar's value column on one line.
-  const parts = [`${count}× since`];
-  if (Number.isFinite(latestStartMs)) {
-    parts.push(`last ${formatDuration(now - latestStartMs)} ago`);
-  }
+export function describeOccurrence({ before, after, first, latest, now = Date.now() }) {
+  const position = Number(before) || 0;
+  const total = position + (Number(after) || 0);
+  // position counts this event, so 0 means the lookup failed rather than "never
+  // happened". One occurrence is not a pattern and gets no row.
+  if (position <= 0 || total <= 1) return null;
+  // Short enough for the sidebar's value column: the chip carries the count and
+  // the day it started; how long ago the latest one was sits beside it and wraps.
+  const firstMs = toMs(first?.starts_at);
+  const since = Number.isFinite(firstMs) ? ` since ${formatClockCompact(firstMs).replace(/ \d{2}:\d{2}$/, '')}` : '';
+  const latestMs = toMs(latest?.starts_at);
+  const hasLater = Number.isFinite(latestMs) && latest?.id && String(latest.id) !== String(first?.id);
   return {
-    // An ended event whose problem came back is the case a reader would otherwise walk away from.
-    cameBack: ownState === 'ended',
-    tone: 'warning',
-    text: parts.join(' · '),
+    text: `${ordinal(position)} of ${total}${since}`,
+    lastSeen: hasLater ? `${formatDuration(now - latestMs)} ago` : '',
+    firstId: first?.id ? String(first.id) : undefined,
     latestId: latest?.id ? String(latest.id) : undefined,
-    latestOpen,
+    total,
   };
+}
+
+function ordinal(n) {
+  const rest = n % 100;
+  if (rest >= 11 && rest <= 13) return `${n}th`;
+  return `${n}${{ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'}`;
 }

@@ -8,7 +8,6 @@ import {
   getStartOfMonth,
   getEndOfMonth,
   getYesterday,
-  getLast7Days,
   formatDateTime,
 } from '@lib/datetime';
 import { getBudgetExpectedMonthlyExpense, getExpectedYearlyExpense } from '@lib/budget';
@@ -419,18 +418,6 @@ query ResolveEventRecord($id:String!) {
 `;
 
 // Lifecycle fields only — for showing another event's state without loading its evidences.
-export const GET_EVENT_STATE = `
-query GetEventState($id:String!) {
-  events: events_list(where: {id: {_eq:$id}}) {
-    rows {
-      id
-      status
-      starts_at
-      ends_at
-    }
-  }
-}
-`;
 export const EVENT_UPDATE_STATUS = `
 mutation EventUpdateStatus($event_id: String!, $status: String!) {
   event_update_status(event_id: $event_id, status: $status) {
@@ -1248,10 +1235,6 @@ const apiKubernetes = {
       return error;
     }
   },
-  async getEventState(id: string): Promise<{ id: string; status: string; starts_at: string; ends_at: string | null } | null> {
-    const response = await queryGraphQL(GET_EVENT_STATE, 'GetEventState', { id });
-    return response?.data?.data?.events?.rows?.[0] ?? null;
-  },
   async getEventsSimilarDataAndInsights(aggregation_key: string, service_key: string, id: string, end_date: string | null = null) {
     try {
       let parsedEndDate: Date | null = null;
@@ -1276,8 +1259,11 @@ const apiKubernetes = {
         id: id,
         aggregation_key: aggregation_key,
         service_key: service_key,
-        sdate_1_days: getYesterday(new Date()),
-        sdate_7_days: getLast7Days(new Date()),
+        // Anchored on the event, not on now: with `endDate` set to the event's
+        // start and these set from today, the range inverted on any event older
+        // than the window and the count silently came back 0.
+        sdate_1_days,
+        sdate_7_days,
         endDate: parsedEndDate,
       });
       const d = response?.data?.data;
