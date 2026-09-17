@@ -128,6 +128,8 @@ func (a *podLogAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 		return nil, errors.New("relay: unable to execute relay query")
 	}
 	insight := InsightFromRelayResponse(relayResponse)
+	logDigest := summarizeAgentLogPayload(data)
+	insight = append(insight, logDigest.Insights...)
 
 	// Record which container instance was read and over what window. Without
 	// this, stored evidence does not say whether a payload is the dying
@@ -144,6 +146,16 @@ func (a *podLogAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 	}
 	if params.TailLines > 0 {
 		additionalInfo["tail_lines"] = params.TailLines
+	}
+	// Same key the provider log actions write, so the investigation tools read one
+	// shape regardless of which source the logs came from.
+	if logDigest.Summary != nil {
+		additionalInfo["log_summary"] = logDigest.Summary
+	}
+	// The log card shows these instead of the raw file when the file is too long to read.
+	if len(logDigest.Groups) > 0 {
+		additionalInfo["log_groups"] = logDigest.Groups
+		additionalInfo["log_total_lines"] = logDigest.TotalLines
 	}
 
 	return PlaybookActionResponseFile{
@@ -186,6 +198,20 @@ func (a *podLogAction) fetch(ctx PlaybookActionContext, params podLogParams, pre
 		Cache:   false,
 	}
 	return relay.ExecuteAndExtractResponse(relayRequest)
+}
+
+// maxPodLogInsights is how many log patterns become card highlights.
+const maxPodLogInsights = 3
+
+// summarizeAgentLogPayload groups the lines of an agent log payload.
+// An undecodable payload yields nothing rather than an error: the logs are still
+// stored and shown, they just carry no summary.
+func summarizeAgentLogPayload(payload string) LogLinesDigest {
+	decoded, err := DecodeAgentPayload(payload)
+	if err != nil || IsLogRetrievalFailure(decoded) {
+		return LogLinesDigest{}
+	}
+	return LogLinesSummary(decoded, maxPodLogInsights)
 }
 
 // usableAgentLogOutput reports whether an agent log payload carries actual log

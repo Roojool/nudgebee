@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import ConsoleLogOutput from '@shared/viewers/ConsoleLogOutput';
+import LogGroupsView from './LogGroupsView';
 import { base64Converter, unzipData } from './util';
 import LogsIcon from '@assets/investigation/logs-blue.svg';
 import { redLogsErrorCodes as keywords, libraryErrors } from 'src/utils/common';
@@ -139,7 +139,7 @@ class LogsCard {
         {/* Render non-tabbed logs */}
         {logsWithoutTabs.map((log, index) => (
           <div key={log.fileName}>
-            <ConsoleLogOutput data={log.logs} />
+            <LogGroupsView logs={log.logs} additionalInfo={log.additionalInfo} idPrefix={`log-groups-${index}`} />
             {index < logsWithoutTabs.length - 1 && <br />}
           </div>
         ))}
@@ -236,7 +236,14 @@ const LogsTabs = ({ logs, getTabLabel }) => {
 
       {/* Tab Content */}
       <div role='tabpanel' id={`tabpanel-${activeTab}`} aria-labelledby={`tab-${activeTab}`} style={tabContentStyle}>
-        {logs[activeTab] && <ConsoleLogOutput data={logs[activeTab].logs} />}
+        {logs[activeTab] && (
+          <LogGroupsView
+            key={activeTab}
+            logs={logs[activeTab].logs}
+            additionalInfo={logs[activeTab].additionalInfo}
+            idPrefix={`log-groups-tab-${activeTab}`}
+          />
+        )}
       </div>
     </div>
   );

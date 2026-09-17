@@ -30,69 +30,6 @@ func init() {
 
 // Get top 2 error logs based on severity
 const actionLogMaxInsightErrors = 10
-const logSummaryMaxPatterns = 10
-
-// computeLogSummary runs Drain3 pattern clustering and level detection on log data.
-// Returns a map suitable for additional_info containing level_breakdown and log_patterns.
-// Expects logs as []map[string]any with "body" and optional "severity_text" keys.
-func computeLogSummary(logs []map[string]any) map[string]any {
-	if len(logs) == 0 {
-		return nil
-	}
-
-	// Collect message bodies
-	var allBodies []string
-	for _, logData := range logs {
-		body, _ := logData["body"].(string)
-		if body != "" {
-			allBodies = append(allBodies, body)
-		}
-	}
-
-	if len(allBodies) == 0 {
-		return nil
-	}
-
-	// Level breakdown
-	levelCounts := map[string]int{}
-	for _, logData := range logs {
-		// Use severity_text if available
-		if severity, ok := logData["severity_text"].(string); ok && severity != "" {
-			levelCounts[strings.ToLower(severity)]++
-			continue
-		}
-		// Fall back to logparser level detection
-		body, _ := logData["body"].(string)
-		if body != "" {
-			level := logparser.GuessLevel(body)
-			if level != logparser.LevelUnknown {
-				levelCounts[level.String()]++
-			} else {
-				levelCounts["unknown"]++
-			}
-		}
-	}
-
-	// Extract top patterns using Drain3
-	patterns := logparser.ExtractPatterns(allBodies, logSummaryMaxPatterns)
-	patternList := make([]map[string]any, 0, len(patterns))
-	for _, p := range patterns {
-		patternList = append(patternList, map[string]any{
-			"template":   p.Template,
-			"count":      p.Count,
-			"percentage": p.Percentage,
-			"example":    p.Example,
-		})
-	}
-
-	summary := map[string]any{
-		"total_lines":     len(allBodies),
-		"level_breakdown": levelCounts,
-		"log_patterns":    patternList,
-	}
-
-	return summary
-}
 
 // firstStringField returns the first key in obj that holds a non-empty value, coerced to a
 // string. Structured logs sometimes encode time/level/severity numerically (epoch timestamp
@@ -477,7 +414,7 @@ func actionLogExtractErrorPatterns(logs []map[string]any, maxErrors int) []playb
 // every provider renders through the same frontend cards.
 
 // outputLogsToInsightMaps converts canonical logs to the {"body","severity_text",
-// "labels"} map shape that computeLogSummary / actionLogExtractErrorPatterns consume.
+// "labels"} map shape that playbooks.ComputeLogSummary / actionLogExtractErrorPatterns consume.
 func outputLogsToInsightMaps(logs []OutputLog) []map[string]any {
 	return lo.Map(logs, func(item OutputLog, _ int) map[string]any {
 		return map[string]any{
@@ -560,7 +497,7 @@ func buildLogsActionResponse(logs []OutputLog, title string, additionalInfo map[
 	if title != "" {
 		additionalInfo["title"] = title
 	}
-	if summary := computeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
+	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
 	insight := extractLogInsights(logs, maxInsights)
@@ -1367,7 +1304,7 @@ func (a *signozLogsAction) executeRawQueryLegacy(ctx playbooks.PlaybookActionCon
 
 	// Add log summary (level breakdown + pattern grouping)
 	logEntries := a.extractLogEntries(data)
-	if summary := computeLogSummary(logEntries); summary != nil {
+	if summary := playbooks.ComputeLogSummary(logEntries); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
 
@@ -1929,7 +1866,7 @@ func (a *observabilityLogAction) fetchLogsViaLogsEnricher(ctx playbooks.Playbook
 	}
 	filename, _ := relayResponse["filename"].(string)
 	insight := playbooks.InsightFromRelayResponse(relayResponse)
-	if summary := computeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
+	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
 	if filename != "" {
@@ -2046,7 +1983,7 @@ func (a *observabilityLogAction) fetchLogsViaKubectl(ctx playbooks.PlaybookActio
 		return nil, nil
 	}
 	insight := playbooks.InsightFromRelayResponse(relayResponse)
-	if summary := computeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
+	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
 	additionalInfo["filename"] = fmt.Sprintf("%s-%s.log", workloadName, namespace)

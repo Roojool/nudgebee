@@ -275,8 +275,11 @@ function CollapsableCard({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)', minWidth: 0 }}>
               <SearchOutlined style={{ width: ds.space[4], height: ds.space[4], color: 'var(--ds-gray-400)' }} />
               <Box component='div' sx={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+                {/* This line is shown when a card produced no highlight, which says nothing about
+                    whether the card is empty — several cards hold the root cause and highlight
+                    nothing. So it asks the reader to look instead of claiming there is nothing there. */}
                 <Text
-                  value={'Nothing major to show. Check the card for more.'}
+                  value={'Open the card to see what it holds.'}
                   showAutoEllipsis
                   sx={{
                     gap: 'var(--ds-space-1)',
