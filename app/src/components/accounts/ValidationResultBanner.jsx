@@ -1,4 +1,5 @@
-import { Alert, Box, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import PropTypes from 'prop-types';
@@ -17,9 +18,9 @@ const ValidationResultBanner = ({ result }) => {
   // Hard failure (e.g. invalid credentials JSON)
   if (result.success === false && result.errorMessage) {
     return (
-      <Alert severity='error' sx={{ mt: ds.space[2], mb: ds.space[2] }}>
-        {result.errorMessage}
-      </Alert>
+      <Box sx={{ mt: ds.space[2], mb: ds.space[2] }}>
+        <Banner tone='critical' message={result.errorMessage} />
+      </Box>
     );
   }
 
@@ -44,30 +45,37 @@ const ValidationResultBanner = ({ result }) => {
   }
 
   return (
-    <Alert severity={severity} sx={{ mt: ds.space[2], mb: ds.space[2] }}>
-      <Typography variant='body2' sx={{ mb: ds.space[1] }}>
-        {title}
-      </Typography>
-      {details.map((detail) => (
-        <Box key={detail.permission} sx={{ display: 'flex', alignItems: 'flex-start', gap: ds.space[1], mt: ds.space[1] }}>
-          {detail.hasAccess ? (
-            <CheckCircleOutlineIcon sx={{ fontSize: ds.text.title, color: 'success.main', mt: 'var(--ds-space-1)' }} />
-          ) : (
-            <WarningAmberIcon sx={{ fontSize: ds.text.title, color: 'warning.main', mt: 'var(--ds-space-1)' }} />
-          )}
-          <Box>
-            <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
-              {detail.permission}
+    <Box sx={{ mt: ds.space[2], mb: ds.space[2] }}>
+      <Banner
+        tone={severity}
+        message={
+          <>
+            <Typography variant='body2' sx={{ mb: ds.space[1] }}>
+              {title}
             </Typography>
-            {detail.errorDetail && (
-              <Typography variant='caption' color='text.secondary'>
-                {detail.errorDetail}
-              </Typography>
-            )}
-          </Box>
-        </Box>
-      ))}
-    </Alert>
+            {details.map((detail) => (
+              <Box key={detail.permission} sx={{ display: 'flex', alignItems: 'flex-start', gap: ds.space[1], mt: ds.space[1] }}>
+                {detail.hasAccess ? (
+                  <CheckCircleOutlineIcon sx={{ fontSize: ds.text.title, color: 'success.main', mt: 'var(--ds-space-1)' }} />
+                ) : (
+                  <WarningAmberIcon sx={{ fontSize: ds.text.title, color: 'warning.main', mt: 'var(--ds-space-1)' }} />
+                )}
+                <Box>
+                  <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>
+                    {detail.permission}
+                  </Typography>
+                  {detail.errorDetail && (
+                    <Typography variant='caption' color='text.secondary'>
+                      {detail.errorDetail}
+                    </Typography>
+                  )}
+                </Box>
+              </Box>
+            ))}
+          </>
+        }
+      />
+    </Box>
   );
 };
 

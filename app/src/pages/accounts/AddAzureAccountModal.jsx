@@ -1,10 +1,10 @@
-import { Grid, Typography, Box, Alert } from '@mui/material';
+import { Grid, Typography, Box } from '@mui/material';
 import { Chip } from '@ui/Chip';
 import { CollapsableCard } from '@ui/CollapsableCard';
 import { Stepper } from '@ui/Stepper';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
-import { Visibility, VisibilityOff, HelpOutline, InfoOutlined, SearchOutlined, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
+import { Visibility, VisibilityOff, HelpOutline, SearchOutlined, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
 import { useState, useEffect, useRef } from 'react';
 import { Banner } from '@ui/Banner';
 import { useTour } from '@components/common/tour';
@@ -468,9 +468,9 @@ const AddAzureAccountModal = ({ open, onClose }) => {
 
           {discoveryError && (
             <Box sx={{ py: ds.space[4] }}>
-              <Alert severity='error' sx={{ mb: ds.space[4] }}>
-                {discoveryError}
-              </Alert>
+              <Box sx={{ mb: ds.space[4] }}>
+                <Banner tone='critical' message={discoveryError} />
+              </Box>
               <Box sx={{ textAlign: 'center' }}>
                 <Button size='md' id='retry-discover' tone='secondary' onClick={handleDiscoverSubscriptions} disabled={isDiscovering}>
                   Retry
@@ -575,11 +575,18 @@ const AddAzureAccountModal = ({ open, onClose }) => {
         <>
           {!onboardResults && (
             <>
-              <Alert severity='info' icon={<InfoOutlined sx={{ fontSize: 16 }} />} sx={{ mb: ds.space[4] }}>
-                {selectedSubscriptionIds.size} subscription{selectedSubscriptionIds.size > 1 ? 's' : ''} will be onboarded under &quot;
-                {accountNameValue}&quot;.
-                {selectedSubscriptionIds.size > 1 && ' The first subscription becomes the parent account.'}
-              </Alert>
+              <Box sx={{ mb: ds.space[4] }}>
+                <Banner
+                  tone='info'
+                  message={
+                    <>
+                      {selectedSubscriptionIds.size} subscription{selectedSubscriptionIds.size > 1 ? 's' : ''} will be onboarded under &quot;
+                      {accountNameValue}&quot;.
+                      {selectedSubscriptionIds.size > 1 && ' The first subscription becomes the parent account.'}
+                    </>
+                  }
+                />
+              </Box>
 
               <Box
                 sx={{

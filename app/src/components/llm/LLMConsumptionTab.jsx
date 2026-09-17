@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import Tooltip from '@ui/Tooltip';
 import PropTypes from 'prop-types';
-import { Box, Typography, Alert, Collapse, Stack } from '@mui/material';
+import { Box, Typography, Collapse, Stack } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Divider } from '@ui/Divider';
 import { Chip } from '@ui/Chip';
 import { Input } from '@ui/Input';
@@ -812,16 +813,23 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
     >
       <Box sx={{ p: ds.space[2] }}>
         {error && (
-          <Alert severity='error' sx={{ mb: ds.space[4] }}>
-            {error}
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner tone='critical' message={error} />
+          </Box>
         )}
 
         {hasConflict && (
-          <Alert severity='warning' sx={{ mb: ds.space[4], fontSize: 'var(--ds-text-caption)' }}>
-            A budget already exists for {conflictingModules.map((m) => moduleLabels[m] || m).join(' and ')} on this {entityType}. Edit the existing
-            budget from the Active Budgets section instead of adding a new one.
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner
+              tone='warning'
+              message={
+                <>
+                  A budget already exists for {conflictingModules.map((m) => moduleLabels[m] || m).join(' and ')} on this {entityType}. Edit the
+                  existing budget from the Active Budgets section instead of adding a new one.
+                </>
+              }
+            />
+          </Box>
         )}
 
         <Box sx={{ display: 'flex', gap: 2, mb: ds.space[4] }}>
@@ -1452,9 +1460,12 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
           so it surfaces via the Exhausted status pill instead, without
           this banner. */}
       {kpi?.tenantExhausted && (
-        <Alert severity='warning' sx={{ mb: ds.space[3], fontSize: 'var(--ds-text-small)' }}>
-          {`Tenant budget exhausted. Please contact ${baseTitle} support to enable ${assistantName} and LLM-based Event Analysis.`}
-        </Alert>
+        <Box sx={{ mb: ds.space[3] }}>
+          <Banner
+            tone='warning'
+            message={`Tenant budget exhausted. Please contact ${baseTitle} support to enable ${assistantName} and LLM-based Event Analysis.`}
+          />
+        </Box>
       )}
 
       {/* KPI strip + Usage matrix. In tenant-wide mode the per-account

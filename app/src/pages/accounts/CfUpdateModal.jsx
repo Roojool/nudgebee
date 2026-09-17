@@ -1,4 +1,5 @@
-import { Grid, Typography, Alert } from '@mui/material';
+import { Box, Grid, Typography } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Checkbox } from '@ui/Checkbox';
 import React, { useRef, useState } from 'react';
 import PropTypes from 'prop-types';
@@ -85,14 +86,28 @@ const CfUpdateModal = ({ open, onClose, accountId }) => {
       {data && (
         <>
           {data.needs_update ? (
-            <Alert severity='info' sx={{ mx: 2, mt: 1 }}>
-              Stack <strong>{data.stack_name}</strong> is on v{data.template_version}. Latest version is v{data.latest_version}.
-            </Alert>
+            <Box sx={{ mx: 2, mt: 1 }}>
+              <Banner
+                tone='info'
+                message={
+                  <>
+                    Stack <strong>{data.stack_name}</strong> is on v{data.template_version}. Latest version is v{data.latest_version}.
+                  </>
+                }
+              />
+            </Box>
           ) : (
-            <Alert severity='success' sx={{ mx: 2, mt: 1 }}>
-              Stack <strong>{data.stack_name}</strong> is already on the latest version (v{data.latest_version}). You can still update parameter
-              settings below.
-            </Alert>
+            <Box sx={{ mx: 2, mt: 1 }}>
+              <Banner
+                tone='success'
+                message={
+                  <>
+                    Stack <strong>{data.stack_name}</strong> is already on the latest version (v{data.latest_version}). You can still update parameter
+                    settings below.
+                  </>
+                }
+              />
+            </Box>
           )}
 
           <MarkDowns data={cfUpdateInstructions()} sx={{ width: 'auto' }} />
@@ -125,13 +140,20 @@ const CfUpdateModal = ({ open, onClose, accountId }) => {
             </Grid>
           </Grid>
 
-          <Alert severity='warning' sx={{ mx: 2, mt: 2 }}>
-            When you reach <strong>Step 2 (Parameters)</strong> in AWS Console, set:
-            <br />
-            &bull; <strong>NudgebeeSsmAccess</strong> = <code>{ssmAccess ? 'enabled' : 'disabled'}</code>
-            <br />
-            &bull; <strong>NudgebeeAccessMode</strong> = <code>{readOnly ? 'readonly' : 'readwrite'}</code>
-          </Alert>
+          <Box sx={{ mx: 2, mt: 2 }}>
+            <Banner
+              tone='warning'
+              message={
+                <>
+                  When you reach <strong>Step 2 (Parameters)</strong> in AWS Console, set:
+                  <br />
+                  &bull; <strong>NudgebeeSsmAccess</strong> = <code>{ssmAccess ? 'enabled' : 'disabled'}</code>
+                  <br />
+                  &bull; <strong>NudgebeeAccessMode</strong> = <code>{readOnly ? 'readonly' : 'readwrite'}</code>
+                </>
+              }
+            />
+          </Box>
 
           <Grid container spacing={2} mt={1} mb={4} justifyContent='flex-end' sx={{ button: { minWidth: '140px' } }}>
             <Grid item>

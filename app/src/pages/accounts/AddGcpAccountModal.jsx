@@ -1,4 +1,4 @@
-import { Grid, Typography, Box, Alert } from '@mui/material';
+import { Grid, Typography, Box } from '@mui/material';
 import Tabs from '@shared/navigation/Tabs';
 import { CollapsableCard } from '@ui/CollapsableCard';
 import { Chip } from '@ui/Chip';
@@ -6,7 +6,7 @@ import { Stepper } from '@ui/Stepper';
 import { Checkbox } from '@ui/Checkbox';
 import { Input } from '@ui/Input';
 import { getBrandTitle } from '@hooks/useTenantBranding';
-import { ContentCopy, CheckCircleOutline, HelpOutline, InfoOutlined, Search, ErrorOutline } from '@mui/icons-material';
+import { ContentCopy, CheckCircleOutline, HelpOutline, Search } from '@mui/icons-material';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import apiAccount from '@api1/account';
 import apiIntegrations from '@api1/integrations';
@@ -562,9 +562,9 @@ const AddGcpAccountModal = ({ open, onClose }) => {
               </Box>
 
               {discoveryError && (
-                <Alert severity='warning' sx={{ mb: ds.space[4], '& .MuiAlert-message': { fontSize: ds.text.body } }}>
-                  {discoveryError}
-                </Alert>
+                <Box sx={{ mb: ds.space[4] }}>
+                  <Banner tone='warning' message={discoveryError} />
+                </Box>
               )}
 
               {discoveredProjects.length > 0 && (
@@ -681,14 +681,17 @@ const AddGcpAccountModal = ({ open, onClose }) => {
       {/* ──── Step 3: Billing ──── */}
       {step === 2 && (
         <>
-          <Alert
-            severity='info'
-            icon={<InfoOutlined sx={{ fontSize: 18 }} />}
-            sx={{ mb: ds.space[4], '& .MuiAlert-message': { fontSize: ds.text.body } }}
-          >
-            Billing data is typically exported to a central BigQuery table. This may be in a different project than your resource projects. Configure
-            this in GCP Console under Billing &rarr; Billing export.
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner
+              tone='info'
+              message={
+                <>
+                  Billing data is typically exported to a central BigQuery table. This may be in a different project than your resource projects.
+                  Configure this in GCP Console under Billing &rarr; Billing export.
+                </>
+              }
+            />
+          </Box>
 
           <Grid container>
             <Box sx={{ mt: ds.space[4], width: '100%' }}>
@@ -736,15 +739,16 @@ const AddGcpAccountModal = ({ open, onClose }) => {
           </Grid>
 
           {billingValidationResult && (
-            <Alert
-              severity={billingValidationResult.hasAccess ? 'success' : 'error'}
-              icon={billingValidationResult.hasAccess ? <CheckCircleOutline sx={{ fontSize: 18 }} /> : <ErrorOutline sx={{ fontSize: 18 }} />}
-              sx={{ mt: ds.space[2], mb: ds.space[2], '& .MuiAlert-message': { fontSize: ds.text.body } }}
-            >
-              {billingValidationResult.hasAccess
-                ? 'BigQuery billing table accessible.'
-                : billingValidationResult.errorDetail || 'Unable to access BigQuery billing data.'}
-            </Alert>
+            <Box sx={{ mt: ds.space[2], mb: ds.space[2] }}>
+              <Banner
+                tone={billingValidationResult.hasAccess ? 'success' : 'critical'}
+                message={
+                  billingValidationResult.hasAccess
+                    ? 'BigQuery billing table accessible.'
+                    : billingValidationResult.errorDetail || 'Unable to access BigQuery billing data.'
+                }
+              />
+            </Box>
           )}
 
           <Box
@@ -807,36 +811,51 @@ const AddGcpAccountModal = ({ open, onClose }) => {
           </Box>
 
           {onboardResults?.accounts?.some((a) => a.status === 'error') && (
-            <Alert severity='warning' sx={{ mt: ds.space[2], mb: ds.space[2], '& .MuiAlert-message': { fontSize: ds.text.body } }}>
-              <Typography variant='body2' sx={{ fontWeight: ds.weight.medium, mb: ds.space[1] }}>
-                Some projects failed:
-              </Typography>
-              {onboardResults.accounts
-                .filter((a) => a.status === 'error')
-                .map((a) => (
-                  <Typography key={a.project_id} variant='caption' display='block'>
-                    {a.project_id}: {a.error}
-                  </Typography>
-                ))}
-            </Alert>
+            <Box sx={{ mt: ds.space[2], mb: ds.space[2] }}>
+              <Banner
+                tone='warning'
+                message={
+                  <>
+                    <Typography variant='body2' sx={{ fontWeight: ds.weight.medium, mb: ds.space[1] }}>
+                      Some projects failed:
+                    </Typography>
+                    {onboardResults.accounts
+                      .filter((a) => a.status === 'error')
+                      .map((a) => (
+                        <Typography key={a.project_id} variant='caption' display='block'>
+                          {a.project_id}: {a.error}
+                        </Typography>
+                      ))}
+                  </>
+                }
+              />
+            </Box>
           )}
 
           {webhookSetupResult?.succeeded?.length > 0 && webhookSetupResult?.failed?.length === 0 && (
-            <Alert
-              severity='success'
-              icon={<CheckCircleOutline sx={{ fontSize: 18 }} />}
-              sx={{ mt: ds.space[2], mb: ds.space[4], '& .MuiAlert-message': { fontSize: ds.text.body } }}
-            >
-              Real-time alerts enabled for {webhookSetupResult.succeeded.length} project(s). Webhook notification channels have been created.
-            </Alert>
+            <Box sx={{ mt: ds.space[2], mb: ds.space[4] }}>
+              <Banner
+                tone='success'
+                message={
+                  <>Real-time alerts enabled for {webhookSetupResult.succeeded.length} project(s). Webhook notification channels have been created.</>
+                }
+              />
+            </Box>
           )}
 
           {webhookSetupResult?.failed?.length > 0 && (
-            <Alert severity='warning' sx={{ mt: ds.space[2], mb: ds.space[4], '& .MuiAlert-message': { fontSize: ds.text.body } }}>
-              {webhookSetupResult?.succeeded?.length > 0 ? `Alerts enabled for ${webhookSetupResult.succeeded.length} project(s). ` : ''}
-              Failed for {webhookSetupResult.failed.length}: {webhookSetupResult.failed.join(', ')}. You can set them up manually below or enable
-              later from the account menu.
-            </Alert>
+            <Box sx={{ mt: ds.space[2], mb: ds.space[4] }}>
+              <Banner
+                tone='warning'
+                message={
+                  <>
+                    {webhookSetupResult?.succeeded?.length > 0 ? `Alerts enabled for ${webhookSetupResult.succeeded.length} project(s). ` : ''}
+                    Failed for {webhookSetupResult.failed.length}: {webhookSetupResult.failed.join(', ')}. You can set them up manually below or
+                    enable later from the account menu.
+                  </>
+                }
+              />
+            </Box>
           )}
 
           {!webhookSetupResult && (
@@ -888,14 +907,17 @@ const AddGcpAccountModal = ({ open, onClose }) => {
               )}
 
               {!webhookUrl && (
-                <Alert
-                  severity='info'
-                  icon={<InfoOutlined sx={{ fontSize: 18 }} />}
-                  sx={{ mt: ds.space[2], mb: ds.space[4], '& .MuiAlert-message': { fontSize: ds.text.body } }}
-                >
-                  Real-time alerts are not configured. Your account will use polling mode to detect alert changes. You can enable real-time alerts
-                  later from the account settings.
-                </Alert>
+                <Box sx={{ mt: ds.space[2], mb: ds.space[4] }}>
+                  <Banner
+                    tone='info'
+                    message={
+                      <>
+                        Real-time alerts are not configured. Your account will use polling mode to detect alert changes. You can enable real-time
+                        alerts later from the account settings.
+                      </>
+                    }
+                  />
+                </Box>
               )}
             </>
           )}

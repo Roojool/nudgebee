@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Typography, Alert } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Skeleton } from '@ui/Skeleton';
 import { Chip as DsChip, type ChipTone } from '@ui/Chip';
 import Pdb from '@components/k8s/cluster-upgrade/cards/Pdb';
@@ -175,7 +176,7 @@ export const HelmContent: React.FC<{ accountId?: string; onInsightsChange?: (ins
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -494,7 +495,7 @@ export const ClusterHealthWorkloadsContent: React.FC<{ accountId?: string }> = (
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -780,7 +781,7 @@ export const ClusterHealthNodesContent: React.FC<{ accountId?: string }> = ({ ac
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -885,7 +886,7 @@ export const ClusterHealthLoadBalancerContent: React.FC<{ accountId?: string }> 
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -1188,7 +1189,7 @@ export const ClusterHealthNodeGroupsContent: React.FC<{ accountId?: string }> = 
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -1434,7 +1435,7 @@ export const ClusterHealthPvContent: React.FC<{ accountId?: string }> = ({ accou
   if (error) {
     return (
       <Box sx={{ p: ds.space[4] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   }
@@ -1667,9 +1668,9 @@ export const PreFlightCheckContent: React.FC<PreFlightCheckContentProps> = ({ ac
           </WidgetCard>
         </Box>
 
-        <Alert severity='success' sx={{ mb: ds.space[4] }}>
-          Pre-flight check snapshot captured successfully
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='success' message='Pre-flight check snapshot captured successfully' />
+        </Box>
 
         {checkData.created_at && (
           <Box sx={{ mt: ds.space[4] }}>
@@ -1695,9 +1696,9 @@ export const PreFlightCheckContent: React.FC<PreFlightCheckContentProps> = ({ ac
       </Box>
 
       {error && (
-        <Alert severity='error' sx={{ mb: ds.space[4] }}>
-          {error}
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='critical' message={error} />
+        </Box>
       )}
 
       {loading && (
@@ -2029,9 +2030,9 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
             </DsChip>
           </Box>
 
-          <Alert severity='success' sx={{ mb: ds.space[4] }}>
-            Post-flight check snapshot captured successfully
-          </Alert>
+          <Box sx={{ mb: ds.space[4] }}>
+            <Banner tone='success' message='Post-flight check snapshot captured successfully' />
+          </Box>
 
           <Box sx={statRowSx}>
             <WidgetCard sx={statCardSx}>
@@ -2093,9 +2094,9 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
       </Box>
 
       {error && (
-        <Alert severity='error' sx={{ mb: ds.space[4] }}>
-          {error}
-        </Alert>
+        <Box sx={{ mb: ds.space[4] }}>
+          <Banner tone='critical' message={error} />
+        </Box>
       )}
 
       {loading && (

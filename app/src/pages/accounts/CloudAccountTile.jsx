@@ -1,7 +1,8 @@
-import { Box, Grid, Typography, Stack, Alert } from '@mui/material';
+import { Box, Grid, Typography, Stack } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { Input } from '@ui/Input';
 import { getBrandTitle } from '@hooks/useTenantBranding';
-import { ContentCopy, CheckCircleOutline, ErrorOutline } from '@mui/icons-material';
+import { ContentCopy } from '@mui/icons-material';
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import apiAccount from '@api1/account';
 import apiIntegrations from '@api1/integrations';
@@ -1088,13 +1089,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
           )}
           {billingValidationResult && (
             <Grid item xs={12}>
-              <Alert
-                severity={billingValidationResult.success ? 'success' : 'error'}
-                icon={billingValidationResult.success ? <CheckCircleOutline sx={{ fontSize: 18 }} /> : <ErrorOutline sx={{ fontSize: 18 }} />}
-                sx={{ '& .MuiAlert-message': { fontSize: ds.text.body } }}
-              >
-                {billingValidationResult.message}
-              </Alert>
+              <Banner tone={billingValidationResult.success ? 'success' : 'critical'} message={billingValidationResult.message} />
             </Grid>
           )}
         </Grid>

@@ -1,4 +1,5 @@
-import { Grid, CircularProgress, Typography, RadioGroup, FormControlLabel, Radio, Alert, Box, IconButton } from '@mui/material';
+import { Grid, CircularProgress, Typography, RadioGroup, FormControlLabel, Radio, Box, IconButton } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import { HelpOutline, InfoOutlined } from '@mui/icons-material';
 import Tooltip from '@ui/Tooltip';
 import { CollapsableCard } from '@ui/CollapsableCard';
@@ -483,10 +484,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
         />
       </Grid>
       <Grid item>
-        <Alert severity='info' sx={{ mt: 1 }}>
-          Access keys are stored encrypted at rest. Prefer the CloudFormation flow when possible — keys grant broader access and rotation is your
-          responsibility.
-        </Alert>
+        <Box sx={{ mt: 1 }}>
+          <Banner
+            tone='info'
+            message={
+              <>
+                Access keys are stored encrypted at rest. Prefer the CloudFormation flow when possible — keys grant broader access and rotation is
+                your responsibility.
+              </>
+            }
+          />
+        </Box>
       </Grid>
     </Grid>
   );
@@ -496,12 +504,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       <ValidationResultBanner result={validationResult} />
 
       {validationResult?.success && validationResult?.cur?.reportName && (
-        <Alert severity='success' sx={{ mt: 1 }}>
-          <Typography variant='body2'>
-            Detected Cost &amp; Usage Report: <strong>{validationResult.cur.reportName}</strong> (bucket{' '}
-            <code>{validationResult.cur.bucketName}</code>, region <code>{validationResult.cur.region}</code>).
-          </Typography>
-        </Alert>
+        <Box sx={{ mt: 1 }}>
+          <Banner
+            tone='success'
+            message={
+              <Typography variant='body2'>
+                Detected Cost &amp; Usage Report: <strong>{validationResult.cur.reportName}</strong> (bucket{' '}
+                <code>{validationResult.cur.bucketName}</code>, region <code>{validationResult.cur.region}</code>).
+              </Typography>
+            }
+          />
+        </Box>
       )}
     </Grid>
   );
@@ -666,10 +679,17 @@ const AddAwsAccountModal = ({ open, onClose }) => {
           </Box>
 
           {accessMode === 'readonly' && (
-            <Alert severity='info' sx={{ mt: 1 }}>
-              Read-only mode does not grant write permissions to your AWS account. The following features will be unavailable: CloudWatch alarm
-              creation, EventBridge real-time event tracking, and automated recommendation actions.
-            </Alert>
+            <Box sx={{ mt: 1 }}>
+              <Banner
+                tone='info'
+                message={
+                  <>
+                    Read-only mode does not grant write permissions to your AWS account. The following features will be unavailable: CloudWatch alarm
+                    creation, EventBridge real-time event tracking, and automated recommendation actions.
+                  </>
+                }
+              />
+            </Box>
           )}
         </Grid>
 
