@@ -632,9 +632,10 @@ Be decisive. Only fail if there's a clear mismatch between the issue's subject a
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: targetPrompt}}},
 	}
 
-	response, err := a.llmClient.GenerateContent(ctx, messages)
-	if err != nil || len(response.Choices) == 0 {
-		return AnalysisResult{Passed: true, Issues: ""} // Don't block on failure
+	response, err := a.generateWithRetry(ctx, messages)
+	if err != nil {
+		a.logger.Error(common.EventStepFailure, "Target correctness check could not be verified", err, nil)
+		return AnalysisResult{Passed: false, Issues: fmt.Sprintf("Target correctness check could not be verified: %v", err)}
 	}
 
 	result := strings.TrimSpace(response.Choices[0].Content)
@@ -753,6 +754,30 @@ type AnalysisResult struct {
 	Issues string
 }
 
+// generateWithRetry calls GenerateContent and retries once on transport
+// failure or an empty response before giving up, since a single transient
+// LLM-call error would otherwise permanently sink an already build-verified
+// fix. Returns the real error (never swallowed) if both attempts fail.
+func (a *CodeReviewAgent) generateWithRetry(ctx context.Context, messages []llms.MessageContent) (*llms.ContentResponse, error) {
+	response, err := a.llmClient.GenerateContent(ctx, messages)
+	if err == nil && len(response.Choices) > 0 {
+		return response, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("empty response from LLM")
+	}
+	a.logger.Error(common.EventStepFailure, "Review gate LLM call failed, retrying once", err, nil)
+
+	response, err = a.llmClient.GenerateContent(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+	if len(response.Choices) == 0 {
+		return nil, fmt.Errorf("empty response from LLM")
+	}
+	return response, nil
+}
+
 // gateVerdictPassed reports whether a focused-pass LLM response ends in a PASS
 // verdict. The gate prompts tell the model to reason step by step and *then*
 // answer "PASS: ..." / "FAIL: ...", so the verdict is the last such line, not
@@ -808,9 +833,10 @@ If all variables are properly defined before use, return "PASS: Variable scope v
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: scopePrompt}}},
 	}
 
-	response, err := a.llmClient.GenerateContent(ctx, messages)
-	if err != nil || len(response.Choices) == 0 {
-		return AnalysisResult{Passed: false, Issues: "Scope analysis failed"}
+	response, err := a.generateWithRetry(ctx, messages)
+	if err != nil {
+		a.logger.Error(common.EventStepFailure, "Scope analysis could not be verified", err, nil)
+		return AnalysisResult{Passed: false, Issues: fmt.Sprintf("Scope analysis could not be verified: %v", err)}
 	}
 
 	result := strings.TrimSpace(response.Choices[0].Content)
@@ -849,9 +875,10 @@ If syntax is correct, return "PASS: Syntax validated"`
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: syntaxPrompt}}},
 	}
 
-	response, err := a.llmClient.GenerateContent(ctx, messages)
-	if err != nil || len(response.Choices) == 0 {
-		return AnalysisResult{Passed: false, Issues: "Syntax analysis failed"}
+	response, err := a.generateWithRetry(ctx, messages)
+	if err != nil {
+		a.logger.Error(common.EventStepFailure, "Syntax analysis could not be verified", err, nil)
+		return AnalysisResult{Passed: false, Issues: fmt.Sprintf("Syntax analysis could not be verified: %v", err)}
 	}
 
 	result := strings.TrimSpace(response.Choices[0].Content)
@@ -1089,9 +1116,10 @@ Be thorough but fair - focus on actual problems, not style preferences.`
 		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: coherencePrompt}}},
 	}
 
-	response, err := a.llmClient.GenerateContent(ctx, messages)
-	if err != nil || len(response.Choices) == 0 {
-		return AnalysisResult{Passed: false, Issues: "Coherence check failed to execute"}
+	response, err := a.generateWithRetry(ctx, messages)
+	if err != nil {
+		a.logger.Error(common.EventStepFailure, "Coherence check could not be verified", err, nil)
+		return AnalysisResult{Passed: false, Issues: fmt.Sprintf("Coherence check could not be verified: %v", err)}
 	}
 
 	result := strings.TrimSpace(response.Choices[0].Content)

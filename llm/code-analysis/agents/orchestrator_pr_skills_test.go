@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"nudgebee/code-analysis-agent/common"
+	"nudgebee/code-analysis-agent/planners"
 )
 
 const prSkillMarker = "NB-TEST-PR-SKILL: PRs must target the develop branch and include a Rollback section"
@@ -71,6 +74,117 @@ func TestBuildCommitHeredocAvoidsDelimiterCollision(t *testing.T) {
 	}
 	if !strings.Contains(out, colliding) {
 		t.Errorf("commit message body must be preserved verbatim, got:\n%s", out)
+	}
+}
+
+const repoSkillMarker = "NB-TEST-REPO-SKILL: use type(scope): subject"
+
+func TestRepoSkillPromptBlock(t *testing.T) {
+	if got := repoSkillPromptBlock(nil); got != "" {
+		t.Errorf("repoSkillPromptBlock(nil) = %q, want empty", got)
+	}
+
+	skill := &planners.RepoSkill{Name: "commit", Path: ".claude/skills/commit/SKILL.md", Content: repoSkillMarker}
+	block := repoSkillPromptBlock(skill)
+	if !strings.Contains(block, "<repo-skill path=\".claude/skills/commit/SKILL.md\">") {
+		t.Errorf("expected wrapper tag with path, got: %s", block)
+	}
+	if !strings.Contains(block, repoSkillMarker) {
+		t.Errorf("expected skill body inlined, got: %s", block)
+	}
+	if !strings.Contains(block, "advisory documentation") {
+		t.Errorf("expected non-authoritative framing (repo content, not operator-verified), got: %s", block)
+	}
+}
+
+func TestRepoSkillPromptBlock_MarksTruncatedContent(t *testing.T) {
+	// classifyRepoSkillForStep normally clears Truncated after re-reading the
+	// winning skill in full; this covers that re-read's rare failure path,
+	// where the discovery-time capped Content is all that's left to inject —
+	// the model must be told it's a partial excerpt, not the whole file.
+	full := repoSkillPromptBlock(&planners.RepoSkill{Name: "commit", Path: ".claude/skills/commit/SKILL.md", Content: repoSkillMarker, Truncated: false})
+	if strings.Contains(full, "truncated") {
+		t.Errorf("untruncated skill must not carry a truncation note, got: %s", full)
+	}
+
+	partial := repoSkillPromptBlock(&planners.RepoSkill{Name: "commit", Path: ".claude/skills/commit/SKILL.md", Content: repoSkillMarker, Truncated: true})
+	if !strings.Contains(partial, "truncated") {
+		t.Errorf("truncated skill must carry a visible truncation note, got: %s", partial)
+	}
+}
+
+func TestBuildRepoSkillClassificationPrompt(t *testing.T) {
+	skills := []planners.RepoSkill{
+		{Name: "open-pr", Content: "---\ndescription: Create a pull request with our conventions\n---\n# body"},
+		{Name: "deploy", Content: "how we deploy to prod"},
+	}
+	prompt := buildRepoSkillClassificationPrompt(skills, "writing pull request descriptions")
+
+	for _, want := range []string{`"open-pr"`, `"deploy"`, "Create a pull request with our conventions", "writing pull request descriptions", "NONE"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildRepoSkillClassificationPrompt_TruncatesLongExcerpts(t *testing.T) {
+	skills := []planners.RepoSkill{{Name: "big", Content: strings.Repeat("x", maxRepoSkillClassificationExcerpt+500)}}
+	prompt := buildRepoSkillClassificationPrompt(skills, "some step")
+	if strings.Contains(prompt, strings.Repeat("x", maxRepoSkillClassificationExcerpt+1)) {
+		t.Errorf("expected excerpt to be capped at %d chars, got a longer run of x's", maxRepoSkillClassificationExcerpt)
+	}
+}
+
+func TestParseRepoSkillClassificationAnswer(t *testing.T) {
+	skills := []planners.RepoSkill{
+		{Name: "open-pr", Content: "pr skill"},
+		{Name: "commit", Content: "commit skill"},
+	}
+
+	cases := []struct {
+		answer string
+		want   string // "" means expect nil
+	}{
+		{`"open-pr"`, "open-pr"},
+		{"open-pr", "open-pr"},
+		{"  `commit`  \n", "commit"},
+		{"NONE", ""},
+		{"none", ""},
+		{"", ""},
+		{`"does-not-exist"`, ""}, // hallucinated name must not be trusted
+	}
+	for _, c := range cases {
+		got := parseRepoSkillClassificationAnswer(c.answer, skills)
+		if c.want == "" {
+			if got != nil {
+				t.Errorf("parseRepoSkillClassificationAnswer(%q) = %+v, want nil", c.answer, got)
+			}
+			continue
+		}
+		if got == nil || got.Name != c.want {
+			t.Errorf("parseRepoSkillClassificationAnswer(%q) = %+v, want %q", c.answer, got, c.want)
+		}
+	}
+}
+
+func TestClassifyRepoSkillForStep_NoSkillsSkipsLLMCall(t *testing.T) {
+	// A nil llmClient would panic if GenerateContent were ever called, so this
+	// proves the "no repo skills at all" case short-circuits before the LLM.
+	a := &OrchestratorAgent{}
+	if got := a.classifyRepoSkillForStep(context.Background(), t.TempDir(), "writing commit messages"); got != nil {
+		t.Errorf("expected nil with no repo skills present, got %+v", got)
+	}
+}
+
+// TestClassifyRepoSkillForStep_NoSkillsRecordsNoVisibleStep ensures a repo
+// with no committed skills doesn't clutter the UI's step list with an empty
+// "classify_repo_skill" entry — the visible step should only appear when
+// there was something to classify.
+func TestClassifyRepoSkillForStep_NoSkillsRecordsNoVisibleStep(t *testing.T) {
+	a := &OrchestratorAgent{toolTracker: common.NewToolInvocationTracker("test-analysis")}
+	a.classifyRepoSkillForStep(context.Background(), t.TempDir(), "writing commit messages")
+	if got := a.toolTracker.GetInvocations(); len(got) != 0 {
+		t.Errorf("expected no tracked steps when the repo has no skills, got %+v", got)
 	}
 }
 

@@ -839,12 +839,82 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 	// full clones and colliding on the shared base config. Different repos use
 	// different locks and still run in parallel. Context-aware so a cancelled
 	// dispatch waiting behind another repo's in-flight clone returns promptly.
+	// Also guards the worktree-reuse check below, since it can mutate baseDir's
+	// worktree admin metadata (`git worktree remove`) and must not race a
+	// concurrent bare-clone/fetch on the same baseDir.
 	repoLock := lockForRepo(repoKey)
 	select {
 	case <-repoLock:
 		defer func() { repoLock <- struct{}{} }()
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+
+	// Reuse an already-checked-out worktree verbatim when this exact directory
+	// was left behind by an earlier call — e.g. a followup turn in the same
+	// conversation/event investigation reusing its persistent workspace (see
+	// agentic_analyze.go). `git worktree add` below is not idempotent: calling
+	// it again on an existing worktree fails, and the only fallback was to wipe
+	// and recreate it, silently discarding whatever the previous call left
+	// there — including an already-applied, already-reviewed fix. A worktree is
+	// marked by a `.git` FILE (not a directory) pointing at its admin dir under
+	// the bare repo; only reuse when the checked-out ref still matches what was
+	// asked for, since silently analyzing a different commit/branch than
+	// requested is worse than failing (see CloneSealedAtCommit's doc comment).
+	if info, statErr := os.Stat(filepath.Join(worktreeDir, ".git")); statErr == nil && !info.IsDir() {
+		if hashOut, err := exec.CommandContext(ctx, "git", "-C", worktreeDir, "rev-parse", "HEAD").Output(); err == nil {
+			headHash := strings.TrimSpace(string(hashOut))
+
+			// worktree add --detach leaves HEAD detached, so "rev-parse
+			// --abbrev-ref HEAD" always reports "HEAD" — comparing branch names
+			// can never match. For a pinned commit, an exact hash match is
+			// sufficient (that ref never moves). For a branch, the tip can have
+			// moved upstream since the worktree was created, so confirm via a
+			// cheap fetch instead of trusting whatever happens to be checked
+			// out — a worktree shares its bare repo's remotes, so this fetch is
+			// equivalent to running it against baseDir directly.
+			var refMatches bool
+			switch {
+			case commit != "":
+				refMatches = headHash == commit
+			case branch != "":
+				if _, fetchErr := exec.CommandContext(ctx, "git", "-C", worktreeDir, "fetch", "origin", branch).CombinedOutput(); fetchErr == nil {
+					if tipOut, tipErr := exec.CommandContext(ctx, "git", "-C", worktreeDir, "rev-parse", "FETCH_HEAD").Output(); tipErr == nil {
+						refMatches = strings.TrimSpace(string(tipOut)) == headHash
+					}
+				}
+			default:
+				// No specific branch or commit requested ("clone the default
+				// branch") — nothing to detect drift against without extra
+				// bookkeeping of which branch this worktree was created for, so
+				// reuse as-is rather than treating this narrower case as fresh
+				// every time.
+				refMatches = true
+			}
+
+			if refMatches {
+				msgOut, _ := exec.CommandContext(ctx, "git", "-C", worktreeDir, "log", "-1", "--format=%s").Output()
+				gc.logger.Log(common.EventStepComplete, "Reusing existing worktree from a prior call", map[string]any{
+					"worktree_dir": worktreeDir,
+					"commit":       headHash,
+				})
+				return &CloneResult{
+					LocalPath:     worktreeDir,
+					Branch:        branch,
+					CommitHash:    headHash,
+					CommitMessage: strings.TrimSpace(string(msgOut)),
+				}, nil
+			}
+			gc.logger.Log(common.EventStepStart, "Existing worktree is stale or at a different ref than requested, recreating", map[string]any{
+				"worktree_dir": worktreeDir, "have_commit": headHash, "want_commit": commit, "want_branch": branch,
+			})
+		}
+		// Deregister before removing: `git worktree add` at the same path later
+		// fails with "missing but already registered worktree" if the bare
+		// repo's admin entry for it isn't cleared first, which a plain
+		// os.RemoveAll of the worktree directory never does.
+		_ = exec.CommandContext(ctx, "git", "-C", baseDir, "worktree", "remove", "--force", worktreeDir).Run()
+		_ = os.RemoveAll(worktreeDir)
 	}
 
 	gc.logger.Log(common.EventStepStart, "Clone or reuse repository", map[string]any{
@@ -992,6 +1062,16 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		}
 		checkoutRef = commit
 	}
+
+	// Prune stale worktree registrations before adding. The reuse-check above
+	// only cleans up a prior registration when worktreeDir still exists on
+	// disk; if it was removed by something else (e.g. the workspace-cleanup
+	// sweep deleting a persisted session directory the bare repo still thinks
+	// is checked out), `worktree add` below fails with "missing but already
+	// registered worktree" even though nothing is actually there to reuse.
+	// `git worktree prune` clears exactly that class of stale admin entry and
+	// is a no-op when there is nothing to prune.
+	_ = exec.CommandContext(ctx, "git", "-C", baseDir, "worktree", "prune").Run()
 
 	// Create worktree
 	if err := os.MkdirAll(worktreeDir, 0755); err != nil {

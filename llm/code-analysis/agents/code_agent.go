@@ -191,24 +191,19 @@ func (a *CodeAgent) buildEnhancedQuery(ctx context.Context, sessionCtx *session.
 }
 
 func (a *CodeAgent) buildCodeAgentPrompt(sessionCtx *session.SessionContext) (string, error) {
-	contextInfo := ""
-	if sessionCtx.RepoContext != nil {
-		contextInfo = sessionCtx.RepoContext.GetRepositoryGuidance()
-	}
+	contextInfo, repoSkills := repoScopedPromptContext(sessionCtx, a.logger)
 
 	// Prepare template data (tools are now passed via native function calling, not prompt text)
-	mode := sessionCtx.Mode
-	if mode == "" {
-		mode = "explore"
-	}
+	mode := effectiveMode(sessionCtx)
 	templateData := map[string]any{
 		"ContextInfo":   contextInfo,
 		"OriginalQuery": sessionCtx.OriginalQuery,
 		"Mode":          mode,
-		"IsExploreMode": mode == "explore",
-		"IsFixMode":     mode == "fix",
+		"IsExploreMode": mode == ModeExplore,
+		"IsFixMode":     mode == ModeFix,
 		"BaseDiff":      sessionCtx.BaseDiff,
 		"Skills":        sessionCtx.SkillsContext,
+		"RepoSkills":    repoSkills,
 	}
 
 	// Load and execute template

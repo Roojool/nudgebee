@@ -124,16 +124,14 @@ func (a *PerformanceDebuggerAgent) buildEnhancedQuery(ctx context.Context, sessi
 }
 
 func (a *PerformanceDebuggerAgent) buildPerformanceDebuggerPrompt(sessionCtx *session.SessionContext) (string, error) {
-	contextInfo := ""
-	if sessionCtx.RepoContext != nil {
-		contextInfo = sessionCtx.RepoContext.GetRepositoryGuidance()
-	}
+	contextInfo, repoSkills := repoScopedPromptContext(sessionCtx, a.logger)
 
 	// Prepare template data (tools are now passed via native function calling, not prompt text)
 	templateData := map[string]any{
 		"ContextInfo":   contextInfo,
 		"OriginalQuery": sessionCtx.OriginalQuery,
 		"Skills":        sessionCtx.SkillsContext,
+		"RepoSkills":    repoSkills,
 	}
 
 	// Load and execute template
