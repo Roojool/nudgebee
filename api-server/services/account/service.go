@@ -397,18 +397,56 @@ var accountDataDeletePlan = []deleteGroup{
 	// insight tables
 	{defaultAccountIdColumn: "account_id", tables: []tableDetails{{name: "insight"}}},
 	// llm related tables
-	{defaultAccountIdColumn: "account_id", tables: []tableDetails{{name: "llm_rag_audit", accountColumnName: "cloud_account_id"}, {name: "llm_rags"}, {name: "llm_conversation_history"}, {name: "llm_conversation_saved", whereSubclause: "conversation_id in (select id from llm_conversations where account_id = $1)"}, {name: "llm_functions"}, {name: "llm_tools_installation"}, {name: "llm_agents_installation"}, {name: "llm_conversation_feedback", accountColumnName: "cloud_account_id"}, {name: "llm_conversation_tool_calls"}, {name: "llm_conversation_agent"}, {name: "llm_conversation_messages"}, {name: "llm_conversations"}}},
+	{defaultAccountIdColumn: "account_id", tables: []tableDetails{{name: "llm_rag_audit", accountColumnName: "cloud_account_id"}, {name: "llm_rags"}, {name: "llm_conversation_history"}, {name: "llm_conversation_saved", whereSubclause: "conversation_id in (select id from llm_conversations where account_id = $1)"}, {name: "llm_functions"}, {name: "llm_tools_installation"}, {name: "llm_agents_installation"}, {name: "llm_conversation_feedback", accountColumnName: "cloud_account_id"}, {name: "llm_conversation_tool_calls"}, {name: "llm_conversation_agent"}, {name: "llm_conversation_messages"}, {name: "llm_conversation_attachments"}, {name: "llm_conversation_references"}, {name: "llm_conversations"}}},
 	// anomaly/slo related tables
 	{defaultAccountIdColumn: "cloud_account_id", tables: []tableDetails{{name: "anomaly_config"}, {name: "anomaly", accountColumnName: "account_id"}, {name: "slo_report"}, {name: "slo_config"}}},
+	// knowledge graph; edges carry no foreign key to nodes, and a cross-account
+	// edge belongs to the other account, so edges that point at this account's
+	// nodes go too
+	{defaultAccountIdColumn: "cloud_account_id", tables: []tableDetails{
+		{name: "knowledge_graph_edge"},
+		{name: "knowledge_graph_edge", whereSubclause: "source_node_id in (select id from knowledge_graph_node where cloud_account_id = $1)"},
+		{name: "knowledge_graph_edge", whereSubclause: "destination_node_id in (select id from knowledge_graph_node where cloud_account_id = $1)"},
+		{name: "knowledge_graph_node"},
+		{name: "knowledge_graph_metadata"},
+	}},
+	// discovery snapshots, workload criticality (keyed by resource ids that
+	// rediscovery issues afresh), predictions, delivered notifications and
+	// threshold suggestions
+	{defaultAccountIdColumn: "cloud_account_id", tables: []tableDetails{
+		{name: "active_resources"},
+		{name: "workload_criticality"},
+		{name: "discovery_batch_progress"},
+		{name: "ml_inference", accountColumnName: "account_id"},
+		{name: "sent_notifications", accountColumnName: "account_id"},
+		{name: "event_threshold_suggestions"},
+	}},
 	// integration related tables
 	{defaultAccountIdColumn: "cloud_account_id", tables: []tableDetails{{name: "integrations_cloud_accounts"}}},
 	// additional tables
 	{defaultAccountIdColumn: "cloud_account_id", tables: []tableDetails{{name: "cloud_account_score"}, {name: "billing_usage_cost", accountColumnName: "account_id"}, {name: "cloud_api_permission_errors"}, {name: "feature_flag", accountColumnName: "account_id"}, {name: "upgrade_plan_steps", accountColumnName: "account_id"}, {name: "upgrade_plan_audit", accountColumnName: "account_id"}}},
 }
 
+// accountRoleGrants matches built-in role grants scoped to the account or to one
+// of its namespaces, whose entity_id is "<accountId>:<namespace>".
+var accountRoleGrants = "(entity_type = '" + security.RBAC_ENTITY_TYPE_ACCOUNT + "' AND entity_id = $1) OR " +
+	"(entity_type = '" + security.RBAC_ENTITY_TYPE_K8S_NAMESPACE + "' AND split_part(entity_id, ':', 1) = $1)"
+
 // accountRowDeletePlan runs after accountDataDeletePlan when the account itself
 // is removed rather than only cleaned.
 var accountRowDeletePlan = []deleteGroup{
+	// role grants and per-account settings
+	{defaultAccountIdColumn: "account_id", tables: []tableDetails{
+		{name: "user_roles", whereSubclause: accountRoleGrants},
+		{name: "group_roles", whereSubclause: accountRoleGrants},
+		{name: "custom_role_assignments", whereSubclause: "entity_type = '" + security.RBAC_ENTITY_TYPE_ACCOUNT + "' AND entity_id = $1"},
+		{name: "llm_budget_config", whereSubclause: "entity_type = 'account' AND entity_id = $1"},
+		{name: "configs"},
+		{name: "llm_prompt_configuration"},
+		{name: "llm_memory_preferences", accountColumnName: "cloud_account_id"},
+		{name: "event_triage_rule_overrides"},
+		{name: "event_triage_rules"},
+	}},
 	{defaultAccountIdColumn: "account_id", tables: []tableDetails{
 		{name: "workflow_templates"},
 		{name: "llm_kb_agent_mappings"},
