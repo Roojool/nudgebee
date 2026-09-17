@@ -200,6 +200,15 @@ export class TenantSettingsLocators extends CommonLocators {
       .first();
   }
 
+  // The same row reached by its description copy rather than its display name, so a
+  // display_name reword in the feature catalog degrades to this instead of a red suite.
+  // CustomTable renders one <tr> per feature, which is what keeps the role match pinned to
+  // that feature's own switch; no .or() below it, since an unscoped checkbox match would
+  // resolve against the first row on the table instead.
+  featureToggleByDescription(description: string): Locator {
+    return this.featureRows.filter({ hasText: description }).getByRole("checkbox").first();
+  }
+
   // A Save button. Every tab and sub-tab carries its own, all wired to the same
   // handleSaveSettings, and none of them renders at all without tenants:Write —
   // so this is scoped to the visible card rather than assumed to exist.

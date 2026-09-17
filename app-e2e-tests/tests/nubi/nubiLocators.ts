@@ -174,7 +174,7 @@ export class NubiLocators {
     this.createFunctionBtn = page.locator('#create-function');
     this.searchFunctionInput = page.getByPlaceholder('Search Function');
     this.functionNameInput = page.getByPlaceholder('e.g., get_user_data, process_payment');
-    this.functionStatusSelect = page.getByLabel('Status');
+    this.functionStatusSelect = page.getByRole('button', { name: 'Status', exact: true }).or(page.locator('#function-status')).first();
     this.functionStatusDraftOption = page.getByText('Draft', { exact: true });
     this.functionStatusActiveOption = page.getByText('Active', { exact: true });
     this.functionCancelBtn = page.getByRole('button', { name: 'Cancel' });
@@ -282,6 +282,13 @@ export class NubiLocators {
   // resolves to nothing. Same trap soulLocators.ts already documents for the
   // expand editor; the attribute selectors see the DOM directly.
   async selectFirstAdminAccount(timeout = 30000): Promise<void> {
+    await this.selectAdminAccount(undefined, timeout);
+  }
+
+  // The same picker, for a caller that needs one named account rather than whichever real one
+  // comes first. The Nubi chat reads its own account from the global cluster selection, so a
+  // function authored under any other account is simply absent from its /call list.
+  async selectAdminAccount(accountName?: string, timeout = 30000): Promise<void> {
     const trigger = this.page.locator("#account-select");
     await trigger.click();
     const listbox = this.page.locator('[role="listbox"]');
@@ -299,7 +306,16 @@ export class NubiLocators {
       .toBeGreaterThan(0);
 
     const groupCount = await groupHeaders.count();
-    const realAccountOption = listbox.locator('[role="option"]').filter({ hasNotText: "All accounts" }).first();
+    // Exact match, not hasText substring: AccountSelect lists sibling accounts that share a
+    // name prefix (e.g. "k8s-dev" and "k8s-dev-oss"), and a substring match picks whichever
+    // sorts first regardless of which one the caller asked for. That silently created a
+    // function under the wrong account in the "Usage in Nubi" tests — CHAT_ACCOUNT ("k8s-dev")
+    // resolved to a different accountId than the one the /call suggestions were read from,
+    // so the created function could never appear there no matter how long the test waited.
+    const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const realAccountOption = accountName
+      ? listbox.locator('[role="option"]').filter({ hasText: new RegExp(`^${escapeRegExp(accountName)}$`) }).first()
+      : listbox.locator('[role="option"]').filter({ hasNotText: "All accounts" }).first();
     for (let i = 0; i < groupCount; i++) {
       // Each header TOGGLES its group, so an already-expanded one would close
       // again — stop as soon as a real account is reachable.
@@ -374,6 +390,23 @@ export class NubiLocators {
   // Ask-Nubi rail only, so openPanel() has to have run first.
   async openAITools(tab: Locator, timeout = 60000): Promise<void> {
     await this.openRailModal(this.aiToolsDialog, this.aiToolsBtn, tab, timeout);
+  }
+
+  // One entry in the chat's /call suggestion popup. TextAreaV2 renders that popup
+  // as a bare MUI Popper of unlabelled Boxes - no testid, role or id anywhere
+  // inside it - so the function's own name is the only handle it offers.
+  // No .or(): every wider match would resolve against the chat transcript behind
+  // the popup rather than the suggestion itself.
+  callSuggestion(functionName: string): Locator {
+    return this.page.getByText(functionName, { exact: true }).first();
+  }
+
+  functionRowsMatching(text: string): Locator {
+    return this.page.getByRole("row").filter({ hasText: text });
+  }
+
+  functionRowMoreActionsBtn(row: Locator): Locator {
+    return row.getByRole("button", { name: "More actions" });
   }
 
   // b-Cortex, which took Soul, Privacy, Preferences, Feedback, My Usage and
