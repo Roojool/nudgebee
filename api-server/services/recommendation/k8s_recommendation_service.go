@@ -894,7 +894,17 @@ func GenerateRecommendation(ctx *security.RequestContext, request GenerateRecomm
 	} else {
 		for _, id := range request.AccountId {
 			var tenantId string
-			_ = dbms.Db.Get(&tenantId, `SELECT tenant::varchar FROM cloud_accounts WHERE id::varchar = $1`, id)
+			// Named accounts are held to the same 'active' bar as the sweep
+			// above. Without it an explicit request — a cron payload, a manual
+			// trigger — schedules scans against a disabled account forever, and
+			// the swallowed error meant an id that matched nothing was still
+			// queued, with an empty tenant.
+			if err := dbms.Db.Get(&tenantId,
+				`SELECT tenant::varchar FROM cloud_accounts WHERE id::varchar = $1 AND status = 'active' AND account_type = 'kubernetes'`,
+				id); err != nil {
+				ctx.GetLogger().Info("skipping account that is not an active kubernetes account", "account_id", id, "error", err)
+				continue
+			}
 			accountList = append(accountList, accountInfo{Id: id, TenantId: tenantId})
 		}
 	}

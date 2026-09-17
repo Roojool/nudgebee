@@ -1265,6 +1265,7 @@ func GetK8sAccountsForTenant(tenantID string, cloudAccountIDs []string) ([]K8sAc
 		FROM cloud_accounts ca
 		INNER JOIN agent a ON ca.id = a.cloud_account_id
 		WHERE ca.cloud_provider = 'K8s'
+		  AND ca.status = 'active'
 		  AND a.status = 'CONNECTED'
 		  AND ca.tenant = ?`
 

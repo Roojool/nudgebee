@@ -97,7 +97,7 @@ func ListTenantsWithActiveAccounts(context *security.RequestContext) ([]models.T
 	if err != nil {
 		return []models.Tenant{}, err
 	}
-	rows, err := manager.Db.Queryx("SELECT DISTINCT t.id, t.name FROM tenant t JOIN cloud_accounts ca ON t.id = ca.tenant JOIN agent ag ON ca.id = ag.cloud_account_id WHERE ca.cloud_provider = 'K8s' AND ag.status = 'CONNECTED'")
+	rows, err := manager.Db.Queryx("SELECT DISTINCT t.id, t.name FROM tenant t JOIN cloud_accounts ca ON t.id = ca.tenant JOIN agent ag ON ca.id = ag.cloud_account_id WHERE ca.cloud_provider = 'K8s' AND ca.status = 'active' AND ag.status = 'CONNECTED'")
 	if err != nil {
 		return []models.Tenant{}, err
 	}

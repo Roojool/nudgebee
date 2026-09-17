@@ -121,6 +121,7 @@ const needsServerSideStampQuery = `
 		INNER JOIN agent a ON ca.id = a.cloud_account_id
 		WHERE ca.id = $1
 		  AND ca.cloud_provider = 'K8s'
+		  AND ca.status = 'active'
 		  AND a.type != 'proxy'
 		  AND (a.connection_status->>'opencostConnection') IS DISTINCT FROM 'true'
 		  AND NOT (COALESCE(a.connection_status, '{}'::jsonb) ? 'opencostServerSide')
@@ -241,6 +242,7 @@ const activeK8sAccountsQuery = `
 	FROM cloud_accounts ca
 	INNER JOIN agent a ON ca.id = a.cloud_account_id
 	WHERE ca.cloud_provider = 'K8s'
+	  AND ca.status = 'active'
 	  AND a.type != 'proxy'
 	  AND a.status = 'CONNECTED'
 	  AND a.last_connected_at > now() - interval '1 DAY'
@@ -257,6 +259,7 @@ const activeK8sAccountsByIdQuery = `
 	INNER JOIN agent a ON ca.id = a.cloud_account_id
 	WHERE ca.id = ANY($1::uuid[])
 	  AND ca.cloud_provider = 'K8s'
+	  AND ca.status = 'active'
 	  AND a.type != 'proxy'
 	  AND a.status = 'CONNECTED'
 	  AND a.last_connected_at > now() - interval '1 DAY'

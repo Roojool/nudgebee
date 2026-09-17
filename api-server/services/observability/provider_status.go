@@ -180,6 +180,7 @@ const providerStatusAccountsQuery = `
 	FROM cloud_accounts ca
 	INNER JOIN agent a ON ca.id = a.cloud_account_id AND a.type != 'proxy'
 	WHERE ca.cloud_provider = 'K8s'
+	  AND ca.status = 'active'
 	  AND (
 	    EXISTS (
 	      SELECT 1
@@ -204,6 +205,7 @@ const providerStatusAccountsByIdQuery = `
 	INNER JOIN agent a ON ca.id = a.cloud_account_id AND a.type != 'proxy'
 	WHERE ca.id = ANY($1::uuid[])
 	  AND ca.cloud_provider = 'K8s'
+	  AND ca.status = 'active'
 	GROUP BY ca.id, ca.tenant`
 
 func listProviderStatusAccounts(ctx context.Context, accountIds []string) ([]providerStatusAccount, error) {

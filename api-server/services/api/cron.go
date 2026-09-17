@@ -777,6 +777,7 @@ func triggerVerticalRightsizing(ctx *security.RequestContext, accountIds []strin
 			FROM cloud_accounts ca
 			INNER JOIN agent a ON ca.id = a.cloud_account_id
 			WHERE ca.cloud_provider = 'K8s'
+			AND ca.status = 'active'
 			AND a.status = 'CONNECTED'
 			AND a.last_connected_at > now() - interval '1 DAY'
 			GROUP BY ca.id, ca.tenant
@@ -794,6 +795,7 @@ func triggerVerticalRightsizing(ctx *security.RequestContext, accountIds []strin
     INNER JOIN agent a ON ca.id = a.cloud_account_id
     WHERE ca.id = ANY($1::uuid[]) -- Cast the input array, not the column
     AND ca.cloud_provider = 'K8s'
+    AND ca.status = 'active'
     AND a.status = 'CONNECTED'
     AND a.last_connected_at > now() - interval '1 DAY'
     GROUP BY ca.id, ca.tenant
