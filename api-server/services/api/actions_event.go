@@ -348,16 +348,18 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 
 		c.JSON(200, resp)
 		if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{{
-			TenantId:      ctx.GetSecurityContext().GetTenantId(),
-			UserId:        ctx.GetSecurityContext().GetUserId(),
-			EventTime:     time.Now().UTC(),
-			EventCategory: audit.EventAlertEvent,
-			EventType:     audit.EventTypeEventUpdate,
-			EventState:    map[string]any{"event_id": eventID, "status": status},
-			EventActor:    audit.EventActorApiService,
-			EventTarget:   eventID,
-			EventAction:   audit.EventActionUpdate,
-			EventStatus:   audit.EventStatusSuccess,
+			TenantId:       ctx.GetSecurityContext().GetTenantId(),
+			UserId:         ctx.GetSecurityContext().GetUserId(),
+			AccountId:      resp.AccountId,
+			EventTime:      time.Now().UTC(),
+			EventCategory:  audit.EventAlertEvent,
+			EventType:      audit.EventTypeEventUpdate,
+			EventPrevState: map[string]any{"event_id": eventID, "status": resp.PrevStatus},
+			EventState:     map[string]any{"event_id": eventID, "status": status},
+			EventActor:     audit.EventActorApiService,
+			EventTarget:    eventID,
+			EventAction:    audit.EventActionUpdate,
+			EventStatus:    audit.EventStatusSuccess,
 		}}}); err != nil {
 			ctx.GetLogger().Error("failed to create audit event", "error", err)
 		}

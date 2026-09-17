@@ -4253,6 +4253,7 @@ type UpdateEventStatusResponse struct {
 	Success    bool   `json:"success"`
 	PrevStatus string `json:"prev_status"`
 	NewStatus  string `json:"new_status"`
+	AccountId  string `json:"account_id"`
 }
 
 // UpdateEventStatus manually opens or closes an event (Troubleshoot > Events >
@@ -4282,7 +4283,7 @@ func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRe
 
 	prevStatus := common.StrVal(r.Status)
 	if prevStatus == request.Status {
-		return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status}, nil
+		return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status, AccountId: *r.CloudAccountId}, nil
 	}
 
 	dbms, err := database.GetDatabaseManager(database.Metastore)
@@ -4317,7 +4318,7 @@ func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRe
 		}
 	}()
 
-	return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status}, nil
+	return &UpdateEventStatusResponse{Success: true, PrevStatus: prevStatus, NewStatus: request.Status, AccountId: accountId}, nil
 }
 
 // EventManualStatusChange is the most recent manual open/close of an event,
