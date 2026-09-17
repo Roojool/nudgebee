@@ -391,6 +391,7 @@ query ResolveEventRecord($id:String!) {
       cluster
       subject_node
       subject_owner
+      subject_owner_kind
       subject_type
       title
       priority

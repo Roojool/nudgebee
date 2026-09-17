@@ -533,3 +533,72 @@ func TestRegexWorkloadKindNeverReturnsPod(t *testing.T) {
 	assert.Equal(t, "", regexWorkloadKind(ctxWith(""), "pod"))
 	assert.Equal(t, "deployment", workloadKindForUtilisation(regexWorkloadKind(ctxWith(""), "pod")))
 }
+
+// Regression for #38638: the OOMKilled Prometheus is also the metrics backend, so
+// every query for its own container was refused, while a sidecar's usage came
+// back. The card showed only the sidecar and the tune form proposed the sidecar's
+// 21 MiB for the pod. Every container in the spec must be listed, and what the
+// metrics could not return must come from the spec.
+func TestBuildPodMetricResponse_ListsSpecContainerWithoutUsage(t *testing.T) {
+	a := &podMetricAction{}
+	ctx := playbooks.NewPlaybookActionContext("t", "a", slog.Default(), playbooks.PlaybookEvent{EventId: "e"})
+	requests, limits := parseSpecResources([]byte(`{
+		"prometheus": {"requests": {"cpu": "200m", "memory": "2Gi"}, "limits": {"memory": "8Gi"}},
+		"config-reloader": {}
+	}`))
+	spec := podWorkloadSpec{
+		found:      true,
+		containers: []string{"prometheus", "config-reloader"},
+		hasMemReq:  true,
+		hasMemLim:  true,
+		hasCpuReq:  true,
+		requests:   requests,
+		limits:     limits,
+	}
+	params := podMetricEnricherParams{PodName: "prometheus-kube-p-prometheus", Namespace: "nudgebee-agent", ResourceType: "memory"}
+	entries := []podMetricEntry{{
+		Metric:     map[string]any{"container": "config-reloader", "pod": params.PodName, "namespace": params.Namespace},
+		Timestamps: []float64{1, 2},
+		Values:     []string{"18000000", "20262912"},
+	}}
+
+	pm, _ := a.buildPodMetricResponse(ctx, entries, nil, nil, spec, params, "memory")
+
+	require.Len(t, pm.Data, 2)
+	assert.Equal(t, "config-reloader", pm.Data[0].Metric["container"], "the entry with usage keeps its place")
+	assert.Equal(t, 0, pm.Data[0].Metric["limits"].(map[string]any)["memory"], "config-reloader genuinely has no limit")
+
+	prom := pm.Data[1]
+	assert.Equal(t, "prometheus", prom.Metric["container"])
+	assert.Empty(t, prom.Values)
+	assert.Equal(t, float64(2*1024*1024*1024), prom.Metric["requests"].(map[string]any)["memory"])
+	assert.Equal(t, 0.2, prom.Metric["requests"].(map[string]any)["cpu"])
+	assert.Equal(t, float64(8*1024*1024*1024), prom.Metric["limits"].(map[string]any)["memory"])
+}
+
+// A value the metrics backend did return is the running pod's and wins over the
+// workload template (in-place resize, VPA); the spec only fills what is missing.
+func TestGetResourceValues_MetricsWinSpecFillsGaps(t *testing.T) {
+	a := &podMetricAction{}
+	metric := map[string]any{"container": "app"}
+	got := a.getResourceValues(
+		map[string]map[string]float64{"app": {"memory": 300}},
+		map[string]map[string]float64{"app": {"memory": 200, "cpu": 0.5}},
+		metric)
+	assert.Equal(t, float64(300), got["memory"])
+	assert.Equal(t, 0.5, got["cpu"])
+}
+
+func TestParseSpecResources(t *testing.T) {
+	requests, limits := parseSpecResources([]byte(`{
+		"a": {"requests": {"cpu": 1, "memory": "512Mi"}, "limits": {"cpu": "1500m", "memory": "garbage"}},
+		"b": {"requests": null}
+	}`))
+	assert.Equal(t, map[string]float64{"cpu": 1, "memory": 512 * 1024 * 1024}, requests["a"])
+	assert.Equal(t, map[string]float64{"cpu": 1.5}, limits["a"], "an unparseable quantity is left unknown, not zero")
+	assert.NotContains(t, requests, "b")
+
+	requests, limits = parseSpecResources(nil)
+	assert.Empty(t, requests)
+	assert.Empty(t, limits)
+}

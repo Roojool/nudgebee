@@ -1947,6 +1947,9 @@ var table_metadata = map[string]TableDefinition{
 			"subject_owner": {
 				Type: ColumnDefinitionTypeString,
 			},
+			"subject_owner_kind": {
+				Type: ColumnDefinitionTypeString,
+			},
 			"service_key": {
 				Type: ColumnDefinitionTypeString,
 			},

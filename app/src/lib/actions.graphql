@@ -6656,6 +6656,7 @@ type EventsRowResponse {
   subject_type: String
   subject_name: String
   subject_owner: String
+  subject_owner_kind: String
   subject_namespace: String
   subject_node: String
   service_key: String

@@ -5,6 +5,7 @@ import apiTickets from '@api1/tickets';
 import apiRecommendations from '@api1/recommendation';
 import { Modal } from '@ui/Modal';
 import { Select } from '@ui/Select';
+import { Label } from '@ui/Label';
 import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX, CI_REQUEST_ANNOTATIONS } from '@lib/annotationKeys';
 import k8sApi from '@api1/kubernetes';
@@ -105,6 +106,9 @@ const detectGitOpsManager = (annotations = {}, labels = {}) => {
   return { manager, gitRepo };
 };
 
+// Beyond this many containers the segmented control wraps badly; use a dropdown.
+const MAX_CONTAINER_BUTTONS = 4;
+
 const KubernetesRightSizingPopupForm = ({
   open,
   title = 'Update Resource Limits',
@@ -114,6 +118,9 @@ const KubernetesRightSizingPopupForm = ({
   data = {},
   updateResourceType = '',
   recommendationSource,
+  containerOptions = [],
+  onContainerChange,
+  alertContainer,
 }) => {
   const requestAnnotations = CI_REQUEST_ANNOTATIONS;
   const [updatedData, setUpdatedData] = useState({ ...data });
@@ -135,9 +142,19 @@ const KubernetesRightSizingPopupForm = ({
   // large-change confirmation rows (null = no confirmation open).
   const [gitOpsInfo, setGitOpsInfo] = useState({ manager: null, gitRepo: null });
   const [driftConfirm, setDriftConfirm] = useState(null);
-  // Container spec (requests/limits) of the workload being tuned, used as the
-  // fallback current allocation when the caller's data carries none.
-  const [specAllocation, setSpecAllocation] = useState(null);
+  // The workload being tuned. Its container spec (requests/limits) is the
+  // fallback current allocation when the caller's data carries none, and is read
+  // per container so switching containers switches the Current column too.
+  const [workloadSpec, setWorkloadSpec] = useState(null);
+  const tunedContainer = data?.container_name || data?.cloud_resourse?.meta?.container;
+  const specAllocation = useMemo(() => containerSpecAllocation(workloadSpec, tunedContainer), [workloadSpec, tunedContainer]);
+  // The caller lists the containers its evidence knows about; the workload spec
+  // adds any the metrics never returned, so every container is reachable.
+  const containerChoices = useMemo(() => {
+    if (containerOptions.length === 0) return containerOptions;
+    const specNames = (workloadSpec?.meta?.config?.containers || []).map((c) => c?.name).filter(Boolean);
+    return [...new Set([...containerOptions, ...specNames])];
+  }, [containerOptions, workloadSpec]);
 
   const parsedOldRequest =
     data?.memory?.oldRequest && typeof data?.memory?.oldRequest === 'string'
@@ -256,7 +273,7 @@ const KubernetesRightSizingPopupForm = ({
       setSelectedWorkloadAnnotations({});
       setGitOpsInfo({ manager: null, gitRepo: null });
       setDriftConfirm(null);
-      setSpecAllocation(null);
+      setWorkloadSpec(null);
     }
   }, [open]);
 
@@ -459,6 +476,9 @@ const KubernetesRightSizingPopupForm = ({
         accountId: data.accountId,
         namespaceName: data?.cloud_resourse?.meta?.namespace,
         workloadName: data?.cloud_resourse?.meta?.controller,
+        // Exact: a partial match with limit 1 can hand back another workload
+        // ("api" → "api-gateway") and show its spec as Current.
+        exactNameMatch: true,
         workloadType: data?.cloud_resourse?.meta?.controllerKind || 'Deployment',
       })
       .then(async (res) => {
@@ -469,7 +489,7 @@ const KubernetesRightSizingPopupForm = ({
           const labels = workload.meta?.config?.labels || {};
           setGitOpsInfo(detectGitOpsManager(annotations, labels));
           // Set before the annotation branches below, each of which returns early.
-          setSpecAllocation(containerSpecAllocation(workload, data?.container_name || data?.cloud_resourse?.meta?.container));
+          setWorkloadSpec(workload);
 
           // Check k8s annotations first
           const filteredKeys = Object.keys(annotations).filter((key) => key.startsWith(CI_PREFIX));
@@ -791,17 +811,64 @@ const KubernetesRightSizingPopupForm = ({
         height: '700px',
       }}
     >
+      {/* One row: which container, then how to apply — the modal has no height to spare. */}
       <Box
-        display='flex'
-        flexDirection={'column'}
-        alignItems={'center'}
-        my={2}
         sx={{
-          button: {
-            minWidth: '120px',
-          },
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: containerChoices.length > 0 ? 'space-between' : 'center',
+          flexWrap: 'wrap',
+          gap: 'var(--ds-space-4)',
+          my: 2,
         }}
       >
+        {containerChoices.length > 0 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--ds-space-3)' }}>
+            <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', color: ds.gray[700] }}>Container</Typography>
+            {containerChoices.length > 1 && onContainerChange && containerChoices.length <= MAX_CONTAINER_BUTTONS ? (
+              // Every container visible at once, the one that was killed marked.
+              <ToggleButtonGroup
+                size='small'
+                exclusive
+                value={tunedContainer}
+                onChange={(_, value) => value && onContainerChange(value)}
+                aria-label='Container'
+                sx={{ button: { textTransform: 'none', gap: 'var(--ds-space-2)', height: '32px' } }}
+              >
+                {containerChoices.map((name) => (
+                  <ToggleButton key={name} value={name}>
+                    {name}
+                    {name === alertContainer && (
+                      <Label tone='critical' size='sm' textTransform='none'>
+                        Out of memory
+                      </Label>
+                    )}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+            ) : containerChoices.length > 1 && onContainerChange ? (
+              <Select
+                label='Container'
+                value={tunedContainer || ''}
+                minWidth='250px'
+                clearable={false}
+                options={containerChoices.map((name) => ({ value: name, label: name === alertContainer ? `${name} (out of memory)` : name }))}
+                onChange={(v) => onContainerChange(v)}
+              />
+            ) : (
+              <>
+                <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                  {tunedContainer}
+                </Typography>
+                {tunedContainer === alertContainer && (
+                  <Label tone='critical' size='sm' textTransform='none'>
+                    Out of memory
+                  </Label>
+                )}
+              </>
+            )}
+          </Box>
+        )}
         <ToggleButtonGroup
           size='small'
           color='primary'
@@ -1060,5 +1127,8 @@ KubernetesRightSizingPopupForm.propTypes = {
   onFailure: PropTypes.func,
   data: PropTypes.object,
   recommendationSource: PropTypes.string,
+  containerOptions: PropTypes.arrayOf(PropTypes.string),
+  onContainerChange: PropTypes.func,
+  alertContainer: PropTypes.string,
 };
 export default KubernetesRightSizingPopupForm;
