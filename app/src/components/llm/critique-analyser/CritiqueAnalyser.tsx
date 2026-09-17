@@ -111,14 +111,19 @@ export function CritiqueAnalyser() {
               setFilters((f) => ({ ...f, agents: (sel ?? []).map((o) => (typeof o === 'string' ? o : String(o?.value ?? ''))) }))
             }
           />
-          <ToggleGroup
-            selection='single'
-            size='sm'
-            ariaLabel='Trend granularity'
-            value={filters.granularity}
-            onChange={(g) => setFilters((f) => ({ ...f, granularity: g as CritiqueGranularity }))}
-            options={GRANULARITY_OPTIONS}
-          />
+          {/* Granularity only drives the Overview trend chart (aggregateCritiques has no
+              time-bucket dimension) — hidden elsewhere so it isn't visibly inert, matching
+              CostAnalyser's showGranularity / #35797 precedent. */}
+          {tab === 'overview' && (
+            <ToggleGroup
+              selection='single'
+              size='sm'
+              ariaLabel='Trend granularity'
+              value={filters.granularity}
+              onChange={(g) => setFilters((f) => ({ ...f, granularity: g as CritiqueGranularity }))}
+              options={GRANULARITY_OPTIONS}
+            />
+          )}
           <CustomDateTimeRangePicker
             passedSelectedDateTime={dateTimeValue}
             onChange={handleDateRangeChange}
