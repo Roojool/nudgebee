@@ -380,8 +380,10 @@ func handleOrgAccountCreate(
 	if existingAccountId != "" {
 		// Update existing account with CUR data and org role
 		logger.Info("aws: updating existing account with org membership", "accountNumber", accountNumber, "existingId", existingAccountId)
+		// Merged, not replaced — see the same note on the single-account path: a
+		// wholesale write would drop a configured region allowlist.
 		_, err = dbms.Exec(
-			`UPDATE cloud_accounts SET data = $1, assume_role = $2, updated_at = NOW() WHERE id = $3`,
+			`UPDATE cloud_accounts SET data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, updated_at = NOW() WHERE id = $3`,
 			string(curDataJSON), props.RoleArn, existingAccountId,
 		)
 		if err != nil {
@@ -789,9 +791,13 @@ func handleSingleAccountCreate(
 
 	if existingAccountId != "" {
 		logger.Info("aws: updating existing account via single-account auto-registration", "accountNumber", accountNumber, "existingId", existingAccountId)
+		// Merge rather than replace: the CUR keys are all this callback knows about,
+		// and a wholesale write would drop the region allowlist an operator set on
+		// the account, silently returning it to the all-regions discovery a
+		// region-scoped IAM role forbids.
 		_, err = dbms.Exec(
 			`UPDATE cloud_accounts SET
-				data = $1, assume_role = $2, status = 'active',
+				data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, status = 'active',
 				external_id = $4,
 				account_name = CASE
 					WHEN NOT EXISTS (
@@ -934,9 +940,12 @@ func handleSingleAccountUpdate(
 	}
 
 	// Update only role ARN, CUR data, and status. Preserve existing account_access.
+	// The data write merges so a configured region allowlist survives a stack
+	// update — replacing it would quietly revert the account to all-regions
+	// discovery, which a region-scoped IAM role denies.
 	_, err = dbms.Exec(
 		`UPDATE cloud_accounts SET
-			data = $1, assume_role = $2, status = 'active', updated_at = NOW()
+			data = COALESCE(data, '{}'::jsonb) || $1::jsonb, assume_role = $2, status = 'active', updated_at = NOW()
 		WHERE id = $3`,
 		string(curDataJSON), props.RoleArn, existingAccountId,
 	)

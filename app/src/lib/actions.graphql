@@ -5923,6 +5923,7 @@ input cloud_account_update_input {
   account_name: String
   account_env: String
   data: jsonb
+  regions: [String!]
 }
 
 input cloud_account_attr_object {

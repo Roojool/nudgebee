@@ -587,6 +587,15 @@ export const isK8sAccountNameValid = (value: string) => {
   return regex.test(value);
 };
 
+// Parses the comma-separated AWS region box into the array the API expects. An
+// empty result means "discover regions from the account", never "no regions" —
+// the latter would collect nothing while the account reported healthy.
+export const parseAwsRegions = (value: string) =>
+  value
+    .split(',')
+    .map((region) => region.trim())
+    .filter(Boolean);
+
 export const isAWSAccountNameValid = (value: string) => {
   const regex = /^(?!.*(?:--|__|\s\s))[a-zA-Z0-9](?:[a-zA-Z0-9\s_-]{2,47}[a-zA-Z0-9])?$/;
   return regex.test(value);

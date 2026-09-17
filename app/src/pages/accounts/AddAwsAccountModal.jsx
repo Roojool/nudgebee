@@ -11,7 +11,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import apiAccount from '@api1/account';
 import { Modal } from '@shared/modal';
 import { Input } from '@ui/Input';
-import { isK8sAccountNameValid } from 'src/utils/common';
+import { isK8sAccountNameValid, parseAwsRegions } from 'src/utils/common';
 import apiKubernetes1 from '@api1/kubernetes1';
 import { Button } from '@ui/Button';
 import { snackbar } from '@shared/snackbarService';
@@ -65,15 +65,6 @@ const OPTION_DESC_SX = {
   lineHeight: 1.45,
   maxWidth: '46ch',
 };
-
-// Parses the comma-separated region box into the array the API expects. An
-// empty result means "discover regions from the account", never "no regions" —
-// the latter would collect nothing while the account reported healthy.
-const parseRegions = (value) =>
-  value
-    .split(',')
-    .map((region) => region.trim())
-    .filter(Boolean);
 
 const AddAwsAccountModal = ({ open, onClose }) => {
   const [activeTab, setActiveTab] = useState(TAB_CLOUDFORMATION);
@@ -245,7 +236,7 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       // Validation must bootstrap inside the allowlist: a role scoped with an
       // aws:RequestedRegion condition denies every call made outside it, so
       // validating from the us-east-1 default would fail on a working role.
-      const regions = parseRegions(regionsInput);
+      const regions = parseAwsRegions(regionsInput);
       if (regions.length > 0) {
         payload.region = regions[0];
       }
@@ -285,7 +276,7 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       payload.access_key = accessKeyId;
       payload.access_secret = secretAccessKey;
     }
-    const regions = parseRegions(regionsInput);
+    const regions = parseAwsRegions(regionsInput);
     if (regions.length > 0) {
       payload.regions = regions;
     }
