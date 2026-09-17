@@ -1597,19 +1597,41 @@ class Events:
 
     @staticmethod
     def _build_followup_action_elements(followup_options, cached_entry):
+        """Returns (elements, shown_count). `shown_count` is None when every
+        option is shown, otherwise the number actually rendered — so the
+        caller can tell the user more options exist beyond what's shown."""
         account_id = cached_entry.get("account_id") if cached_entry else None
         session_id = cached_entry.get("session_id") if cached_entry else None
 
         if len(followup_options) > FOLLOWUP_OPTIONS_THRESHOLD and account_id and session_id:
             url = f"{settings.base_url}/ask-nudgebee?accountId={account_id}&session_id={session_id}"
+            # Slack caps static_select option text/value at 75 chars, and rejects the whole
+            # payload if truncation collapses two options into the same value — dedup after
+            # truncating, and recompute the shown count from what's left rather than assuming
+            # it's still exactly the pre-truncation slice length.
+            sanitized_options = list(
+                dict.fromkeys(
+                    Transformer.apply_length_limit(str(option), 75)
+                    for option in followup_options[:FOLLOWUP_OPTIONS_THRESHOLD]
+                    if option is not None
+                )
+            )
             return [
                 {
+                    "type": "static_select",
+                    "placeholder": {"type": "plain_text", "text": "Select an option"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": opt}, "value": opt} for opt in sanitized_options
+                    ],
+                    "action_id": "select_followup_option_dropdown",
+                },
+                {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": f"Open in {settings.urls.branding_name}"},
+                    "text": {"type": "plain_text", "text": f"See all {len(followup_options)} options"},
                     "url": url,
                     "action_id": "open_followup_in_ui",
-                }
-            ]
+                },
+            ], len(sanitized_options)
 
         if len(followup_options) <= 3:
             return [
@@ -1620,10 +1642,11 @@ class Events:
                     "action_id": f"select_followup_option--{option}",
                 }
                 for option in followup_options
-            ]
+            ], None
 
         # Cap at Slack's hard limit as a safety net in case the UI-link branch
         # above was skipped (e.g., cached_entry missing account_id/session_id).
+        truncated = len(followup_options) > SLACK_STATIC_SELECT_MAX_OPTIONS
         return [
             {
                 "type": "static_select",
@@ -1634,7 +1657,7 @@ class Events:
                 ],
                 "action_id": "select_followup_option_dropdown",
             }
-        ]
+        ], (SLACK_STATIC_SELECT_MAX_OPTIONS if truncated else None)
 
     def handle_followup_response(self, payload, cached_entry, channel_id: str, thread_ts: str, team_id: str):
         try:
@@ -1647,12 +1670,12 @@ class Events:
 
             blocks = Transformer.to_slack(MarkdownBlock(text=followup_question))
             if followup_options:
-                blocks.append(
-                    {
-                        "type": "actions",
-                        "elements": self._build_followup_action_elements(followup_options, cached_entry),
-                    }
-                )
+                elements, shown = self._build_followup_action_elements(followup_options, cached_entry)
+                if shown is not None:
+                    blocks += Transformer.to_slack(
+                        ContextBlock(text=f"_Showing {shown} of {len(followup_options)} options._")
+                    )
+                blocks.append({"type": "actions", "elements": elements})
             else:
                 # Free-text follow-up: Slack has no inline input field, so tell the user
                 # they should reply by @mentioning the bot in this thread with their answer.
