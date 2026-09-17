@@ -175,7 +175,13 @@ func upsertEventRule(dbms *database.DatabaseManager, annotations any, labels any
 			metric_provider = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.metric_provider ELSE event_rules.metric_provider END,
 			metric_provider_source = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.metric_provider_source ELSE event_rules.metric_provider_source END,
 			external_rule_id = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.external_rule_id ELSE event_rules.external_rule_id END,
-			provider_config = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = '' THEN EXCLUDED.provider_config ELSE event_rules.provider_config END
+			-- provider_config is merged, never replaced: other writers own keys in it (the
+			-- k8s-collector sync stores managed_by, which decides whether a Prometheus rule
+			-- may be changed), and a UI edit sends no provider_config at all.
+			provider_config = CASE WHEN EXCLUDED.source NOT LIKE '%\_webhook' OR event_rules.source LIKE '%\_webhook' OR COALESCE(event_rules.source, '') = ''
+				THEN CASE WHEN EXCLUDED.provider_config IS NULL THEN event_rules.provider_config
+					ELSE COALESCE(event_rules.provider_config, '{}'::jsonb) || EXCLUDED.provider_config END
+				ELSE event_rules.provider_config END
 		RETURNING id`,
 		accountId, tenantId, alert, annotationsJSON, expr, duration, labelsJSON, source, category, severity, enabled,
 		alertType, nilIfEmpty(metricProvider), nilIfEmpty(metricProviderSource), nilIfEmpty(externalRuleId), providerConfigJSON,

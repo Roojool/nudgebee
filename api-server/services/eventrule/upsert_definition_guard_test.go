@@ -110,6 +110,11 @@ func TestUpsertEventRuleGuardsDefinitionFieldsOnTheFlag(t *testing.T) {
 		// The fallback must survive, or #33024 reopens and firing webhooks
 		// blank agent-synced PromQL again.
 		"firing guard remains the fallback": lit(`WHEN EXCLUDED.source NOT LIKE '%\_webhook' THEN EXCLUDED.expr ELSE event_rules.expr END`),
+		// A write without provider_config (every UI edit) must keep the stored
+		// keys — the sync's managed_by decides whether the rule can be changed
+		// at all — and a write with one must merge, not replace.
+		"provider_config kept when not sent": lit(`WHEN EXCLUDED.provider_config IS NULL THEN event_rules.provider_config`),
+		"provider_config merged":             lit(`COALESCE(event_rules.provider_config, '{}'::jsonb) || EXCLUDED.provider_config`),
 	}
 
 	for name, pattern := range patterns {
