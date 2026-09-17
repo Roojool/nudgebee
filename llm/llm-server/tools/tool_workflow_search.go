@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -43,7 +44,7 @@ func (t WorkflowSearchTool) Description() string {
 		"Returns each automation's id, what it does, when to use it, and its input parameters — " +
 		"pass the id to workflow_trigger to run it. " +
 		"Call with no query to list everything you are allowed to run. " +
-		"Args: query (string, optional), limit (number, optional, default 5)."
+		"Args: query (string, optional), limit (number, optional, default 5). " + automationURLToolHint
 }
 
 // InferToolRequestType marks the search as a read so it runs without a
@@ -103,5 +104,37 @@ func (t WorkflowSearchTool) Call(ctx core.NbToolContext, input core.NBToolCallRe
 		return core.NBToolResponse{}, fmt.Errorf("failed to search automations: %w", err)
 	}
 
-	return core.NBToolResponse{Data: string(resp), Type: core.NBToolResponseTypeJson}, nil
+	return core.NBToolResponse{Data: string(injectAutomationURLs(resp, ctx.AccountId)), Type: core.NBToolResponseTypeJson}, nil
+}
+
+// injectAutomationURLs adds the canonical `url` to each item in `workflows`.
+// Returns raw unchanged on an unexpected shape or empty accountId.
+func injectAutomationURLs(raw []byte, accountId string) []byte {
+	if accountId == "" {
+		return raw
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return raw
+	}
+	workflows, ok := parsed["workflows"].([]any)
+	if !ok {
+		return raw
+	}
+	for _, w := range workflows {
+		item, ok := w.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, ok := item["id"].(string); ok {
+			if u := core.BuildAutomationURL(accountId, id, nil, ""); u != "" {
+				item["url"] = u
+			}
+		}
+	}
+	b, err := marshalNoHTMLEscape(parsed, "")
+	if err != nil {
+		return raw
+	}
+	return b
 }

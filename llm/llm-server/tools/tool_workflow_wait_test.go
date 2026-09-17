@@ -268,3 +268,19 @@ func TestTriggerSourceHeaderIsSentOnEveryRunbookCall(t *testing.T) {
 	assert.Equal(t, triggerSourceAI, gotSource, "runbook-server's AI gate depends on this header")
 	assert.Equal(t, "user-1", gotUser)
 }
+
+// A run the model started is reported with the automation's real link, so it
+// does not invent one (#37882).
+func TestWaitForExecutionCarriesAutomationURL(t *testing.T) {
+	runbookStub(t, []map[string]any{{"status": "COMPLETED"}})
+	prev := config.Config.BaseUrl
+	config.Config.BaseUrl = "https://app.example.com"
+	t.Cleanup(func() { config.Config.BaseUrl = prev })
+
+	outcome := waitForExecution(context.Background(), "wf-1", "exec-1", "acct", "tenant", "user")
+	assert.Equal(t, "https://app.example.com/automation/wf-1?accountId=acct", outcome.URL)
+	assert.Contains(t, marshalOutcome(outcome), `"url":"https://app.example.com/automation/wf-1?accountId=acct"`)
+
+	outcome = waitForExecution(context.Background(), "wf-1", "exec-1", "", "tenant", "user")
+	assert.NotContains(t, marshalOutcome(outcome), `"url"`, "no account means no url key at all")
+}

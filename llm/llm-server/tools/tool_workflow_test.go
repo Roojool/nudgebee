@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"nudgebee/llm/config"
 	"nudgebee/llm/tools/core"
 )
 
@@ -125,7 +126,7 @@ func TestProjectWorkflowListResponse_TrimsVerboseFields(t *testing.T) {
 		"total_count": 170
 	}`)
 
-	got := projectWorkflowListResponse(raw)
+	got := projectWorkflowListResponse(raw, "")
 	var parsed map[string]any
 	assert.NoError(t, json.Unmarshal(got, &parsed))
 
@@ -164,7 +165,7 @@ func TestProjectWorkflowListResponse_TruncatesLongStatusMessage(t *testing.T) {
 	assert.NoError(t, err)
 
 	var parsed map[string]any
-	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw), &parsed))
+	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw, ""), &parsed))
 	wf := parsed["workflows"].([]any)[0].(map[string]any)
 	msg := wf["last_execution_status_message"].(string)
 	assert.Equal(t, 203, len(msg)) // 200 runes + "..."
@@ -173,13 +174,13 @@ func TestProjectWorkflowListResponse_TruncatesLongStatusMessage(t *testing.T) {
 
 func TestProjectWorkflowListResponse_InvalidJSONPassesThrough(t *testing.T) {
 	raw := []byte(`not json at all`)
-	assert.Equal(t, raw, projectWorkflowListResponse(raw))
+	assert.Equal(t, raw, projectWorkflowListResponse(raw, ""))
 }
 
 func TestProjectWorkflowListResponse_UnexpectedShapePassesThrough(t *testing.T) {
 	// No "workflows" key — leave it alone.
 	raw := []byte(`{"error": "unauthorized"}`)
-	assert.Equal(t, raw, projectWorkflowListResponse(raw))
+	assert.Equal(t, raw, projectWorkflowListResponse(raw, ""))
 }
 
 // TestProjectWorkflowListResponse_OmitsDraftAIDescription pins the one field
@@ -205,7 +206,7 @@ func TestProjectWorkflowListResponse_OmitsDraftAIDescription(t *testing.T) {
 	}`)
 
 	var parsed map[string]any
-	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw), &parsed))
+	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw, ""), &parsed))
 	wf := parsed["workflows"].([]any)[0].(map[string]any)
 
 	_, present := wf["llm_description"]
@@ -216,4 +217,48 @@ func TestProjectWorkflowListResponse_OmitsDraftAIDescription(t *testing.T) {
 	assert.Equal(t, true, wf["ai_invocable"])
 	assert.Equal(t, "ACTIVE", wf["status"])
 	assert.Equal(t, []any{"manual"}, wf["trigger_types"])
+}
+
+// Issue #37882: the model invented `/automations/<id>` links with no accountId
+// because the listing carried only the id. Every item must carry the canonical url.
+func TestProjectWorkflowListResponse_AddsCanonicalURL(t *testing.T) {
+	prev := config.Config.BaseUrl
+	config.Config.BaseUrl = "https://app.example.com/"
+	t.Cleanup(func() { config.Config.BaseUrl = prev })
+
+	raw := []byte(`{"workflows": [{"id": "wf-1", "name": "a"}, {"id": "wf-2", "name": "b"}]}`)
+
+	var parsed map[string]any
+	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw, "acct-1"), &parsed))
+	wfs := parsed["workflows"].([]any)
+	assert.Equal(t, "https://app.example.com/automation/wf-1?accountId=acct-1", wfs[0].(map[string]any)["url"])
+	assert.Equal(t, "https://app.example.com/automation/wf-2?accountId=acct-1", wfs[1].(map[string]any)["url"])
+
+	// Without an account the url is omitted entirely, never emitted partial.
+	assert.NoError(t, json.Unmarshal(projectWorkflowListResponse(raw, ""), &parsed))
+	_, present := parsed["workflows"].([]any)[0].(map[string]any)["url"]
+	assert.False(t, present)
+}
+
+func TestWithAutomationURL(t *testing.T) {
+	link := "https://app.example.com/automation/wf-1?accountId=acct-1"
+
+	var parsed map[string]any
+	assert.NoError(t, json.Unmarshal(withAutomationURL([]byte(`{"id":"wf-1","name":"a"}`), link), &parsed))
+	assert.Equal(t, link, parsed["url"])
+	assert.Equal(t, "a", parsed["name"])
+
+	script := []byte(`{"id":"wf-1","script":"if a < b && c > d: print('<ok>')"}`)
+	assert.Contains(t, string(withAutomationURL(script, link)), `if a < b && c > d: print('<ok>')`, "scripts must not be HTML-escaped")
+
+	raw := []byte(`{"id":"wf-1"}`)
+	assert.Equal(t, raw, withAutomationURL(raw, ""), "no link leaves the payload untouched")
+	notObject := []byte(`not json`)
+	assert.Equal(t, notObject, withAutomationURL(notObject, link))
+}
+
+func TestMarshalNoHTMLEscape_KeepsURLQueryVerbatim(t *testing.T) {
+	b, err := marshalNoHTMLEscape(map[string]string{"url": "https://h/automation/x?accountId=a&session_id=s"}, "")
+	assert.NoError(t, err)
+	assert.Equal(t, `{"url":"https://h/automation/x?accountId=a&session_id=s"}`, string(b))
 }

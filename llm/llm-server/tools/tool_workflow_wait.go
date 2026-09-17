@@ -2,11 +2,11 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"nudgebee/llm/common"
+	"nudgebee/llm/tools/core"
 )
 
 const (
@@ -38,6 +38,9 @@ type executionOutcome struct {
 	WorkflowID  string `json:"workflow_id"`
 	ExecutionID string `json:"execution_id"`
 	Status      string `json:"status"`
+	// URL links the automation the run belongs to, so the model reports the run
+	// with a real link instead of inventing one. Omitted without an account.
+	URL string `json:"url,omitempty"`
 	// Result / Error carry the run's own output, present only once terminal.
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
@@ -90,6 +93,7 @@ func waitForExecution(reqCtx context.Context, workflowID, executionID, accountID
 		WorkflowID:  workflowID,
 		ExecutionID: executionID,
 		Status:      "RUNNING",
+		URL:         core.BuildAutomationURL(accountID, workflowID, nil, ""),
 	}
 
 	waitCtx, cancel := context.WithTimeout(reqCtx, executionWaitTimeout)
@@ -186,7 +190,7 @@ func hasPendingApproval(details executionDetails) bool {
 
 // marshalOutcome renders an outcome for the tool response.
 func marshalOutcome(outcome executionOutcome) string {
-	encoded, err := json.Marshal(outcome)
+	encoded, err := marshalNoHTMLEscape(outcome, "")
 	if err != nil {
 		// Never drop the ids — they are how a user finds the run in the UI.
 		return fmt.Sprintf(`{"workflow_id":%q,"execution_id":%q,"status":%q}`,

@@ -240,8 +240,14 @@ func (t WorkflowListTool) Description() string {
 		"inspecting them (what exists, its status, when it last ran). To find an " +
 		"automation that fits a problem someone described, use workflow_search: it " +
 		"matches against what each automation is for and reads published data, which " +
-		"this listing does not."
+		"this listing does not. " + automationURLToolHint
 }
+
+// automationURLToolHint tells the model to use the returned url, not invent one.
+// Lives in tool descriptions so it survives scratchpad compression.
+const automationURLToolHint = "Each automation comes back with a `url` — the only correct link to it. " +
+	"Use it exactly as given; never build an automation URL from an id."
+
 func (t WorkflowListTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
@@ -269,16 +275,18 @@ func (t WorkflowListTool) Call(ctx core.NbToolContext, input core.NBToolCallRequ
 	if err != nil {
 		return core.NBToolResponse{}, err
 	}
-	return core.NBToolResponse{Data: string(projectWorkflowListResponse(resp)), Type: core.NBToolResponseTypeJson}, nil
+	return core.NBToolResponse{Data: string(projectWorkflowListResponse(resp, ctx.AccountId)), Type: core.NBToolResponseTypeJson}, nil
 }
 
 // projectWorkflowListResponse trims the runbook-server `GET /workflows` payload
 // to the fields the LLM actually needs to pick a workflow. The full definition
 // (tasks, scripts, layouts), tenant/account IDs, and created/updated_by user
 // blobs are dropped — callers fetch them on demand via workflow_get.
+// Each item gets the canonical `url` so the model links it instead of inventing
+// one (#37882); it is omitted when accountId is empty.
 // If the response is not the expected shape, the original bytes are returned
 // so the LLM still sees something usable.
-func projectWorkflowListResponse(raw []byte) []byte {
+func projectWorkflowListResponse(raw []byte, accountId string) []byte {
 	var parsed struct {
 		Workflows []map[string]any `json:"workflows"`
 		NextPage  any              `json:"next_page_token,omitempty"`
@@ -298,6 +306,11 @@ func projectWorkflowListResponse(raw []byte) []byte {
 		for _, k := range []string{"id", "name", "description", "status", "ai_invocable", "last_execution_status", "last_execution_time"} {
 			if v, ok := wf[k]; ok && v != nil {
 				item[k] = v
+			}
+		}
+		if id, ok := item["id"].(string); ok {
+			if u := core.BuildAutomationURL(accountId, id, nil, ""); u != "" {
+				item["url"] = u
 			}
 		}
 		if msg, ok := wf["last_execution_status_message"].(string); ok && msg != "" {
@@ -337,7 +350,7 @@ func projectWorkflowListResponse(raw []byte) []byte {
 	if parsed.Total != nil {
 		out["total_count"] = parsed.Total
 	}
-	b, err := json.Marshal(out)
+	b, err := marshalNoHTMLEscape(out, "")
 	if err != nil {
 		return raw
 	}
@@ -365,7 +378,7 @@ type WorkflowGetTool struct{}
 func (t WorkflowGetTool) Name() string             { return ToolWorkflowGet }
 func (t WorkflowGetTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 func (t WorkflowGetTool) Description() string {
-	return "Gets the definition and details of a specific automation. Arg: id (string, required)."
+	return "Gets the definition and details of a specific automation. Arg: id (string, required). " + automationURLToolHint
 }
 func (t WorkflowGetTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
@@ -386,21 +399,65 @@ func (t WorkflowGetTool) Call(ctx core.NbToolContext, input core.NBToolCallReque
 		return core.NBToolResponse{}, err
 	}
 
+	link := core.BuildAutomationURL(ctx.AccountId, id, nil, "")
+	var references []core.NBToolResponseReference
+	if link != "" {
+		references = []core.NBToolResponseReference{{Text: "Open automation", Url: link, Type: "link"}}
+	}
+
 	// For large workflows (>8KB), return a compact summary to fit within the ReAct scratchpad budget
 	const compactThreshold = 8192
 	if len(resp) > compactThreshold {
-		compact := compactWorkflowResponse(resp)
+		compact := compactWorkflowResponse(resp, link)
 		if compact != "" {
-			return core.NBToolResponse{Data: compact, Type: core.NBToolResponseTypeJson}, nil
+			return core.NBToolResponse{Data: compact, Type: core.NBToolResponseTypeJson, References: references}, nil
 		}
 	}
 
-	return core.NBToolResponse{Data: string(resp), Type: core.NBToolResponseTypeJson}, nil
+	return core.NBToolResponse{Data: string(withAutomationURL(resp, link)), Type: core.NBToolResponseTypeJson, References: references}, nil
+}
+
+// withAutomationURL sets a top-level `url` on a single-automation JSON object.
+// raw is returned unchanged when link is empty or raw is not a JSON object.
+func withAutomationURL(raw []byte, link string) []byte {
+	if link == "" {
+		return raw
+	}
+	// RawMessage + no HTML escaping keeps scripts in the definition byte-faithful.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return raw
+	}
+	encodedLink, err := marshalNoHTMLEscape(link, "")
+	if err != nil {
+		return raw
+	}
+	obj["url"] = encodedLink
+	b, err := marshalNoHTMLEscape(obj, "")
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+// marshalNoHTMLEscape is json.Marshal without escaping &, <, > (url query strings
+// and scripts must reach the model verbatim, not as \u0026). indent "" = compact.
+func marshalNoHTMLEscape(v any, indent string) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if indent != "" {
+		enc.SetIndent("", indent)
+	}
+	if err := enc.Encode(v); err != nil {
+		return nil, fmt.Errorf("marshal json: %w", err)
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // compactWorkflowResponse returns a structured summary of a large workflow,
 // preserving task IDs, types, dependencies, and conditions while omitting large param values.
-func compactWorkflowResponse(resp []byte) string {
+func compactWorkflowResponse(resp []byte, link string) string {
 	var workflow map[string]interface{}
 	if err := json.Unmarshal(resp, &workflow); err != nil {
 		return ""
@@ -410,6 +467,9 @@ func compactWorkflowResponse(resp []byte) string {
 		"id":     workflow["id"],
 		"name":   workflow["name"],
 		"status": workflow["status"],
+	}
+	if link != "" {
+		summary["url"] = link
 	}
 
 	definition, ok := workflow["definition"].(map[string]interface{})
@@ -468,7 +528,7 @@ func compactWorkflowResponse(resp []byte) string {
 	compactDef["tasks"] = compactTasks
 	summary["definition"] = compactDef
 
-	result, err := json.MarshalIndent(summary, "", "  ")
+	result, err := marshalNoHTMLEscape(summary, "  ")
 	if err != nil {
 		return ""
 	}

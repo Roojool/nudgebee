@@ -81,7 +81,7 @@ class TestSlackGenericFooter:
         )
         text = get_slack_generic_message_template(params)["blocks"][-1]["elements"][0]["text"]
         assert (
-            "Automation: <https://app.test/workflow/wf-123?accountId=acct-456&utm=slack|*cleanup-old-instances*>"
+            "Automation: <https://app.test/automation/wf-123?accountId=acct-456&utm=slack|*cleanup-old-instances*>"
             in text
         )
 
@@ -90,7 +90,7 @@ class TestSlackGenericFooter:
             workflow_metadata=_meta(workflow_name="W", workflow_id="wf-1"),
         )
         text = get_slack_generic_message_template(params)["blocks"][-1]["elements"][0]["text"]
-        assert "Automation: <https://app.test/workflow/wf-1?utm=slack|*W*>" in text
+        assert "Automation: <https://app.test/automation/wf-1?utm=slack|*W*>" in text
 
     def test_missing_base_url_falls_back_to_plaintext(self, monkeypatch):
         monkeypatch.setattr(settings, "base_url", "")
@@ -161,7 +161,7 @@ class TestMsTeamsGenericFooter:
         text = get_ms_teams_generic_message_template(params)["body"][-1]["text"]
         assert (
             "Automation: [**cleanup-old-instances**]"
-            "(https://app.test/workflow/wf-123?accountId=acct-456&utm=teams)" in text
+            "(https://app.test/automation/wf-123?accountId=acct-456&utm=teams)" in text
         )
 
 
@@ -197,7 +197,7 @@ class TestGoogleChatGenericFooter:
         )
         out = get_google_chat_generic_message_template(params)
         assert (
-            "Automation: <https://app.test/workflow/wf-123?accountId=acct-456&utm=gchat|cleanup-old-instances>" in out
+            "Automation: <https://app.test/automation/wf-123?accountId=acct-456&utm=gchat|cleanup-old-instances>" in out
         )
 
 
@@ -237,3 +237,11 @@ class TestGenericMessageParamsParsing:
     def test_workflow_footer_reservation_constant_is_two(self):
         # Sanity: divider + context = 2 blocks
         assert WORKFLOW_FOOTER_BLOCKS_RESERVED == 2
+
+
+def test_workflow_route_is_the_canonical_automation_page():
+    # The frontend page is app/src/pages/automation/[workflowId].tsx; /workflow/ only
+    # survives as a redirect. Pin the constant so a revert fails here, not in renderers.
+    from notifications_server.configs.settings import URLRoutes
+
+    assert URLRoutes.WORKFLOW == "/automation/{workflow_id}"

@@ -1513,7 +1513,7 @@ func TestWorkflowBuilder_BuildWorkflowEditorLink(t *testing.T) {
 			requestAcct: acct,
 			sessionId:   sess,
 			workflowId:  wfId,
-			want:        base + "/workflow/" + wfId + "?accountId=" + acct + "&session_id=" + sess + "#editor",
+			want:        base + "/automation/" + wfId + "?accountId=" + acct + "&session_id=" + sess + "#editor",
 		},
 		{
 			name:        "agent accountId empty, fallback to request",
@@ -1521,7 +1521,7 @@ func TestWorkflowBuilder_BuildWorkflowEditorLink(t *testing.T) {
 			requestAcct: otherAcct,
 			sessionId:   sess,
 			workflowId:  wfId,
-			want:        base + "/workflow/" + wfId + "?accountId=" + otherAcct + "&session_id=" + sess + "#editor",
+			want:        base + "/automation/" + wfId + "?accountId=" + otherAcct + "&session_id=" + sess + "#editor",
 		},
 		{
 			name:        "session id empty omits session_id param",
@@ -1529,7 +1529,7 @@ func TestWorkflowBuilder_BuildWorkflowEditorLink(t *testing.T) {
 			requestAcct: acct,
 			sessionId:   "",
 			workflowId:  wfId,
-			want:        base + "/workflow/" + wfId + "?accountId=" + acct + "#editor",
+			want:        base + "/automation/" + wfId + "?accountId=" + acct + "#editor",
 		},
 		{
 			name:        "both account ids empty returns empty",
@@ -1553,7 +1553,7 @@ func TestWorkflowBuilder_BuildWorkflowEditorLink(t *testing.T) {
 			requestAcct: acct,
 			sessionId:   "",
 			workflowId:  "wf with space",
-			want:        base + "/workflow/wf%20with%20space?accountId=" + acct + "#editor",
+			want:        base + "/automation/wf%20with%20space?accountId=" + acct + "#editor",
 		},
 	}
 

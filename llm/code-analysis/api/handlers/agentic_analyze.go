@@ -150,7 +150,7 @@ type AgenticAnalyzeRequest struct {
 	EventId          string `json:"event_id,omitempty"`
 	RecommendationId string `json:"recommendation_id,omitempty"`
 	// WorkflowId is the originating workflow definition id. When set, the PR
-	// description links back to the workflow (/workflow/<id>).
+	// description links back to the workflow (/automation/<id>).
 	WorkflowId     string               `json:"workflow_id,omitempty"`
 	AccountId      string               `json:"account_id,omitempty"`
 	ConversationId string               `json:"conversation_id,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/internal/tasks/types"
 	"nudgebee/runbook/services/notification"
+	"strings"
 )
 
 // DmSendTask defines a task for sending a direct message to a user.
@@ -129,15 +130,15 @@ func (t *DmSendTask) OutputSchema() *types.Schema {
 	}
 }
 
-// buildWorkflowDmLink returns a Slack mrkdwn link to the workflow page, or "" if any required piece is missing.
+// buildWorkflowDmLink returns a Slack mrkdwn link to the automation page, or "" if any required piece is missing.
 func buildWorkflowDmLink(taskCtx types.TaskContext, wfName string) string {
-	baseURL := config.Config.BaseUrl
+	baseURL := strings.TrimRight(config.Config.BaseUrl, "/")
 	wfID := taskCtx.GetWorkflowID()
 	accountID := taskCtx.GetAccountID()
 	if baseURL == "" || wfID == "" {
 		return ""
 	}
-	link := fmt.Sprintf("%s/workflow/%s", baseURL, wfID)
+	link := fmt.Sprintf("%s/automation/%s", baseURL, wfID)
 	if accountID != "" {
 		link += "?" + url.Values{"accountId": []string{accountID}, "utm": []string{"slack"}}.Encode()
 	} else {

@@ -69,6 +69,8 @@ const nextConfig = {
         destination: '/automation',
         permanent: true,
       },
+      // Keep the /workflow redirects permanently: links already sent in Slack/Teams/email
+      // and written into GitHub PR descriptions still use the old path.
       {
         source: '/workflow',
         destination: '/automation',

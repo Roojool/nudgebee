@@ -30,7 +30,7 @@ class URLRoutes:
     AUTO_PILOT_TASK = "/auto-pilot/task/{auto_pilot_id}"
 
     # Workflow / Automation routes
-    WORKFLOW = "/workflow/{workflow_id}"
+    WORKFLOW = "/automation/{workflow_id}"
 
     # Cloud Account routes
     CLOUD_ACCOUNT_DETAILS = "/cloud-account/details/{account_id}"

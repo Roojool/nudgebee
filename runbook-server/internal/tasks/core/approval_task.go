@@ -230,14 +230,14 @@ func approvalSignature(token, status, approver, signingKey string) string {
 // HMAC and proxies the decision to runbook-server. runbook-server itself must
 // NOT be exposed publicly.
 //
-// URL shape: {appBaseURL}/workflow/approvals/{token}?status=...&approver=...&sig=...
+// URL shape: {appBaseURL}/automation/approvals/{token}?status=...&approver=...&sig=...
 func buildApprovalURL(appBaseURL, token, status, approver, signingKey string) string {
 	sig := approvalSignature(token, status, approver, signingKey)
 	q := url.Values{}
 	q.Set("status", status)
 	q.Set("approver", approver)
 	q.Set("sig", sig)
-	return fmt.Sprintf("%s/workflow/approvals/%s?%s",
+	return fmt.Sprintf("%s/automation/approvals/%s?%s",
 		strings.TrimRight(appBaseURL, "/"),
 		url.PathEscape(token),
 		q.Encode())
