@@ -207,6 +207,7 @@ func resolveK8sRecommendationImpact(kg *core.Service, tenantID, accountID string
 	if err != nil || impact == nil {
 		return nil, false
 	}
+	impact.RetainDirectDependents()
 	return impact, true
 }
 
@@ -226,6 +227,7 @@ func resolveCloudRecommendationImpact(kg *core.Service, tenantID, accountID, res
 	if err != nil || impact == nil {
 		return nil, false
 	}
+	impact.RetainDirectDependents()
 	return impact, true
 }
 
