@@ -40,9 +40,15 @@ func (s *WorkflowTemplateDao) ListGlobal(ctx context.Context, request model.List
 		argID++
 	}
 
-	if request.Name != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("t.name ILIKE $%d", argID))
-		args = append(args, "%"+request.Name+"%")
+	// Free-text search: matches the name, the description, or any browse label.
+	if query := strings.TrimSpace(request.Name); query != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(t.name ILIKE $%[1]d OR COALESCE(t.description, '') ILIKE $%[1]d OR EXISTS ("+
+				"SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(t.tags->'labels') = 'array' THEN t.tags->'labels' ELSE '[]'::jsonb END) l "+
+				"WHERE l ILIKE $%[1]d))",
+			argID,
+		))
+		args = append(args, "%"+sqlEscapeLike(query)+"%")
 		argID++
 	}
 
