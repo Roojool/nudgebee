@@ -36,7 +36,7 @@ export function formatDuration(ms) {
   return h ? `${d}d ${h}h` : `${d}d`;
 }
 
-// Same "HH:MM TZ, DD-Mon" form as the app's other timestamp tooltips.
+// Same "HH:MM TZ, DD-Mon-YYYY" form as the app's other timestamp tooltips.
 const formatClock = (ms) => formatTooltip(new Date(ms));
 
 const toMs = (value) => {
