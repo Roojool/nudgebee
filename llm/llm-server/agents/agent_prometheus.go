@@ -80,6 +80,7 @@ func (l PrometheusAgent) GetSystemPrompt(ctx *security.RequestContext, query cor
 		"3.  **Complex Query Generation:** ONLY use `promql_query` tool if the request involves custom metrics, complex aggregations, or if you are unsure of the metric name.",
 		"4.  **Execute Query:** Use the `prometheus_execute` tool to execute prometheus query and get the results.",
 		"5.  **Visualize:** ONLY if the user explicitly asks for a chart, graph, or plot, use the `visualizer` tool. For standard queries, provide a text summary. Do NOT generate any Mermaid/chart syntax yourself.",
+		"    **Chart type:** Default to a line chart for a trend over time and a bar chart for a comparison across categories. If the user explicitly asks for a pie or doughnut chart, it must show a share-of-total breakdown at a single point in time, NOT a time series — omitting `range`/`start_time`/`end_time` does NOT give you a snapshot, it defaults to a 24-HOUR range query. Instead, pass a short explicit `range` (e.g. `{\"command\": \"...\", \"range\": \"5m\"}`) so `prometheus_execute` returns a small number of recent values you can chart as a snapshot. If they name a concrete metric that already fits that shape (e.g. 'pie chart of CPU usage by pod'), query it that way and chart it directly. If they ask for a pie chart without naming a metric (e.g. 'give me any pie chart'), pick a metric that is naturally a snapshot breakdown — e.g. current CPU or memory usage by pod in the active namespace, or pod count by phase — rather than an arbitrary time-series metric, which cannot be shown as a pie.",
 		"**Time Handling:**",
 		" - If the user request specifies a specific time (e.g., 'at 01:00', 'around 01:00'), you MUST calculate specific `start_time` and `end_time` (e.g. 00:45 to 01:15 for a 30m window) and pass them to `prometheus_execute`.",
 		" - Do NOT use `range` for specific past time points; `range` is only for 'last X minutes/hours' relative to NOW.",
@@ -149,6 +150,7 @@ func (l PrometheusAgent) GetSystemPrompt(ctx *security.RequestContext, query cor
 		VisualizationAgentName: {
 			"Use this tool to generate visualizations (charts, graphs) for metrics, Without using this tool you can't generate correct charts or graphs.",
 			"Input: A natural language request that INCLUDES the FULL metric data. For trend charts (time-series), you MUST pass the arrays of values and timestamps (e.g., 'Series A: [1,2,3], Time: [t1,t2,t3]'). For bar charts, pass the categorical values. Do NOT summarize time-series data into a single number unless explicitly asked.",
+			"For pie or doughnut charts, pass a snapshot breakdown as labeled values (e.g., 'CPU usage by pod: web-server-1: 45%, web-server-2: 30%, web-server-3: 25%') — never a time series; a pie chart has no time axis.",
 			"Output: A Mermaid.js visualization block.",
 		},
 	}
@@ -159,9 +161,9 @@ func (l PrometheusAgent) GetSystemPrompt(ctx *security.RequestContext, query cor
 		"You MAY execute PromQL queries directly using `prometheus_execute` if you are confident in the query syntax and metric names (e.g. standard K8s metrics). Otherwise, use `promql_query` first.",
 		"Do NOT use `resource_search_execute` if the resource name and namespace are already provided in the user request.",
 		"If `prometheus_execute` returns no data after trying correct label schemas, use `promql_query` ONCE. If still empty, inform the user no data exists.",
-		"You MUST use `visualizer` tool to generate visualizations (charts) for metrics, and prefer line/bar charts, without using this tool you can't generate correct charts or graphs.",
+		"You MUST use `visualizer` tool to generate visualizations (charts) for metrics — without it you can't generate correct charts or graphs. Choose the chart type from what the user asked for and the data's shape (see the Visualize step): line/bar for a trend or category comparison, pie/doughnut only for a share-of-total snapshot.",
 		"For specific time queries (e.g. 'around 10am'), ALWAYS use `start_time` and `end_time` calculated from the request. NEVER use `range` for absolute time targets.",
-		"The final answer must be a summary or chart of the data from `prometheus_execute` tool, if user requests for chart or graph prefer line/bar charts using `visualizer` tool.",
+		"The final answer must be a summary or chart of the data from `prometheus_execute` tool; if the user requests a chart or graph, generate it using the `visualizer` tool with the chart type they asked for (or, if unspecified, whichever type fits the data).",
 	}
 
 	return core.NBAgentPrompt{
@@ -260,6 +262,22 @@ func (l PrometheusAgent) GetSystemPrompt(ctx *security.RequestContext, query cor
 					},
 				},
 				Explanation: `The user wants memory usage chart for web-server pod. I will generate visualization (line chart) for memory usage of the web-server pod.`,
+			},
+			{
+				Question: "Give me any pie chart",
+				AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+					{
+						Tool:        tools.ToolQueryPrometheus,
+						Input:       `{"command": "sum(rate(container_cpu_usage_seconds_total{namespace=\"nudgebee\"}[5m])) by (pod)", "range": "5m"}`,
+						Explanation: "No metric was named. A pie chart needs a share-of-total snapshot, not a trend, so I query current CPU usage per pod in the active namespace with a short 5m range (omitting range/start_time/end_time would default to a 24-hour query) instead of a time-series metric.",
+					},
+					{
+						Tool:        VisualizationAgentName,
+						Input:       "Generate a pie chart showing CPU usage by pod. Data: web-server-1: 45%, web-server-2: 30%, web-server-3: 25%",
+						Explanation: "The per-pod breakdown at a single point in time is a share-of-total snapshot, which is what a pie chart shows.",
+					},
+				},
+				Explanation: `The request named no concrete metric, so I picked a snapshot metric (current per-pod CPU usage) that is naturally a share-of-total breakdown, instead of a time-series metric that can't be shown as a pie.`,
 			},
 			{
 				Question: "What is the CPU utilization percentage per pod in namespace nudgebee?",
