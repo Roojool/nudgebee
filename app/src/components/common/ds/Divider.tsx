@@ -73,6 +73,7 @@ export function Divider({
   }
 
   // Horizontal + label = "line+label" composition. Two flanking lines with the label between.
+  // align-self: stretch keeps the flanking lines from collapsing in a column aligned start/center/end.
   if (label !== undefined) {
     return (
       <Box
@@ -86,6 +87,7 @@ export function Divider({
           gap: 'var(--ds-space-3)',
           marginTop: 'var(--ds-space-3)',
           marginBottom: 'var(--ds-space-3)',
+          alignSelf: 'stretch',
           ...sx,
         }}
       >
@@ -108,7 +110,10 @@ export function Divider({
 
   // Horizontal + no label = "line" composition.
   // An <hr> gets `margin-inline: auto` from the browser, which collapses it to
-  // zero width in a flex column; zero the side margins (as MUI's Divider does).
+  // zero width in a flex column; zero the side margins (as MUI's Divider does)
+  // and stretch across columns whatever their alignItems. A flex *row* parent
+  // still needs the caller to size the line (e.g. `sx={{ flex: 1 }}`), and
+  // `mx: 'auto'` centring only works in a block parent.
   return (
     <Box
       component='hr'
@@ -123,6 +128,7 @@ export function Divider({
         marginBottom: 'var(--ds-space-3)',
         marginLeft: 0,
         marginRight: 0,
+        alignSelf: 'stretch',
         flexShrink: 0,
         ...sx,
       }}
