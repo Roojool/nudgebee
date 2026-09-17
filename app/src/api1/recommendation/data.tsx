@@ -87,6 +87,11 @@ const TEMPLATE_ALIASES: Record<string, string[]> = {
   INSTANCE_ID: ['recommendation.instance_id', 'recommendation.cpu.resource_id', 'resource_name'],
   INSTANCE_TYPE: ['recommendation.recommended_instance_type', 'recommendation.recommendedInstances.0.instanceType'],
   ALTERNATE_INSTANCE_TYPE: ['recommendation.alternate_instances.0.instanceType'],
+  // RDS keeps the whole pricing object per candidate, so the class sits under its product attributes.
+  RDS_INSTANCE_CLASS: [
+    'recommendation.recommendedInstances.0.product.attributes.instanceType',
+    'recommendation.alternate_instances.0.product.attributes.instanceType',
+  ],
   REPOSITORY_NAME: ['repository_name', 'recommendation.repository_name'],
 };
 
@@ -1792,7 +1797,7 @@ aws cloudtrail start-logging --name {{resource_name}}
       mitigations: [
         `
 \`\`\`
-aws logs put-retention-policy --log-group-name {{recommendation.log_group_name}} --retention-in-days 90
+aws logs put-retention-policy --log-group-name {{recommendation.log_group_name}} --retention-in-days {{recommendation.proposed_retention_days}}
 \`\`\`
 `,
       ],
@@ -1977,7 +1982,7 @@ aws logs put-retention-policy --log-group-name {{recommendation.log_group_name}}
       mitigations: [
         `
 \`\`\`
-aws efs put-lifecycle-configuration --file-system-id fs-xxx --lifecycle-policies TransitionToIA=AFTER_30_DAYS
+aws efs put-lifecycle-configuration --file-system-id {{recommendation.filesystem_id}} --lifecycle-policies TransitionToIA=AFTER_30_DAYS
 \`\`\`
 `,
       ],
@@ -4650,13 +4655,9 @@ aws logs associate-kms-key --log-group-name {{recommendation.log_group_name}} --
       title: 'Unallocated Elastic IP Address',
       description: 'The Elastic IP address is not associated with any instance or network interface, incurring unnecessary costs.',
       serviceName: 'AmazonVPC',
-      recommendations: ['Release unused Elastic IPs to avoid unnecessary charges.'],
-      mitigations: [
-        `
-\`\`\`
-aws ec2 release-address --allocation-id eipalloc-xxx
-\`\`\`
-`,
+      recommendations: [
+        'Release unused Elastic IPs to avoid unnecessary charges.',
+        'Releasing one takes two steps: look up the allocation behind the address, then release that allocation. Copy Command gives you both, ready to paste.',
       ],
       references: ['https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html'],
     },
@@ -6419,13 +6420,7 @@ az vmss create \\
       serviceName: 'AmazonRDS',
       recommendations: [
         `Ensure that all the Amazon RDS databases instances provisioned within your AWS account are using the latest generation of instance classes in order to get the best performance with lower costs. If you are using database instances from the previous generation, Trend Micro Cloud One™ – Conformity strongly recommends that you upgrade your instances with their latest generation equivalents.`,
-      ],
-      mitigations: [
-        `**AWS CLI command to upgrade RDS instance generation:**
-\`\`\`
-        aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class db.t3.medium --apply-immediately
-\`\`\`
-`,
+        'This finding names the current class but not a replacement, so pick the current-generation equivalent yourself before modifying the instance.',
       ],
       references: ['https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.html'],
     },
@@ -6721,7 +6716,7 @@ Restart the instance (*Optional — skip if you want to start it yourself later*
       mitigations: [
         `**AWS CLI command to upgrade RDS instance generation:**
 \`\`\`
-        aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class db.t3.medium --apply-immediately
+        aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class {{RDS_INSTANCE_CLASS}} --apply-immediately
 \`\`\`
 `,
       ],
@@ -6741,7 +6736,7 @@ Restart the instance (*Optional — skip if you want to start it yourself later*
       mitigations: [
         `**AWS CLI command to upgrade RDS instance generation:**
 \`\`\`
-  aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class db.t3.medium --apply-immediately
+  aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class {{RDS_INSTANCE_CLASS}} --apply-immediately
 \`\`\`
 `,
       ],
@@ -6761,7 +6756,7 @@ Restart the instance (*Optional — skip if you want to start it yourself later*
       mitigations: [
         `**AWS CLI command to upgrade RDS instance generation:**
 \`\`\`
-        aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class db.t3.medium --apply-immediately
+        aws rds modify-db-instance --region {{region}} --db-instance-identifier {{INSTANCE_ID}} --db-instance-class {{RDS_INSTANCE_CLASS}} --apply-immediately
 \`\`\`
         `,
       ],
@@ -8339,7 +8334,10 @@ Restart the instance (*Optional — skip if you want to start it yourself later*
       title: 'Storage Class Optimization',
       description:
         'This storage resource may benefit from a different storage class based on its access patterns. Optimizing storage class can reduce costs.',
-      recommendations: ['Review access patterns and consider moving to a more cost-effective storage class.'],
+      recommendations: [
+        'Review access patterns and consider moving to a more cost-effective storage class.',
+        'NudgeBee cannot make this change for you. On Google Cloud, Copy Command gives you the bucket update ready to paste; on Azure, change the access tier on the storage account.',
+      ],
     },
     unused_load_balancer: {
       title: 'Unused Load Balancer',

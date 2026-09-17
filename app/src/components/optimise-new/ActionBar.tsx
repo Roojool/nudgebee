@@ -15,7 +15,7 @@ import AlarmCreationModal from '@components/cloudaccount/AlarmCreationModal';
 import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import { hasCliCommand } from './cliCommands';
 import { hasWriteAccess, hasPermission, missingPermissionMessage } from '@lib/auth';
-import { safeParseJSON, panelActionBarSx } from './utils';
+import { safeParseJSON, panelActionBarSx, detailNavFor } from './utils';
 
 interface ActionBarProps {
   fullRecommendation: any;
@@ -38,14 +38,7 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
   const accountId = rec.account_id || '';
   const isK8sRightSizing = ruleName === 'pod_right_sizing';
   const isReplicaRightSizing = category === 'RightSizing' && ruleName === 'replica_right_sizing';
-  const isPVResize = category === 'RightSizing' && ruleName === 'pv_rightsize';
-  const isUnusedPVC = category === 'RightSizing' && ruleName === 'unused_pvc';
-  const isAbandonedResource = category === 'RightSizing' && ruleName === 'abandoned_resource';
-  const showDetailNav = isPVResize || isUnusedPVC || isAbandonedResource;
-  // unused_pvc is a delete/reclaim, not a resize — label each action for what it does.
-  let detailNavLabel = 'Scale Down Workload';
-  if (isPVResize) detailNavLabel = 'Resize Volume';
-  else if (isUnusedPVC) detailNavLabel = 'Reclaim Volume';
+  const detailNav = detailNavFor(category, ruleName);
   const recData = safeParseJSON(rec.recommendation);
   const hasAlarmConfig = recData?.alarm_config != null;
   const canWrite = hasWriteAccess(accountId);
@@ -62,7 +55,7 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
   const showDismissAction = canWrite && (isDismissed || !rec.status || rec.status === 'Open');
 
   const handleNavigateToDetail = () => {
-    const detailUrl = `/kubernetes/details/${accountId}#optimize/right-sizing`;
+    const detailUrl = `/kubernetes/details/${accountId}#optimize/${detailNav?.fragment ?? ''}`;
     window.open(detailUrl, '_blank');
   };
 
@@ -171,14 +164,14 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
             />
           )}
 
-          {showDetailNav && canWrite && (
+          {detailNav && canWrite && (
             <Button
               tone='ghost'
               composition='icon-only'
               size='sm'
               icon={<RocketLaunchOutlinedIcon />}
-              tooltip={detailNavLabel}
-              aria-label={detailNavLabel}
+              tooltip={detailNav.label}
+              aria-label={detailNav.label}
               onClick={handleNavigateToDetail}
               id='action-bar-detail-nav'
             />
