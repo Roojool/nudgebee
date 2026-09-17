@@ -56,6 +56,9 @@ import {
   ruleNameSearchText,
   makeRuleFilterValue,
   parseRuleFilterValue,
+  parseQueryArray,
+  accountFilterFromQuery,
+  filtersToUrlQuery,
   getRecommendationBrief,
   getResourceDisplayName,
   safeParseJSON,
@@ -169,14 +172,6 @@ const WIDGET_CATEGORY_TOOLTIPS: Record<string, string> = {
   InfraUpgrade: 'Infrastructure upgrade recommendations including node groups, instance types, and cluster versions',
   Configuration: 'Configuration best practices and policy compliance recommendations',
   K8sSpotRecommendation: 'Workloads eligible for Spot/preemptible instances to reduce compute costs',
-};
-
-/** Parse a URL query param that may be a string or string[] into a string[] */
-const parseQueryArray = (param: string | string[] | undefined): string[] => {
-  if (!param) {
-    return [];
-  }
-  return Array.isArray(param) ? param : [param];
 };
 
 // Map between CustomTable header labels and backend sort fields.
@@ -380,7 +375,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
     const severityFromUrl = parseQueryArray(router.query.severity) as SeverityLevel[];
     return {
       severity: severityFromUrl.length > 0 ? severityFromUrl : DEFAULT_SEVERITY,
-      account: parseQueryArray(router.query.account),
+      account: accountFilterFromQuery(router.query),
       // A locked tab owns its category outright — a stale ?category= from an old
       // link cannot select a different one out from under it.
       category: lockedCategory ? [lockedCategory] : parseQueryArray(router.query.category),
@@ -436,38 +431,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
   // Sync filters to URL
   const updateUrl = useCallback((newFilters: FilterState) => {
     const r = routerRef.current;
-    const query: Record<string, string | string[]> = {};
-    if (r.query.accountId) {
-      query.accountId = r.query.accountId as string;
-    }
-    if (newFilters.severity.length > 0) {
-      query.severity = newFilters.severity;
-    }
-    if (newFilters.account.length > 0) {
-      query.account = newFilters.account;
-    }
-    if (newFilters.category.length > 0) {
-      query.category = newFilters.category;
-    }
-
-    if (newFilters.search) {
-      query.search = newFilters.search;
-    }
-    if (newFilters.safety.length > 0) {
-      query.safety = newFilters.safety;
-    }
-    if (newFilters.rules.length > 0) {
-      query.rules = newFilters.rules;
-    }
-    if (newFilters.status.length > 0) {
-      query.status = newFilters.status;
-    }
-    if (newFilters.savings) {
-      query.savings = newFilters.savings;
-    }
-    if (newFilters.lastSeen) {
-      query.seen = newFilters.lastSeen;
-    }
+    const query = filtersToUrlQuery(newFilters);
 
     const currentHash = r.asPath.split('#')[1];
     r.replace({ pathname: r.pathname, query, ...(currentHash ? { hash: `#${currentHash}` } : {}) }, undefined, { shallow: true });

@@ -223,6 +223,74 @@ export const ruleNameSearchText = (ruleName: string): string => {
 // shape, still produced by old shared ?rules= URLs, and treated as unscoped.
 const RULE_FILTER_SEP = '::';
 
+/** Parse a URL query param that may be a string or string[] into a string[] */
+export const parseQueryArray = (param: string | string[] | undefined): string[] => {
+  if (!param) {
+    return [];
+  }
+  return Array.isArray(param) ? param : [param];
+};
+
+// Accounts the list opens filtered to. Links here are written with two names for
+// the same thing: `account` is the filter's own, and `accountId` is what the
+// cluster, workload and home pages send and what the page keeps for its
+// write-permission check. Either one selects the account; `account` wins when a
+// link carries both.
+export const accountFilterFromQuery = (query: { account?: string | string[]; accountId?: string | string[] }): string[] => {
+  const named = parseQueryArray(query.account);
+  return named.length > 0 ? named : parseQueryArray(query.accountId);
+};
+
+// The query a filter selection is written back to the address as. Pure so the
+// rules below can be pinned without mounting the page.
+//
+// `accountId` follows the selection — the first of several, and absent when
+// nothing is selected. It is the name links here carry, the Resolutions tab
+// seeds from and the Auto Optimize write check reads, so leaving a stale one
+// behind would re-select an account the reader had just cleared.
+export const filtersToUrlQuery = (filters: {
+  severity: string[];
+  account: string[];
+  category: string[];
+  search: string;
+  safety: string[];
+  rules: string[];
+  status: string[];
+  savings: string;
+  lastSeen: string;
+}): Record<string, string | string[]> => {
+  const query: Record<string, string | string[]> = {};
+  if (filters.account.length > 0) {
+    query.accountId = filters.account[0];
+    query.account = filters.account;
+  }
+  if (filters.severity.length > 0) {
+    query.severity = filters.severity;
+  }
+  if (filters.category.length > 0) {
+    query.category = filters.category;
+  }
+  if (filters.search) {
+    query.search = filters.search;
+  }
+  if (filters.safety.length > 0) {
+    query.safety = filters.safety;
+  }
+  if (filters.rules.length > 0) {
+    query.rules = filters.rules;
+  }
+  if (filters.status.length > 0) {
+    query.status = filters.status;
+  }
+  if (filters.savings) {
+    query.savings = filters.savings;
+  }
+  if (filters.lastSeen) {
+    query.seen = filters.lastSeen;
+  }
+  return query;
+};
+
 export const makeRuleFilterValue = (ruleName: string, category?: string): string =>
   category ? `${ruleName}${RULE_FILTER_SEP}${category}` : ruleName;
 
