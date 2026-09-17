@@ -1207,7 +1207,7 @@ const KubernetesLLMRequestResponse = (props) => {
                   <Divider
                     style='dashed'
                     color='var(--ds-gray-300)'
-                    sx={{ mt: ds.space[1], mb: ds.space.mul(1, 5), maxWidth: ds.space.mul(0, 427) }}
+                    sx={{ mt: ds.space[1], mb: ds.space.mul(1, 5), mx: 'auto', maxWidth: ds.space.mul(0, 427) }}
                   />
                 )}
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

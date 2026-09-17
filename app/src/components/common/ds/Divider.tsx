@@ -107,6 +107,8 @@ export function Divider({
   }
 
   // Horizontal + no label = "line" composition.
+  // An <hr> gets `margin-inline: auto` from the browser, which collapses it to
+  // zero width in a flex column; zero the side margins (as MUI's Divider does).
   return (
     <Box
       component='hr'
@@ -119,6 +121,9 @@ export function Divider({
         borderTop: `${thickness}px ${borderStyle} ${color}`,
         marginTop: 'var(--ds-space-3)',
         marginBottom: 'var(--ds-space-3)',
+        marginLeft: 0,
+        marginRight: 0,
+        flexShrink: 0,
         ...sx,
       }}
     />
