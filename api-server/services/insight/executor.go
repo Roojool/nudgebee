@@ -340,8 +340,13 @@ func computeCloudRedirectURL(rule InsightRule, id string) string {
 
 	switch uid {
 	case "114":
-		// missing-tags/labels: the home page scopes this to Low/Medium severity.
 		return base + ruleNameParam + "&severity=Low,Medium#optimize/configuration"
+	case "105":
+		return base + ruleNameParam + "&severity=Critical,High#optimize/security"
+	case "115":
+		return base + ruleNameParam + "&severity=Critical,High#optimize/configuration"
+	case "103":
+		return base + ruleNameParam + "&severity=Critical#optimize/security"
 	case "101":
 		return base + "&ruleName=aws_ec2_orphaned_volume,aws_vpc_unallocated_elastic_ip,azure_disk_unattached_volume&status=Open#optimize/right-sizing"
 	case "102":
