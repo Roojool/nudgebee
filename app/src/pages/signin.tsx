@@ -481,6 +481,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
           label='LDAP Password'
           id='ldapPassword'
           type='password'
+          autoComplete='current-password'
           placeholder='Enter LDAP password'
           value={ldapCredsPassword}
           error={helperText.ldapPassword || undefined}
@@ -575,6 +576,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
           label='Admin Password'
           id='credsPassword'
           type='password'
+          autoComplete='current-password'
           placeholder='Enter admin password'
           value={credsPassword}
           error={helperText.credsPassword || undefined}

@@ -2732,6 +2732,10 @@ const IntegrationDynamicFormModal = ({
                                           ? 'textarea'
                                           : 'text'
                                       }
+                                      // Nothing on this form is a saved browser login. The secret opts out
+                                      // via `new-password`; its neighbours opt out too, so the browser can't
+                                      // pair a config field like Username with the adjacent secret and fill both.
+                                      autoComplete={field.is_encrypted ? 'new-password' : 'off'}
                                       value={formValues[key] || ''}
                                       onChange={(value) => handleChange(key, value)}
                                       trailingIcon={

@@ -1018,26 +1018,29 @@ Unified text-entry primitive. **Variants:** `size` `sm`·`md`·`lg` · `type` `t
 <Input label='Name' value={name} onChange={setName} required />
 ```
 
-| Prop                                 | Type                                          | Default        | Req |
-| ------------------------------------ | --------------------------------------------- | -------------- | --- |
-| `value`                              | `string`                                      | —              | ✓   |
-| `onChange`                           | `(next: string) => void`                      | —              | ✓   |
-| `label`                              | `ReactNode`                                   | —              | —   |
-| `instructionText`                    | `ReactNode` (between label and input)         | —              | —   |
-| `help`                               | `ReactNode` (hidden when `error` set)         | —              | —   |
-| `error`                              | `string` (presence ⇒ error; message required) | —              | —   |
-| `prefix` / `suffix`                  | `ReactNode` (outside the input bounds)        | —              | —   |
-| `leadingIcon` / `trailingIcon`       | `ReactNode` (inside bounds)                   | —              | —   |
-| `size`                               | `'sm' \| 'md' \| 'lg'`                        | `'md'`         | —   |
-| `type`                               | `InputType`                                   | `'text'`       | —   |
-| `placeholder`                        | `string`                                      | —              | —   |
-| `animatePlaceholder`                 | `boolean` / `typingSpeed` (ms/char)           | `false` / `60` | —   |
-| `required` / `disabled` / `readOnly` | `boolean`                                     | —              | —   |
-| `rows` / `minRows` / `maxRows`       | `number` (textarea)                           | — / `3` / `20` | —   |
-| `onBlur` / `onFocus` / `onKeyDown`   | handlers                                      | —              | —   |
-| `data-testid`                        | `string` (forwarded to the native input)      | —              | —   |
+| Prop                                 | Type                                               | Default        | Req |
+| ------------------------------------ | -------------------------------------------------- | -------------- | --- |
+| `value`                              | `string`                                           | —              | ✓   |
+| `onChange`                           | `(next: string) => void`                           | —              | ✓   |
+| `label`                              | `ReactNode`                                        | —              | —   |
+| `instructionText`                    | `ReactNode` (between label and input)              | —              | —   |
+| `help`                               | `ReactNode` (hidden when `error` set)              | —              | —   |
+| `error`                              | `string` (presence ⇒ error; message required)      | —              | —   |
+| `prefix` / `suffix`                  | `ReactNode` (outside the input bounds)             | —              | —   |
+| `leadingIcon` / `trailingIcon`       | `ReactNode` (inside bounds)                        | —              | —   |
+| `size`                               | `'sm' \| 'md' \| 'lg'`                             | `'md'`         | —   |
+| `type`                               | `InputType`                                        | `'text'`       | —   |
+| `placeholder`                        | `string`                                           | —              | —   |
+| `animatePlaceholder`                 | `boolean` / `typingSpeed` (ms/char)                | `false` / `60` | —   |
+| `required` / `disabled` / `readOnly` | `boolean`                                          | —              | —   |
+| `rows` / `minRows` / `maxRows`       | `number` (textarea)                                | — / `3` / `20` | —   |
+| `onBlur` / `onFocus` / `onKeyDown`   | handlers                                           | —              | —   |
+| `autoComplete`                       | `string` (`'new-password'` when `type='password'`) | auto           | —   |
+| `data-testid`                        | `string` (forwarded to the native input)           | —              | —   |
 
 **Don't:** pass a boolean to `error`; combine `leadingIcon`+`prefix` (or `trailingIcon`+`suffix`) on the same side; combine `readOnly`+`disabled`.
+
+A `type='password'` input defaults to `autoComplete='new-password'` so the browser's password manager leaves it alone — without it, clearing a secret field invites an instant re-fill from a saved credential. A genuine sign-in field must pass `autoComplete='current-password'` to opt back in.
 
 #### `SearchInput` — `import SearchInput from '@ui/SearchInput'` (default export, `.jsx`)
 
