@@ -14,7 +14,8 @@ import {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useRouter } from 'next/router';
-import { Box, Typography, CircularProgress, Drawer, Divider } from '@mui/material';
+import { Box, Typography, CircularProgress, Drawer } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import Tooltip from '@ui/Tooltip';
 import { Banner } from '@ui/Banner';
 import { Checkbox } from '@ui/Checkbox';
@@ -4857,7 +4858,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                   onClick={() => setHistoryOpen(false)}
                 />
               </Box>
-              <Divider />
+              <Divider sx={{ my: 0 }} />
               <Box sx={{ flex: 1, overflowY: 'auto' }}>
                 {loadingVersions ? (
                   <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>

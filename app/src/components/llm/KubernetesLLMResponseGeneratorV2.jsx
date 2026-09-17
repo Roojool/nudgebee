@@ -20,7 +20,8 @@ import { useLLMInvestigationControl } from '@hooks/useLLMInvestigationControl';
 import { useTokenUsage } from '@hooks/useTokenUsage';
 import { getUserSession, hasReadAccess, hasPermission } from '@lib/auth';
 import { applyFiltersOnRouter } from '@lib/router';
-import { Avatar, Box, CircularProgress, Divider, Typography } from '@mui/material';
+import { Avatar, Box, CircularProgress, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { useRouter } from 'next/router';
 import PropTypes from 'prop-types';
 import { useEffect, useRef, useReducer, useMemo, useCallback, useState } from 'react';
@@ -1694,7 +1695,7 @@ const KubernetesLLMResponseGenerator = ({
                     />
                   </Box>
                 </Box>
-                <Divider orientation='vertical' variant='middle' flexItem sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5) }} />
+                <Divider orientation='vertical' sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5), my: 1 }} />
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
                   {selectedConversation?.id && (
                     <Button
@@ -1730,7 +1731,7 @@ const KubernetesLLMResponseGenerator = ({
                     onClick={handleShare}
                   />
                 </Box>
-                <Divider orientation='vertical' variant='middle' flexItem sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5) }} />
+                <Divider orientation='vertical' sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5), my: 1 }} />
                 <Box
                   sx={{
                     display: 'flex',

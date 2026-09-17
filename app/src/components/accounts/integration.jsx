@@ -1,4 +1,5 @@
-import { Box, Divider, Stack, Typography } from '@mui/material';
+import { Box, Stack, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import apiAccount from '@api1/account';
@@ -1019,11 +1020,11 @@ const Integrations = () => {
             <Box width='100%' mt={ds.space[4]}>
               <Box sx={{ marginBottom: ds.space[4] }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[3], mb: ds.space[2] }}>
-                  <Divider orientation='vertical' flexItem sx={{ borderRightWidth: ds.space[1], my: ds.space[1] }} />
+                  <Divider orientation='vertical' thickness={4} sx={{ my: ds.space[1], mx: 0 }} />
                   <Skeleton shape='rect' width={ds.space.mul(0, 60)} height={ds.space[5]} />
                   <Skeleton shape='circle' width={ds.space[5]} />
                 </Box>
-                <Divider />
+                <Divider sx={{ my: 0 }} />
               </Box>
               <Box
                 sx={{

@@ -6,7 +6,8 @@
 // SettingsModal tabs visually.
 
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Divider, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import PropTypes from 'prop-types';
 import { Banner } from '@ui/Banner';
 import { Button } from '@ui/Button';
@@ -311,7 +312,7 @@ const KGCoverageTab = ({ open, onSaved, onClose }) => {
         {/* Visual separator between the two columns. Vertical to match the
             two-column orientation; matches the horizontal Divider we'd use
             if the sections were stacked. */}
-        <Divider orientation='vertical' flexItem sx={{ alignSelf: 'stretch' }} />
+        <Divider orientation='vertical' sx={{ mx: 0 }} />
 
         {/* Flow sources column — small set; stack vertically so each one is
             easy to scan. Fixed-ish width keeps the cloud accounts column

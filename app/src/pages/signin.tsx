@@ -10,7 +10,7 @@ import { googleAuth, oktaAuth, oneloginAuth, azureAuth, auth0Auth, NBIconSignIn 
 import SafeIcon from '@shared/icons/SafeIcon';
 import { ds } from 'src/utils/colors';
 import { EmailRegEx } from '@lib/validation';
-import { Divider } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import { useRouter } from 'next/router';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { SignInProviderExtraSlot } from '@shared/auth/SignInProviderExtraSlot';
@@ -697,15 +697,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
       {/* Divider between providers and Magic Link */}
       {(otherIconProviders.length > 0 || samlEnabled) && emailProvider && (
         <Box sx={{ my: ds.space[5] }}>
-          <Divider
-            sx={{
-              color: ds.gray[300],
-              fontSize: 'var(--ds-text-small)',
-              '&::before, &::after': { borderColor: ds.gray[300] },
-            }}
-          >
-            OR
-          </Divider>
+          <Divider label='OR' color={ds.gray[300]} sx={{ my: 0 }} />
         </Box>
       )}
 
@@ -735,15 +727,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
       {/* Divider between Magic Link and LDAP */}
       {emailProvider && ldapProvider && (
         <Box sx={{ my: ds.space[5] }}>
-          <Divider
-            sx={{
-              color: ds.gray[300],
-              fontSize: 'var(--ds-text-small)',
-              '&::before, &::after': { borderColor: ds.gray[300] },
-            }}
-          >
-            OR
-          </Divider>
+          <Divider label='OR' color={ds.gray[300]} sx={{ my: 0 }} />
         </Box>
       )}
 
@@ -768,15 +752,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
       {/* Divider before Teleport */}
       {ldapProvider && teleportProvider && (
         <Box sx={{ my: ds.space[5] }}>
-          <Divider
-            sx={{
-              color: ds.gray[300],
-              fontSize: 'var(--ds-text-small)',
-              '&::before, &::after': { borderColor: ds.gray[300] },
-            }}
-          >
-            OR
-          </Divider>
+          <Divider label='OR' color={ds.gray[300]} sx={{ my: 0 }} />
         </Box>
       )}
 
@@ -800,15 +776,7 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
       {/* Divider before Credentials */}
       {(ldapProvider || teleportProvider || emailProvider) && credentialsProvider && (
         <Box sx={{ my: ds.space[5] }}>
-          <Divider
-            sx={{
-              color: ds.gray[300],
-              fontSize: 'var(--ds-text-small)',
-              '&::before, &::after': { borderColor: ds.gray[300] },
-            }}
-          >
-            OR
-          </Divider>
+          <Divider label='OR' color={ds.gray[300]} sx={{ my: 0 }} />
         </Box>
       )}
 
