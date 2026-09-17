@@ -40,6 +40,8 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 	// Restrict PR/MR creation — only the orchestrator creates PRs with proper formatting
 	cliTool := tools.NewCLITool(workspaceDir)
 	cliTool.SetRestrictPROperations(true)
+	bgTool := tools.NewBackgroundExecTool(workspaceDir)
+	bgTool.SetRestrictPROperations(true)
 	ghTool := tools.NewGHTool(workspaceDir)
 	ghTool.SetRestrictPROperations(true)
 	glabTool := tools.NewGLabTool(workspaceDir)
@@ -47,6 +49,7 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 
 	var rawTools []core.NBTool
 	rawTools = append(rawTools, cliTool)
+	rawTools = append(rawTools, bgTool)
 	rawTools = append(rawTools, tools.NewFileFindTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewFileViewTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewGrepTool(workspaceDir))
@@ -80,7 +83,7 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 		tools:         trackedTools,
 		promptLoader:  common.NewPromptLoader(),
 		repoCloneTool: repoCloneTool,
-		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool},
+		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool, bg: bgTool},
 	}
 }
 

@@ -36,9 +36,12 @@ func NewPerformanceDebuggerAgentWithTracker(cfg *config.Config, llmClient *llm.C
 	// Initialize raw tools for the Performance Debugger agent
 	cliTool := tools.NewCLITool(workspaceDir)
 	cliTool.SetRestrictPROperations(true) // Only orchestrator creates PRs
+	bgTool := tools.NewBackgroundExecTool(workspaceDir)
+	bgTool.SetRestrictPROperations(true)
 
 	var rawTools []core.NBTool
 	rawTools = append(rawTools, cliTool)
+	rawTools = append(rawTools, bgTool)
 	rawTools = append(rawTools, tools.NewSubmitAnalysisTool())
 
 	// Use the provided shared tracker and wrap tools for comprehensive tracking

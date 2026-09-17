@@ -196,12 +196,12 @@ func (t *CLITool) Execute(ctx context.Context, input map[string]any) core.NBTool
 	}
 
 	// Block PR/MR creation for agent-facing instances — orchestrator handles this
-	if blocked, reason := t.isRestrictedPROperation(commandToExecute); blocked {
+	if blocked, reason := isRestrictedPROperation(commandToExecute, t.restrictPROperations); blocked {
 		return core.CreateSuccessResponse(reason, reason, map[string]any{"blocked": true, "reason": reason})
 	}
 
 	// Security: Block dangerous commands
-	if t.isDangerousCommand(commandToExecute) {
+	if isDangerousCommand(commandToExecute) {
 		return core.CreateErrorResponse(
 			"Command blocked for security reasons",
 			"Potentially dangerous command detected."+envPivotHint,
@@ -546,7 +546,7 @@ func (t *CLITool) executeCommand(ctx context.Context, command, workingDir string
 	// Check if command contains shell features (pipes, redirections, etc.)
 	var cmd *exec.Cmd
 	wantStageExits := false
-	if t.containsShellFeatures(command) {
+	if containsShellFeatures(command) {
 		// Multi-stage pipelines get bash with PIPESTATUS capture: the pipeline exit
 		// code alone is the LAST stage's, which hides earlier failures (a broken
 		// `go build | grep -v noise` looks like success). Kill switch:
@@ -584,7 +584,7 @@ func (t *CLITool) executeCommand(ctx context.Context, command, workingDir string
 	// the token into git HTTPS operations too so any clone/fetch the agent issues
 	// directly (not just via the repo_clone tool) authenticates the same way.
 	var extraEnv []string
-	if t.isGitHubCommand(command) && githubToken != "" {
+	if isGitHubCommand(command) && githubToken != "" {
 		extraEnv = append(extraEnv, fmt.Sprintf("GITHUB_TOKEN=%s", githubToken))
 	}
 	if commandInvokesGit(command) {
@@ -752,7 +752,10 @@ func headTailTruncate(s string, head, tail int, spillPath, hint string) string {
 		s[tailStart:]
 }
 
-func (t *CLITool) isDangerousCommand(command string) bool {
+// isDangerousCommand is a free function (not a *CLITool method) so
+// BackgroundExecTool can apply the exact same blocklist to the command it
+// starts — no second implementation that could drift from this one.
+func isDangerousCommand(command string) bool {
 	commandLower := strings.ToLower(command)
 
 	// Phase 1: Detect bypass patterns that attempt to evade validation.
@@ -849,11 +852,12 @@ func (t *CLITool) isDangerousCommand(command string) bool {
 	return false
 }
 
-// isRestrictedPROperation blocks PR/MR creation commands when restrictPROperations is set.
+// isRestrictedPROperation blocks PR/MR creation commands when restrict is set.
 // Only the orchestrator should create PRs — it handles template formatting, branding, and metadata.
 // Git push, commit, and other operations remain allowed for legitimate agent workflows.
-func (t *CLITool) isRestrictedPROperation(command string) (bool, string) {
-	if !t.restrictPROperations {
+// Free function (not a *CLITool method) so BackgroundExecTool can share it.
+func isRestrictedPROperation(command string, restrict bool) (bool, string) {
+	if !restrict {
 		return false, ""
 	}
 
@@ -905,7 +909,9 @@ func containsBypassPattern(cmdLower string) bool {
 	return false
 }
 
-func (t *CLITool) containsShellFeatures(command string) bool {
+// containsShellFeatures is a free function so BackgroundExecTool can decide
+// sh -c vs. direct exec the same way cli_tool does.
+func containsShellFeatures(command string) bool {
 	shellFeatures := []string{"|", ">", "<", ">>", "<<", "&&", "||", ";", "`", "$(", "&", "*", "?", "[", "]", "{", "}", "'", "\""}
 
 	for _, feature := range shellFeatures {
@@ -916,7 +922,9 @@ func (t *CLITool) containsShellFeatures(command string) bool {
 	return false
 }
 
-func (t *CLITool) isGitHubCommand(command string) bool {
+// isGitHubCommand is a free function so BackgroundExecTool can inject the
+// same gh-auth env var the same way cli_tool does.
+func isGitHubCommand(command string) bool {
 	// Check if command starts with 'gh ' or is just 'gh'
 	trimmed := strings.TrimSpace(command)
 	return strings.HasPrefix(trimmed, "gh ") || trimmed == "gh"

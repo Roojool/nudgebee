@@ -2916,13 +2916,16 @@ func (p *ReActPlanner) injectSecureContext(action string, input map[string]any) 
 		if repoPath, ok := p.secureContext["repository_path"]; ok {
 			secureInput["workspace_dir"] = repoPath
 		}
-	case "file_find", "file_view", "grep", "rg", "ripgrep", "replace", "write_file", "git", "gh":
+	case "file_find", "file_view", "grep", "rg", "ripgrep", "replace", "write_file", "git", "gh", "cli_background":
 		// Inject working directory for all file/repository tools.
 		// write_file is included here because it shares the same workspace
 		// boundary as replace — without this injection, write_file falls back
 		// to its constructor-time workspaceDir (the parent temp dir created
 		// before repo_clone), so new files land outside the cloned repo and
-		// the subsequent `git add` finds nothing to stage.
+		// the subsequent `git add` finds nothing to stage. cli_background is
+		// included for the same reason as cli — without it, a background
+		// command with no explicit working_dir falls back to the pre-clone
+		// workspace root instead of the cloned repo.
 		if workingDir, ok := p.secureContext["working_directory"]; ok {
 			secureInput["working_directory"] = workingDir
 		}
