@@ -208,6 +208,24 @@ func TestComputeRedirectURL_Families(t *testing.T) {
 			title: "187 resources missing required tags/labels", cloudProvider: "aws",
 			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_tags,azure_missing_tags&severity=Low,Medium#optimize/configuration",
 		},
+		{
+			name: "cloud recommendation uid 101 (wasted resources, routes to right-sizing not summary)",
+			rule: InsightRule{
+				UniqueID: "101", Source: InsightSourceRecommendation, Type: InsightTypeRatio, InsightCategory: "Cost",
+				InsightFormat: "Wasting ${}/month on unattached resources (EBS/IPs/Disks)",
+			},
+			title: "Wasting $404.00/month on unattached resources (EBS/IPs/Disks)", cloudProvider: "aws",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_ec2_orphaned_volume,aws_vpc_unallocated_elastic_ip,azure_disk_unattached_volume&status=Open#optimize/right-sizing",
+		},
+		{
+			name: "cloud recommendation uid 102 (rightsizing, routes to right-sizing not summary)",
+			rule: InsightRule{
+				UniqueID: "102", Source: InsightSourceRecommendation, Type: InsightTypeRatio, InsightCategory: "Cost",
+				InsightFormat: "Save ${}/month by rightsizing underutilized instances",
+			},
+			title: "Save $48.00/month by rightsizing underutilized instances", cloudProvider: "azure",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_ec2_underutilized,aws_ec2_idle_instance,aws_ec2_alternate_instances,aws_rds_alternate_instances,azure_vm_auto_shutdown_disabled&status=Open#optimize/right-sizing",
+		},
 	}
 
 	for _, tc := range cases {

@@ -338,9 +338,14 @@ func computeCloudRedirectURL(rule InsightRule, id string) string {
 	cat := string(rule.InsightCategory)
 	uid := rule.UniqueID
 
-	if uid == "114" {
+	switch uid {
+	case "114":
 		// missing-tags/labels: the home page scopes this to Low/Medium severity.
 		return base + ruleNameParam + "&severity=Low,Medium#optimize/configuration"
+	case "101":
+		return base + "&ruleName=aws_ec2_orphaned_volume,aws_vpc_unallocated_elastic_ip,azure_disk_unattached_volume&status=Open#optimize/right-sizing"
+	case "102":
+		return base + "&ruleName=aws_ec2_underutilized,aws_ec2_idle_instance,aws_ec2_alternate_instances,aws_rds_alternate_instances,azure_vm_auto_shutdown_disabled&status=Open#optimize/right-sizing"
 	}
 
 	switch cat {
