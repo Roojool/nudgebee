@@ -48,6 +48,7 @@ from notifications_server.services.messaging_installations import (
     ORIGIN_INTEGRATION,
     ORIGIN_LEGACY,
     WEBHOOK_PLATFORM_TYPES,
+    load_google_chat_webhook_installations_async,
     load_integration_installations_async,
     load_ms_teams_webhook_installations_async,
     load_slack_webhook_installations_async,
@@ -871,6 +872,7 @@ class MessageService:
         if requested is None or requested in WEBHOOK_PLATFORM_TYPES:
             integration_installs += await load_ms_teams_webhook_installations_async(session, tenant_id)
             integration_installs += await load_slack_webhook_installations_async(session, tenant_id)
+            integration_installs += await load_google_chat_webhook_installations_async(session, tenant_id)
         if not integration_installs:
             return installs
         overridden = {ip.platform for ip in integration_installs}
@@ -982,6 +984,7 @@ class MessageService:
             PlatformTypes.MS_TEAMS_WEBHOOK.value: self._send_finding_to_teams_webhook,
             PlatformTypes.SLACK_WEBHOOK.value: self._send_finding_to_slack_webhook,
             PlatformTypes.GOOGLE_CHAT.value: self._send_finding_to_gchat,
+            PlatformTypes.GOOGLE_CHAT_WEBHOOK.value: self._send_finding_to_gchat_webhook,
             PlatformTypes.DISCORD.value: self._send_finding_to_discord,
         }.get(platform)
 
@@ -1251,6 +1254,24 @@ class MessageService:
             None,
         )
 
+    async def _send_finding_to_gchat_webhook(self, session, tenant_id, ip, finding, _):
+        """POST a finding card to ip.webhook_url. Reuses the plain-text/markdown
+        finding template (no interactive elements exist in it) - webhooks don't
+        thread, so no sent_notification row."""
+        if not getattr(ip, "webhook_url", None):
+            return None, None
+
+        response = await asyncio.to_thread(
+            GoogleChatClient.post_to_google_chat_webhook,
+            ip.webhook_url,
+            get_markdown_message_template(finding),
+            tenant_id,
+        )
+        if not (response is not None and 200 <= response.status_code < 300):
+            return None, None
+
+        return success_response("google_chat_webhook", channel_id=str(ip.id)), None
+
     async def _send_finding_to_discord(self, session, tenant_id, ip, finding, fingerprint):
         token = await self.discord_sender.acquire_discord_access_token(session, ip)
         if not token:
@@ -1336,6 +1357,8 @@ class MessageService:
                     template_key = PlatformTypes.MS_TEAMS.value
                 elif ip.platform == PlatformTypes.SLACK_WEBHOOK.value:
                     template_key = PlatformTypes.SLACK.value
+                elif ip.platform == PlatformTypes.GOOGLE_CHAT_WEBHOOK.value:
+                    template_key = PlatformTypes.GOOGLE_CHAT.value
                 else:
                     template_key = ip.platform
                 template_func = template_mapping[notification_type].get(template_key)
@@ -1374,6 +1397,8 @@ class MessageService:
                 return await self.send_google_chat_template_notification(
                     ip, template_func, param_value, session, tenant
                 )
+            case PlatformTypes.GOOGLE_CHAT_WEBHOOK.value:
+                return await self.send_google_chat_webhook_template_notification(ip, template_func, param_value, tenant)
             case PlatformTypes.DISCORD.value:
                 return await self.send_discord_template_notification(ip, template_func, param_value, session, tenant)
             case _:
@@ -1541,6 +1566,22 @@ class MessageService:
             reason=result.get("reason"),
             channel_id=result.get("channel_id"),
         )
+
+    async def send_google_chat_webhook_template_notification(self, ip, template_func, param_value, tenant):
+        """Template send via webhook: same google_chat template, POSTed to
+        ip.webhook_url."""
+        if not getattr(ip, "webhook_url", None):
+            return failed_response("google_chat_webhook", reason="Webhook target has no URL")
+
+        response = await asyncio.to_thread(
+            GoogleChatClient.post_to_google_chat_webhook, ip.webhook_url, template_func(param_value), tenant
+        )
+
+        if response is not None and 200 <= response.status_code < 300:
+            return success_response("google_chat_webhook", channel_id=str(ip.id))
+
+        reason = response.text[:512] if response is not None else "Unable to send google chat webhook notification"
+        return failed_response("google_chat_webhook", reason=reason)
 
     async def send_discord_template_notification(self, ip, template_func, param_value, session, tenant):
         token = await self.discord_sender.acquire_discord_access_token(session, ip)

@@ -56,3 +56,5 @@ class PlatformTypes(str, Enum):
     MS_TEAMS_WEBHOOK = "ms_teams_webhook"
     # Slack incoming webhook URL; many per tenant, routed by target id, no default.
     SLACK_WEBHOOK = "slack_webhook"
+    # Google Chat incoming space webhook; many per tenant, routed by target id, no default.
+    GOOGLE_CHAT_WEBHOOK = "google_chat_webhook"

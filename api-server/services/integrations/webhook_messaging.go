@@ -5,8 +5,9 @@ package integrations
 // cache invalidate" check in actions_integration.go tests membership here, so
 // a new webhook messaging type joins that behavior just by being added.
 var webhookMessagingTypes = map[string]bool{
-	IntegrationMsTeamsWebhook: true,
-	IntegrationSlackWebhook:   true,
+	IntegrationMsTeamsWebhook:    true,
+	IntegrationSlackWebhook:      true,
+	IntegrationGoogleChatWebhook: true,
 }
 
 // IsWebhookMessagingIntegration reports whether name is a one-way channel

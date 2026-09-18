@@ -43,9 +43,14 @@ MS_TEAMS_WEBHOOK_URL_FIELD = "webhook_url"
 SLACK_WEBHOOK_TYPE = "slack_webhook"
 SLACK_WEBHOOK_URL_FIELD = "webhook_url"
 
+# Google Chat incoming space webhooks: same shape as MS_TEAMS_WEBHOOK_TYPE above,
+# distinct from the "google_chat_space" service-account bound-space type.
+GOOGLE_CHAT_WEBHOOK_TYPE = "google_chat_webhook"
+GOOGLE_CHAT_WEBHOOK_URL_FIELD = "webhook_url"
+
 # Every "is this a webhook?" guard in the send path checks membership here, so a
 # second webhook platform joins routing just by being added.
-WEBHOOK_PLATFORM_TYPES = frozenset({MS_TEAMS_WEBHOOK_TYPE, SLACK_WEBHOOK_TYPE})
+WEBHOOK_PLATFORM_TYPES = frozenset({MS_TEAMS_WEBHOOK_TYPE, SLACK_WEBHOOK_TYPE, GOOGLE_CHAT_WEBHOOK_TYPE})
 
 # Config-value field names. The encrypted set must mirror the IsEncrypted fields
 # declared in api-server slack.go / ms_teams.go.
@@ -313,6 +318,47 @@ async def load_slack_webhook_installations_async(session, tenant_id) -> List[Mes
             )
         except Exception:
             LOG.exception("messaging installation: failed to load slack_webhook %s; skipping", integ.id)
+            continue
+        if inst.webhook_url:
+            result.append(inst)
+    return result
+
+
+async def load_google_chat_webhook_installations_async(session, tenant_id) -> List[MessagingPlatform]:
+    """Async: every google_chat_webhook target for the tenant, URL decrypted."""
+    if not tenant_id:
+        return []
+    integ_result = await session.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.type == GOOGLE_CHAT_WEBHOOK_TYPE,
+            Integration.status != "disabled",
+        )
+    )
+    integ_rows = integ_result.scalars().all()
+    if not integ_rows:
+        return []
+
+    cfg_result = await session.execute(
+        select(IntegrationConfigValue).where(
+            IntegrationConfigValue.integration_id.in_([integ.id for integ in integ_rows])
+        )
+    )
+    cfg_by_integration: Dict[Any, List[IntegrationConfigValue]] = {}
+    for cfg in cfg_result.scalars().all():
+        cfg_by_integration.setdefault(cfg.integration_id, []).append(cfg)
+
+    result: List[MessagingPlatform] = []
+    for integ in integ_rows:
+        try:
+            inst = build_webhook_installation(
+                integ,
+                _decrypt_config(cfg_by_integration.get(integ.id, [])),
+                platform=GOOGLE_CHAT_WEBHOOK_TYPE,
+                url_field=GOOGLE_CHAT_WEBHOOK_URL_FIELD,
+            )
+        except Exception:
+            LOG.exception("messaging installation: failed to load google_chat_webhook %s; skipping", integ.id)
             continue
         if inst.webhook_url:
             result.append(inst)

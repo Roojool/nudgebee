@@ -7,7 +7,6 @@ import requests
 LOG = logging.getLogger(__name__)
 
 CONTENT_TYPE_JSON = "application/json"
-_SESSION = requests.Session()
 
 
 class SlackClient(WebClient):
@@ -122,7 +121,9 @@ class SlackClient(WebClient):
         Returns the raw response, or None on a transport failure so one dead
         webhook doesn't abort the fan-out. The caller decides success (2xx)."""
         try:
-            response = _SESSION.post(
+            # requests.post, not a shared Session: this runs concurrently across
+            # threads via asyncio.to_thread, and a Session isn't thread-safe.
+            response = requests.post(
                 webhook_url,
                 headers={"Content-Type": CONTENT_TYPE_JSON},
                 json=payload,

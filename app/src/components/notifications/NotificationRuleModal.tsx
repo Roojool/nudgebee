@@ -81,6 +81,7 @@ const getBadgeHoverBorderColor = (isActive: boolean, isConfigured: boolean): str
 interface Option {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 // Sources that describe the whole tenant rather than one account, so the rule
@@ -140,6 +141,10 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const [selectedSlackWebhookTarget, setSelectedSlackWebhookTarget] = useState<string>('');
   const [slackWebhookToggle, setSlackWebhookToggle] = useState<boolean>(false);
   const [loadingSlackWebhookTargets, setLoadingSlackWebhookTargets] = useState<boolean>(false);
+  const [gChatWebhookTargets, setGChatWebhookTargets] = useState<Option[]>([]);
+  const [selectedGChatWebhookTarget, setSelectedGChatWebhookTarget] = useState<string>('');
+  const [gChatWebhookToggle, setGChatWebhookToggle] = useState<boolean>(false);
+  const [loadingGChatWebhookTargets, setLoadingGChatWebhookTargets] = useState<boolean>(false);
   const [loadingChannelList, setLoadingChannelList] = useState({
     slack: false,
     ms_teams: false,
@@ -166,6 +171,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     basedOnValue !== 'daily_recap' && msWebhookToggle && 'MS Teams Webhook',
     basedOnValue !== 'daily_recap' && slackWebhookToggle && 'Slack Webhook',
     basedOnValue !== 'daily_recap' && gChatToggle && 'Google Chat',
+    basedOnValue !== 'daily_recap' && gChatWebhookToggle && 'Google Chat Webhook',
     basedOnValue !== 'daily_recap' && discordToggle && 'Discord',
     basedOnValue === 'daily_recap' && emailToggle && 'Email',
   ].filter(Boolean) as string[];
@@ -189,6 +195,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     selectedSlackWebhookTarget: '',
     gChatToggle: false,
     selectedGChatChannel: '',
+    gChatWebhookToggle: false,
+    selectedGChatWebhookTarget: '',
     discordToggle: false,
     selectedDiscordChannel: '',
     notificationName: '',
@@ -210,6 +218,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setSelectedSlackWebhookTarget(defaultFormState.selectedSlackWebhookTarget);
     setGChatToggle(defaultFormState.gChatToggle);
     setSelectedGChatChannel(defaultFormState.selectedGChatChannel);
+    setGChatWebhookToggle(defaultFormState.gChatWebhookToggle);
+    setSelectedGChatWebhookTarget(defaultFormState.selectedGChatWebhookTarget);
     setDiscordToggle(defaultFormState.discordToggle);
     setSelectedDiscordChannel(defaultFormState.selectedDiscordChannel);
     setNotificationName(defaultFormState.notificationName);
@@ -234,6 +244,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
           selectedSlackWebhookTarget,
           gChatToggle,
           selectedGChatChannel,
+          gChatWebhookToggle,
+          selectedGChatWebhookTarget,
           discordToggle,
           selectedDiscordChannel,
           notificationName,
@@ -260,6 +272,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setSelectedSlackWebhookTarget(oldState.selectedSlackWebhookTarget);
     setGChatToggle(oldState.gChatToggle);
     setSelectedGChatChannel(oldState.selectedGChatChannel);
+    setGChatWebhookToggle(oldState.gChatWebhookToggle);
+    setSelectedGChatWebhookTarget(oldState.selectedGChatWebhookTarget);
     setDiscordToggle(oldState.discordToggle);
     setSelectedDiscordChannel(oldState.selectedDiscordChannel);
     setNotificationName(oldState.notificationName);
@@ -669,6 +683,18 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       })
       .catch(() => setSlackWebhookTargets([]))
       .finally(() => setLoadingSlackWebhookTargets(false));
+    setLoadingGChatWebhookTargets(true);
+    apiIntegrations
+      .listIntegrations({ type: 'google_chat_webhook', limit: 200 })
+      .then((res: any) => {
+        const rows = res?.data?.data?.integrations_list?.rows || [];
+        // Keep disabled targets in the list (grayed out, unpickable) rather than
+        // dropping them: a rule already pointed at one must not have it silently
+        // stripped just because the modal was reopened while it's disabled.
+        setGChatWebhookTargets(rows.map((r: any) => ({ label: r.name, value: r.id, disabled: r.status === 'disabled' })));
+      })
+      .catch(() => setGChatWebhookTargets([]))
+      .finally(() => setLoadingGChatWebhookTargets(false));
   }, [open]);
 
   const fetchCluster = (notificationRuleObject: any) => {
@@ -754,6 +780,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setSelectedSlackWebhookTarget('');
     setSlackWebhookTargets([]);
     setGChatToggle(false);
+    setGChatWebhookToggle(false);
+    setSelectedGChatWebhookTarget('');
+    setGChatWebhookTargets([]);
     setDiscordToggle(false);
     setEmailToggle(false);
     setSelectedSlackChannel('');
@@ -799,6 +828,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       } else if (item.platform === 'slack_webhook' && item.channels?.webhook_target_id) {
         setSelectedSlackWebhookTarget(item.channels.webhook_target_id);
         setSlackWebhookToggle(true);
+      } else if (item.platform === 'google_chat_webhook' && item.channels?.webhook_target_id) {
+        setSelectedGChatWebhookTarget(item.channels.webhook_target_id);
+        setGChatWebhookToggle(true);
       }
       if (item.channels.id && item.platform == 'google_chat') {
         setSelectedGChatChannel(item.channels.id);
@@ -842,7 +874,17 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (!isValidString(notificationName)) {
       error.notificationName = 'Rule name must start with letter or number and can include spaces, underscores, and hyphens.';
     }
-    if (!suppressed && !slackToggle && !teamsToggle && !msWebhookToggle && !slackWebhookToggle && !gChatToggle && !discordToggle && !emailToggle) {
+    if (
+      !suppressed &&
+      !slackToggle &&
+      !teamsToggle &&
+      !msWebhookToggle &&
+      !slackWebhookToggle &&
+      !gChatToggle &&
+      !gChatWebhookToggle &&
+      !discordToggle &&
+      !emailToggle
+    ) {
       error.general = 'Please enable at least one notification platform or email';
     }
 
@@ -872,6 +914,14 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (gChatToggle && !selectedGChatChannel) {
       error.gChat = 'Google Chat channel must be selected';
       snackbar.error('Google Chat channel must be selected');
+    }
+
+    if (gChatWebhookToggle && loadingGChatWebhookTargets) {
+      error.gChatWebhook = 'Still loading Google Chat webhook targets — try again in a moment';
+      snackbar.error('Still loading Google Chat webhook targets — try again in a moment');
+    } else if (gChatWebhookToggle && !selectedGChatWebhookTarget) {
+      error.gChatWebhook = 'Select a Google Chat webhook target';
+      snackbar.error('Select a Google Chat webhook target');
     }
 
     if (discordToggle && !selectedDiscordChannel) {
@@ -1055,6 +1105,19 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         });
       }
     }
+    if (selectedGChatWebhookTarget && gChatWebhookToggle && !suppressed) {
+      const target = gChatWebhookTargets.find((item: any) => item.value === selectedGChatWebhookTarget);
+      if (!target) {
+        snackbar.warning('Google Chat webhook target is no longer available and will be removed from this rule.');
+        setGChatWebhookToggle(false);
+        setSelectedGChatWebhookTarget('');
+      } else {
+        queryParams.mappings.push({
+          channels: { webhook_target_id: target.value, name: target.label },
+          platform: 'google_chat_webhook',
+        });
+      }
+    }
     // email mapping object
     if ((email || selectedExclusionEmails.length > 0) && emailToggle && !suppressed) {
       const emailChannels = {
@@ -1208,6 +1271,16 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       });
     }
   }, [selectedSlackWebhookTarget, slackWebhookToggle, errors.slackWebhook]);
+
+  useEffect(() => {
+    if (errors.gChatWebhook && (!gChatWebhookToggle || selectedGChatWebhookTarget)) {
+      setErrors((prev: any) => {
+        const newErrors = { ...prev };
+        delete newErrors.gChatWebhook;
+        return newErrors;
+      });
+    }
+  }, [selectedGChatWebhookTarget, gChatWebhookToggle, errors.gChatWebhook]);
 
   useEffect(() => {
     if (errors.gChat && (!gChatToggle || selectedGChatChannel)) {
@@ -1838,6 +1911,50 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
               </Box>
             )}
 
+            {/* Google Chat Webhook Badge — hidden for daily_recap (email-only). Shown
+                when a target is selected even if the list is empty (deleted/disabled
+                target on a rehydrated rule) so the stale selection stays removable. */}
+            {basedOnValue !== 'daily_recap' && (gChatWebhookToggle || gChatWebhookTargets.length > 0) && (
+              <Box
+                id='gchat-webhook-badge'
+                onClick={() => setActiveChannel(activeChannel === 'google_chat_webhook' ? null : 'google_chat_webhook')}
+                sx={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: ds.space[1],
+                  px: ds.space.mul(0, 5),
+                  py: ds.space[1],
+                  borderRadius: 'var(--ds-radius-xl)',
+                  border: `1.5px solid ${getBadgeBorderColor(activeChannel === 'google_chat_webhook', !!selectedGChatWebhookTarget)}`,
+                  backgroundColor: activeChannel === 'google_chat_webhook' ? ds.blue[100] : ds.background[100],
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                  '&:hover': {
+                    borderColor: getBadgeHoverBorderColor(activeChannel === 'google_chat_webhook', !!selectedGChatWebhookTarget),
+                  },
+                }}
+              >
+                <SafeIcon src={GChatIcon} alt='Google Chat Webhook' width={14} height={14} />
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[700] }}>
+                  Google Chat Webhook
+                </Typography>
+                {selectedGChatWebhookTarget && (
+                  <>
+                    <CheckCircleOutlineIcon sx={{ fontSize: 14, color: 'var(--ds-green-500)', ml: ds.space[0] }} />
+                    <CloseIcon
+                      sx={{ fontSize: 13, color: 'var(--ds-gray-400)', ml: ds.space[0], '&:hover': { color: 'var(--ds-red-500)' } }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedGChatWebhookTarget('');
+                        setGChatWebhookToggle(false);
+                        if (activeChannel === 'google_chat_webhook') setActiveChannel(null);
+                      }}
+                    />
+                  </>
+                )}
+              </Box>
+            )}
+
             {/* Discord Badge — hidden for daily_recap (email-only) */}
             {basedOnValue !== 'daily_recap' && installedPlatforms.filter((g: any) => g.platform == 'discord').length > 0 && (
               <Box
@@ -2117,6 +2234,40 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
                     {errors.gChat && (
                       <FormHelperText error sx={{ mt: ds.space[1] }}>
                         {errors.gChat}
+                      </FormHelperText>
+                    )}
+                  </Box>
+                </Box>
+              )}
+
+              {/* Google Chat Webhook Config */}
+              {activeChannel === 'google_chat_webhook' && (
+                <Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[3] }}>
+                    <SafeIcon src={GChatIcon} alt='Google Chat Webhook' width={16} height={16} />
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                      Google Chat Webhook Configuration
+                    </Typography>
+                  </Box>
+                  <Box sx={{ maxWidth: ds.space.mul(1, 80) }}>
+                    <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Webhook target</InputLabel>
+                    <Box sx={{ width: '60%' }}>
+                      <Select
+                        id='gchat-webhook-target'
+                        placeholder='Webhook target'
+                        onChange={(value) => {
+                          setSelectedGChatWebhookTarget(value);
+                          if (value) setGChatWebhookToggle(true);
+                          else setGChatWebhookToggle(false);
+                        }}
+                        value={selectedGChatWebhookTarget || null}
+                        options={gChatWebhookTargets}
+                        size='sm'
+                      />
+                    </Box>
+                    {errors.gChatWebhook && (
+                      <FormHelperText error sx={{ mt: ds.space[1] }}>
+                        {errors.gChatWebhook}
                       </FormHelperText>
                     )}
                   </Box>
