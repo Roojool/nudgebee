@@ -46,10 +46,11 @@ func TestParseChangePlanBlock(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown kind defaults to source", func(t *testing.T) {
+	t.Run("unknown kind is preserved and rejected before fixing", func(t *testing.T) {
 		plan := parseChangePlanBlock("<change_plan>\nkind: infra\nchange: x\n</change_plan>")
 		if assert.NotNil(t, plan) {
-			assert.Equal(t, "source", plan.Kind)
+			assert.Equal(t, "infra", plan.Kind)
+			assert.NotEmpty(t, validateCodeChangePlan(plan))
 		}
 	})
 
@@ -133,9 +134,10 @@ func TestFilterCitationsToFiles(t *testing.T) {
 	list := []any{
 		map[string]any{"file_path": "svc/gateway/ratelimit/redis.go"},
 		map[string]any{"file_path": "some/other/file.go"},
+		map[string]any{"file_path": "svc/worker/redis.go"},
 	}
 
-	t.Run("keeps only the files the plan named, matching on basename", func(t *testing.T) {
+	t.Run("matches directory-qualified suffix without admitting a namesake", func(t *testing.T) {
 		kept, ok := filterCitationsToFiles(list, []string{"gateway/ratelimit/redis.go"}).([]any)
 		if assert.True(t, ok) && assert.Len(t, kept, 1) {
 			assert.Equal(t, "svc/gateway/ratelimit/redis.go", kept[0].(map[string]any)["file_path"])
@@ -145,8 +147,42 @@ func TestFilterCitationsToFiles(t *testing.T) {
 	t.Run("no plan files keeps everything", func(t *testing.T) {
 		kept, ok := filterCitationsToFiles(list, nil).([]any)
 		assert.True(t, ok)
-		assert.Len(t, kept, 2)
+		assert.Len(t, kept, 3)
 	})
+	t.Run("bare filename does not match arbitrary directories", func(t *testing.T) {
+		assert.Empty(t, filterCitationsToFiles(list, []string{"redis.go"}))
+	})
+	t.Run("absolute workspace path retains target directories", func(t *testing.T) {
+		citations := []any{map[string]any{"file_path": "/tmp/repo/svc/./gateway/redis.go"}}
+		assert.Len(t, filterCitationsToFiles(citations, []string{"svc/gateway/redis.go"}), 1)
+		assert.Empty(t, filterCitationsToFiles(citations, []string{"other/gateway/redis.go"}))
+	})
+}
+
+func TestValidateCodeChangePlan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plan  *codeChangePlan
+		valid bool
+	}{
+		{"absent", nil, false},
+		{"instructions only", &codeChangePlan{Kind: "source", Change: "fix"}, false},
+		{"files only", &codeChangePlan{Kind: "source", Files: []string{"a.go"}}, false},
+		{"unknown kind", &codeChangePlan{Kind: "infra", Change: "fix", Files: []string{"a.go"}}, false},
+		{"parent path", &codeChangePlan{Kind: "source", Change: "fix", Files: []string{"../a.go"}}, false},
+		{"absolute path", &codeChangePlan{Kind: "source", Change: "fix", Files: []string{"/tmp/a.go"}}, false},
+		{"empty path", &codeChangePlan{Kind: "source", Change: "fix", Files: []string{" "}}, false},
+		{"wildcard path", &codeChangePlan{Kind: "source", Change: "fix", Files: []string{"src/*.go"}}, false},
+		{"placeholder instruction", &codeChangePlan{Kind: "source", Change: "<describe change>", Files: []string{"a.go"}}, false},
+		{"source", &codeChangePlan{Kind: "source", Change: "fix", Files: []string{"svc/a.go"}}, true},
+		{"deployment without numeric target", &codeChangePlan{Kind: "deployment", Change: "remove stale option", Files: []string{"values.yaml"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.valid, validateCodeChangePlan(tc.plan) == "")
+			// Stored plans must pass the same gate as freshly parsed plans.
+			assert.Equal(t, tc.valid, validateCodeChangePlan(unmarshalCodeChangePlan(marshalCodeChangePlan(tc.plan))) == "")
+		})
+	}
 }
 
 func TestBuildFixModeQuery(t *testing.T) {

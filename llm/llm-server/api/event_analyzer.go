@@ -20,6 +20,7 @@ import (
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -1577,6 +1578,11 @@ const maxInvestigationEvidenceBytes = 12000
 // middle-truncated so both the first and last errors of the window survive.
 const maxErrorLogLinesBytes = 4096
 
+// Reserve space for observations even when enrichment produces verbose insights.
+const maxEvidenceInsightBytes = 2000
+const maxEvidencePatternBytes = 1500
+const maxInlineRawLogBytes = 1000
+
 // maxLogPatternCount bounds how many enricher log-pattern templates are
 // rendered into the prompt digest.
 const maxLogPatternCount = 10
@@ -1618,11 +1624,11 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// push them past the cap.
 	if insights := collectEvidenceInsights(ev); len(insights) > 0 {
 		b.WriteString("### Collected Insights\n")
+		var insightText strings.Builder
 		for _, msg := range insights {
-			b.WriteString("- ")
-			b.WriteString(msg)
-			b.WriteString("\n")
+			insightText.WriteString("- " + msg + "\n")
 		}
+		b.WriteString(core.TruncateMiddle(insightText.String(), maxEvidenceInsightBytes/2, maxEvidenceInsightBytes/2))
 		b.WriteString("\n")
 	}
 
@@ -1630,7 +1636,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// the severity breakdown.
 	if digest := renderLogPatternDigest(ev.LogSummary); digest != "" {
 		b.WriteString("### Log Patterns\n")
-		b.WriteString(digest)
+		b.WriteString(core.TruncateMiddle(digest, maxEvidencePatternBytes/2, maxEvidencePatternBytes/2))
 		b.WriteString("\n")
 	}
 
@@ -1648,7 +1654,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// not, the caller saves it to the conversation workspace instead and the
 	// prompt points the agent at that file.
 	if logText := strings.TrimSpace(ev.LogData); logText != "" {
-		remaining := maxInvestigationEvidenceBytes - b.Len()
+		remaining := min(maxInlineRawLogBytes, maxInvestigationEvidenceBytes-b.Len()-128)
 		if remaining > 512 {
 			b.WriteString("### Collected Logs\n```\n")
 			if len(logText) > remaining {
@@ -1679,7 +1685,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 // conversation row exists by this point: Step 1 (summary) created it.
 func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessionId, eventId string, event events.Event) string {
 	logText := strings.TrimSpace(event.Evidences.LogData)
-	if len(logText) <= maxInvestigationEvidenceBytes {
+	if len(logText) <= maxInlineRawLogBytes {
 		return ""
 	}
 	conv, convErr := core.GetConversationDao().GetConversationBySession(accountId, sessionId)
@@ -1925,7 +1931,7 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 			fmt.Fprintf(&b, " at commit `%s`", caps.Source.Commit)
 		}
 		b.WriteString(". `code_analyzer` is available.\n")
-		b.WriteString("- When your causality chain lands on a code defect, OR your Next Steps call for a code change (error handling, retry/backoff, a hardening change) even if the root cause is external/config, call `code_analyzer` in **explore mode** with the distinctive strings from the logs — the exact error message text and any `filename:lineno` — so it clones the repo and greps for where that code lives. Use what it returns to name the exact file(s).\n")
+		b.WriteString("- When incident-window evidence supports a code defect, call `code_analyzer` in **explore mode** with the resource, time window, observed failure, causal mechanism, and distinctive log strings (including any filename:lineno). Ask it to verify the mechanism against the deployed revision and identify the exact repo-relative file(s). A log-string match alone does not establish a defect. Keep optional hardening suggestions in prose; they do not justify an automated change plan.\n")
 	}
 	if caps.Deployment != nil {
 		fmt.Fprintf(&b, "The deployment values for `%s` are in `%s`: `%s`.\n", workload, caps.Deployment.Repo, caps.Deployment.ValuesPath)
@@ -1935,7 +1941,7 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 	b.WriteString("<change_plan>\n")
 	b.WriteString("kind: source | deployment\n")
 	b.WriteString("files: <repo-relative path(s) code_analyzer identified, comma-separated; or the values file>\n")
-	b.WriteString("change: <what to change and why, as direct instructions to a code-fixing agent>\n")
+	b.WriteString("change: <what to change, the incident evidence establishing why it is needed, and a focused regression check with its expected result; distinguish observed facts from hypotheses>\n")
 	b.WriteString("target_value: <for a deployment change only: the exact value, e.g. 512Mi>\n")
 	b.WriteString("</change_plan>\n")
 	return b.String()
@@ -2899,10 +2905,31 @@ func parseChangePlanBlock(investigationText string) *codeChangePlan {
 	if plan.Change == "" && len(plan.Files) == 0 {
 		return nil
 	}
-	if plan.Kind != "source" && plan.Kind != "deployment" {
-		plan.Kind = "source"
-	}
 	return plan
+}
+
+// Check both fresh and recovered plans before paying for a fix invocation.
+// Structural validity is necessary, but does not prove the diagnosis correct.
+func validateCodeChangePlan(plan *codeChangePlan) string {
+	if plan == nil {
+		return "skipped - investigation concluded no actionable code change"
+	}
+	if plan.Kind != "source" && plan.Kind != "deployment" {
+		return "skipped - change plan has an unsupported kind"
+	}
+	if strings.TrimSpace(plan.Change) == "" || len(plan.Files) == 0 {
+		return "skipped - change plan needs explicit instructions and located files"
+	}
+	if strings.HasPrefix(strings.TrimSpace(plan.Change), "<") {
+		return "skipped - change plan instructions are an unfilled placeholder"
+	}
+	for _, file := range plan.Files {
+		clean := path.Clean(strings.TrimSpace(file))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) || strings.ContainsAny(file, "<>*?\\\n\r") {
+			return "skipped - change plan files must be concrete repository-relative paths"
+		}
+	}
+	return ""
 }
 
 // stripChangePlanBlock removes the <change_plan> block (and trailing blank
@@ -3127,8 +3154,9 @@ func collectInvestigationCodeCitations(ctx *security.RequestContext, dbManager *
 }
 
 // filterCitationsToFiles keeps only the citations naming a file the plan targets,
-// matched on the basename so the investigation's path spelling (workspace-absolute,
-// service-relative) doesn't drop a legitimate citation. An empty file list keeps
+// matched on the full path or a directory-qualified suffix for workspace-absolute
+// and service-relative citations. Basenames alone cannot identify monorepo files.
+// An empty file list keeps
 // everything — the plan named no file to check against.
 func filterCitationsToFiles(raw any, planFiles []string) any {
 	list, ok := raw.([]any)
@@ -3141,7 +3169,7 @@ func filterCitationsToFiles(raw any, planFiles []string) any {
 		if f == "" {
 			continue
 		}
-		wanted[f[strings.LastIndexByte(f, '/')+1:]] = true
+		wanted[path.Clean(f)] = true
 	}
 	kept := make([]any, 0, len(list))
 	for _, item := range list {
@@ -3149,12 +3177,16 @@ func filterCitationsToFiles(raw any, planFiles []string) any {
 		if !ok {
 			continue
 		}
-		path, _ := c["file_path"].(string)
-		if path == "" {
+		file, _ := c["file_path"].(string)
+		if strings.TrimSpace(file) == "" {
 			continue
 		}
-		if wanted[path[strings.LastIndexByte(path, '/')+1:]] {
-			kept = append(kept, item)
+		file = path.Clean(strings.TrimSpace(file))
+		for target := range wanted {
+			if file == target || (strings.Contains(target, "/") && strings.HasSuffix(file, "/"+target)) {
+				kept = append(kept, item)
+				break
+			}
 		}
 	}
 	return kept
@@ -3302,8 +3334,8 @@ func runCodeFixStage(ctx *security.RequestContext, request EventAnalysisRequest,
 		"code_capabilities_present", caps.HasAny(),
 		"auto_raise_pr_enabled", raisePR)
 
-	if plan == nil {
-		return skipCodeFix("skipped - investigation concluded no actionable code change")
+	if reason := validateCodeChangePlan(plan); reason != "" {
+		return skipCodeFix(reason)
 	}
 	if !isGitIntegrationConfigured(request.AccountId) {
 		return skipCodeFix("skipped - no git integration configured")
