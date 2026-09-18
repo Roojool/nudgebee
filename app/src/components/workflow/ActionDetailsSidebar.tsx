@@ -1,5 +1,6 @@
 import React, { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Box, Typography, Switch as MuiSwitch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField, Alert } from '@mui/material';
+import { Box, Typography, Switch as MuiSwitch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField } from '@mui/material';
+import { Callout } from '@ui/Callout';
 import { Switch } from '@ui/Switch';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
@@ -3388,28 +3389,18 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               {showMcpGuidance && (
                 <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
                   <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
-                  <Alert
-                    severity='info'
-                    sx={{
-                      flex: 1,
-                      py: 0.5,
-                      fontSize: 'var(--ds-text-caption)',
-                      '& .MuiAlert-icon': { py: 0.5 },
-                      '& .MuiAlert-message': { fontSize: 'var(--ds-text-caption)', py: 0.25 },
-                    }}
-                    data-testid='mcp-integration-alert'
-                  >
-                    To add an MCP integration, go to Admin &gt; Integrations &gt; MCP.
-                    <br />
-                    <Button
-                      id='action-sidebar-mcp-manage-integrations-btn'
-                      tone='link'
-                      size='xs'
-                      onClick={() => window.open('/accounts/account-form?cloudProvider=mcp', '_blank', 'noopener,noreferrer')}
-                    >
-                      Manage MCP Integrations &rarr;
-                    </Button>
-                  </Alert>
+                  <Box sx={{ flex: 1 }}>
+                    <Callout
+                      tone='info'
+                      data-testid='mcp-integration-alert'
+                      message='To add an MCP integration, go to Admin > Integrations > MCP.'
+                      action={{
+                        id: 'action-sidebar-mcp-manage-integrations-btn',
+                        label: <>Manage MCP Integrations &rarr;</>,
+                        onClick: () => window.open('/accounts/account-form?cloudProvider=mcp', '_blank', 'noopener,noreferrer'),
+                      }}
+                    />
+                  </Box>
                 </Box>
               )}
             </React.Fragment>
@@ -3518,57 +3509,36 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             {fieldName === 'integration_id' && selectedActionType === 'llm.mcp_call' && (
               <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
                 <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
-                <Alert
-                  severity='info'
-                  sx={{
-                    flex: 1,
-                    py: 0.5,
-                    fontSize: 'var(--ds-text-caption)',
-                    '& .MuiAlert-icon': { py: 0.5 },
-                    '& .MuiAlert-message': { fontSize: 'var(--ds-text-caption)', py: 0.25 },
-                  }}
-                  data-testid='mcp-integration-alert'
-                >
-                  To add an MCP integration, go to Admin &gt; Integrations &gt; MCP.
-                  <br />
-                  <Button
-                    id='action-sidebar-mcp-manage-integrations-id-btn'
-                    tone='link'
-                    size='xs'
-                    onClick={() => window.open('/accounts/account-form?cloudProvider=mcp', '_blank', 'noopener,noreferrer')}
-                  >
-                    Manage MCP Integrations &rarr;
-                  </Button>
-                </Alert>
+                <Box sx={{ flex: 1 }}>
+                  <Callout
+                    tone='info'
+                    data-testid='mcp-integration-alert'
+                    message='To add an MCP integration, go to Admin > Integrations > MCP.'
+                    action={{
+                      id: 'action-sidebar-mcp-manage-integrations-id-btn',
+                      label: <>Manage MCP Integrations &rarr;</>,
+                      onClick: () => window.open('/accounts/account-form?cloudProvider=mcp', '_blank', 'noopener,noreferrer'),
+                    }}
+                  />
+                </Box>
               </Box>
             )}
             {/* SSM permission guidance — shown directly below the executor_type dropdown */}
             {fieldName === 'executor_type' && selectedActionType === 'scripting.run_script' && localData?.executor_type === 'aws_ssm' && (
               <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
                 <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
-                <Alert
-                  severity='info'
-                  sx={{
-                    flex: 1,
-                    py: 0.5,
-                    fontSize: 'var(--ds-text-caption)',
-                    '& .MuiAlert-icon': { py: 0.5 },
-                    '& .MuiAlert-message': { fontSize: 'var(--ds-text-caption)', py: 0.25 },
-                  }}
-                  data-testid='ssm-permission-alert'
-                >
-                  Ensure SSM access is enabled for the selected AWS account. If you encounter permission errors, update the account permissions to
-                  enable SSM access via CloudFormation. Ignore if already done.
-                  <br />
-                  <Button
-                    id='action-sidebar-ssm-manage-permissions-btn'
-                    tone='link'
-                    size='xs'
-                    onClick={() => window.open('/accounts/account-form?cloudProvider=AWS', '_blank', 'noopener,noreferrer')}
-                  >
-                    Manage AWS Integrations &rarr;
-                  </Button>
-                </Alert>
+                <Box sx={{ flex: 1 }}>
+                  <Callout
+                    tone='info'
+                    data-testid='ssm-permission-alert'
+                    message='Ensure SSM access is enabled for the selected AWS account. If you encounter permission errors, update the account permissions to enable SSM access via CloudFormation. Ignore if already done.'
+                    action={{
+                      id: 'action-sidebar-ssm-manage-permissions-btn',
+                      label: <>Manage AWS Integrations &rarr;</>,
+                      onClick: () => window.open('/accounts/account-form?cloudProvider=AWS', '_blank', 'noopener,noreferrer'),
+                    }}
+                  />
+                </Box>
               </Box>
             )}
           </React.Fragment>

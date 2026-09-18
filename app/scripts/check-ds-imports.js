@@ -46,7 +46,7 @@ const MUI_REPLACEMENTS = {
   Accordion: '@ui/Accordion',
   AccordionDetails: '@ui/Accordion',
   AccordionSummary: '@ui/Accordion',
-  Alert: '@ui/Banner',
+  Alert: '@ui/Banner (page/section notice) or @ui/Callout (inline hint under a field)',
   Button: '@ui/Button',
   Card: '@ui/Card',
   CardContent: '@ui/Card',

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Typography, Switch, FormControlLabel, Alert } from '@mui/material';
+import { Box, Typography, Switch, FormControlLabel } from '@mui/material';
+import { Callout } from '@ui/Callout';
 import { ds } from 'src/utils/colors';
 import apiWorkflow from '@api1/workflow';
 import FilterDropdown from '@ui/FilterDropdown';
@@ -357,9 +358,9 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
             return <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[700], mt: 0.5 }}>{helper}</Typography>;
           })()}
           {loadError ? (
-            <Alert severity='warning' sx={{ mt: 1, py: 0 }}>
-              {loadError}
-            </Alert>
+            <Box sx={{ mt: 1 }}>
+              <Callout tone='warning' message={loadError} />
+            </Box>
           ) : null}
         </Box>
       </Box>
@@ -384,9 +385,12 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
               sx={{ width: '100%' }}
             />
             {pinnedMissing ? (
-              <Alert severity='warning' sx={{ mt: 1, py: 0 }}>
-                {`Pinned version v${pinnedVersion} no longer exists in this workflow's history. The run will fail unless you pick another version or switch back to Live.`}
-              </Alert>
+              <Box sx={{ mt: 1 }}>
+                <Callout
+                  tone='warning'
+                  message={`Pinned version v${pinnedVersion} no longer exists in this workflow's history. The run will fail unless you pick another version or switch back to Live.`}
+                />
+              </Box>
             ) : (
               <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[700], mt: 0.5 }}>
                 {pinnedVersion !== undefined
@@ -420,9 +424,7 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
         {advancedInputs || isTemplated || !selectedWorkflow ? (
           <>
             {!selectedWorkflow && !isTemplated && workflowName ? (
-              <Alert severity='info' sx={{ py: 0 }}>
-                Pick an existing workflow above to get a per-input editor. You can still pass inputs as a JSON object.
-              </Alert>
+              <Callout tone='info' message='Pick an existing workflow above to get a per-input editor. You can still pass inputs as a JSON object.' />
             ) : null}
             <JsonEditor
               value={rawInputs ?? {}}

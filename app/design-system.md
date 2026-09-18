@@ -110,6 +110,7 @@ app-specific component built from primitives.
 | `DropdownMenu` · `ThreeDotsMenu`                             | ds/     | Action menus. `ThreeDotsMenu` is the kebab/overflow wrapper (`<DropdownMenu trigger={icon-only Button}>`). Per spec there is no separate `ButtonMenu` primitive — compose `DropdownMenu` with a labelled trigger.                     |
 | `CopyButton` · `DownloadButton`                              | common/ | Icon-only copy-to-clipboard (`@shared/buttons/CopyButton`) and download trigger (`@shared/buttons/DownloadButton`, wraps `ds/Button` + `file-saver`). Prefer these over wiring `saveAs` manually.                                     |
 | `Banner` · `Toast`                                           | ds/     | Inline page banners / transient toast notifications. **Toast is imperative** — `import { toast } from '@ui/Toast'`, mount `<Toast />` once in `_app.tsx`, then `toast.success('…')`. See the Toast note below.                        |
+| `Callout`                                                    | ds/     | Compact inline hint in the flow of a form — sits under the field it explains, no margins of its own. Not a page notice; that's `Banner`.                                                                                              |
 | `EmptyState` · `Skeleton` · `ProgressBar` · `ProgressLinear` | ds/     | Empty / loading / progress states. Error boundaries: `@shared/ErrorBoundary` (no `ds/ErrorBoundary`).                                                                                                                                 |
 | `Modal`                                                      | ds/     | Centered overlay — plain shell **or** confirm/cancel decision dialog (pick the footer mode). The unified `Modal` absorbed the legacy `Dialog`/`NDialog`. There is no separate `ds/Dialog`, `ds/Popover`, or `ds/Inspector` primitive. |
 | `Tooltip`                                                    | ds/     | Hover text / explainer / interactive tooltip. `variant` (`default`/`explainer`/`interactive`), `title`, `desc`, `placement`, `linkUrl`/`linkText`.                                                                                    |
@@ -494,6 +495,7 @@ When two components could fit, this is which to pick.
 | Top-of-page **2-level** nav — parent tabs with hover-dropdown subtabs, URL-hash driven             | `@shared/navigation/AnchorComponent`                               | `ds/Tabs` (single-level only)                                              |
 | Transient confirmation message                                                                     | `ds/Toast`                                                         | `ds/Banner`                                                                |
 | Persistent inline page-level message                                                               | `ds/Banner`                                                        | `ds/Toast`                                                                 |
+| Short hint under a form field                                                                      | `ds/Callout`                                                       | `ds/Banner` (page/section notice, taller)                                  |
 | Small overlay anchored to an element                                                               | `ds/Tooltip` (text/explainer) · `DropdownMenu` (menu)              | `ds/Modal` (there is no `ds/Popover`)                                      |
 | Centered blocking task / decision                                                                  | `ds/Modal`                                                         | a side-drawer (there is no `ds/Inspector`)                                 |
 | Pick one value in a **form**                                                                       | `ds/Select`                                                        | `DropdownMenu` (action menu) · `FilterDropdown` (toolbar pill)             |
@@ -532,7 +534,7 @@ When two components could fit, this is which to pick.
 
 ## 4. Component API reference (`ds/` primitives)
 
-Per-component reference for all 44 primitives in `src/components/common/ds/`, harvested from each
+Per-component reference for all 45 primitives in `src/components/common/ds/`, harvested from each
 file's JSDoc + `Props` interface. **Conventions for the tables below:**
 
 - **Req** column: `✓` = required, `—` = optional.
@@ -1402,6 +1404,25 @@ Page/section-level persistent message (one per surface, max). **Variants:** `ton
 
 `BannerAction`: `{ label, onClick, tone?: 'secondary'\|'link' }`.
 **Don't:** stack two banners on one surface; make a critical banner dismissible; > 2 actions; use for transient confirmations (that's `Toast`).
+
+#### `Callout` — `import { Callout } from '@ui/Callout'`
+
+Compact inline hint, in the flow of a form. **Variants:** `tone` `info`·`success`·`warning`·`critical` · composition `icon+message`·`icon+message+action` (auto from `action`).
+
+```tsx
+<Callout tone='info' message='To add an MCP integration, go to Admin > Integrations > MCP.' />
+```
+
+| Prop      | Type                                       | Default  | Req |
+| --------- | ------------------------------------------ | -------- | --- |
+| `tone`    | `'info'\|'success'\|'warning'\|'critical'` | `'info'` | —   |
+| `message` | `ReactNode` (or `children`)                | —        | —   |
+| `action`  | `{ label, onClick, id? }`                  | —        | —   |
+| `id`      | `string`                                   | —        | —   |
+
+Pass the text as `message` or as children — one of the two, though neither is type-enforced. Other props (`data-testid`, `className`, …) pass through to the root, except `role`/`aria-live`, which the tone decides (`warning`/`critical`: `alert` + assertive; `info`/`success`: `status` + polite). `info`/`success` render `role='status'`; `warning`/`critical` render `role='alert'`.
+
+**Don't:** use it as a page- or section-level notice (`Banner`); give it more than one action; use it for a field's own validation error (`Input` has `error`/`helperText`).
 
 #### `Toast` — `import { toast } from '@ui/Toast'` (singleton) · `import Toast from '@ui/Toast'` (mount once)
 
