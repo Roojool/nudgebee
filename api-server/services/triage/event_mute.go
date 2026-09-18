@@ -83,8 +83,12 @@ type EventAlertControls struct {
 	Rule *eventrule.RuleCapabilities `json:"rule"`
 	// RuleLocation is where a PrometheusRule-backed rule is defined.
 	RuleLocation *EventRuleLocation `json:"rule_location,omitempty"`
-	Scopes       []EventMuteScope   `json:"scopes"`
-	Suppressions []EventSuppression `json:"suppressions"`
+	// RuleDefinition is the rule's expression and `for` when they can be changed
+	// from Nudgebee (edit available, expression is PromQL). Nubi's remediation plan
+	// proposes changes against it.
+	RuleDefinition *eventrule.RuleDefinition `json:"rule_definition,omitempty"`
+	Scopes         []EventMuteScope          `json:"scopes"`
+	Suppressions   []EventSuppression        `json:"suppressions"`
 }
 
 // EventRuleLocation names the PrometheusRule a rule lives in and who manages it.
@@ -106,9 +110,10 @@ type eventMuteBasis struct {
 	ruleID string
 	// sources are the event sources a mute covers: every delivery path of the
 	// rule when the rule can be muted as a whole, else the event's own source.
-	sources  []string
-	rule     *eventrule.RuleCapabilities
-	location *EventRuleLocation
+	sources    []string
+	rule       *eventrule.RuleCapabilities
+	location   *EventRuleLocation
+	definition *eventrule.RuleDefinition
 }
 
 // muteSpec identifies one mute: the rows it owns and what they match.
@@ -351,6 +356,7 @@ func resolveEventMuteBasis(ctx *security.RequestContext, db *sqlx.DB, tenantID, 
 		case err == nil:
 			caps := target.Capabilities()
 			b.rule = &caps
+			b.definition = target.EditableDefinition()
 			if target.PromRule.Name != "" {
 				b.location = &EventRuleLocation{Namespace: target.PromRule.Namespace, Name: target.PromRule.Name, ManagedBy: target.PromRule.ManagedBy}
 			}
@@ -452,7 +458,7 @@ func latestEnd(ends []*time.Time) *time.Time {
 }
 
 func buildEventAlertControls(ctx *security.RequestContext, db *sqlx.DB, tenantID, accountID string, b *eventMuteBasis) (*EventAlertControls, error) {
-	out := &EventAlertControls{EventID: b.event.Id, Alert: b.alert, Source: b.source, Rule: b.rule, RuleLocation: b.location}
+	out := &EventAlertControls{EventID: b.event.Id, Alert: b.alert, Source: b.source, Rule: b.rule, RuleLocation: b.location, RuleDefinition: b.definition}
 	supps, err := activeSuppressions(ctx.GetContext(), db, tenantID, accountID, b.event)
 	if err != nil {
 		return nil, err
@@ -550,6 +556,7 @@ func UpdateEventMute(ctx *security.RequestContext, req UpdateEventMuteRequest) (
 		if target, err := eventrule.ResolveRuleTarget(ctx, b.ruleID, eventrule.ResolveOptions{}); err == nil {
 			caps := target.Capabilities()
 			b.rule = &caps
+			b.definition = target.EditableDefinition()
 		}
 	}
 	return buildEventAlertControls(ctx, dbms.Db, tenantID, req.AccountID, b)

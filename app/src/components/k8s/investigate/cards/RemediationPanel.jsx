@@ -12,6 +12,10 @@ import { hasWriteAccess } from '@lib/auth';
 import apiKubernetes from '@api1/kubernetes';
 import apiRecommendations from '@api1/recommendation';
 import apiTriage from '@api1/triage';
+import apiKubernetes1 from '@api1/kubernetes1';
+import { getBrandTitle } from '@hooks/useTenantBranding';
+import AlertRuleChangeAction from './AlertRuleChangeAction';
+import { buildAlertRuleContext, isAlertRuleChangeApplied } from './remediationAlertRule';
 
 const STATUS_META = {
   SUCCESS: { text: 'Success', tone: 'success' },
@@ -368,7 +372,7 @@ CodeFixDetails.propTypes = {
 // confidence, shown inline — there is no separate hypotheses box), and its command rows. A per-block
 // "Run" button runs this action's execute → verify one-by-one, stopping on the first failure.
 // A code-fix action carries no command, so it renders the diff instead of command rows.
-function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, appliedAt, onExecuted, codeFix }) {
+function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, appliedAt, onExecuted, codeFix, alertControls, onAlertRuleApplied }) {
   const [running, setRunning] = useState(false);
   const execRef = useRef(null);
   const verifyRef = useRef(null);
@@ -384,7 +388,10 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
   const hypConfidence = formatConfidence(hypothesis?.confidence);
   // Only a command-less fix stands in for the code change; a mitigation with a command shows its
   // command rows instead, and must not carry someone else's diff.
-  const showCodeFix = !execCmd && trimmedString(action?.kind).toLowerCase() === 'fix' && !!codeFix;
+  // A change to the alert rule is applied from the card, not by a command, and is not the code fix.
+  const ruleChange = action?.alert_rule_change || null;
+  const ruleChangeApplied = ruleChange ? isAlertRuleChangeApplied(ruleChange, alertControls) : false;
+  const showCodeFix = !execCmd && !ruleChange && trimmedString(action?.kind).toLowerCase() === 'fix' && !!codeFix;
 
   // Run the action's execute command, then (only if it succeeded) its verify command. Rollback is
   // never auto-run. Each row shows its own output live as it runs.
@@ -420,6 +427,7 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
             {kindMeta ? <Label tone={kindMeta.tone} size='sm' text={kindMeta.text} /> : null}
             {appliedAt ? <Label tone='success' size='sm' text={appliedLabel ? `Applied · ${appliedLabel}` : 'Applied'} /> : null}
+            {ruleChangeApplied ? <Label tone='success' size='sm' text='Applied' /> : null}
             {confidence !== null ? (
               // Says what the number measures. The hypothesis below carries its own percentage
               // measuring something different (is this the cause), and two bare "confidence" chips
@@ -462,6 +470,16 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
           </Box>
         ) : null}
         {showCodeFix ? <CodeFixDetails codeFix={codeFix} /> : null}
+        {ruleChange ? (
+          <AlertRuleChangeAction
+            change={ruleChange}
+            controls={alertControls}
+            accountId={accountId}
+            eventId={eventId}
+            canRun={canRun}
+            onApplied={onAlertRuleApplied}
+          />
+        ) : null}
         {execCmd ? (
           <CommandRow
             ref={execRef}
@@ -530,6 +548,8 @@ ActionCard.propTypes = {
   appliedAt: PropTypes.string,
   onExecuted: PropTypes.func,
   codeFix: PropTypes.object,
+  alertControls: PropTypes.object,
+  onAlertRuleApplied: PropTypes.func,
 };
 
 // RemediationPanel renders below the investigation analysis. "Generate Remediation" reuses the
@@ -546,6 +566,9 @@ const RESOLVED_STATUSES = ['RESOLVED', 'CLOSED'];
 
 const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
   const [plan, setPlan] = useState(null);
+  // The event's alert rule and what can be changed on it: sent with generate so the
+  // plan can propose a rule fix, and read back to show when that fix is applied.
+  const [alertControls, setAlertControls] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   // Whether pressing the button again could plausibly succeed. A failed fetch is worth retrying; an
@@ -575,6 +598,15 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
   }, []);
 
   const isResolved = typeof nbStatus === 'string' && RESOLVED_STATUSES.includes(nbStatus.toUpperCase());
+
+  const loadAlertControls = async () => {
+    try {
+      const controls = await apiKubernetes1.getEventAlertControls({ event_id: eventId, account_id: accountId });
+      if (mountedRef.current) setAlertControls(controls);
+    } catch (err) {
+      console.error('RemediationPanel: failed to load alert rule controls', err);
+    }
+  };
 
   const loadExecutions = async () => {
     if (!eventId) return;
@@ -658,7 +690,22 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
         }
         return;
       }
-      const res = await apiKubernetes.generateRemediation(accountId, eventId, context, artifacts);
+      // The event's alert rule, when the plan could change it. Appended after the check above
+      // so a rule definition alone never counts as investigation content. Best-effort.
+      let alertRule = null;
+      try {
+        const controls = await apiKubernetes1.getEventAlertControls({ event_id: eventId, account_id: accountId });
+        if (mountedRef.current) setAlertControls(controls);
+        const built = buildAlertRuleContext(controls, getBrandTitle());
+        if (built) {
+          artifacts.push('alert_rule');
+          alertRule = built.alertRule;
+          context = [context, built.text].join('\n\n');
+        }
+      } catch (err) {
+        console.error('RemediationPanel: failed to fetch alert rule controls', err);
+      }
+      const res = await apiKubernetes.generateRemediation(accountId, eventId, context, artifacts, alertRule);
       if (res && typeof res === 'object' && Array.isArray(res.actions)) {
         setPlan(res);
       } else {
@@ -691,6 +738,8 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
         if (saved && typeof saved === 'object' && Array.isArray(saved.actions)) {
           loaded = true;
           if (!cancelled) setPlan(saved);
+          // A restored rule change shows Applied from the rule's live state.
+          if (saved.actions.some((a) => a?.alert_rule_change)) loadAlertControls();
           // A restored plan holds no diff (only generate() sees the analysis record), so fetch it
           // when the plan actually has a command-less fix to show it against. Skipped otherwise so
           // the common all-commands plan costs no extra request.
@@ -831,6 +880,8 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
               appliedAt={executedCommands[trimmedString(action?.execute_command)] || ''}
               onExecuted={loadExecutions}
               codeFix={codeFix}
+              alertControls={alertControls}
+              onAlertRuleApplied={loadAlertControls}
             />
           ))}
         </>

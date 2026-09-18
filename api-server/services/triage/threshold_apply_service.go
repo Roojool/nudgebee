@@ -392,32 +392,22 @@ func applyDirect(ctx *security.RequestContext, sug *ApplySuggestionRow, rule *So
 		return result.Previous, nil
 	}
 
-	cfg := eventrule.EventConfig{
-		Id:                   rule.ID,
-		Alert:                sug.AlertName,
-		AccountID:            sug.CloudAccountID,
-		Source:               rule.Source,
-		Expr:                 rewritten.Expr,
-		Category:             rule.Category,
-		Severity:             rule.Severity,
-		Enabled:              rule.Enabled,
-		AlertType:            rule.AlertType,
-		MetricProvider:       rule.MetricProvider,
-		MetricProviderSource: rule.MetricProviderSource,
-		ProviderConfig:       rewritten.ProviderConfig,
+	// The stored rule is the base, so the write-back changes only the threshold or
+	// duration and keeps annotations, labels and the rule's playbook.
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("threshold apply: database manager: %w", err)
 	}
-	cfg.Duration = rule.Duration
+	cfg, err := eventrule.LoadEventConfig(ctx.GetContext(), dbms.Db, sug.TenantID, rule.ID)
+	if err != nil {
+		return nil, fmt.Errorf("threshold apply: load rule: %w", err)
+	}
+	cfg.Expr = rewritten.Expr
+	if rewritten.ProviderConfig != nil {
+		cfg.ProviderConfig = rewritten.ProviderConfig
+	}
 	if rewritten.Duration != "" {
 		cfg.Duration = rewritten.Duration
-	}
-	// UpdateEventRule keeps the stored labels/annotations for a known row; these
-	// fill the fields its edit form would otherwise send.
-	cfg.Annotations.Description = rule.AnnDescription
-	cfg.Annotations.Summary = rule.AnnSummary
-	cfg.Annotations.Runbook = rule.AnnRunbook
-	cfg.Labels.Severity = rule.LabelSeverity
-	if cfg.Severity == "" {
-		cfg.Severity = rule.LabelSeverity
 	}
 
 	_, err = eventrule.UpdateEventRule(ctx, cfg)

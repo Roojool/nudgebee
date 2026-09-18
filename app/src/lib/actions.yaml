@@ -2040,6 +2040,18 @@ actions:
       - role: account_admin_readonly
       - role: account_admin
     comment: What the investigation screen can do about an event's alert — the alert rule it belongs to and its capabilities, the mute scopes with 7-day counts, and the suppressions that apply
+  - name: eventrules_apply_rule_change
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Change one alert rule's expression and/or `for` where it is defined, refusing if the rule changed since the change was proposed (Nubi remediation plan)
   - name: eventrules_update_event_mute
     definition:
       kind: synchronous

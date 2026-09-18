@@ -281,6 +281,37 @@ func handleEventRuleAction(actionPayload *ActionRequest, c *gin.Context, tracer 
 		c.JSON(200, capabilities)
 		return
 
+	case "eventrules_apply_rule_change":
+		var changeRequest eventrule.ApplyRuleChangeRequest
+		if req, ok := relayRequest["request"].(map[string]interface{}); ok {
+			relayRequest = req
+		}
+		if err := common.UnmarshalMapToStruct(relayRequest, &changeRequest); err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		result, err := eventrule.ApplyRuleChange(ctx, changeRequest)
+		defer func() {
+			auditEvent.AccountId = changeRequest.AccountID
+			auditEvent.EventAction = audit.EventActionUpdate
+			auditEvent.EventTime = time.Now()
+			auditEvent.EventTarget = changeRequest.RuleID
+			if result != nil && result.Capabilities.Alert != "" {
+				auditEvent.EventTarget = result.Capabilities.Alert
+			}
+			auditEvent.EventState = changeRequest
+			if auditErr := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); auditErr != nil {
+				ctx.GetLogger().Error("failed to create audit event for alert rule change", "error", auditErr)
+			}
+		}()
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			auditEvent.EventStatus = audit.EventStatusFailure
+			return
+		}
+		c.JSON(200, result)
+		return
+
 	case "eventrules_get_event_alert_controls":
 		var controlsRequest triage.EventAlertControlsRequest
 		if relayRequest["request"] != nil {

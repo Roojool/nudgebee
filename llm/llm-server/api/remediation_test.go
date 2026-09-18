@@ -232,7 +232,7 @@ func TestNormalizePlan_ClampsMitigationConfidence(t *testing.T) {
 		{Action: "Raise checkout memory limit", Kind: "fix", Confidence: 88},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	// Looked up by name, not index: normalizePlan also reorders fixes ahead of mitigations.
 	assert.Equal(t, Confidence(maxMitigationConfidence), actionByName(t, plan, "Restart flagd deployment").Confidence,
@@ -262,7 +262,7 @@ func TestNormalizePlan_DefaultsUnknownKindToMitigation(t *testing.T) {
 		{Action: "padded fix", Kind: "  FIX  ", Confidence: 90},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, RemediationKindMitigation, actionByName(t, plan, "empty kind").Kind)
 	assert.Equal(t, Confidence(maxMitigationConfidence), actionByName(t, plan, "empty kind").Confidence)
@@ -307,7 +307,7 @@ func TestNormalizePlan_ClampsActionToHypothesisConfidence(t *testing.T) {
 		},
 	}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, Confidence(95), actionByName(t, plan, "exact match").Confidence, "action is capped at its hypothesis")
 	assert.Equal(t, Confidence(80), actionByName(t, plan, "case and space insensitive match").Confidence, "an action below the ceiling is untouched")
@@ -323,7 +323,7 @@ func TestNormalizePlan_MitigationCapAndHypothesisCeilingCompose(t *testing.T) {
 		},
 	}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Equal(t, Confidence(30), plan.Actions[0].Confidence, "the 30% hypothesis binds harder than the 50% mitigation cap")
 }
@@ -341,16 +341,16 @@ func TestNormalizePlan_DropsCommandlessActionWithoutArtifact(t *testing.T) {
 	}
 
 	withoutArtifact := newPlan()
-	normalizePlan(&withoutArtifact, nil)
+	normalizePlan(&withoutArtifact, nil, nil)
 	assert.Len(t, withoutArtifact.Actions, 1, "the command-less action has nothing backing it")
 	assert.Equal(t, "Raise memory limit", withoutArtifact.Actions[0].Action)
 
 	withArtifact := newPlan()
-	normalizePlan(&withArtifact, []string{"code_fix"})
+	normalizePlan(&withArtifact, []string{"code_fix"}, nil)
 	assert.Len(t, withArtifact.Actions, 2, "with an artifact present the action is real and is kept")
 
 	blank := newPlan()
-	normalizePlan(&blank, []string{"", "   "})
+	normalizePlan(&blank, []string{"", "   "}, nil)
 	assert.Len(t, blank.Actions, 1, "blank entries do not count as artifacts")
 }
 
@@ -363,7 +363,7 @@ func TestNormalizePlan_StripsVerifyAndRollbackFromCommandlessAction(t *testing.T
 			VerifyCommand: "kubectl logs -l app=x -n ns --tail=100", RollbackCommand: "kubectl rollout undo deployment x -n ns"},
 	}}
 
-	normalizePlan(&plan, []string{"code_fix"})
+	normalizePlan(&plan, []string{"code_fix"}, nil)
 
 	assert.Empty(t, plan.Actions[0].VerifyCommand)
 	assert.Empty(t, plan.Actions[0].RollbackCommand)
@@ -378,7 +378,7 @@ func TestNormalizePlan_OrdersFixesBeforeMitigations(t *testing.T) {
 		{Action: "high-confidence fix", Kind: "fix", Confidence: 90, ExecuteCommand: "kubectl set image deployment a c=i:2 -n ns"},
 	}}
 
-	normalizePlan(&plan, nil)
+	normalizePlan(&plan, nil, nil)
 
 	assert.Equal(t, []string{"high-confidence fix", "low-confidence fix", "restart"},
 		[]string{plan.Actions[0].Action, plan.Actions[1].Action, plan.Actions[2].Action},

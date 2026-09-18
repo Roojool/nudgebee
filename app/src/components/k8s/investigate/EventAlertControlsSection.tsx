@@ -12,6 +12,7 @@ import { DropdownMenu } from '@ui/DropdownMenu';
 import { MoreVert } from '@mui/icons-material';
 import { toast as snackbar } from '@ui/Toast';
 import { useBrandingConfig } from '@hooks/useTenantBranding';
+import { ALERT_RULE_CHANGED_EVENT } from './cards/AlertRuleChangeAction';
 import k8sApi, { firstGraphQLError, type EventAlertControls, type EventMuteScope, type EventMuteScopeName } from '@api1/kubernetes1';
 import {
   DEFAULT_MUTE_DURATION,
@@ -73,13 +74,18 @@ export default function EventAlertControlsSection({
 
   useEffect(() => {
     let cancelled = false;
-    load().then((c) => {
-      if (!cancelled) {
-        setControls(c);
-      }
-    });
+    const refresh = () =>
+      load().then((c) => {
+        if (!cancelled && c) {
+          setControls(c);
+        }
+      });
+    refresh();
+    // A fix applied from Nubi's remediation plan changes the rule this row shows.
+    window.addEventListener(ALERT_RULE_CHANGED_EVENT, refresh);
     return () => {
       cancelled = true;
+      window.removeEventListener(ALERT_RULE_CHANGED_EVENT, refresh);
     };
   }, [load]);
 

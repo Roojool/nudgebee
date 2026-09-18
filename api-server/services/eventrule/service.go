@@ -296,6 +296,12 @@ func resolveSourceFromMetricProvider(metricProvider string) string {
 }
 
 // upsertAgentPlaybook inserts or updates an agent playbook, returning the id.
+// playbookSent reports whether an update carries the rule's playbook. Absent keys
+// (nil) mean "not part of this update"; empty arrays mean "no actions".
+func playbookSent(req EventConfig) bool {
+	return req.TriggerParams != nil || req.ActionParams != nil
+}
+
 func upsertAgentPlaybook(dbms *database.DatabaseManager, cloudAccountId, tenantId string, triggerParams, actionParams any, alertName string, source *string) (string, error) {
 	triggerParamsJSON, err := common.MarshalJson(triggerParams)
 	if err != nil {
@@ -689,13 +695,19 @@ func UpdateEventRule(context *security.RequestContext, eventRequest EventConfig)
 	context.GetLogger().Info("UpdateEventRule", "rule_id", ruleId)
 	data["response"] = ok
 
-	playbookId, err := upsertAgentPlaybook(dbms,
-		eventRequest.AccountID, context.GetSecurityContext().GetTenantId(),
-		eventRequest.TriggerParams, eventRequest.ActionParams, eventRequest.Alert, nil)
-	if err != nil {
-		return data, err
+	// A partial update (threshold apply, a rule fix from Nubi's plan) sends no
+	// playbook fields and must keep the rule's playbook; writing its nil params
+	// would store null and silently drop the rule's actions. Empty arrays are an
+	// explicit "no actions" from the edit form and still clear it.
+	if playbookSent(eventRequest) {
+		playbookId, err := upsertAgentPlaybook(dbms,
+			eventRequest.AccountID, context.GetSecurityContext().GetTenantId(),
+			eventRequest.TriggerParams, eventRequest.ActionParams, eventRequest.Alert, nil)
+		if err != nil {
+			return data, err
+		}
+		data["response"] = playbookId != ""
 	}
-	data["response"] = playbookId != ""
 
 	if kind == TargetPromCR {
 		// call async refresh of agent playbooks with a bounded context

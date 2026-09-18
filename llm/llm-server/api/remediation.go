@@ -43,6 +43,9 @@ type RemediationGenerateRequest struct {
 	// An action with no command can only be carried out through one of these, so an empty list means
 	// no such action is actionable, whatever the model proposes.
 	AvailableArtifacts []string `json:"available_artifacts"`
+	// AlertRule is the rule the event came from and what may be changed on it; an
+	// action may propose one of those changes (see remediation_alert_rule.go).
+	AlertRule *RemediationAlertRule `json:"alert_rule,omitempty"`
 }
 
 // Confidence is the model's 0-100 self-reported estimate. The model is unreliable about the exact
@@ -157,6 +160,9 @@ type RemediationAction struct {
 	ExecuteCommand  string     `json:"execute_command"`
 	VerifyCommand   string     `json:"verify_command"`
 	RollbackCommand string     `json:"rollback_command"`
+	// AlertRuleChange, when set, is a change to the alert rule itself, applied from
+	// the card rather than by a command.
+	AlertRuleChange *AlertRuleChange `json:"alert_rule_change,omitempty"`
 }
 
 // Action kinds. A fix removes the root cause; a mitigation restores service with the cause still
@@ -176,7 +182,7 @@ const maxMitigationConfidence = 50
 // free text from the LLM, so anything that isn't recognizably a fix is treated as a mitigation:
 // the safe default is to under-claim, since presenting a mitigation as a fix is the failure mode
 // that misleads an operator.
-func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
+func normalizePlan(plan *RemediationPlan, availableArtifacts []string, alertRule *RemediationAlertRule) {
 	// An action inherits the uncertainty of the hypothesis it addresses: if the cause is only 95%
 	// likely, no action against it can be more than 95% likely to resolve the incident. The model
 	// scores the two independently and routinely emits a 100% action under a 95% hypothesis, which
@@ -186,9 +192,12 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 		hypConfidence[strings.ToLower(strings.TrimSpace(h.Hypothesis))] = h.Confidence
 	}
 
+	// The alert-rule controls admit only actions that carry alert_rule_change; every
+	// other command-less action still needs a prepared artifact (a code fix, a
+	// threshold suggestion). One flag for all of them would let unprepared work back in.
 	hasArtifact := false
 	for _, a := range availableArtifacts {
-		if strings.TrimSpace(a) != "" {
+		if name := strings.TrimSpace(a); name != "" && name != artifactAlertRule {
 			hasArtifact = true
 			break
 		}
@@ -197,6 +206,11 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 	kept := plan.Actions[:0]
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
+		// A rule change's kind follows from what it does, not from the model's label, and
+		// must be set before the mitigation cap below reads it.
+		if a.AlertRuleChange != nil {
+			a.Kind = alertRuleActionKind(strings.ToLower(strings.TrimSpace(a.AlertRuleChange.Operation)))
+		}
 		if strings.EqualFold(strings.TrimSpace(a.Kind), RemediationKindFix) {
 			a.Kind = RemediationKindFix
 		} else {
@@ -210,6 +224,21 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string) {
 		// than leaving the value alone.
 		if ceiling, ok := hypConfidence[strings.ToLower(strings.TrimSpace(a.Hypothesis))]; ok && a.Confidence > ceiling {
 			a.Confidence = ceiling
+		}
+
+		if a.AlertRuleChange != nil {
+			if reason := checkAlertRuleChange(a.AlertRuleChange, alertRule); reason != "" {
+				plan.Dropped = append(plan.Dropped, DroppedAction{Action: a.Action, Reason: reason})
+				continue
+			}
+			a.Kind = alertRuleActionKind(a.AlertRuleChange.Operation)
+			if a.Kind == RemediationKindMitigation && int(a.Confidence) > maxMitigationConfidence {
+				a.Confidence = Confidence(maxMitigationConfidence)
+			}
+			// Applied from the card, not by a command.
+			a.ExecuteCommand, a.VerifyCommand, a.RollbackCommand = "", "", ""
+			kept = append(kept, *a)
+			continue
 		}
 
 		if strings.TrimSpace(a.ExecuteCommand) == "" {
@@ -256,6 +285,8 @@ type RemediationPlan struct {
 	Summary    string                  `json:"summary"`
 	Hypotheses []RemediationHypothesis `json:"hypotheses"`
 	Actions    []RemediationAction     `json:"actions"`
+	// Dropped lists alert-rule actions the server removed and why. Not rendered.
+	Dropped []DroppedAction `json:"dropped,omitempty"`
 }
 
 // RemediationExecuteRequest is the payload for ai_remediation_execute (one command per play-button click).
@@ -362,7 +393,10 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 		return
 	}
 
-	normalizePlan(&plan, request.AvailableArtifacts)
+	normalizePlan(&plan, request.AvailableArtifacts, request.AlertRule)
+	for _, d := range plan.Dropped {
+		ctx.GetLogger().Info("remediation_generate: dropped alert-rule action", "action", d.Action, "reason", d.Reason)
+	}
 
 	// Persist the plan so it survives reload (best-effort — a DB hiccup must not fail generation).
 	persistRemediationPlan(ctx, request.AccountId, request.EventId, plan)

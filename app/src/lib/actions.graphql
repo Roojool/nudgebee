@@ -284,6 +284,7 @@ type Query {
     event_id: String
     context: String!
     available_artifacts: [String!]
+    alert_rule: jsonb
   ): AIResponse
 }
 
@@ -531,6 +532,12 @@ type Mutation {
 type Query {
   eventrules_get_event_alert_controls(
     request: EventRulesGetEventAlertControlsRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_apply_rule_change(
+    request: EventRulesApplyRuleChangeRequest!
   ): jsonb
 }
 
@@ -3407,6 +3414,15 @@ input EventRulesUpdateMuteRequest {
 input EventRulesGetEventAlertControlsRequest {
   event_id: String!
   account_id: String!
+}
+
+input EventRulesApplyRuleChangeRequest {
+  rule_id: String!
+  account_id: String!
+  expr: String
+  duration: String
+  expected_expr: String!
+  expected_duration: String
 }
 
 input EventRulesUpdateEventMuteRequest {

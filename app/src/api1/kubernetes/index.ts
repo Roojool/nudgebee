@@ -725,8 +725,8 @@ query GenerateAIRecommendation($eventId: String!, $accountId: String!, $recommen
 `;
 
 export const AI_REMEDIATION_GENERATE = `
-query AiRemediationGenerate($accountId: String!, $eventId: String, $context: String!, $availableArtifacts: [String!]) {
-  ai_remediation_generate(account_id: $accountId, event_id: $eventId, context: $context, available_artifacts: $availableArtifacts) {
+query AiRemediationGenerate($accountId: String!, $eventId: String, $context: String!, $availableArtifacts: [String!], $alertRule: jsonb) {
+  ai_remediation_generate(account_id: $accountId, event_id: $eventId, context: $context, available_artifacts: $availableArtifacts, alert_rule: $alertRule) {
     data
   }
 }
@@ -3865,13 +3865,21 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     });
     return response?.data?.data?.generate_ai_recommendation?.data || parseHttpResponseBodyMessage(response?.data);
   },
-  async generateRemediation(accountId: string, eventId: string, context: string, availableArtifacts: string[] = []) {
+  async generateRemediation(
+    accountId: string,
+    eventId: string,
+    context: string,
+    availableArtifacts: string[] = [],
+    // The event's alert rule and which changes the plan may propose to it.
+    alertRule: Record<string, unknown> | null = null
+  ) {
     if (accountId === 'demo') return null;
     const response = await queryGraphQL(AI_REMEDIATION_GENERATE, 'AiRemediationGenerate', {
       accountId,
       eventId,
       context,
       availableArtifacts,
+      alertRule,
     });
     return response?.data?.data?.ai_remediation_generate?.data;
   },

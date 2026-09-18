@@ -116,6 +116,12 @@ mutation UpdateEventMute {
 }
 `;
 
+export const APPLY_RULE_CHANGE = `
+mutation ApplyRuleChange {
+  result: eventrules_apply_rule_change(request: __REQUEST__)
+}
+`;
+
 export interface EventRuleCapability {
   available: boolean;
   reason?: string;
@@ -168,6 +174,8 @@ export interface EventAlertControls {
   source: string;
   rule: EventRuleCapabilities | null;
   rule_location?: { namespace: string; name: string; managed_by?: string };
+  // The rule's expression and `for` when they can be changed from here.
+  rule_definition?: { expr: string; duration: string; expr_normalized: string };
   scopes: EventMuteScope[];
   suppressions: EventSuppression[];
 }
@@ -742,6 +750,23 @@ const apiKubernetes1 = {
   async updateEventMute(data: { event_id: string; account_id: string; scope: EventMuteScopeName; duration_hours: number; muted: boolean }) {
     try {
       const response = await queryGraphQL(UPDATE_EVENT_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventMute', {});
+      return {
+        data: response?.data,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  async applyRuleChange(data: {
+    rule_id: string;
+    account_id: string;
+    expr?: string;
+    duration?: string;
+    expected_expr: string;
+    expected_duration?: string;
+  }) {
+    try {
+      const response = await queryGraphQL(APPLY_RULE_CHANGE.replace('__REQUEST__', gqlStringify(data)), 'ApplyRuleChange', {});
       return {
         data: response?.data,
       };
