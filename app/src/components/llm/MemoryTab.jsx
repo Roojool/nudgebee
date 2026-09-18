@@ -17,6 +17,7 @@ import AccountPickerModal from '@components/common/AccountPickerModal';
 import { Checkbox } from '@ui/Checkbox';
 import { ds } from '@utils/colors';
 import { safeJSONParse } from '@utils/common';
+import { useBrandingConfig } from '@hooks/useTenantBranding';
 
 // Pins live in localStorage keyed by account. Module-level so both the initial
 // state and the on-switch re-derive read them the same way.
@@ -330,6 +331,8 @@ TypeChipFilter.propTypes = {
 };
 
 const MemoryTab = ({ accountId }) => {
+  // Partner hostnames rename the assistant — never hardcode it (app/CLAUDE.md, Brand copy).
+  const { assistantName } = useBrandingConfig();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [memories, setMemories] = useState([]);
@@ -624,8 +627,10 @@ const MemoryTab = ({ accountId }) => {
               color: 'var(--ds-gray-500)',
             }}
           >
-            Nubi has saved from past investigations. Pin the ones that matter most, remove anything outdated, and Nubi will use these to resolve
-            similar issues faster
+            {assistantName
+              ? `Memories ${assistantName} has saved from past investigations. Pin the ones that matter most, remove anything outdated, and ${assistantName} will use these to resolve similar issues faster.`
+              : // Branding resolves asynchronously; without a name, a brand-free sentence rather than a broken one.
+                'Memories saved from past investigations. Pin the ones that matter most, remove anything outdated, and they will be used to resolve similar issues faster.'}
           </Typography>
         </Box>
       </WidgetCard>
