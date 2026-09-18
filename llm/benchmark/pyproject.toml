@@ -61,3 +61,11 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["llm*", "server*"]
+
+[tool.pytest.ini_options]
+# event_code_fix/fixture_repos/*/tests are standalone repos-in-waiting (each
+# has its own src/ package, run via `cd <fixture>/ && pytest` per
+# fixture_repos/README.md) — not part of this package's own test suite, and
+# collecting them here fails since their `from src...` imports don't resolve
+# against this rootdir.
+norecursedirs = ["event_code_fix/fixture_repos"]

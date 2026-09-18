@@ -1,0 +1,47 @@
+name: n_plus_one_query_latency
+type: event
+tags: [code_fix, latency, sql]
+
+alert:
+  alertname: HighAPILatency
+  labels:
+    deployment: orders-api
+    namespace: benchmark-scenarios
+    severity: warning
+  summary: "orders-api: high latency on /api/orders/by-email"
+  log_lines: |
+    2026-09-18T11:00:00Z level=warn msg="slow query" duration_ms=1180 query="SELECT * FROM customers WHERE id = $1" endpoint="/api/orders/by-email"
+    2026-09-18T11:00:00Z level=warn msg="slow query" duration_ms=1210 query="SELECT * FROM customers WHERE id = $1" endpoint="/api/orders/by-email"
+    2026-09-18T11:00:01Z level=warn msg="request completed" endpoint="/api/orders/by-email" status=200 latency_ms=4310 order_count=42
+    2026-09-18T11:01:00Z level=warn msg="slow query" duration_ms=1190 query="SELECT * FROM customers WHERE id = $1" endpoint="/api/orders/by-email"
+    2026-09-18T11:01:02Z level=warn msg="request completed" endpoint="/api/orders/by-email" status=200 latency_ms=3980 order_count=38
+  fingerprint: bench-n-plus-one-latency-003
+
+workload:
+  manifests: manifests/all.yaml
+  namespace: benchmark-scenarios
+  deployment: orders-api
+
+fixture_repo:
+  url: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  subdir: n_plus_one_query_latency  # this repo hosts one scenario per top-level subdirectory
+  bug_commit: REPLACE_WITH_BUG_COMMIT_SHA
+  test_command: pytest -q
+  # A DB-call-count assertion, not a real latency measurement: querying one
+  # customer per order (N+1) is 42 calls for order_count=42; joining is 1.
+  # Chosen over an index/EXPLAIN-based test because a call-count assertion is
+  # a robust, deterministic unit test, whereas asserting real query latency in
+  # a unit test is not (see docs/code-analysis-eval-spec.md, scenario 003).
+  fail_to_pass:
+    - tests/test_orders_by_email.py::test_single_query_per_request
+  pass_to_pass:
+    - tests/test_orders_by_email.py::test_returns_correct_orders
+
+expected_diagnosis:
+  - "The response must identify the repeated 'SELECT * FROM customers WHERE id = $1' slow-query log lines on /api/orders/by-email as an N+1 query pattern (one customer lookup per order) rather than a single joined query."
+  - "The response must connect this to the endpoint's high latency_ms, not to an unrelated infra/network cause."
+
+expected_fix:
+  file: n_plus_one_query_latency/src/orders/repository.py
+  function: get_orders_by_email
+  description: "Replace the per-order customer lookup loop with a single joined query."

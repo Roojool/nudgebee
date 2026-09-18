@@ -1,0 +1,31 @@
+# Workload for the startup_ordering_crashloop scenario. Apply with: kubectl apply -f all.yaml
+#
+# Exists only for the code-fix stage's capability-annotation resolution, not
+# to actually reproduce the crash loop live — the event is injected directly
+# (event_rca_client.py), same rationale as scenarios 001/003.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmark-scenarios
+  labels:
+    benchmark: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runbook-worker
+  namespace: benchmark-scenarios
+  labels: {app: runbook-worker, scenario: event-code-fix-004-startup-ordering-crashloop}
+  annotations:
+    workloads.nudgebee.com/git.repo: https://github.com/nudgebee-org/nb-benchmark-fixtures
+    workloads.nudgebee.com/git.hash: REPLACE_WITH_BUG_COMMIT_SHA  # must match scenario.yaml's fixture_repo.bug_commit
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: runbook-worker}}
+  template:
+    metadata: {labels: {app: runbook-worker}}
+    spec:
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "sleep 3600"]

@@ -1,0 +1,32 @@
+name: undersized_memory_limit_oom
+type: event
+tags: [diagnosis_only, oom, resource_limits]
+
+alert:
+  alertname: PodOOMKilled
+  labels:
+    deployment: batch-report-worker
+    namespace: benchmark-scenarios
+    severity: critical
+  summary: "batch-report-worker OOMKilled"
+  # Flat, stable memory right up to a single abrupt spike during a legitimate
+  # one-off large batch — no gradual climb (contrast with scenario 001). The
+  # limit itself (256Mi) is undersized for this workload's real, non-leaky peak.
+  log_lines: |
+    2026-09-18T09:00:00Z level=info msg="heap_alloc_mb=140 goroutines=12"
+    2026-09-18T09:00:15Z level=info msg="heap_alloc_mb=142 goroutines=12"
+    2026-09-18T09:00:30Z level=info msg="processing batch_id=88213 size=50000 rows"
+    2026-09-18T09:00:42Z level=info msg="heap_alloc_mb=256 goroutines=14"
+    2026-09-18T09:00:45Z level=error msg="container OOMKilled: memory usage 256Mi exceeded limit 256Mi"
+    2026-09-18T09:00:45Z level=info msg="pod spec: resources.limits.memory=256Mi resources.requests.memory=128Mi"
+  fingerprint: bench-undersized-limit-oom-002
+
+# No `workload` / `fixture_repo` block: there is no source-code bug here. The
+# correct fix is a deployment/values change (raise the limit), which has no
+# natural test suite to verify against — scored on diagnosis correctness only
+# (see docs/code-analysis-eval-spec.md, scenario 002).
+
+expected_diagnosis:
+  - "The response must identify the memory limit (256Mi) as undersized for a legitimate, one-off large batch (50000 rows), not a memory leak."
+  - "The response must NOT diagnose a memory leak — memory is flat and stable until the single batch-driven spike, with no gradual growth trend."
+  - "The response should recommend raising the memory limit/request, not a code change."

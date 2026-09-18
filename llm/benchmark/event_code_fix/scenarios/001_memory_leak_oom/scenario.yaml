@@ -1,0 +1,46 @@
+name: memory_leak_oom
+type: event
+tags: [code_fix, oom, memory_leak]
+
+alert:
+  alertname: PodOOMKilled
+  labels:
+    deployment: subscriber-cache-worker
+    namespace: benchmark-scenarios
+    severity: critical
+  summary: "subscriber-cache-worker OOMKilled"
+  # Becomes annotations.description verbatim — this is what the investigation
+  # agent (the "log analyser") reads. The shape of the numbers is the
+  # diagnostic signal: heap grows steadily over ~12 minutes before the kill,
+  # not a single spike (contrast with scenario 002).
+  log_lines: |
+    2026-09-18T10:00:00Z level=info msg="heap_alloc_mb=180 goroutines=42"
+    2026-09-18T10:05:00Z level=info msg="heap_alloc_mb=310 goroutines=44"
+    2026-09-18T10:10:00Z level=warn msg="heap_alloc_mb=512 goroutines=210 gc_pause_ms=340"
+    2026-09-18T10:11:00Z level=warn msg="heap_alloc_mb=780 goroutines=380 gc_pause_ms=610"
+    2026-09-18T10:12:00Z level=error msg="container OOMKilled: memory usage 1024Mi exceeded limit 1024Mi"
+  fingerprint: bench-memory-leak-oom-001
+
+workload:
+  manifests: manifests/all.yaml
+  namespace: benchmark-scenarios
+  deployment: subscriber-cache-worker
+
+fixture_repo:
+  url: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  subdir: memory_leak_oom  # this repo hosts one scenario per top-level subdirectory
+  bug_commit: REPLACE_WITH_BUG_COMMIT_SHA
+  test_command: pytest -q
+  fail_to_pass:
+    - tests/test_cache.py::test_cache_evicts_stale_subscribers
+  pass_to_pass:
+    - tests/test_cache.py::test_cache_returns_active_subscriber
+
+expected_diagnosis:
+  - "The response must identify unbounded growth of an in-memory cache/map (no eviction or TTL) as the root cause, citing the rising heap_alloc_mb trend across the log lines."
+  - "The response must NOT attribute this to an undersized memory limit — the pattern is gradual growth over time, not a one-off spike against a fixed ceiling."
+
+expected_fix:
+  file: memory_leak_oom/src/cache.py
+  function: put
+  description: "Cache entries are never evicted; add a TTL or bounded-size eviction policy."

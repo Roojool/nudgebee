@@ -1,0 +1,16 @@
+name: explore_n_plus_one_query
+type: explore
+tags: [explore, latency, sql]
+
+# Reuses scenario 003's fixture repo/commit — no new fixture needed.
+
+explore:
+  query: "Why might /api/orders/by-email be slow? Look at how orders are fetched."
+  git_repo: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  git_commit: REPLACE_WITH_BUG_COMMIT_SHA   # same commit as scenario 003's fixture_repo.bug_commit
+
+expected_diagnosis:
+  - "The response must identify an N+1 query pattern — fetching orders, then issuing one extra customer lookup per order — instead of a single joined query."
+
+expected_citation:
+  file_contains: n_plus_one_query_latency/src/orders/repository.py

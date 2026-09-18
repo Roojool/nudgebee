@@ -1,0 +1,64 @@
+# Manual/scheduled runs of event_code_fix, mirroring swebench/k8s/cronjob.yaml's
+# suspended-by-default pattern. No RBAC needed here — unlike swebench's
+# grading pipeline, this runner never calls kubectl or submits per-instance
+# Jobs; code_fix_verifier.py clones and tests the fixture repo inline.
+#
+#   kubectl -n nudgebee apply -f k8s/cronjob.yaml
+#   kubectl -n nudgebee create job --from=cronjob/event-code-fix-weekly event-code-fix-manual   # ad-hoc run
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: event-code-fix-weekly
+  namespace: nudgebee
+  labels: { app: event-code-fix }
+spec:
+  schedule: "0 3 * * 1"  # Mondays 03:00 UTC
+  timeZone: Etc/UTC
+  # Suspended by default — flip deliberately once the fixture repo exists
+  # (fixture_repos/README.md) and the manifests in scenarios/*/manifests/
+  # have been applied. Three scenarios, one full agent run each: cheap
+  # relative to swebench's weekly run, but still real paid LLM calls.
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 8
+  failedJobsHistoryLimit: 4
+  jobTemplate:
+    spec:
+      backoffLimit: 0  # a retry re-runs every LLM conversation in the set
+      ttlSecondsAfterFinished: 1209600
+      template:
+        metadata:
+          labels: { app: event-code-fix }
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: runner
+              image: ghcr.io/nudgebee/event-code-fix-runner:2026-09-18.1  # pinned, never :latest
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: OUT_DIR
+                  value: /results
+                - name: API_SERVER_URL
+                  value: "http://services-server.nudgebee.svc.cluster.local:8000"
+                - name: LLM_SERVER_URL
+                  value: "http://llm-server.nudgebee.svc.cluster.local:8000"
+                - name: ACTION_API_SERVER_TOKEN
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: action_api_server_token } }
+                - name: ALERTMANAGER_WEBHOOK_URL
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: alertmanager_webhook_url } }
+                - name: LLM_SERVER_TOKEN
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: llm_server_token } }
+                - name: BENCHMARK_ACCOUNT_ID
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: account_id } }
+                - name: BENCHMARK_TENANT_ID
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: tenant_id } }
+                - name: GITHUB_TOKEN
+                  # code_fix_verifier.py clones the private fixture repo; the
+                  # pod has no ambient git credentials (SSH agent, credential
+                  # helper) the way a developer's own machine does.
+                  valueFrom: { secretKeyRef: { name: event-code-fix, key: github_token } }
+                - name: APP_DATABASE_URL
+                  # Single key, not envFrom on the `nudgebee` secret — same
+                  # reasoning as swebench/k8s/cronjob.yaml: that secret holds
+                  # every platform credential, not just this one.
+                  valueFrom: { secretKeyRef: { name: nudgebee, key: APP_DATABASE_URL } }

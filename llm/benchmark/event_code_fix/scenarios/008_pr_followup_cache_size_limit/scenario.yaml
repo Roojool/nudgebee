@@ -1,0 +1,37 @@
+name: pr_followup_cache_size_limit
+type: pr_followup
+tags: [pr_followup, "trigger:issue_comment"]
+
+# The one scenario type with real GitHub side effects on every run — see
+# docs/code-analysis-eval-spec.md §4c/§5c/§6c for the full design and the
+# /challenge findings that shaped it (namespaced branches + orphan sweep,
+# re-checking the original fail_to_pass/pass_to_pass alongside the new gap's
+# test, and why this is tagged as testing the issue-comment trigger path
+# specifically, not inline review comments or CI-failure state).
+
+pr_followup:
+  fixture_repo:
+    url: https://github.com/nudgebee-org/nb-benchmark-fixtures
+    subdir: memory_leak_oom
+    base_commit: REPLACE_WITH_BUG_COMMIT_SHA   # same commit as scenario 001's fixture_repo.bug_commit
+    test_command: pytest -q
+    # The ORIGINAL scenario's own checks — re-run against the followup
+    # commit too, so closing the review comment can't be credited if it
+    # silently reopened this.
+    fail_to_pass: [tests/test_cache.py::test_cache_evicts_stale_subscribers]
+    pass_to_pass: [tests/test_cache.py::test_cache_returns_active_subscriber]
+  # A real diff, verified locally (clone at base_commit, apply, run tests —
+  # confirms the original bug is fixed and the new env-var test fails, exactly
+  # matching what a live run will see). Fixes the unbounded-growth bug with a
+  # hardcoded FIFO cap, but ignores a MAX_CACHE_SIZE env var — and already
+  # includes the (currently failing) test proving that gap, so the agent's
+  # job is to make an existing named test pass, the same trust model every
+  # other fail_to_pass in this suite uses — not to invent its own test name.
+  incomplete_fix_diff_file: incomplete_fix.patch
+  review_comment: >
+    This caps the cache at a fixed size, but we need the limit configurable
+    via a MAX_CACHE_SIZE env var (default 1000) — see the failing
+    test_cache_respects_max_cache_size_env_var test, which should pass once
+    that's wired up.
+  fail_to_pass_after_followup:
+    - tests/test_cache.py::test_cache_respects_max_cache_size_env_var
