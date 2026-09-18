@@ -3,7 +3,7 @@ import { Box } from '@mui/material';
 import { Modal } from '@ui/Modal';
 import { Chip, hashHue } from '@components/common/ds/Chip';
 import Text from '@shared/format/Text';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Tabs from '@shared/navigation/Tabs';
 import apiWorkflow from '@api1/workflow';
 import { useRouter } from 'next/router';
@@ -209,9 +209,8 @@ const TemplateCard = ({ workflow, onUseTemplate, index }: { workflow: any; onUse
   const badge = CATEGORY_BADGE_CONFIG[workflow.category] || DEFAULT_BADGE;
 
   return (
-    <WidgetCard
+    <Card
       sx={{
-        mt: 0,
         padding: 'var(--ds-space-4) var(--ds-space-5)',
         display: 'flex',
         flexDirection: 'column',
@@ -351,7 +350,7 @@ const TemplateCard = ({ workflow, onUseTemplate, index }: { workflow: any; onUse
           Use Template
         </Button>
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 

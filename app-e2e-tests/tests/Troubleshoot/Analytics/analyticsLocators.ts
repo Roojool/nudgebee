@@ -16,8 +16,9 @@ import {
 // This whole surface renders ZERO data-testid attributes, so rung 1 of the ladder does not
 // exist here. Verified before writing a locator:
 //   grep -c data-testid app/src/components/troubleshoot/analytics/TroubleshootAnalytics.tsx -> 0
-//   ... and the same for every primitive it composes: ds/Stat, ds/Banner, ds/WidgetCard,
-//   ds/Skeleton, ds/FilterDropdown and common/charts/TimeSeriesChart -> all 0.
+//   ... and the same for every primitive it composes: ds/Stat, ds/Banner,
+//   ds/Skeleton, ds/FilterDropdown and common/charts/TimeSeriesChart -> all 0. (ds/Card
+//   accepts a data-testid pass-through, but TroubleshootAnalytics never passes one.)
 // So each locator below takes the highest rung that IS available: role+name for anything the
 // component gives an accessible name, the three real ids the app renders, then exact text.
 export class AnalyticsLocators extends TroubleshootLocators {
@@ -85,7 +86,7 @@ export class AnalyticsLocators extends TroubleshootLocators {
     return this.page.getByText(label, { exact: true }).first().locator("xpath=ancestor::div[4]");
   }
 
-  // The clickable tiles are WidgetCards with role='button' whose accessible name is composed
+  // The clickable tiles are interactive ds/Cards (role='button') whose accessible name is composed
   // from their contents, so the label is enough to name them — rung 2, no id needed.
   clickableTile(label: string): Locator {
     return this.page.getByRole("button", { name: new RegExp(label) }).first();
