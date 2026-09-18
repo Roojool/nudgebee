@@ -14,7 +14,7 @@ import { ds } from '@utils/colors';
  * budget-editor already supports creating either a tenant- or account-scoped
  * rule from there, independent of this outer prop.
  */
-const BudgetsAndLimitsAdminTab = () => {
+const BudgetsAndLimitsAdminTab = ({ stickyTable = false }) => {
   const [activeSubTab, setActiveSubTab] = useState('usage');
 
   return (
@@ -33,7 +33,7 @@ const BudgetsAndLimitsAdminTab = () => {
         />
       </Box>
       {activeSubTab === 'usage' && <LLMConsumptionTab />}
-      {activeSubTab === 'pricing' && <ModelPricingTab stickyTable />}
+      {activeSubTab === 'pricing' && <ModelPricingTab stickyTable={stickyTable} />}
     </Box>
   );
 };

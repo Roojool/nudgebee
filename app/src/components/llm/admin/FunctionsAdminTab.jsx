@@ -20,7 +20,7 @@ const ListFunctions = dynamic(() => import('@components/llm/ListFunctions'), {
  * (docs/ia-consolidation-plan.md). ListFunctions self-fetches via accountId
  * (tenant-wide when unset), same as its existing Settings mount.
  */
-const FunctionsAdminTab = () => {
+const FunctionsAdminTab = ({ stickyTable = false }) => {
   const [accountId, setAccountId] = useState('');
 
   return (
@@ -28,7 +28,7 @@ const FunctionsAdminTab = () => {
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: ds.space[3] }}>
         <AdminAccountFilter value={accountId} onChange={setAccountId} />
       </Box>
-      <ListFunctions accountId={accountId} stickyTable />
+      <ListFunctions accountId={accountId} stickyTable={stickyTable} />
     </Box>
   );
 };

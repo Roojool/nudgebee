@@ -133,7 +133,8 @@ const AIToolsModal = ({ open, onClose }) => {
       <Box sx={{ padding: `0px ${ds.space[7]} ${ds.space[6]}` }}>
         {!isActiveDisabled && (
           <ErrorBoundary key={activeTab}>
-            <ActiveBody />
+            {/* stickyTable: compact modal scroll; full-page Admin mount omits it → page scroll. */}
+            <ActiveBody stickyTable />
           </ErrorBoundary>
         )}
       </Box>

@@ -15,7 +15,7 @@ import { ds } from '@utils/colors';
  * Tenant-wide by default (accountId=''), same as the Settings mount opened
  * from the global sidebar — narrows via the header filter.
  */
-const AgentsAdminTab = () => {
+const AgentsAdminTab = ({ stickyTable = false }) => {
   const [accountId, setAccountId] = useState('');
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -50,7 +50,7 @@ const AgentsAdminTab = () => {
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: ds.space[3] }}>
         <AdminAccountFilter value={accountId} onChange={setAccountId} />
       </Box>
-      <ListAgents accountId={accountId} allAgents={agents} refreshAgentListing={fetchAgents} loadingAgents={loading} stickyTable />
+      <ListAgents accountId={accountId} allAgents={agents} refreshAgentListing={fetchAgents} loadingAgents={loading} stickyTable={stickyTable} />
     </Box>
   );
 };
