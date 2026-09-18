@@ -82,7 +82,6 @@ const MUI_REPLACEMENTS = {
 
 // Legacy module (path under src/, no extension) → replacement.
 const LEGACY_REPLACEMENTS = {
-  'components/common/ds/WidgetCard': '@ui/Card',
   'components/common/forms/CustomTextField': '@ui/Input',
   'components/common/navigation/CustomStepper': '@ui/Stepper',
   'components/common/navigation/NewVerticalStepper': '@ui/Stepper',

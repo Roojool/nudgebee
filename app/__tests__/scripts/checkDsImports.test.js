@@ -28,13 +28,11 @@ describe('check-ds-imports', () => {
 
     it('flags legacy modules through aliases, relative paths, re-exports and dynamic imports', () => {
       const src = [
-        "import WidgetCard from '@ui/WidgetCard';",
         "import CustomStepper from '../common/navigation/CustomStepper';",
         "export { default as Field } from '@shared/forms/CustomTextField';",
         "const Nav = dynamic(() => import('@components/common/navigation/VerticalStepNavigation'));",
       ].join('\n');
       expect(keys(findRestrictedImports(src, 'src/components/k8s/Page.tsx'))).toEqual([
-        'legacy:WidgetCard',
         'legacy:CustomStepper',
         'legacy:CustomTextField',
         'legacy:VerticalStepNavigation',
@@ -111,7 +109,7 @@ describe('check-ds-imports', () => {
 
   describe('resolveModule', () => {
     it('maps aliases and relative specifiers to src-relative paths', () => {
-      expect(resolveModule('@ui/WidgetCard', 'src/pages/a.tsx')).toBe('components/common/ds/WidgetCard');
+      expect(resolveModule('@ui/Card', 'src/pages/a.tsx')).toBe('components/common/ds/Card');
       expect(resolveModule('./navigation/CustomStepper.tsx', 'src/components/common/b.tsx')).toBe('components/common/navigation/CustomStepper');
       expect(resolveModule('react', 'src/pages/a.tsx')).toBeNull();
     });
