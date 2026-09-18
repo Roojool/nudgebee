@@ -161,6 +161,11 @@ func TestProfileTask_Execute_SubmitsAndPolls(t *testing.T) {
 	assert.Equal(t, "gz", file["type"])
 	assert.Equal(t, "/tmp/agent-flamegraph-1.html.gz", file["filename"])
 	assert.NotContains(t, out, "contents_omitted")
+	// The logs card renders any .gz evidence unless the action name marks it
+	// as a profile, so an unlabelled profile shows up there as a binary blob.
+	info, ok := file["additional_info"].(map[string]any)
+	require.True(t, ok, "the profile must be labelled or the logs card claims it")
+	assert.Equal(t, "pod_profiler", info["actual_action_name"])
 	assert.Equal(t, int32(1), atomic.LoadInt32(&submits))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&polls))
 }

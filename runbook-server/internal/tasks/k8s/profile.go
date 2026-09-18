@@ -23,6 +23,10 @@ const (
 	profileSubmitAction = "applications_execute_profile"
 	profileStatusAction = "applications_get_profile_status"
 
+	// profilerActionName is how the Investigate page tells a profile apart
+	// from every other .gz evidence it is handed.
+	profilerActionName = "pod_profiler"
+
 	// Headroom over the requested duration for the queue tick, the debugger
 	// pod starting, and the result being copied back out. The task's own
 	// `timeout:` in the workflow definition still has the final say.
@@ -214,6 +218,11 @@ func profileResult(profileID string, request map[string]any, status map[string]a
 					"filename": filename,
 					"type":     profileFileType(filename),
 					"data":     contents,
+					// Without this the logs card claims the profile too: it
+					// takes every .gz evidence and only skips a pprof.gz when
+					// the action name says pod_profiler, so an unlabelled
+					// profile is rendered as if it were a log file.
+					"additional_info": map[string]any{"actual_action_name": profilerActionName},
 				}
 			default:
 				result["contents_omitted"] = fmt.Sprintf(

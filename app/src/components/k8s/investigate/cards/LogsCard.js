@@ -21,17 +21,23 @@ class LogsCard {
     this.renderContent = false;
   }
 
+  // A profile is evidence of a profile, not a log file. It arrives as a .gz
+  // the same way logs do, in whatever shape its tool produced - .pprof.gz for
+  // Go, .svg.gz and .html.gz for flamegraphs, .txt.gz for a heap histogram -
+  // so the action name is the only signal that covers all of them. Matching on
+  // the extension instead let every profile but Go's render here as a binary
+  // blob.
+  isProfileEvidence = (item) => item?.additional_info?.actual_action_name === 'pod_profiler';
+
   canRenderContent = async (evidenceData, _event) => {
     const isValidLogEvidence = evidenceData.some((item) => {
       const isGz = (item.type === 'gz' && item.filename?.endsWith('log.gz')) || item.filename?.endsWith('.gz');
 
-      const isExcluded = item.filename?.endsWith('pprof.gz') && item.additional_info?.actual_action_name === 'pod_profiler';
-
-      return isGz && !isExcluded && item?.additional_info?.actual_action_name != 'datadog_logs';
+      return isGz && !this.isProfileEvidence(item) && item?.additional_info?.actual_action_name != 'datadog_logs';
     });
     if (isValidLogEvidence) {
       this.renderContent = true;
-      let logObject = evidenceData.filter((item) => item.type === 'gz' || item.filename?.endsWith('.gz'));
+      let logObject = evidenceData.filter((item) => (item.type === 'gz' || item.filename?.endsWith('.gz')) && !this.isProfileEvidence(item));
       const getInsights = logObject
         .filter((p) => p && p.insight && p.insight.length > 0)
         .map((g) => g.insight)
