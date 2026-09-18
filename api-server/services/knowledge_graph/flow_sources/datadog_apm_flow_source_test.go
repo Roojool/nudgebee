@@ -1,11 +1,14 @@
 package flow_sources
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"strings"
+	"testing"
+
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/traces"
-	"testing"
 )
 
 // ---- matchEntityToNode tests (matcher consolidation, #30305 Bug 4) ---------
@@ -732,5 +735,75 @@ func TestDatadogAPMFlowSource_extractEntityNameAndKind_EdgeCases(t *testing.T) {
 				t.Errorf("extractEntityNameAndKind() kind = %v, want %v", gotKind, tt.wantKind)
 			}
 		})
+	}
+}
+
+func TestDatadogAPMFlowSource_ResolveCloudAccountID(t *testing.T) {
+	logger := slog.Default()
+	source := NewDatadogAPMFlowSource(logger)
+
+	tests := []struct {
+		name     string
+		req      *core.FlowSourceBuildRequest
+		expected string
+	}{
+		{
+			name:     "Empty request",
+			req:      &core.FlowSourceBuildRequest{},
+			expected: "",
+		},
+		{
+			name: "Prefers CloudAccountID",
+			req: &core.FlowSourceBuildRequest{
+				CloudAccountID: "acc-primary",
+				ExistingNodes: []*core.DbNode{
+					{CloudAccountID: "acc-node"},
+				},
+				CloudAccountIDs: []string{"acc-list"},
+			},
+			expected: "acc-primary",
+		},
+		{
+			name: "Falls back to ExistingNodes",
+			req: &core.FlowSourceBuildRequest{
+				ExistingNodes: []*core.DbNode{
+					{CloudAccountID: ""},
+					{CloudAccountID: "acc-node"},
+				},
+				CloudAccountIDs: []string{"acc-list"},
+			},
+			expected: "acc-node",
+		},
+		{
+			name: "Falls back to CloudAccountIDs",
+			req: &core.FlowSourceBuildRequest{
+				ExistingNodes: []*core.DbNode{
+					{CloudAccountID: ""},
+				},
+				CloudAccountIDs: []string{"", "acc-list-1", "acc-list-2"},
+			},
+			expected: "acc-list-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := source.resolveCloudAccountID(tt.req)
+			if got != tt.expected {
+				t.Errorf("resolveCloudAccountID() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDatadogAPMFlowSource_GetDatadogConfig_CloudAccountFallback(t *testing.T) {
+	logger := slog.Default()
+	source := NewDatadogAPMFlowSource(logger)
+
+	// Case 1: All empty -> returns "cloud account ID not found in request or existing nodes"
+	reqEmpty := &core.FlowSourceBuildRequest{}
+	_, _, _, err := source.getDatadogConfig(context.Background(), reqEmpty)
+	if err == nil || !strings.Contains(err.Error(), "cloud account ID not found in request or existing nodes") {
+		t.Fatalf("expected cloud account ID not found error, got: %v", err)
 	}
 }

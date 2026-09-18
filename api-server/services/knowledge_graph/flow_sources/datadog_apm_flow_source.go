@@ -198,12 +198,8 @@ func (s *DatadogAPMFlowSource) BuildFlowRelationships(reqCtx *security.RequestCo
 	return edges, nodes, nil
 }
 
-// getDatadogConfig fetches Datadog API configuration from integrations
-func (s *DatadogAPMFlowSource) getDatadogConfig(
-	ctx context.Context,
-	req *core.FlowSourceBuildRequest,
-) (apiKey, appKey, site string, err error) {
-	// Try to get cloud account ID from request or existing nodes
+func (s *DatadogAPMFlowSource) resolveCloudAccountID(req *core.FlowSourceBuildRequest) string {
+	// Try to get cloud account ID from request
 	cloudAccountID := req.CloudAccountID
 
 	// If no cloud account ID in request, try to get from first existing node
@@ -215,6 +211,26 @@ func (s *DatadogAPMFlowSource) getDatadogConfig(
 			}
 		}
 	}
+
+	// If still no cloud account ID, try to get from request CloudAccountIDs
+	if cloudAccountID == "" && len(req.CloudAccountIDs) > 0 {
+		for _, accountID := range req.CloudAccountIDs {
+			if accountID != "" {
+				cloudAccountID = accountID
+				break
+			}
+		}
+	}
+
+	return cloudAccountID
+}
+
+// getDatadogConfig fetches Datadog API configuration from integrations
+func (s *DatadogAPMFlowSource) getDatadogConfig(
+	ctx context.Context,
+	req *core.FlowSourceBuildRequest,
+) (apiKey, appKey, site string, err error) {
+	cloudAccountID := s.resolveCloudAccountID(req)
 
 	if cloudAccountID == "" {
 		return "", "", "", fmt.Errorf("cloud account ID not found in request or existing nodes")
