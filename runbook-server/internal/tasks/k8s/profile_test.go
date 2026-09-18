@@ -34,9 +34,9 @@ func TestProfileTask_Schemas(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Contains(t, out.Properties, "profile_task_id")
 	assert.Contains(t, out.Properties, "profile_tool")
-	// The artefact itself is deliberately absent — it is stored against the
-	// pod, and a flamegraph would bloat every workflow payload.
-	assert.NotContains(t, out.Properties, "contents_base64")
+	// The artefact comes back so downstream tasks can use it, bounded by size.
+	assert.Contains(t, out.Properties, "file")
+	assert.Contains(t, out.Properties, "contents_omitted")
 	assert.Equal(t, types.PropertyTypeString, out.Properties["status"].Type)
 }
 
@@ -123,7 +123,9 @@ func TestProfileTask_Execute_SubmitsAndPolls(t *testing.T) {
 				_, _ = w.Write([]byte(`{"data":{"status":"PROCESSING"}}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"data":{"status":"COMPLETED","base64_profile":{"lang":"java","profile_tool":"async-profiler","filename":"/tmp/agent-flamegraph-1.html.gz","contents_base64":"AAAA"}}}`))
+			// base64_profile wraps the agent response, whose own data is the
+			// file block — the shape services-server actually returns.
+			_, _ = w.Write([]byte(`{"data":{"status":"COMPLETED","base64_profile":{"data":{"success":true,"task_processing_duration":42,"data":{"lang":"java","profile_tool":"async-profiler","filename":"/tmp/agent-flamegraph-1.html.gz","contents_base64":"AAAA"}}}}}`))
 		default:
 			t.Fatalf("unexpected action %q", envelope.Action.Name)
 		}
@@ -150,15 +152,91 @@ func TestProfileTask_Execute_SubmitsAndPolls(t *testing.T) {
 	// What the agent actually did, not what was asked for.
 	assert.Equal(t, "java", out["lang"])
 	assert.Equal(t, "async-profiler", out["profile_tool"])
-	assert.NotContains(t, out, "contents_base64")
 	// "AAAA" is four base64 characters, so three bytes of artefact.
 	assert.Equal(t, 3, out["size_bytes"])
+	// Small enough to carry, so the bytes come back shaped for the profile card.
+	file, ok := out["file"].(map[string]any)
+	require.True(t, ok, "the profile itself must come back — a handle alone is unusable downstream")
+	assert.Equal(t, "AAAA", file["data"])
+	assert.Equal(t, "gz", file["type"])
+	assert.Equal(t, "/tmp/agent-flamegraph-1.html.gz", file["filename"])
+	assert.NotContains(t, out, "contents_omitted")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&submits))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&polls))
 }
 
 // TestProfileTask_Execute_ReportsAgentFailure — a failed profile has to fail the
 // task with the agent's reason, not pass quietly with nothing captured.
+// Test_profileDetails — the metadata the task reports sits two wrappers deep.
+// Reading base64_profile directly finds only the envelope, and the task then
+// reports a profile with no language, tool or size.
+func Test_profileDetails(t *testing.T) {
+	fileBlock := map[string]any{"lang": "go", "profile_tool": "pprof", "filename": "/tmp/agent-heapdump-1.pprof.gz"}
+
+	t.Run("double-wrapped, as services-server returns it", func(t *testing.T) {
+		status := map[string]any{"base64_profile": map[string]any{
+			"data": map[string]any{"success": true, "data": fileBlock},
+		}}
+		assert.Equal(t, fileBlock, profileDetails(status))
+	})
+
+	t.Run("flattened by one layer", func(t *testing.T) {
+		status := map[string]any{"base64_profile": map[string]any{"data": fileBlock}}
+		assert.Equal(t, fileBlock, profileDetails(status))
+	})
+
+	t.Run("not wrapped at all", func(t *testing.T) {
+		status := map[string]any{"base64_profile": fileBlock}
+		assert.Equal(t, fileBlock, profileDetails(status))
+	})
+
+	t.Run("no profile block", func(t *testing.T) {
+		assert.Nil(t, profileDetails(map[string]any{"status": "COMPLETED"}))
+	})
+
+	// A wrapper is worse than nothing: the caller reads no fields out of it and
+	// reports a profile with no language, tool or bytes.
+	t.Run("wrappers all the way down returns nil, not a wrapper", func(t *testing.T) {
+		status := map[string]any{"base64_profile": map[string]any{
+			"data": map[string]any{"success": true, "task_processing_duration": 42},
+		}}
+		assert.Nil(t, profileDetails(status))
+	})
+
+	// The block is identified by what the caller consumes, so it survives one
+	// of the two fields going missing.
+	t.Run("block without a filename is still the block", func(t *testing.T) {
+		block := map[string]any{"lang": "go", "contents_base64": "AAAA"}
+		status := map[string]any{"base64_profile": map[string]any{"data": map[string]any{"data": block}}}
+		assert.Equal(t, block, profileDetails(status))
+	})
+}
+
+// TestProfileResult_OversizedProfileIsNotInlined — a jcmd heapdump is a whole
+// JVM heap; inlining it would breach Temporal's payload ceiling and kill the
+// run, so it degrades to an explanation rather than silently vanishing.
+func TestProfileResult_OversizedProfileIsNotInlined(t *testing.T) {
+	huge := base64.StdEncoding.EncodeToString(make([]byte, maxInlineProfileBytes+1))
+	status := map[string]any{"base64_profile": map[string]any{"data": map[string]any{"data": map[string]any{
+		"lang": "java", "profile_tool": "jcmd", "filename": "/tmp/agent-heapdump-1.hprof.gz",
+		"contents_base64": huge,
+	}}}}
+
+	out := profileResult("prof-9", map[string]any{"namespace": "shop", "pod_name": "web-0"}, status)
+
+	assert.NotContains(t, out, "file")
+	assert.Contains(t, out["contents_omitted"], "Profiler tab")
+	// The metadata still has to be there — that is what the evidence table renders.
+	assert.Equal(t, "jcmd", out["profile_tool"])
+	assert.Equal(t, maxInlineProfileBytes+1, out["size_bytes"])
+}
+
+func Test_profileFileType(t *testing.T) {
+	assert.Equal(t, "gz", profileFileType("/tmp/agent-flamegraph-1.html.gz"))
+	assert.Equal(t, "svg", profileFileType("/tmp/agent-flamegraph-1.svg"))
+	assert.Equal(t, "gz", profileFileType(""))
+}
+
 func TestProfileTask_Execute_ReportsAgentFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var envelope struct {

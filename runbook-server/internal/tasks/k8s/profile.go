@@ -9,6 +9,7 @@ import (
 	"nudgebee/runbook/common"
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/internal/tasks/types"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,15 @@ const (
 
 	defaultProfileDuration = 60
 	maxProfileDuration     = 600
+
+	// maxInlineProfileBytes bounds what we hand back inside the task output.
+	// The profile has to come back for anything downstream to use it — the
+	// evidence card, an LLM task, a ticket attachment — but a jcmd heapdump is
+	// a whole JVM heap and a Node heapsnapshot is the same class, and those
+	// would blow Temporal's 2MB payload ceiling. 256KB is Temporal's own
+	// warning threshold, so past it we return the handle and say so rather
+	// than killing the run.
+	maxInlineProfileBytes = 256 * 1024
 )
 
 // profilePollInterval is how often we ask services-server whether the agent is
@@ -125,10 +135,8 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 	return t.awaitProfile(taskCtx, accountID, profileID, duration, request)
 }
 
-// awaitProfile polls until the agent reports a terminal state. It deliberately
-// returns metadata only: a flamegraph runs to hundreds of kilobytes, and
-// services-server already stores the artefact against the pod, so carrying it
-// through the workflow payload would buy nothing.
+// awaitProfile polls until the agent reports a terminal state, then returns the
+// profile itself so the rest of the workflow can use it.
 func (t *ProfileTask) awaitProfile(
 	taskCtx types.TaskContext,
 	accountID, profileID string,
@@ -172,8 +180,8 @@ func (t *ProfileTask) awaitProfile(
 	}
 }
 
-// profileResult is the task output: what was captured and where to find it,
-// without the artefact itself.
+// profileResult is the task output: what was captured, and the artefact itself
+// unless it is too large to carry.
 func profileResult(profileID string, request map[string]any, status map[string]any) map[string]any {
 	result := map[string]any{
 		"profile_task_id": profileID,
@@ -184,19 +192,94 @@ func profileResult(profileID string, request map[string]any, status map[string]a
 	}
 	// The agent reports what it actually did, which is not always what was
 	// asked for — the language is auto-detected and picks the tool.
-	if profile, ok := status["base64_profile"].(map[string]any); ok {
+	if profile := profileDetails(status); profile != nil {
 		for _, key := range []string{"lang", "profile_tool", "filename"} {
 			if v, ok := profile[key].(string); ok && v != "" {
 				result[key] = v
 			}
 		}
-		if contents, ok := profile["contents_base64"].(string); ok {
-			if size, ok := base64DecodedSize(contents); ok {
+		filename, _ := profile["filename"].(string)
+		if contents, ok := profile["contents_base64"].(string); ok && contents != "" {
+			size, sized := base64DecodedSize(contents)
+			if sized {
 				result["size_bytes"] = size
+			}
+			switch {
+			case sized && size <= maxInlineProfileBytes:
+				// Shaped for the Investigate page's profile card, which keys
+				// off the file type and extension rather than an action name
+				// (SVGImageCard). events.add_evidence can pass this straight
+				// through, and anything else downstream gets the bytes.
+				result["file"] = map[string]any{
+					"filename": filename,
+					"type":     profileFileType(filename),
+					"data":     contents,
+				}
+			default:
+				result["contents_omitted"] = fmt.Sprintf(
+					"the profile is %s, over the %s a task output can carry — fetch it from the pod's Profiler tab, or ask for a shorter profile_duration",
+					describeSize(size, sized), describeSize(maxInlineProfileBytes, true))
 			}
 		}
 	}
 	return result
+}
+
+// profileFileType is the evidence "type" the profile card matches on. The
+// agent names its artefacts by what they are — …flamegraph-1.html.gz,
+// …heapdump-1.pprof.gz — so the final extension is the discriminator.
+func profileFileType(filename string) string {
+	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
+	if ext == "" {
+		return "gz"
+	}
+	return ext
+}
+
+func describeSize(size int, known bool) string {
+	if !known {
+		return "an unreadable size"
+	}
+	return fmt.Sprintf("%dKB", size/1024)
+}
+
+// profileDetails digs out the block the agent itself produced. services-server
+// wraps it twice on the way back — base64_profile holds the agent's response,
+// whose own `data` is the file block — so reading base64_profile directly finds
+// only the wrapper and silently reports no language, tool or size. Descend
+// while `data` is another map, stopping as soon as the fields appear, so this
+// keeps working if a layer is ever flattened.
+func profileDetails(status map[string]any) map[string]any {
+	node, ok := status["base64_profile"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for range 3 {
+		if isProfileBlock(node) {
+			return node
+		}
+		inner, ok := node["data"].(map[string]any)
+		if !ok {
+			break
+		}
+		node = inner
+	}
+	// Never hand back a wrapper: the caller would read nothing out of it and
+	// report a profile with no language, tool or bytes — the failure this
+	// function exists to prevent.
+	return nil
+}
+
+// isProfileBlock recognises the agent's file block by the two fields the
+// caller actually consumes, so a block is still usable if one of them is
+// missing. The wrappers around it carry neither.
+func isProfileBlock(node map[string]any) bool {
+	for _, key := range []string{"filename", "contents_base64"} {
+		if v, ok := node[key].(string); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // base64DecodedSize is the artefact's own size in bytes — the gzipped profile
@@ -347,6 +430,14 @@ func (t *ProfileTask) OutputSchema() *types.Schema {
 			"lang":            {Type: types.PropertyTypeString},
 			"filename":        {Type: types.PropertyTypeString},
 			"size_bytes":      {Type: types.PropertyTypeInteger},
+			"file": {
+				Type:        types.PropertyTypeObject,
+				Description: "The profile itself: filename, type and base64 data, shaped for events.add_evidence so the Investigate page renders it as a profile card.",
+			},
+			"contents_omitted": {
+				Type:        types.PropertyTypeString,
+				Description: "Set instead of file when the profile is too large to carry in a task output, explaining where to get it.",
+			},
 		},
 	}
 }
