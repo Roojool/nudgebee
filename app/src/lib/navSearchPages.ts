@@ -155,6 +155,9 @@ export const navSearchPages: NavSearchPage[] = [
   // "Access & Users" top-level tab as sibling sub-tabs (AnchorComponent's
   // parent/child hash routing) — Users is the default sub-tab, so its path
   // carries no child fragment.
+  // Admin landing dashboard — the default no-hash tab; still enumerated so it's
+  // reachable from global search like every other tab.
+  { group: 'Admin', label: 'Overview', path: '/user-management#overview' },
   { group: 'Admin', label: 'Users', path: '/user-management#access-users' },
   { group: 'Admin', label: 'Groups', path: '/user-management#access-users/groups' },
   { group: 'Admin', label: 'Ownership', path: '/user-management#access-users/ownership' },

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import ErrorBoundary from '@shared/ErrorBoundary';
+import AdminOverview from '@components/user-management/AdminOverview';
 import AllUsers from '@components/user-management/AllUsers';
 import UserGroup from '@components/user-management/UserGroup';
 import AnchorComponent from '@components/common/navigation/AnchorComponent';
@@ -9,7 +10,7 @@ import Notifications from '@components/notifications';
 import Integrations from '@components/accounts/integration';
 import OwnershipRules from '@components/user-management/OwnershipRules';
 import TenantSettings from '@shared/settings/TenantSettings';
-import { AuditIcon, NotificationIcon1, User1, UserGroupIcon, IntegrationsIcon, SettingsIcon, AgentIcon } from '@assets';
+import { AuditIcon, NotificationIcon1, User1, UserGroupIcon, IntegrationsIcon, SettingsIcon, AgentIcon, SummaryIconBlue } from '@assets';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
 import { userManagementFilters } from '@lib/authHooks';
@@ -54,6 +55,14 @@ const OwnershipIcon = withBrandBlue(AssignmentIndOutlinedIcon);
 // the rolesFilter handling in filterOptions below, which folds it in (right
 // after Groups) only when userManagementFilters(session) actually returns it.
 const baseFilters = (baseTitle) => [
+  {
+    name: 'Overview',
+    fragment: 'overview',
+    icon: SummaryIconBlue,
+    iconSize: 16,
+    Body: AdminOverview,
+    description: 'A snapshot of everything set up for this tenant, with a quick link into each admin area.',
+  },
   {
     name: 'Access & Users',
     // Explicit id: AnchorComponent falls back to `anchor-tab-${name}` when no id

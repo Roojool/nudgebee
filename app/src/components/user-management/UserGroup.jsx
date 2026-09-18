@@ -5,6 +5,7 @@ import { Box, Typography, List, ListItem, ListItemText } from '@mui/material';
 import { writeIcon } from '@assets';
 import GroupModal from './modal/GroupModal';
 import { canManage, canReadCustomRoles } from '@lib/auth';
+import useAdminAction from './useAdminAction';
 import { listCustomRoles } from '@api1/roles';
 import UserGroupUsers from './UserGroupUsers';
 import Datetime from '@shared/format/Datetime';
@@ -46,6 +47,13 @@ function UserGroup({ groupNames = [], onUserUpdate }) {
     setActiveGroupData(null);
     setGroupModalVisible(true);
   };
+
+  // Admin Overview "Create a group" quick-link lands here with
+  // ?action=create-group and opens the Add Group modal (permission-gated, same
+  // as the toolbar button).
+  useAdminAction('create-group', () => {
+    if (canManage('usergroups', 'Write')) handleAddGroupModal();
+  });
 
   const handleGroupModalClose = (shouldUpdate) => {
     setGroupModalVisible(false);

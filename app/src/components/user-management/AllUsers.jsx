@@ -6,6 +6,7 @@ import { TourLauncher } from '@components/common/tour';
 import apiUserManagement from '@api1/user';
 import { useSession } from 'next-auth/react';
 import { canManage, isTenantWideRole, hasPermission, canReadCustomRoles } from '@lib/auth';
+import useAdminAction from './useAdminAction';
 import { listCustomRoles } from '@api1/roles';
 import UserModal from './modal/UserModal';
 import { Label } from '@ui/Label';
@@ -171,6 +172,13 @@ const AllUsers = () => {
       fetchCustomRoles();
     }
   };
+
+  // Admin Overview "Invite new users" quick-link lands here with
+  // ?action=invite-user and opens the Add User modal (permission-gated, same as
+  // the toolbar button).
+  useAdminAction('invite-user', () => {
+    if (canManage('users', 'Write')) setAddUserModalVisible(true);
+  });
 
   const onPageChange = (page, limit) => {
     setCurrentPage(page - 1);

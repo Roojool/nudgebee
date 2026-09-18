@@ -14,6 +14,7 @@ import SafeIcon from '@shared/icons/SafeIcon';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { DeleteIconRed as deleteIcon, writeIconLight } from '@assets';
 import { canManage } from '@lib/auth';
+import useAdminAction from '@components/user-management/useAdminAction';
 import DeleteNotificationRuleModal from './DeleteNotificationRuleModal';
 import Text from '@shared/format/Text';
 import apiUser from '@api1/user';
@@ -38,6 +39,9 @@ const Notifications = () => {
   const [namespaceOption, setNamespaceOption] = useState([]);
   const [notificationTableData, setNotificationTableData] = useState([]);
   const [openNotificationRule, setOpenNotificationRule] = useState(false);
+  // Preset source type when the Create Rule modal is opened from an admin
+  // Overview "Create a … alert" quick-link (empty for the toolbar's own button).
+  const [createSource, setCreateSource] = useState('');
   const [clusterOption, setClusterOption] = useState<any[]>([]);
   const [selectedCluster, setSelectedCluster] = useState<string>('');
   const [selectedClusterId, setSelectedClusterId] = useState<string>('');
@@ -288,17 +292,29 @@ const Notifications = () => {
   };
 
   const handleButtonAction = () => {
+    setCreateSource('');
     setOpenNotificationRule(true);
   };
+
+  // Admin Overview "Create a … alert" / "Schedule a weekly digest" quick-links
+  // land here with ?action=alert-<source> and open the Create Rule modal preset
+  // to that source type.
+  useAdminAction(['alert-troubleshoot', 'alert-optimize', 'alert-slo', 'alert-weekly_digest'], (action: string) => {
+    if (!canManage('notifications', 'Write')) return;
+    setCreateSource(action.replace('alert-', ''));
+    setOpenNotificationRule(true);
+  });
 
   return (
     <Box position={'relative'}>
       <NotificationRuleModal
         open={openNotificationRule}
+        createSource={createSource}
         handleClose={() => {
           setOpenNotificationRule(false);
           setActiveEditRuleData({});
           setEditingSource('');
+          setCreateSource('');
         }}
         listNotificationRules={listNotificationRules}
         notificationRuleObject={activeEditRuleData}

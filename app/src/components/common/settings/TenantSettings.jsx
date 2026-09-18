@@ -20,6 +20,7 @@ import Loader from '@shared/Loader';
 import { Button } from '@ui/Button';
 import { Checkbox } from '@ui/Checkbox';
 import Tabs from '@shared/navigation/Tabs';
+import useAdminAction from '@components/user-management/useAdminAction';
 import { Card } from '@ui/Card';
 import { Switch } from '@ui/Switch';
 import { Banner } from '@ui/Banner';
@@ -389,6 +390,14 @@ const TenantSettings = () => {
   const [activeTab, setActiveTab] = useState('general');
   const [activeLabelTab, setActiveLabelTab] = useState('log');
   const [activeFeatureGroup, setActiveFeatureGroup] = useState(ALL_FEATURES_GROUP_ID);
+
+  // Admin Overview quick-links land here with ?action=settings-<tab> and select
+  // the matching inner tab (identity/self-onboarding → General, labels → Label
+  // Mapping, features → Features).
+  useAdminAction(['settings-general', 'settings-labels', 'settings-features'], (action) => {
+    const tab = { 'settings-general': 'general', 'settings-labels': 'labels', 'settings-features': 'features' }[action];
+    if (tab) setActiveTab(tab);
+  });
   const [showFlagIds, setShowFlagIds] = useState(false);
   // Each flag is on/off/default, since "default" (no explicit row) and "off" are distinct states for a default-on flag.
   const [featureChoices, setFeatureChoices] = useState({});

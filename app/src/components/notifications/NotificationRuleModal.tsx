@@ -50,6 +50,10 @@ interface NotificationRuleModalProps {
   listNotificationRules: () => void;
   notificationRuleObject: any;
   editingSource?: string;
+  // Preset source type for a NEW rule (troubleshoot | optimize | slo |
+  // weekly_digest | daily_recap | cloud). Opened from the admin Overview's
+  // "Create a … alert" quick-links; falls back to troubleshoot when absent.
+  createSource?: string;
 }
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
@@ -98,6 +102,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   listNotificationRules,
   notificationRuleObject,
   editingSource,
+  createSource,
 }) => {
   const [basedOnValue, setBasedOnValue] = useState('');
   const [clusterOption, setClusterOption] = useState([]);
@@ -738,7 +743,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         setSelectedFrequency(notificationRuleObject.frequency);
       }
     } else if (open) {
-      setBasedOnValue('troubleshoot');
+      setBasedOnValue(createSource || 'troubleshoot');
     }
   };
   useEffect(() => {
@@ -749,7 +754,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
 
   useEffect(() => {
     fetchDataForEditing(open, notificationRuleObject);
-  }, [open, notificationRuleObject]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, notificationRuleObject, createSource]);
 
   const clearAllAndClose = () => {
     setErrors({});

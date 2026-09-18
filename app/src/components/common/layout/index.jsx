@@ -38,6 +38,7 @@ import {
   GroupedEventsIcon,
   AutomateBlue,
   dashboardIcon1,
+  SummaryIconBlue,
   PlayCircleIcon,
   OptimizeSummaryIcon,
   DollarIcon,
@@ -569,6 +570,15 @@ const PageLayout = ({ children }) => {
         text: 'Admin',
         id: 'admin-sidenav',
         subItems: [
+          // The admin landing dashboard — first here and first in the page's tab
+          // strip, so it is the default at /user-management. No `module`: it is
+          // visible to anyone who can see the Admin nav item at all.
+          {
+            text: 'Overview',
+            path: '/user-management#overview',
+            id: 'sidenav-admin-overview',
+            icon: SummaryIconBlue,
+          },
           // Users, Groups, Ownership, Roles and Audit Log all live under this one
           // Access & Users tab as sub-tabs (#access-users, #access-users/groups,
           // #access-users/ownership, #access-users/roles, #access-users/audit-log)

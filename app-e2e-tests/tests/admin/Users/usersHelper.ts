@@ -9,6 +9,9 @@ export async function setup(page: Page): Promise<UserLocators> {
   await locators.homeBtn.click();
   await locators.adminBtn.click();
   await page.waitForURL("**/user-management**", { timeout: 15000 });
+  // Admin now defaults to the Overview tab; the Users controls live under the
+  // Access & Users tab, so land there explicitly before using them.
+  await page.goto("/user-management#access-users");
   await locators.addNewUserBtn.waitFor({ state: "visible", timeout: 15000 });
   return locators;
 }
