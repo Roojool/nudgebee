@@ -3505,24 +3505,6 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 )}
               </Box>
             </Box>
-            {/* MCP integration guidance — shown directly below the integration_id dropdown */}
-            {fieldName === 'integration_id' && selectedActionType === 'llm.mcp_call' && (
-              <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-                <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
-                <Box sx={{ flex: 1 }}>
-                  <Callout
-                    tone='info'
-                    data-testid='mcp-integration-alert'
-                    message='To add an MCP integration, go to Admin > Integrations > MCP.'
-                    action={{
-                      id: 'action-sidebar-mcp-manage-integrations-id-btn',
-                      label: <>Manage MCP Integrations &rarr;</>,
-                      onClick: () => window.open('/accounts/account-form?cloudProvider=mcp', '_blank', 'noopener,noreferrer'),
-                    }}
-                  />
-                </Box>
-              </Box>
-            )}
             {/* SSM permission guidance — shown directly below the executor_type dropdown */}
             {fieldName === 'executor_type' && selectedActionType === 'scripting.run_script' && localData?.executor_type === 'aws_ssm' && (
               <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
