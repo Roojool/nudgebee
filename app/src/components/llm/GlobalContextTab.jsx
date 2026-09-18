@@ -14,7 +14,7 @@ import { UploadIcon, PlusIcon, EditIcon, DeleteIconRed as deleteIcon } from '@as
 import SafeIcon from '@shared/icons/SafeIcon';
 import { hasWriteAccess } from '@lib/auth';
 import { ds } from '@utils/colors';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import ScopeChip from '@components/llm/ScopeChip';
 
 const formatExactDate = (dateString) => {
@@ -46,7 +46,7 @@ const formatDate = (dateString) => {
 };
 
 // Account Context Card Component
-const GlobalContextCard = ({ context, onEdit, onDelete, hasAccess, showAccount }) => {
+const GlobalContextCard = ({ context, onEdit, onDelete, hasAccess, showAccount, elevation = 'raised' }) => {
   const MENU_ITEMS = [
     {
       label: 'Edit',
@@ -73,7 +73,7 @@ const GlobalContextCard = ({ context, onEdit, onDelete, hasAccess, showAccount }
   const createdTooltip = formatExactDate(context.created_at) + (context.created_by?.display_name ? ` by ${context.created_by.display_name}` : '');
 
   return (
-    <WidgetCard sx={{ p: ds.space[4], mt: 0, mb: ds.space[3] }}>
+    <Card elevation={elevation} sx={{ p: ds.space[4], mb: ds.space[3] }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <Box sx={{ flex: 1, minWidth: 0 }}>
           {/* Primary: Name */}
@@ -154,7 +154,7 @@ const GlobalContextCard = ({ context, onEdit, onDelete, hasAccess, showAccount }
         </Box>
         <ThreeDotsMenu menuItems={MENU_ITEMS} data={context} onMenuClick={handleMenuClick} />
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 
@@ -164,6 +164,7 @@ GlobalContextCard.propTypes = {
   onDelete: PropTypes.func.isRequired,
   hasAccess: PropTypes.bool.isRequired,
   showAccount: PropTypes.bool,
+  elevation: PropTypes.oneOf(['raised', 'flat']),
 };
 
 // Create/Edit Account Context Modal Component
@@ -460,7 +461,7 @@ GlobalContextFormModal.propTypes = {
   loading: PropTypes.bool,
 };
 
-const GlobalContextTab = ({ accountId }) => {
+const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
   // Tenant-wide read-only mode: when Settings is opened from the global
   // sidebar there's no current account. The backend routes empty
   // account_id to ListGlobalContextsForTenant (KB pattern) and applies
@@ -632,11 +633,11 @@ const GlobalContextTab = ({ accountId }) => {
   return (
     <Box sx={{ p: 0 }}>
       {/* Header Section */}
-      <WidgetCard
+      <Card
+        elevation={cardElevation}
         sx={{
           py: ds.space[4],
           px: ds.space.mul(1, 5),
-          mt: 0,
           mb: ds.space[4],
           display: 'flex',
           justifyContent: 'space-between',
@@ -679,7 +680,7 @@ const GlobalContextTab = ({ accountId }) => {
             Add Account Context
           </Button>
         )}
-      </WidgetCard>
+      </Card>
 
       {isTenantWide && (
         <Box sx={{ mb: ds.space[4] }}>
@@ -738,6 +739,7 @@ const GlobalContextTab = ({ accountId }) => {
               onDelete={handleDelete}
               hasAccess={hasAccess}
               showAccount={isTenantWide}
+              elevation={cardElevation}
             />
           ))}
         </Box>
@@ -798,6 +800,9 @@ GlobalContextTab.propTypes = {
   // Optional: empty / unset means tenant-wide read (Settings opened from
   // the global sidebar).
   accountId: PropTypes.string,
+  // Card elevation: 'flat' when mounted inside a modal (b-Cortex), where a raised
+  // shadow would stack on the modal surface; 'raised' on a page (Admin).
+  cardElevation: PropTypes.oneOf(['raised', 'flat']),
 };
 
 export default GlobalContextTab;

@@ -22,7 +22,7 @@ import { getUserSession, isTenantAdmin } from '@lib/auth';
 import { ds } from '@utils/colors';
 import { useTenantBranding, toAssistantLabel } from '@hooks/useTenantBranding';
 import apiUser from '@api1/user';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ProgressBar } from '@ui/ProgressBar';
 import { Label } from '@ui/Label';
 import ScopeChip from '@components/llm/ScopeChip';
@@ -1133,7 +1133,7 @@ ActiveConfigsCompact.propTypes = {
 
 // ─── main component ──────────────────────────────────────────────────────────
 
-const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
+const LLMConsumptionTab = ({ accountId, readOnly = false, cardElevation = 'raised' }) => {
   // Tenant-wide mode: when Settings is opened from the global sidebar
   // there's no current account. Budget status is per-account, so we skip
   // the KPI strip + Usage matrix entirely and show only the Active
@@ -1412,7 +1412,7 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
   return (
     <Box sx={{ p: 0, pb: ds.space[5] }}>
       {/* Header row: title + period + Manage Budgets action */}
-      <WidgetCard sx={{ py: ds.space[3], px: ds.space[4], mt: 0, mb: ds.space[3] }}>
+      <Card size='sm' elevation={cardElevation} sx={{ mb: ds.space[3] }}>
         <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[4] }}>
           <Box sx={{ flex: 1, minWidth: 0 }}>
             <Stack direction='row' spacing={1} alignItems='center' sx={{ mb: ds.space[0] }}>
@@ -1452,7 +1452,7 @@ const LLMConsumptionTab = ({ accountId, readOnly = false }) => {
             </Button>
           )}
         </Box>
-      </WidgetCard>
+      </Card>
 
       {/* "Contact support" banner fires only on TENANT exhaustion — the
           tenant cap is the only limit operators can't raise themselves.
@@ -1728,6 +1728,9 @@ LLMConsumptionTab.propTypes = {
   // read view, Decision F) uses this; Admin's Budgets & Limits mount
   // (canonical editing) doesn't pass it.
   readOnly: PropTypes.bool,
+  // Card elevation: 'flat' when mounted inside a modal (b-Cortex), where a raised
+  // shadow would stack on the modal surface; 'raised' on a page (Admin).
+  cardElevation: PropTypes.oneOf(['raised', 'flat']),
 };
 
 export default LLMConsumptionTab;

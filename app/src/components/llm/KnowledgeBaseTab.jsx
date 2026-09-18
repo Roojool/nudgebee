@@ -27,7 +27,7 @@ import { UploadIcon, EditIcon, DeleteIconRed as deleteIcon, serviceNowIcon, jira
 import { hasWriteAccess } from '@lib/auth';
 import { ds } from '@utils/colors';
 import SafeIcon from '@shared/icons/SafeIcon';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Tabs from '@shared/navigation/Tabs';
 import { MemoryTable } from '@components/llm/MemoryTable';
 import MentionContentInput from '@components/llm/MentionContentInput';
@@ -1047,7 +1047,7 @@ const TestRetrievalPanel = ({
   const disabledCount = ineligible.filter((kb) => kb.enabled === false).length;
 
   return (
-    <WidgetCard sx={{ mt: ds.space[2], py: ds.space[4], px: ds.space.mul(1, 5) }}>
+    <Card elevation='flat' sx={{ mt: ds.space[2], py: ds.space[4], px: ds.space.mul(1, 5) }}>
       <Typography
         sx={{
           fontSize: 'var(--ds-text-body)',
@@ -1213,7 +1213,7 @@ const TestRetrievalPanel = ({
           )}
         </Box>
       )}
-    </WidgetCard>
+    </Card>
   );
 };
 
@@ -1918,8 +1918,9 @@ const KnowledgeBaseTab = ({ accountId }) => {
   return (
     <Box sx={{ p: 0 }}>
       {/* Header Section */}
-      <WidgetCard
-        sx={{ py: ds.space[4], px: ds.space.mul(1, 5), mt: 0, mb: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
+      <Card
+        elevation='flat'
+        sx={{ py: ds.space[4], px: ds.space.mul(1, 5), display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}
       >
         <Box>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[1] }}>
@@ -1958,7 +1959,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
             </Button>
           )}
         </Box>
-      </WidgetCard>
+      </Card>
 
       {retrievalOpen && (
         <TestRetrievalPanel

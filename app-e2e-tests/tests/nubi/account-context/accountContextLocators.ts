@@ -12,7 +12,7 @@ export const E2E_NAME_PREFIX = "nb_e2e_acctx_";
 
 // Nubi > b-Cortex > Knowledge > Account Context (app/src/components/llm/GlobalContextTab.jsx).
 // `grep -c data-testid app/src/components/llm/GlobalContextTab.jsx` returns 0, and the
-// same holds for ScopeChip.jsx and ds/WidgetCard, so there is no rung-1 handle anywhere
+// same holds for ScopeChip.jsx and the ds/Card wrapping each context, so there is no rung-1 handle anywhere
 // on this surface. ds/Input DOES render a real <label htmlFor>, so the three form fields
 // are reached at rung 2 by their accessible name with the placeholder as the scoped
 // fallback; the cards, banners and empty state carry no role at all and are taken at
@@ -171,7 +171,7 @@ export class AccountContextLocators extends CommonLocators {
   // (or a reordered list) can never point an assertion at the wrong record. The name
   // <Typography> sits in a Box holding the name/description/timestamps, whose parent is the
   // card's flex row — the row that also holds the card's ThreeDotsMenu, which is why the
-  // walk stops there rather than at the WidgetCard above it.
+  // walk stops there rather than at the ds/Card above it.
   contextCard(name: string): Locator {
     return this.dialog.getByText(name, { exact: true }).locator("xpath=../..").first();
   }

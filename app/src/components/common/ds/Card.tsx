@@ -4,9 +4,24 @@
  * Original proposal: design-system/proposals/card-consolidation.html
  *
  * Consolidates WidgetCard and the removed CustomBorderCard into a single primitive with
- * three independent axes: `variant`, `size`, `elevation`. Visual baseline
- * (size="md" + elevation="raised") matches @common/WidgetCard exactly —
- * same border, radius, padding tokens, and shadow value.
+ * three independent axes: `variant`, `size`, `elevation`. Against WidgetCard,
+ * size="md" + elevation="raised" has the same border, radius and background, but:
+ * padding is 20px 24px (WidgetCard: 16px 24px), the shadow is a single
+ * `0 1px 10px rgba(0,0,0,0.08)` (WidgetCard: a two-layer light-gray glow), there
+ * is no default top margin (WidgetCard: 24px), and no ≤1170px padding override.
+ *
+ * Migrating from WidgetCard:
+ *   - onClick: WidgetCard passed it straight to its Box; Card only binds onClick
+ *     when `interactive` is set (which also adds role="button", keyboard activation
+ *     and a focus ring). A clickable WidgetCard needs `interactive`, and any
+ *     hand-rolled role/tabIndex/onKeyDown on it should be dropped, not kept.
+ *   - Margins: drop `mt: 0` / `mb: 0` that only cancelled WidgetCard's top margin;
+ *     add an explicit `mt` where the layout relied on it.
+ *   - Padding: use the `size` whose padding matches (sm = 12px 16px). Where the old
+ *     padding has no size equivalent (e.g. 16px 20px), keeping it in `sx` is a
+ *     deliberate migration-only exception to the Don't below, so the layout
+ *     doesn't shift — new code picks a size.
+ *   - Inside a Modal / Drawer, use elevation="flat" (see below).
  *
  * Distinct from:
  *   - CollapsableCard  — disclosure behavior; composes Card for the surface.
@@ -26,7 +41,7 @@
  *                             (e.g. modal bodies). `tone='neutral'` is the
  *                             canonical "light-gray panel" look.
  *   size         = 'sm' | 'md' | 'lg'
- *                  Drives padding AND default shadow. md is today's WidgetCard.
+ *                  Drives padding AND default shadow. md replaces WidgetCard (see above).
  *   elevation    = 'raised' | 'flat' | 'floating'
  *                  Default 'raised' (all sizes ship with a shadow).
  *                  Use 'flat' when nested inside Modal / Inspector / Drawer
@@ -102,7 +117,7 @@ export interface CardProps {
 }
 
 /**
- * Padding scale anchored on the production WidgetCard (20px 24px) as `md`.
+ * Padding scale with `md` at 20px 24px (WidgetCard, which it replaces, was 16px 24px).
  * Each size keeps the vertical-narrower-than-horizontal rhythm.
  * 20px / 28px are literal (no matching --ds-space-* token).
  */
@@ -112,7 +127,7 @@ const SIZE_TOKENS: Record<CardSize, { padding: string; shadow: string }> = {
     shadow: '0 1px 6px rgba(0, 0, 0, 0.06)',
   },
   md: {
-    padding: '20px var(--ds-space-5)', // 20px 24px — matches WidgetCard
+    padding: '20px var(--ds-space-5)', // 20px 24px (WidgetCard was 16px 24px)
     shadow: '0 1px 10px rgba(0, 0, 0, 0.08)',
   },
   lg: {

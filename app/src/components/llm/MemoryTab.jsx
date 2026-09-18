@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, memo, useMemo, useRef } from 'react';
 import PropTypes from 'prop-types';
 import { Box, Typography } from '@mui/material';
 import { Banner } from '@ui/Banner';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import PushPinIcon from '@mui/icons-material/PushPin';
 import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
 import CheckIcon from '@mui/icons-material/Check';
@@ -600,10 +600,9 @@ const MemoryTab = ({ accountId }) => {
   return (
     <Box sx={{ p: 0 }}>
       {/* Header Section with Title and Description */}
-      <WidgetCard
+      <Card
         sx={{
           p: `${ds.space[4]} ${ds.space.mul(1, 5)}`,
-          mt: 0,
           mb: ds.space[4],
           display: 'flex',
           justifyContent: 'space-between',
@@ -633,7 +632,7 @@ const MemoryTab = ({ accountId }) => {
                 'Memories saved from past investigations. Pin the ones that matter most, remove anything outdated, and they will be used to resolve similar issues faster.'}
           </Typography>
         </Box>
-      </WidgetCard>
+      </Card>
 
       {/* Search Bar and Summary Stats */}
       <Box
