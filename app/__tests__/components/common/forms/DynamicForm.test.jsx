@@ -108,6 +108,26 @@ describe('DynamicForm', () => {
     expect(screen.getByPlaceholderText('Define conditions as Python Template')).toBeInTheDocument();
   });
 
+  // A field's validation error is the design-system error caption (as ds/Input and ds/Select
+  // render it), not an MUI Alert or a Callout.
+  test('renders a field error as the design-system error caption under the field', () => {
+    const { container } = renderDynamicForm({
+      actionDetails: { params: { my_list: { type: 'object[]', display_name: 'Items' } } },
+      errors: { my_list: 'Items is required' },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Items is required');
+    expect(container.querySelector('.MuiAlert-root')).toBeNull();
+  });
+
+  // Select renders its own error (via `error`), so the wrapper must not add a second message.
+  test('does not duplicate the error for a select field', () => {
+    renderDynamicForm({
+      actionDetails: { params: { severity: { type: 'string', display_name: 'Severity', possible_values: [{ value: 'high', label: 'High' }] } } },
+      errors: { severity: 'Severity is required' },
+    });
+    expect(screen.queryByText('Severity is required')).toBeNull();
+  });
+
   test('renders text input (string type) field with correct label', () => {
     renderDynamicForm({
       actionDetails: {
