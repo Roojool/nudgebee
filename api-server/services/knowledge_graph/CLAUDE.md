@@ -134,6 +134,15 @@ Traces is the reference implementation; the shape generalises:
 | `operation_verb_span_name` | no span kind at all, but the name carries an operation verb (consume/process/send/…) and no SERVER kind confirms this service is the destination |
 | `messaging_system_name_mismatch` | `messaging.system` is set but the service name doesn't contain it |
 
+`source="aws-vpc-flow"`, `classification_kind="node_match"` — a private flow-log address no lookup could place (`candidate_name` = the IP, `candidate_namespace` = its VPC or region, `candidate_cluster` = the AWS account). The graph shows these as one "Unidentified addresses (<vpc>)" node per VPC; the per-IP detail lives here. See `flow_sources/vpc_flowlogs_k8s_resolution.go`.
+
+| Code | Why the address stayed unresolved |
+|---|---|
+| `vpc_ip_unresolved` | no ENI, K8s node or K8s pod held it during the flow window (or no K8s account is mapped / metrics were unavailable — see `lookups_tried`) |
+| `vpc_ip_k8s_node_gone` | it was a K8s node's IP during the window, but that node is no longer in the graph; not attributed to a pod because host-network pods share the node IP |
+| `vpc_ip_ambiguous_owner` | more than one workload's pods held it during the window (IP reuse) |
+| `vpc_ip_workload_not_in_graph` | exactly one workload held it, but the K8s source didn't emit that workload |
+
 When adding a guard, give it its **own** reason code rather than reusing a near-neighbour — a review row labelled `outbound_span_kind` for a span that carried no span kind is worse than no row, because it sends whoever reads it looking for something that was never there.
 
 ---
