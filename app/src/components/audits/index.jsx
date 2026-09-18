@@ -28,7 +28,7 @@ import { Link } from '@ui/Link';
 import CodeMirrorDiffViewer from '@shared/viewers/DiffViewer';
 import { CategoryListing, EventListing } from './common';
 import { toast as snackbar } from '@ui/Toast';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 
 const headers = [
   'User',
@@ -75,9 +75,9 @@ const CommandTab = (option, query, _row) => {
   }
 
   return (
-    <WidgetCard sx={{ mt: 0 }}>
+    <Card sx={{ padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       <CommandExecutionDetail commands={Array.isArray(attr.commands) ? attr.commands : []} status={query.data?.event_status} />
-    </WidgetCard>
+    </Card>
   );
 };
 

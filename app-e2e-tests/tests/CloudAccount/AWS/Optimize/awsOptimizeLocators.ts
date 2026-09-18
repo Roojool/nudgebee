@@ -237,7 +237,7 @@ export class AwsOptimizeLocators extends AWSLocators {
       .first();
   }
 
-  // ds/Stat renders its label as plain text inside the WidgetCard, with no id, role or
+  // ds/Stat renders its label as plain text inside the ds/Card, with no id, role or
   // testid of its own — scoped text is the highest rung available (rung 4). Scoped to the
   // page rather than to the panel root because the two stat cards sit above ListingLayout,
   // outside it (CloudOptimizeRecommendationsTable.tsx:690-729). exact:true and no .or():

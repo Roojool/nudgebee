@@ -1,7 +1,7 @@
 import { Box, Typography } from '@mui/material';
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { Chip } from '@ui/Chip';
 import PropTypes from 'prop-types';
@@ -255,11 +255,9 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
     </Typography>
   );
 
-  const widgetCardSx = {
+  const statCardSx = {
     flex: 1,
     minWidth: 0,
-    mt: 0,
-    padding: `${ds.space[3]} ${ds.space[4]}`,
   };
 
   const inv = investigateInfographics;
@@ -267,7 +265,7 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'row', width: '100%', gap: ds.space[3], padding: `${ds.space[5]} 0` }}>
-      <WidgetCard sx={widgetCardSx}>
+      <Card size='sm' sx={statCardSx}>
         <Stat
           size='md'
           label='Total Investigations'
@@ -288,9 +286,9 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
           }
           sub={!inv.loading && invHasBaseline ? `vs ${inv.previous.toLocaleString()} prev 24h` : undefined}
         />
-      </WidgetCard>
+      </Card>
 
-      <WidgetCard sx={widgetCardSx}>
+      <Card size='sm' sx={statCardSx}>
         <Stat
           size='md'
           label='Total Triage'
@@ -299,9 +297,9 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
           }}
           value={inv.loading ? '…' : inv.current.toLocaleString()}
         />
-      </WidgetCard>
+      </Card>
 
-      <WidgetCard sx={widgetCardSx}>
+      <Card size='sm' sx={statCardSx}>
         <Stat
           size='md'
           label='Total Time Saved'
@@ -312,9 +310,9 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
           value={inv.loading ? '…' : <TimeSavedValue minutes={inv.currentTime} />}
           sub={!inv.loading && inv.diffTime > 0 ? `${inv.diffTime}% of manual effort automated` : undefined}
         />
-      </WidgetCard>
+      </Card>
 
-      <WidgetCard sx={widgetCardSx}>
+      <Card size='sm' sx={statCardSx}>
         <Stat
           size='md'
           label={`${baseTitle} Savings`}
@@ -334,7 +332,7 @@ const TroubleshootSummary = ({ tab = 'auto', range }) => {
             )
           }
         />
-      </WidgetCard>
+      </Card>
     </Box>
   );
 };

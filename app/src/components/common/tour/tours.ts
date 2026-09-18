@@ -654,7 +654,7 @@ const investigationsTour: TourDef = {
  *   #kg-canvas              → the graph canvas (graphWrapperRef Box). Note it also
  *                             hosts the "Graph Too Large to Render" state, so the
  *                             step is safe even when the graph won't draw.
- *   #kg-filter-panel        → the left filter sidebar (WidgetCard)
+ *   #kg-filter-panel        → the left filter sidebar (ds/Card)
  *   #auto-complete-kg-filter-{account,node-type,node,level}
  *                           → the four filter dropdowns. FilterDropdown re-emits
  *                             its `id` as `auto-complete-<kebab(id)>`; the explicit

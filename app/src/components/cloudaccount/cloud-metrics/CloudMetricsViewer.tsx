@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Box, Typography } from '@mui/material';
 import { ListingLayout } from '@ui/ListingLayout';
 import MetricQueryInfo from '@shared/MetricQueryInfo';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Banner } from '@ui/Banner';
 import { EmptyState } from '@ui/EmptyState';
 import { Button as DsButton } from '@ui/Button';
@@ -158,7 +158,7 @@ function renderCharts(charts: MetricChartData[]): React.ReactNode {
         const chartTitle = showUnitInTitle ? `${displayName} (${getUnitLabel(chart.unit)})` : displayName;
         const scaleOptions = buildScaleOptions(chart.unit);
         return (
-          <WidgetCard key={chart.metricName}>
+          <Card key={chart.metricName} sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[2] }}>
               <Typography
                 sx={{
@@ -174,7 +174,7 @@ function renderCharts(charts: MetricChartData[]): React.ReactNode {
               <MetricQueryInfo queries={chart.query ? { Query: chart.query } : null} />
             </Box>
             <Chart.Line dataset={chart.dataset} labels={chart.labels} data={[]} loading={false} scaleOptions={scaleOptions} />
-          </WidgetCard>
+          </Card>
         );
       })}
     </Box>

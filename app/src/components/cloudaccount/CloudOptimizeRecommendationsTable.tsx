@@ -9,7 +9,7 @@ import apiRecommendations, { RECOMMENDATION_STATUS } from '@api1/recommendation'
 import type { ICustomTableRow } from './ec2/types';
 import ClusterNameWithRegion from '@components/k8s/common/ClusterNameWithRegion';
 import { Box, Typography } from '@mui/material';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
 import { ds } from 'src/utils/colors';
@@ -696,16 +696,16 @@ const CloudOptimizeRecommendationsTable = (props: {
           '& > *': { maxWidth: `calc((100% - 3 * ${ds.space[3]}) / 4)` },
         }}
       >
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Recommendations'
             info={{ tooltip: config.recommendationsTooltip }}
             value={loadingTotal ? '…' : totalRecommendationsCount}
           />
-        </WidgetCard>
+        </Card>
         {config.showSavings && (
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Estimated Savings'
@@ -724,7 +724,7 @@ const CloudOptimizeRecommendationsTable = (props: {
                 )
               }
             />
-          </WidgetCard>
+          </Card>
         )}
       </Box>
 

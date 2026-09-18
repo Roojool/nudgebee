@@ -5,7 +5,7 @@ import apiKubernetes1 from '@api1/kubernetes1';
 import Loader from '@shared/Loader';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import CopyButton from '@shared/buttons/CopyButton';
 import { ExternalLinkIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
@@ -167,9 +167,9 @@ const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
 
   if (!timelineData?.timeline || timelineData.timeline.length === 0) {
     return (
-      <WidgetCard sx={{ width: '100%' }}>
+      <Card sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)', width: '100%' }}>
         <Typography>No timeline events found.</Typography>
-      </WidgetCard>
+      </Card>
     );
   }
 

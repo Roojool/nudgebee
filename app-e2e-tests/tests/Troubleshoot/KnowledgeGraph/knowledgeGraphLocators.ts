@@ -18,8 +18,8 @@ export const KG_LEVEL_OPTIONS = ["1 - Direct neighbors", "2 - 2 hops", "3 - 3 ho
 const triggerSelector = (filterId: string) => `[id="auto-complete-${filterId}"]`;
 
 export class KnowledgeGraphLocators extends TroubleshootLocators {
-  // Panels. WidgetCard renders neither a testid nor a role, and the ids are the only
-  // handles the component offers — deliberate rung 3, no fallback worth having.
+  // Panels. The filter panel's ds/Card gets neither a testid nor a role, and the ids are
+  // the only handles the component offers — deliberate rung 3, no fallback worth having.
   readonly filterPanel: Locator;
   readonly canvas: Locator;
   // The graph column wraps the canvas plus the history/toolbar rows and carries no id of
@@ -68,8 +68,8 @@ export class KnowledgeGraphLocators extends TroubleshootLocators {
   constructor(page: Page) {
     super(page);
 
-    // Id-only by design: both are WidgetCard/Box wrappers with no testid, no role and no
-    // accessible name, so any wider match would resolve to some other panel on the page.
+    // Id-only by design: both are wrappers (a ds/Card and a Box) with no testid, no role
+    // and no accessible name, so any wider match would resolve to some other panel on the page.
     this.filterPanel = page.locator("#kg-filter-panel");
     this.canvas = page.locator("#kg-canvas");
     this.graphPane = this.canvas.locator("xpath=..");

@@ -23,7 +23,7 @@ import { getDateString } from '@lib/datetime';
 import KubernetesEventsTable from '@components/events/KubernetesEvents';
 import { type ThresholdSuggestionItem } from '@api1/triage';
 import ThresholdApplyPanel from './ThresholdApplyPanel';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ds, resolveColor, resolveColors, withAlpha } from 'src/utils/colors';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, PointElement, LineElement, Title, ChartTooltip, Legend);
@@ -678,7 +678,7 @@ const ThresholdEvidence: React.FC<ThresholdEvidenceProps> = ({ data }) => {
   }
 
   return (
-    <WidgetCard sx={{ mt: 0, mb: 0, p: `${ds.space[4]} ${ds.space[5]}` }}>
+    <Card sx={{ p: `${ds.space[4]} ${ds.space[5]}` }}>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3], overflow: 'hidden', maxWidth: '100%' }}>
         {/* ─── Risk warnings (top, prominent) ─── */}
         <RiskWarningBanner riskLevel={riskLevel} warnings={riskWarnings} />
@@ -819,7 +819,7 @@ const ThresholdEvidence: React.FC<ThresholdEvidenceProps> = ({ data }) => {
           </Box>
         )}
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 
