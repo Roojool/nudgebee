@@ -11,7 +11,7 @@ import apiKubernetes1 from '@api1/kubernetes1';
 import CustomTable2 from '@shared/tables/CustomTable2';
 import { Label } from '@ui/Label';
 import { Button as DsButton } from '@ui/Button';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { hasWriteAccess } from '@lib/auth';
 import { convertToLocalTime } from '@lib/datetime';
@@ -37,7 +37,7 @@ const healthLabelToTone: Record<string, ChipTone> = {
 };
 const toHealthTone = (label: string): ChipTone => healthLabelToTone[label] || 'neutral';
 
-const statCardSx = { flex: 1, minWidth: 0, mt: 0, padding: 'var(--ds-space-3) var(--ds-space-4)' };
+const statCardSx = { flex: 1, minWidth: 0 };
 const statRowSx = {
   display: 'grid',
   gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -1644,28 +1644,28 @@ export const PreFlightCheckContent: React.FC<PreFlightCheckContentProps> = ({ ac
         </Box>
 
         <Box sx={statRowSx}>
-          <WidgetCard sx={statCardSx}>
+          <Card size='sm' sx={statCardSx}>
             <Stat size='md' label='Nodes' value={nodesCount} sub={healthySub(`${metrics.healthyNodes}/${metrics.totalNodes} healthy`)} />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat
               size='md'
               label='Workloads'
               value={workloadsCount}
               sub={healthySub(`${metrics.healthyWorkloads}/${metrics.totalWorkloads} healthy`)}
             />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat size='md' label='Services' value={servicesCount} />
-          </WidgetCard>
-          <WidgetCard sx={statCardSx}>
+          </Card>
+          <Card size='sm' sx={statCardSx}>
             <Stat
               size='md'
               label='Persistent Volumes'
               value={persistentVolumesCount}
               sub={healthySub(`${metrics.boundPVs}/${metrics.totalPVs} bound`)}
             />
-          </WidgetCard>
+          </Card>
         </Box>
 
         <Box sx={{ mb: ds.space[4] }}>
@@ -1996,18 +1996,18 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
             </Typography>
 
             <Box sx={statRowSx}>
-              <WidgetCard sx={statCardSx}>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Nodes' value={pre.nodes_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Workloads' value={pre.workloads_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Services' value={pre.services_count} />
-              </WidgetCard>
-              <WidgetCard sx={statCardSx}>
+              </Card>
+              <Card size='sm' sx={statCardSx}>
                 <Stat size='md' label='Persistent Volumes' value={pre.persistent_volumes_count} />
-              </WidgetCard>
+              </Card>
             </Box>
           </Box>
         )}
@@ -2035,33 +2035,33 @@ export const PostFlightCheckContent: React.FC<PostFlightCheckProps> = ({ account
           </Box>
 
           <Box sx={statRowSx}>
-            <WidgetCard sx={statCardSx}>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Nodes'
                 value={recommendation.nodes?.length || 0}
                 sub={healthySub(`${metrics.healthyNodes}/${metrics.totalNodes} healthy`)}
               />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Workloads'
                 value={recommendation.workloads?.length || 0}
                 sub={healthySub(`${metrics.healthyWorkloads}/${metrics.totalWorkloads} healthy`)}
               />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat size='md' label='Services' value={recommendation.services?.length || 0} />
-            </WidgetCard>
-            <WidgetCard sx={statCardSx}>
+            </Card>
+            <Card size='sm' sx={statCardSx}>
               <Stat
                 size='md'
                 label='Persistent Volumes'
                 value={recommendation.persistentVolumes?.length || 0}
                 sub={healthySub(`${metrics.boundPVs}/${metrics.totalPVs} bound`)}
               />
-            </WidgetCard>
+            </Card>
           </Box>
           {check.created_at && (
             <Typography

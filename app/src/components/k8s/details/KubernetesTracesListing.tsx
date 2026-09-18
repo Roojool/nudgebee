@@ -32,7 +32,7 @@ import apiUser from '@api1/user';
 import { applyFiltersOnRouter } from '@lib/router';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import CustomTable from '@shared/tables/CustomTable';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { useData } from '@context/DataContext';
 import { KubernetesTraceServiceOperation } from '@components/k8s/common/KubernetesTraceServiceOperation';
 import { getTableData4 } from '@components/k8s/investigate/cards/util';
@@ -40,6 +40,9 @@ import apiAccount from '@api1/account';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { ds } from '@utils/colors';
 import { ToggleGroup } from '@ui/ToggleGroup';
+
+// WidgetCard's defaults (24px top margin, 16px 24px padding), kept so moving to Card doesn't shift the layout.
+const detailCardSx = { mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' };
 
 type TraceViewMode = 'spans' | 'traces';
 
@@ -947,15 +950,15 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
             if (attrsObj && Object.keys(attrsObj).length > 0) {
               const { headers, convertedJson2 } = getTableData4([attrsObj]);
               return (
-                <WidgetCard>
+                <Card sx={detailCardSx}>
                   <CustomTable headers={headers} tableData={convertedJson2} rowsPerPage={convertedJson2.length} totalRows={convertedJson2.length} />
-                </WidgetCard>
+                </Card>
               );
             }
             return (
-              <WidgetCard>
+              <Card sx={detailCardSx}>
                 <Typography>No Span Attributes Available</Typography>
-              </WidgetCard>
+              </Card>
             );
           },
           text: 'Span Attributes',
@@ -990,7 +993,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
             }
             if (drilldownQuery.span_name == 'query') {
               return (
-                <WidgetCard>
+                <Card sx={detailCardSx}>
                   <Typography
                     sx={{
                       fontFamily: ds.font.mono,
@@ -1002,7 +1005,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                   >
                     {drilldownQuery.resource}
                   </Typography>
-                </WidgetCard>
+                </Card>
               );
             }
             const query = `{"namespaceName":"${drilldownQuery.workload_namespace}","workloadName":"${drilldownQuery.workload_name}", "traceId": "${drilldownQuery.trace_id}"}`;
@@ -1053,7 +1056,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
             }
             const plusMinus10Minutes = formatDateForPlusMinusDuration(new Date(drilldownQuery?.timestamp).getTime(), 10);
             return (
-              <WidgetCard>
+              <Card sx={detailCardSx}>
                 <Typography sx={{ fontWeight: 'bold', mb: 'var(--ds-space-2)' }}>
                   Source: {drilldownQuery.workload_name} | {drilldownQuery.workload_namespace}
                 </Typography>
@@ -1084,7 +1087,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                     />
                   </>
                 )}
-              </WidgetCard>
+              </Card>
             );
           },
         },
@@ -1092,7 +1095,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
           componentFn: function (_opt: any, drilldownQuery: any) {
             if (drilldownQuery?.span_name == 'query') {
               return (
-                <WidgetCard>
+                <Card sx={detailCardSx}>
                   <Typography
                     sx={{
                       fontFamily: ds.font.mono,
@@ -1104,7 +1107,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                   >
                     {drilldownQuery.resource || 'No Data Available'}
                   </Typography>
-                </WidgetCard>
+                </Card>
               );
             }
             const parsedHeader = drilldownQuery.headers
@@ -1114,7 +1117,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                 )
               : '';
             return (
-              <WidgetCard>
+              <Card sx={detailCardSx}>
                 {parsedHeader && (
                   <>
                     <Typography sx={{ fontWeight: 'bold', mb: 'var(--ds-space-1)' }}>Headers:</Typography>
@@ -1156,7 +1159,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                   </>
                 )}
                 {!drilldownQuery?.headers && !drilldownQuery?.request_payload && <Typography>No Data Available</Typography>}
-              </WidgetCard>
+              </Card>
             );
           },
           text: 'Request',
@@ -1167,7 +1170,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
         {
           componentFn: function (_opt: any, drilldownQuery: any) {
             return (
-              <WidgetCard>
+              <Card sx={detailCardSx}>
                 {drilldownQuery?.http_response ? (
                   <>
                     <Typography sx={{ fontWeight: 'bold', mb: 'var(--ds-space-1)' }}>Response:</Typography>
@@ -1187,7 +1190,7 @@ const KubernetesTracesListing: React.FC<KubernetesTracesListingProps> = ({
                 ) : (
                   <Typography>No Data Available</Typography>
                 )}
-              </WidgetCard>
+              </Card>
             );
           },
           text: 'Response',

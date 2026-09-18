@@ -24,7 +24,7 @@ import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import QueryModeSwitcher from '@components/k8s/common/QueryModeSwitcher';
 import { OperatorDescriptor } from '@components/k8s/common/operatorCatalog';
 import { LogDate } from '@components/k8s/common/LogDate';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { isAtMost70PercentDifferent, parseHttpResponseBodyMessage, safeJSONParse, snakeToTitleCase } from 'src/utils/common';
 import { useData } from '@context/DataContext';
@@ -1056,7 +1056,15 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
       return <KubernetesWorkloadRelayLogs accountId={accountId} namespace={namespaceName} workloadName={workloadName} workloadType={workloadType} />;
     }
     return (
-      <WidgetCard sx={{ maxWidth: ds.space.mul(0, 250), mx: 'auto', textAlign: 'center' }}>
+      <Card
+        sx={{
+          mt: 'var(--ds-space-5)',
+          padding: 'var(--ds-space-4) var(--ds-space-5)',
+          maxWidth: ds.space.mul(0, 250),
+          mx: 'auto',
+          textAlign: 'center',
+        }}
+      >
         <Text
           value='No Logs Available'
           sx={{
@@ -1074,7 +1082,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
           }
           sx={{ color: 'var(--ds-gray-600)' }}
         />
-      </WidgetCard>
+      </Card>
     );
   }
 

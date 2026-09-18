@@ -11,7 +11,7 @@ import { LogDate } from '@components/k8s/common/LogDate';
 import observability from '@api1/observability';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import { toast as snackbar } from '@ui/Toast';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import SafeIcon from '@shared/icons/SafeIcon';
 import Loader from '@shared/Loader';
 import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
@@ -325,7 +325,7 @@ const KubernetesPlusMinusLogsGradual: React.FC<KubernetesPlusMinusLogsGradualPro
   }
 
   return (
-    <WidgetCard sx={{ p: 0, overflow: 'hidden' }}>
+    <Card sx={{ mt: 'var(--ds-space-5)', p: 0, overflow: 'hidden' }}>
       <Box sx={{ width: '100%', position: 'relative' }}>
         {/* Header with controls */}
         <Box
@@ -533,7 +533,7 @@ const KubernetesPlusMinusLogsGradual: React.FC<KubernetesPlusMinusLogsGradualPro
           </Box>
         )}
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 

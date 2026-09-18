@@ -2,7 +2,6 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import CustomTable from '@shared/tables/CustomTable';
 import { Box, Typography, Grid } from '@mui/material';
 import { Card } from '@ui/Card';
-import WidgetCard from '@ui/WidgetCard';
 import dynamic from 'next/dynamic';
 import { useRouter } from 'next/router';
 import Chart from '@ui/Chart';
@@ -58,6 +57,9 @@ import { md5 } from '@lib/encode';
 import { buildNubiChartPrompt } from 'src/utils/nubiPromptBuilder';
 import { ds, resolveColor, resolveColors } from 'src/utils/colors';
 import MetricQueryInfo, { K8S_METRIC_QUERY_LABELS, buildPromQueries } from '@shared/MetricQueryInfo';
+
+// WidgetCard's defaults (24px top margin, 16px 24px padding), kept so moving to Card doesn't shift the layout.
+const detailCardSx = { mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' };
 
 const chartContainerStyle = {
   border: '1px solid var(--ds-gray-200)',
@@ -1074,7 +1076,7 @@ const KubernetesLogDetails = ({ query }) => {
     });
 
   return (
-    <WidgetCard>
+    <Card sx={detailCardSx}>
       {labelEntries.length > 0 ? (
         <Grid container sx={{ backgroundColor: 'white' }}>
           {labelEntries.map((entry) => renderLabelRow(entry.key, entry.value, entry.index))}
@@ -1091,7 +1093,7 @@ const KubernetesLogDetails = ({ query }) => {
       ) : (
         <Typography>No Data</Typography>
       )}
-    </WidgetCard>
+    </Card>
   );
 };
 KubernetesLogDetails.propTypes = {
@@ -1121,7 +1123,7 @@ const KubernetesLogPatternDetails = ({ query }) => {
   }
 
   return (
-    <WidgetCard>
+    <Card sx={detailCardSx}>
       {sampleCard}
       <Box sx={{ mt: 'var(--ds-space-3)' }}>
         <Chart.Bar
@@ -1131,7 +1133,7 @@ const KubernetesLogPatternDetails = ({ query }) => {
           style={{ width: '100%' }}
         />
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 KubernetesLogPatternDetails.propTypes = {
