@@ -1052,7 +1052,15 @@ const KubernetesEventsTable = ({
       shortcutClickTime: passedSelectedDateTime.shortcutClickTime ?? 0,
     };
     setSelectedDateRange(next);
-    applyFiltersOnRouter(router, { start_time: passedSelectedDateTime.startTime, end_time: passedSelectedDateTime.endTime });
+    // A filter-less table is embedded (row drill-down): its picker scopes only
+    // its own list. start_time/end_time in the URL are the page's scope — the
+    // Troubleshoot sub-tab remount key and the briefing both follow them.
+    if (!enableFilters) return;
+    applyFiltersOnRouter(router, {
+      start_time: passedSelectedDateTime.startTime,
+      end_time: passedSelectedDateTime.endTime,
+      time_shortcut: isTroubleshootPage ? undefined : next.shortcutClickTime || undefined,
+    });
     // Persist the shortcut duration when known so we can rehydrate as a relative
     // range. For a custom range (shortcutClickTime = 0) persist the absolute
     // bounds; getInitialTime() ignores them once they're > 30 days old.
