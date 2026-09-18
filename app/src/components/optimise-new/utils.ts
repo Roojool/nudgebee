@@ -1,4 +1,3 @@
-import type { KeyboardEvent } from 'react';
 import { ds } from 'src/utils/colors';
 import { recommendationDetails } from '@api1/recommendation/data';
 
@@ -576,37 +575,27 @@ export const getRecommendationBrief = (rec: any): string => {
 // ─── Stat-card tabs ───
 
 /**
- * Shared chrome for the clickable stat-card tabs above a listing: the active
- * card carries the same blue border + tint the Troubleshoot summary widgets use
- * for their active drill-down; zero-count cards render muted and inert.
+ * Shared sx for the clickable stat-card tabs above a listing, each an interactive
+ * ds/Card (size='sm', `pressed`, and `disabled` when muted): the active card carries
+ * the same blue border + tint the Troubleshoot summary widgets use for their active
+ * drill-down. A zero-count card is a disabled Card, which dims it and makes it inert.
  */
 export const cardTabSx = (pressed: boolean, muted: boolean) => ({
   flex: 1,
   minWidth: 0,
-  mt: 0,
-  padding: `${ds.space[3]} ${ds.space[4]}`,
   ...(muted
-    ? { opacity: 0.5 }
+    ? {}
     : {
-        cursor: 'pointer',
         // Stat and Chip pin their own `cursor: default`, which would otherwise leave
         // the hand pointer showing only on the card's bare padding. `&&` outranks them.
         '&& *': { cursor: 'pointer' },
         transition: `border-color ${ds.motion.micro} ${ds.motion.ease}, background-color ${ds.motion.micro} ${ds.motion.ease}`,
-        // Re-assert the blue border on hover for the active card — the gray hover
-        // border would otherwise mask its highlight while hovering.
+        // Replaces Card's own hover, so the tab doesn't lift. Re-assert the blue border on
+        // hover for the active card — the gray hover border would otherwise mask its highlight.
         '&:hover': { borderColor: pressed ? ds.blue[400] : ds.gray[400] },
       }),
   ...(pressed ? { borderColor: ds.blue[400], backgroundColor: ds.blue[100] } : {}),
 });
-
-/** Enter/Space activation so the card tabs work as buttons for keyboard users. */
-export const cardKeyDown = (activate: () => void) => (e: KeyboardEvent) => {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    activate();
-  }
-};
 
 /**
  * Chrome for a detail panel's sticky footer action bar — the bar that holds what

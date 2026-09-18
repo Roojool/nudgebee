@@ -28,7 +28,7 @@ import TicketLink from '@shared/links/TicketLink';
 import { formatMemory } from '@lib/formatter';
 import ResolveModal from './ResolveModal';
 import CliCommandModal from './CliCommandModal';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -65,7 +65,6 @@ import {
   STATUS_FILTER_OPTIONS,
   dismissalLabel,
   cardTabSx,
-  cardKeyDown,
   type SortField,
   type SortDirection,
 } from './utils';
@@ -1535,30 +1534,21 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
           which exist to switch between categories — have nothing to offer. */}
       {!lockedCategory && (
         <Box sx={{ display: 'flex', gap: ds.space[3], mt: ds.space[4] }}>
-          <WidgetCard
-            id='optimize-card-savings'
-            sx={{
-              flex: 1,
-              minWidth: 0,
-              mt: 0,
-              padding: `${ds.space[3]} ${ds.space[4]}`,
-            }}
-          >
+          <Card id='optimize-card-savings' size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Savings'
               info={{ tooltip: 'Total estimated monthly savings if all recommendations are applied' }}
               value={cardsLoading ? '…' : <CostCallout size='lg' tone='high-savings' value={totalSavings} period='/ mo' />}
             />
-          </WidgetCard>
-          <WidgetCard
+          </Card>
+          <Card
             id='optimize-card-all'
-            role='button'
-            tabIndex={0}
-            aria-pressed={filters.category.length === 0}
+            interactive
+            pressed={filters.category.length === 0}
+            size='sm'
             data-testid='optimize-card-all'
             onClick={handleAllCardClick}
-            onKeyDown={cardKeyDown(handleAllCardClick)}
             sx={cardTabSx(filters.category.length === 0, false)}
           >
             <Stat
@@ -1589,7 +1579,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
                 )
               }
             />
-          </WidgetCard>
+          </Card>
 
           {WIDGET_CATEGORIES.map((cat) => {
             const catCount = categoryCounts[cat]?.count || 0;
@@ -1597,15 +1587,14 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
             const pressed = filters.category.length === 1 && filters.category[0] === cat;
             const muted = catCount === 0 && !pressed && !cardsLoading;
             const card = (
-              <WidgetCard
+              <Card
                 key={cat}
-                role='button'
-                tabIndex={muted ? -1 : 0}
-                aria-pressed={pressed}
-                aria-disabled={muted || undefined}
+                interactive
+                disabled={muted}
+                pressed={pressed}
+                size='sm'
                 data-testid={`optimize-card-${cat.toLowerCase()}`}
-                onClick={muted ? undefined : () => handleCategoryCardClick(cat)}
-                onKeyDown={muted ? undefined : cardKeyDown(() => handleCategoryCardClick(cat))}
+                onClick={() => handleCategoryCardClick(cat)}
                 sx={cardTabSx(pressed, muted)}
               >
                 <Stat
@@ -1623,7 +1612,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
                     )
                   }
                 />
-              </WidgetCard>
+              </Card>
             );
             return muted ? (
               <Tooltip key={cat} title='No open recommendations' placement='top'>

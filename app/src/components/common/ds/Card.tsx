@@ -14,7 +14,8 @@
  *   - onClick: WidgetCard passed it straight to its Box; Card only binds onClick
  *     when `interactive` is set (which also adds role="button", keyboard activation
  *     and a focus ring). A clickable WidgetCard needs `interactive`, and any
- *     hand-rolled role/tabIndex/onKeyDown on it should be dropped, not kept.
+ *     hand-rolled role/tabIndex/onKeyDown on it should be dropped, not kept —
+ *     including aria-pressed / aria-disabled, which become `pressed` / `disabled`.
  *   - Margins: drop `mt: 0` / `mb: 0` that only cancelled WidgetCard's top margin;
  *     add an explicit `mt` where the layout relied on it.
  *   - Padding: use the `size` whose padding matches (sm = 12px 16px). Where the old
@@ -65,6 +66,21 @@
  *   selected     = boolean
  *                  2px brand border for picker-row use. Interaction state,
  *                  not semantic colour.
+ *   disabled     = boolean  (with interactive)
+ *                  A button that is unavailable right now: keeps role="button"
+ *                  (so it is still announced, as dimmed), adds aria-disabled,
+ *                  leaves the tab order, ignores clicks and keys, and drops the
+ *                  hover, focus ring and pointer. A card that is simply not a
+ *                  button should drop `interactive` instead. Cursor is 'default',
+ *                  as on ds/Button — Stat/Chip content pins its own cursor, so
+ *                  'not-allowed' would only show over the padding.
+ *   pressed      = boolean  (with interactive)
+ *                  Toggle state for a card that switches a filter on and off;
+ *                  emits aria-pressed. It sets no visual — style the pressed
+ *                  look with `selected` or the consumer's own sx.
+ *
+ * Hover: an `sx['&:hover']` replaces Card's interactive hover entirely (sx is
+ * spread over it, not merged), which is how a card opts out of the lift.
  *
  * Slots (props):
  *   header   — ReactNode rendered above body with a 1px divider when children
@@ -84,6 +100,7 @@
  *   - Don't use sx for padding/shadow overrides. Use size and elevation instead.
  *   - Don't pass tone without variant="accent" or variant="tinted".
  *   - Don't pass onClick without interactive=true (dev-warns; keyboard would be broken).
+ *   - Don't pass disabled or pressed without interactive=true (dev-warns; ignored).
  */
 import * as React from 'react';
 import { Box, SxProps, Theme } from '@mui/material';
@@ -100,6 +117,10 @@ export interface CardProps {
   tone?: CardTone;
   interactive?: boolean;
   selected?: boolean;
+  /** With `interactive`: announced as a dimmed button, but inert. */
+  disabled?: boolean;
+  /** With `interactive`: toggle state, emitted as aria-pressed. */
+  pressed?: boolean;
 
   header?: React.ReactNode;
   footer?: React.ReactNode;
@@ -181,6 +202,8 @@ export const Card: React.FC<CardProps> = ({
   tone = 'neutral',
   interactive = false,
   selected = false,
+  disabled = false,
+  pressed,
   header,
   footer,
   children,
@@ -199,6 +222,10 @@ export const Card: React.FC<CardProps> = ({
       // eslint-disable-next-line no-console
       console.warn('[Card] onClick provided without interactive=true. Set interactive to add role="button" and keyboard support.');
     }
+    if ((disabled || pressed !== undefined) && !interactive) {
+      // eslint-disable-next-line no-console
+      console.warn('[Card] disabled / pressed only apply with interactive=true — a non-button card has no pressed or disabled state. Ignoring.');
+    }
   }
 
   const { padding, shadow: raisedShadow } = SIZE_TOKENS[size];
@@ -214,8 +241,11 @@ export const Card: React.FC<CardProps> = ({
   const defaultBorderColor = selected ? 'var(--ds-blue-500)' : isTinted ? TINTED_BORDER[tone] : 'var(--ds-gray-200)';
   const borderColor = defaultBorderColor;
 
+  // A disabled interactive card is still a button (role, aria-disabled) but takes no input.
+  const actionable = interactive && !disabled;
+
   const handleKeyDown =
-    interactive && onClick
+    actionable && onClick
       ? (e: React.KeyboardEvent<HTMLDivElement>) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
@@ -228,10 +258,12 @@ export const Card: React.FC<CardProps> = ({
     <Box
       id={id}
       className={className}
-      onClick={interactive ? onClick : undefined}
+      onClick={actionable ? onClick : undefined}
       onKeyDown={handleKeyDown}
       role={interactive ? 'button' : undefined}
-      tabIndex={interactive ? 0 : undefined}
+      tabIndex={interactive ? (disabled ? -1 : 0) : undefined}
+      aria-disabled={interactive && disabled ? true : undefined}
+      aria-pressed={interactive ? pressed : undefined}
       sx={{
         backgroundColor: isTinted ? TINTED_BG[tone] : 'var(--ds-background-100)',
         border: `${borderWidth}px solid ${borderColor}`,
@@ -244,7 +276,7 @@ export const Card: React.FC<CardProps> = ({
         ...(isOutlined && {
           borderColor: selected ? 'var(--ds-blue-500)' : 'var(--ds-gray-300)',
         }),
-        ...(interactive && {
+        ...(actionable && {
           cursor: 'pointer',
           transition: 'box-shadow 120ms ease, transform 120ms ease, border-color 120ms ease',
           '&:hover': {
@@ -257,6 +289,11 @@ export const Card: React.FC<CardProps> = ({
             outlineOffset: 2,
           },
         }),
+        ...(interactive &&
+          disabled && {
+            cursor: 'default',
+            opacity: 0.5,
+          }),
         ...sx,
       }}
       {...rest}

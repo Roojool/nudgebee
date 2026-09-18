@@ -1358,7 +1358,7 @@ const automationFromScratchTour: TourDef = {
  *                          in filterOptions (pages/optimise/index.jsx) when their
  *                          UI_ENABLE_* toggle is on AND hasReadAccess passes, so
  *                          both steps are `optional` and silently skip otherwise
- *   #optimize-card-savings → the "Total Savings" WidgetCard
+ *   #optimize-card-savings → the "Total Savings" ds/Card
  *   #optimize-card-all     → the "All Recommendations" card — the category
  *                            stat-cards double as tabs (the category chips and
  *                            the Top Issues band were folded into the cards +

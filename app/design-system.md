@@ -566,10 +566,14 @@ Canonical content-card surface (consolidates `WidgetCard` and the removed `Custo
 | `tone`                           | `'neutral' \| 'info' \| 'success' \| 'warning' \| 'danger'` | `'neutral'`  | — (meaningful only with `variant='accent'\|'tinted'`) |
 | `interactive`                    | `boolean`                                                   | `false`      | — (required when `onClick` is set)                    |
 | `selected`                       | `boolean`                                                   | `false`      | —                                                     |
+| `disabled`                       | `boolean`                                                   | `false`      | — (with `interactive`: a dimmed, inert button)        |
+| `pressed`                        | `boolean`                                                   | —            | — (with `interactive`: emits `aria-pressed`)          |
 | `header` / `footer` / `children` | `ReactNode`                                                 | —            | —                                                     |
 | `onClick`                        | `(e) => void`                                               | —            | —                                                     |
 
-**Don't:** tint bg by hand (use `variant='tinted'`); nest Cards >1 deep; use `sx` for padding/shadow (use `size`/`elevation`); pass `tone` without `accent`/`tinted`; pass `onClick` without `interactive`.
+A clickable card that is unavailable right now stays a button: `interactive disabled` (role, `aria-disabled`, out of the tab order, no input). A card that is simply not clickable drops `interactive`. Toggle-style filter cards pass `pressed`. An `sx['&:hover']` replaces Card's hover (and its lift) entirely.
+
+**Don't:** tint bg by hand (use `variant='tinted'`); nest Cards >1 deep; use `sx` for padding/shadow (use `size`/`elevation`); pass `tone` without `accent`/`tinted`; pass `onClick`, `disabled` or `pressed` without `interactive`.
 
 #### `WidgetCard` — `import WidgetCard from '@ui/WidgetCard'` (legacy)
 
