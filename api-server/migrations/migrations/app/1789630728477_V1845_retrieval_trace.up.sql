@@ -17,8 +17,19 @@
 -- under an exclusive lock; nullable-no-default is a catalog-only change.
 -- Existing rows keep score/response and are identified by created_at IS NULL.
 
-ALTER TABLE "public"."llm_rag_audit" RENAME TO "llm_retrieval_trace";
-ALTER TABLE "public"."llm_retrieval_trace" RENAME COLUMN "response" TO "candidates";
+-- Guarded because dev had this hand-applied before it merged; everything after
+-- the renames is already idempotent.
+DO $$
+BEGIN
+    IF to_regclass('public.llm_retrieval_trace') IS NULL THEN
+        ALTER TABLE "public"."llm_rag_audit" RENAME TO "llm_retrieval_trace";
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = 'llm_retrieval_trace'
+                 AND column_name = 'response') THEN
+        ALTER TABLE "public"."llm_retrieval_trace" RENAME COLUMN "response" TO "candidates";
+    END IF;
+END $$;
 
 -- score held "the top document's score". With similarity, cross-encoder,
 -- weighted and judge scores now recorded per candidate, a single unlabelled
