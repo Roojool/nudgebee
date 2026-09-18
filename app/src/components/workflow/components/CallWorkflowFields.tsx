@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Typography, Switch, FormControlLabel } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Switch } from '@ui/Switch';
 import { Callout } from '@ui/Callout';
 import { ds } from 'src/utils/colors';
 import apiWorkflow from '@api1/workflow';
@@ -406,18 +407,13 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>Inputs</Typography>
-          <FormControlLabel
-            control={
-              <Switch
-                size='small'
-                checked={advancedInputs}
-                onChange={(e) => setAdvancedInputs(e.target.checked)}
-                disabled={viewOnlyMode}
-                data-testid='call-workflow-advanced-toggle'
-              />
-            }
-            label={<Typography sx={{ fontSize: 'var(--ds-text-small)' }}>Raw JSON</Typography>}
-            sx={{ m: 0 }}
+          <Switch
+            size='sm'
+            label='Raw JSON'
+            checked={advancedInputs}
+            onChange={(e) => setAdvancedInputs(e.target.checked)}
+            disabled={viewOnlyMode}
+            data-testid='call-workflow-advanced-toggle'
           />
         </Box>
 

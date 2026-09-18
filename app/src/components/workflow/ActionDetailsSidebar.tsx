@@ -1,5 +1,5 @@
 import React, { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Box, Typography, Switch as MuiSwitch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField } from '@mui/material';
+import { Box, Typography, Dialog, Chip, Tabs, Tab, Autocomplete, TextField } from '@mui/material';
 import { Callout } from '@ui/Callout';
 import { Switch } from '@ui/Switch';
 import { Button } from '@ui/Button';
@@ -4434,14 +4434,13 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                   : 'Skip this task without deleting it. The workflow will be rerouted: predecessors connect directly to successors. Re-enable to restore the original chain.'}
               </Typography>
             </Box>
-            {/* Stays on MUI Switch: ds/Switch does not forward data-* props, and dropping this testid
-                would break the automation contract with app-e2e-tests. */}
-            <MuiSwitch
+            <Switch
               data-testid='task-disable-switch'
+              aria-label='Disable task'
               checked={!!taskConfig.disabled}
               onChange={(e) => handleDisableToggle(e.target.checked)}
               disabled={viewOnlyMode || !onToggleDisable}
-              size='small'
+              size='sm'
             />
           </Box>
 

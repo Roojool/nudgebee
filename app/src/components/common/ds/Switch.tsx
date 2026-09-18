@@ -41,6 +41,8 @@ export interface SwitchProps {
   id?: string;
   name?: string;
   'aria-label'?: string;
+  /** data-* attributes (e.g. data-testid) land on the switch base — the span wrapping the input — as on MUI's Switch. */
+  [dataAttribute: `data-${string}`]: string | number | boolean | undefined;
 }
 
 const StyledSwitch = styled(MuiSwitch, {
@@ -86,26 +88,44 @@ const StyledSwitch = styled(MuiSwitch, {
   };
 });
 
-const Row = styled('div')({
+// The row is a <label> that WRAPS the switch, so clicking the text (or description) flips it —
+// as MUI's FormControlLabel does — without relying on ids. Callers sometimes reuse a static id
+// across repeated rows; an htmlFor would then target the first such input on the page.
+const noInactive = { shouldForwardProp: (prop: string): boolean => prop !== 'inactive' };
+
+const Row = styled(
+  'label',
+  noInactive
+)<{ inactive: boolean }>(({ inactive }) => ({
   display: 'inline-flex',
   alignItems: 'center',
   gap: 'var(--ds-space-3)',
-});
+  cursor: inactive ? 'not-allowed' : 'pointer',
+}));
 
-const RowSpread = styled('div')({
+const RowSpread = styled(
+  'label',
+  noInactive
+)<{ inactive: boolean }>(({ inactive }) => ({
   display: 'flex',
   alignItems: 'flex-start',
   justifyContent: 'space-between',
   gap: 'var(--ds-space-3)',
-});
+  cursor: inactive ? 'not-allowed' : 'pointer',
+}));
 
-const LabelText = styled('div')({
+const LabelText = styled(
+  'span',
+  noInactive
+)<{ inactive: boolean }>(({ inactive }) => ({
+  display: 'block',
   fontSize: 'var(--ds-text-body)',
   fontWeight: 'var(--ds-font-weight-medium)',
-  color: 'var(--ds-gray-700)',
-});
+  color: inactive ? 'var(--ds-gray-500)' : 'var(--ds-gray-700)',
+}));
 
-const DescriptionText = styled('div')({
+const DescriptionText = styled('span')({
+  display: 'block',
   fontSize: 'var(--ds-text-small)',
   color: 'var(--ds-gray-600)',
   marginTop: 2,
@@ -132,34 +152,50 @@ export function Switch({
   id,
   name,
   'aria-label': ariaLabel,
+  ...rest
 }: SwitchProps) {
   const isInteractionDisabled = disabled || loading;
+  const generatedId = React.useId();
+  const inputId = id ?? generatedId;
+  // Unique even when a caller reuses a static `id`.
+  const labelId = `${generatedId}-label`;
+  // Only data-* is part of the API; untyped callers' other props (className, onClick, …) are dropped.
+  const dataAttributes = Object.fromEntries(Object.entries(rest).filter(([key]) => key.startsWith('data-')));
+  // A string label names the input directly; any other label names it by reference, so a
+  // description inside the wrapping <label> doesn't become part of the name.
+  const labelledBy = ariaLabel === undefined && label !== undefined && typeof label !== 'string' ? labelId : undefined;
 
   const switchEl = loading ? (
-    <SpinnerSlot dsSize={size} aria-busy='true'>
+    <SpinnerSlot dsSize={size} aria-busy='true' {...dataAttributes}>
       <CircularProgress size={size === 'sm' ? 12 : 14} sx={{ color: 'var(--ds-blue-500)' }} />
     </SpinnerSlot>
   ) : (
     <StyledSwitch
+      {...dataAttributes}
       dsSize={size}
       checked={checked}
       onChange={onChange}
       disabled={isInteractionDisabled}
-      id={id}
+      id={inputId}
       name={name}
       inputProps={{
         'aria-label': ariaLabel ?? (typeof label === 'string' ? label : undefined),
+        'aria-labelledby': labelledBy,
       }}
     />
   );
 
   if (description !== undefined) {
     return (
-      <RowSpread>
-        <div>
-          {label !== undefined && <LabelText>{label}</LabelText>}
+      <RowSpread inactive={isInteractionDisabled}>
+        <span>
+          {label !== undefined && (
+            <LabelText id={labelId} inactive={isInteractionDisabled}>
+              {label}
+            </LabelText>
+          )}
           <DescriptionText>{description}</DescriptionText>
-        </div>
+        </span>
         {switchEl}
       </RowSpread>
     );
@@ -167,8 +203,10 @@ export function Switch({
 
   if (label !== undefined) {
     return (
-      <Row>
-        <LabelText>{label}</LabelText>
+      <Row inactive={isInteractionDisabled}>
+        <LabelText id={labelId} inactive={isInteractionDisabled}>
+          {label}
+        </LabelText>
         {switchEl}
       </Row>
     );

@@ -746,8 +746,11 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
               checked={enabled}
               onChange={(_e, next) => setEnabled(next)}
               label={
+                // span, not <p>: ds/Switch wraps its label in a <label>.
                 <Typography
+                  component='span'
                   sx={{
+                    display: 'block',
                     fontSize: 'var(--ds-text-body)',
                     fontWeight: 'var(--ds-font-weight-medium)',
                     minWidth: ds.space.mul(0, 60),
@@ -897,7 +900,9 @@ const BudgetEditModal = ({ open, onClose, onSaved, config, maxCaps, systemDefaul
               onChange={(_e, next) => setBudgetDisabled(next)}
               label={
                 <Typography
+                  component='span'
                   sx={{
+                    display: 'block',
                     fontSize: 'var(--ds-text-body)',
                     fontWeight: 'var(--ds-font-weight-semibold)',
                     color: budgetDisabled ? 'var(--ds-red-600)' : 'var(--ds-gray-700)',

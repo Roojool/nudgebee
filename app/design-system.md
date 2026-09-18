@@ -1139,8 +1139,13 @@ Immediate on/off toggle (no submit step). Label always on the LEFT. **Variants:*
 | `description`          | `ReactNode`                         | —       | —   |
 | `size`                 | `'sm' \| 'md'` (sm 28×16, md 36×20) | `'md'`  | —   |
 | `disabled` / `loading` | `boolean`                           | `false` | —   |
+| `id` / `name`          | `string` (`id` lands on the input)  | —       | —   |
+| `aria-label`           | `string`                            | —       | —   |
+| `data-*`               | forwarded to the switch base span   | —       | —   |
 
-**Don't:** use in a form with a submit button (use `Checkbox`); put the label on the right; pair with a confirmation Dialog for non-destructive changes.
+With a `label`, the whole row is a `<label>` wrapping the switch: clicking the label or description flips it, and it doesn't depend on `id` (so a repeated static `id` can't toggle the wrong switch). A string `label` names the input; a ReactNode label names it via `aria-labelledby`, so pass a phrasing element (`<Typography component='span'>`, not a `<p>`). With no visible label, pass `aria-label`. `data-testid` sits inside the label, so Playwright's `check()`/`isChecked()` on it reach the input. Only `data-*` extra props are forwarded.
+
+**Don't:** use in a form with a submit button (use `Checkbox`); put the label on the right; pair with a confirmation Dialog for non-destructive changes; leave a label-less switch without `aria-label`.
 
 #### `Toggle` — `import { Toggle } from '@ui/Toggle'`
 
