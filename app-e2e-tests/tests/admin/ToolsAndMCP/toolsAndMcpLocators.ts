@@ -183,8 +183,8 @@ export class ToolsAndMcpLocators extends CommonLocators {
       .or(this.toolsListing.getByRole("button", { name: CREATE_TOOL_BTN_NAME }))
       .first();
 
-    // ds/Banner with tone='info' renders role="status" (Banner.tsx picks 'alert'
-    // only for critical/warning). Filtered on its own copy so the toast region,
+    // ds/Banner with tone='info' renders role="status" (feedbackRole in
+    // ds/internal/feedbackTones picks 'alert' only for critical/warning). Filtered on its own copy so the toast region,
     // which carries the same role, cannot satisfy it.
     this.mcpBanner = page
       .getByRole("status")

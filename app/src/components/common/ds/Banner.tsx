@@ -16,7 +16,8 @@
  *
  * Don't (per spec):
  *   - Don't render two banners stacked on the same surface. The more severe wins;
- *     the other becomes a Callout in the page body.
+ *     fold the other into it, or — if it concerns one field — move it next to that
+ *     field as a Callout.
  *   - Don't make a Banner dismissible if dismissing it loses the only signal
  *     that something is wrong. Critical-tone Banners are usually non-dismissible.
  *   - Don't put more than two actions in a Banner. Long action lists belong in a Modal.
@@ -24,13 +25,10 @@
  */
 import * as React from 'react';
 import { Box, ButtonBase } from '@mui/material';
-import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
-import ReportProblemOutlinedIcon from '@mui/icons-material/ReportProblemOutlined';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import CloseIcon from '@mui/icons-material/Close';
+import { FEEDBACK_TONES, feedbackRole, resolveFeedbackTone, type FeedbackTone } from './internal/feedbackTones';
 
-export type BannerTone = 'info' | 'success' | 'warning' | 'critical';
+export type BannerTone = FeedbackTone;
 export type BannerSurface = 'page' | 'section';
 
 export interface BannerAction {
@@ -62,50 +60,6 @@ export interface BannerProps {
   id?: string;
 }
 
-interface ToneTokens {
-  bg: string;
-  border: string;
-  iconColor: string;
-  titleColor: string;
-  messageColor: string;
-  Icon: React.ElementType;
-}
-
-const TONE_TOKENS: Record<BannerTone, ToneTokens> = {
-  info: {
-    bg: 'var(--ds-blue-100)',
-    border: 'var(--ds-blue-200)',
-    iconColor: 'var(--ds-blue-600)',
-    titleColor: 'var(--ds-blue-700)',
-    messageColor: 'var(--ds-blue-700)',
-    Icon: InfoOutlinedIcon,
-  },
-  success: {
-    bg: 'var(--ds-green-100)',
-    border: 'var(--ds-green-200)',
-    iconColor: 'var(--ds-green-600)',
-    titleColor: 'var(--ds-green-700)',
-    messageColor: 'var(--ds-green-700)',
-    Icon: CheckCircleOutlineIcon,
-  },
-  warning: {
-    bg: 'var(--ds-amber-100)',
-    border: 'var(--ds-amber-200)',
-    iconColor: 'var(--ds-amber-700)',
-    titleColor: 'var(--ds-amber-700)',
-    messageColor: 'var(--ds-amber-700)',
-    Icon: ReportProblemOutlinedIcon,
-  },
-  critical: {
-    bg: 'var(--ds-red-100)',
-    border: 'var(--ds-red-200)',
-    iconColor: 'var(--ds-red-600)',
-    titleColor: 'var(--ds-red-700)',
-    messageColor: 'var(--ds-red-700)',
-    Icon: ErrorOutlineIcon,
-  },
-};
-
 const SURFACE_TOKENS: Record<BannerSurface, { padding: string; radius: string; marginBottom: string }> = {
   page: { padding: 'var(--ds-space-3) var(--ds-space-4)', radius: 'var(--ds-radius-lg)', marginBottom: 'var(--ds-space-4)' },
   section: { padding: 'var(--ds-space-2) var(--ds-space-3)', radius: 'var(--ds-radius-lg)', marginBottom: 'var(--ds-space-3)' },
@@ -123,7 +77,8 @@ export function Banner({
   className,
   id,
 }: BannerProps) {
-  const cfg = TONE_TOKENS[tone];
+  const safeTone = resolveFeedbackTone(tone, 'Banner');
+  const cfg = FEEDBACK_TONES[safeTone];
   const surf = SURFACE_TOKENS[surface];
   const Icon = cfg.Icon;
 
@@ -133,7 +88,7 @@ export function Banner({
     console.warn('Banner: spec violation — more than 2 actions; long action lists belong in a Modal.');
   }
 
-  const role = tone === 'critical' || tone === 'warning' ? 'alert' : 'status';
+  const role = feedbackRole(safeTone);
 
   const actionsNode =
     actions && actions.length > 0 ? (
@@ -155,7 +110,7 @@ export function Banner({
                 ? {
                     fontSize: 'var(--ds-text-small)',
                     fontWeight: 'var(--ds-font-weight-medium)',
-                    color: cfg.titleColor,
+                    color: cfg.textColor,
                     textDecoration: 'underline',
                     padding: 0,
                     '&:hover': { textDecoration: 'none' },
@@ -166,7 +121,7 @@ export function Banner({
                     padding: '0 10px',
                     fontSize: 'var(--ds-text-caption)',
                     fontWeight: 'var(--ds-font-weight-medium)',
-                    color: cfg.titleColor,
+                    color: cfg.textColor,
                     backgroundColor: 'var(--ds-background-100)',
                     border: `1px solid ${cfg.border}`,
                     borderRadius: 'var(--ds-radius-sm)',
@@ -186,7 +141,6 @@ export function Banner({
       id={id}
       className={className}
       role={role}
-      aria-live={tone === 'critical' ? 'assertive' : 'polite'}
       sx={{
         display: 'flex',
         alignItems: 'center',
@@ -195,7 +149,7 @@ export function Banner({
         backgroundColor: cfg.bg,
         border: `1px solid ${cfg.border}`,
         borderRadius: surf.radius,
-        color: cfg.messageColor,
+        color: cfg.textColor,
       }}
     >
       <Box component={Icon as React.ElementType} aria-hidden='true' sx={{ fontSize: 18, color: cfg.iconColor, flexShrink: 0 }} />
@@ -206,7 +160,7 @@ export function Banner({
             sx={{
               fontSize: 'var(--ds-text-body)',
               fontWeight: 'var(--ds-font-weight-semibold)',
-              color: cfg.titleColor,
+              color: cfg.textColor,
             }}
           >
             {title}

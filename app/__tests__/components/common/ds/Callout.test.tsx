@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { Callout } from '@ui/Callout';
+import { Callout, type CalloutTone } from '@ui/Callout';
 
 describe('Callout', () => {
   it('renders the message from either prop or children', () => {
@@ -11,7 +11,7 @@ describe('Callout', () => {
     expect(screen.getByRole('status')).toHaveTextContent('From children');
   });
 
-  // Same split as Banner: warning and critical interrupt a screen reader, a hint doesn't.
+  // Warning and critical interrupt a screen reader, a hint doesn't — the role carries that.
   it.each([
     ['info', 'status'],
     ['success', 'status'],
@@ -22,15 +22,23 @@ describe('Callout', () => {
     expect(screen.getByRole(role)).toHaveTextContent('Hint');
   });
 
-  // role='alert' implies assertive; an explicit aria-live must never contradict it.
-  it.each([
-    ['info', 'polite'],
-    ['success', 'polite'],
-    ['warning', 'assertive'],
-    ['critical', 'assertive'],
-  ] as const)('gives tone %s aria-live %s, matching its role', (tone, live) => {
+  // role='alert' already implies assertive and role='status' polite. An explicit aria-live on
+  // top either contradicts the role or makes some screen readers announce twice.
+  it.each(['info', 'success', 'warning', 'critical'] as const)('sets no explicit aria-live for tone %s', (tone) => {
     const { container } = render(<Callout tone={tone} message='Hint' />);
-    expect(container.firstElementChild).toHaveAttribute('aria-live', live);
+    expect(container.firstElementChild).not.toHaveAttribute('aria-live');
+  });
+
+  // An untyped (.jsx) caller can pass any string, e.g. MUI Alert's 'error'. It falls back to
+  // info (and warns in development).
+  it.each(['error', 'toString', 'constructor'])('falls back to the info tone for unknown tone %s', (tone) => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    render(<Callout tone={tone as unknown as CalloutTone} message='Still shown' />);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Callout: unknown tone'));
+    warn.mockRestore();
+    expect(screen.getByRole('status')).toHaveTextContent('Still shown');
+    // Specifically the info tone's icon, so a fallback to another tone would fail.
+    expect(screen.getByTestId('InfoOutlinedIcon')).toBeInTheDocument();
   });
 
   it('passes data-testid and id through to the root', () => {
@@ -39,13 +47,15 @@ describe('Callout', () => {
     expect(el).toHaveAttribute('id', 'mcp-hint');
   });
 
-  // The tone decides how a screen reader treats it, so a caller must not be able
-  // to swap that out through the prop spread.
-  it('keeps the tone-driven role and aria-live even when a caller passes its own', () => {
-    render(<Callout tone='critical' role='log' aria-live='polite' message='Boom' />);
+  // `role` is a compile error for typed callers, but `aria-live` (hyphenated) type-checks and an
+  // untyped caller can pass either.
+  // The tone must win so the accessibility semantics can't be swapped out.
+  it('ignores a role or aria-live a caller passes', () => {
+    const untyped = { role: 'log', 'aria-live': 'polite' } as Record<string, string>;
+    render(<Callout tone='critical' message='Boom' {...untyped} />);
     const el = screen.getByRole('alert');
     expect(el).toHaveTextContent('Boom');
-    expect(el).toHaveAttribute('aria-live', 'assertive');
+    expect(el).not.toHaveAttribute('aria-live');
     expect(screen.queryByRole('log')).toBeNull();
   });
 

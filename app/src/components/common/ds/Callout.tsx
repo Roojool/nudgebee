@@ -21,13 +21,10 @@
  */
 import * as React from 'react';
 import { Box } from '@mui/material';
-import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
-import ReportProblemOutlinedIcon from '@mui/icons-material/ReportProblemOutlined';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import { Button } from './Button';
+import { FEEDBACK_TONES, feedbackRole, resolveFeedbackTone, type FeedbackTone } from './internal/feedbackTones';
 
-export type CalloutTone = 'info' | 'success' | 'warning' | 'critical';
+export type CalloutTone = FeedbackTone;
 
 export interface CalloutAction {
   label: React.ReactNode;
@@ -36,66 +33,35 @@ export interface CalloutAction {
   id?: string;
 }
 
-export interface CalloutProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children'> {
+// role and aria-live are left out: the tone decides them (see below). Passing `role` is a
+// compile error; `aria-live`, like any hyphenated JSX attribute, still type-checks, so it is
+// also dropped at runtime.
+export interface CalloutProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children' | 'role' | 'aria-live'> {
   tone?: CalloutTone;
   /** The hint itself. `children` is accepted as an alias. */
   message?: React.ReactNode;
   children?: React.ReactNode;
   /** One optional link action, rendered under the message. */
   action?: CalloutAction;
-  className?: string;
-  id?: string;
 }
 
-const TONE_TOKENS: Record<CalloutTone, { bg: string; border: string; iconColor: string; textColor: string; Icon: React.ElementType }> = {
-  info: {
-    bg: 'var(--ds-blue-100)',
-    border: 'var(--ds-blue-200)',
-    iconColor: 'var(--ds-blue-600)',
-    textColor: 'var(--ds-blue-700)',
-    Icon: InfoOutlinedIcon,
-  },
-  success: {
-    bg: 'var(--ds-green-100)',
-    border: 'var(--ds-green-200)',
-    iconColor: 'var(--ds-green-600)',
-    textColor: 'var(--ds-green-700)',
-    Icon: CheckCircleOutlineIcon,
-  },
-  warning: {
-    bg: 'var(--ds-amber-100)',
-    border: 'var(--ds-amber-200)',
-    iconColor: 'var(--ds-amber-700)',
-    textColor: 'var(--ds-amber-700)',
-    Icon: ReportProblemOutlinedIcon,
-  },
-  critical: {
-    bg: 'var(--ds-red-100)',
-    border: 'var(--ds-red-200)',
-    iconColor: 'var(--ds-red-600)',
-    textColor: 'var(--ds-red-700)',
-    Icon: ErrorOutlineIcon,
-  },
-};
-
-export function Callout({ tone = 'info', message, children, action, className, id, ...rest }: CalloutProps): React.ReactElement {
-  const cfg = TONE_TOKENS[tone];
+export function Callout({ tone = 'info', message, children, action, ...rest }: CalloutProps): React.ReactElement {
+  const safeTone = resolveFeedbackTone(tone, 'Callout');
+  const cfg = FEEDBACK_TONES[safeTone];
   const Icon = cfg.Icon;
   const body = message ?? children;
 
-  // A warning or a failure interrupts, a hint does not. aria-live follows the role so the
-  // two never disagree (role='alert' already implies assertive).
-  const role = tone === 'critical' || tone === 'warning' ? 'alert' : 'status';
+  // Shared with Banner: warning/critical interrupt (role='alert'), info/success don't
+  // (role='status'). The role alone carries the urgency — no explicit aria-live.
+  const role = feedbackRole(safeTone);
 
   return (
     <Box
-      // Spread first: the tone drives role/aria-live, so a caller can't replace
-      // the accessibility semantics by passing its own.
+      // Spread first so the tone-driven role wins; aria-live={undefined} drops any aria-live a
+      // caller passes (hyphenated attributes bypass TypeScript's excess-property check).
       {...rest}
-      id={id}
-      className={className}
       role={role}
-      aria-live={role === 'alert' ? 'assertive' : 'polite'}
+      aria-live={undefined}
       sx={{
         display: 'flex',
         alignItems: 'flex-start',
@@ -106,7 +72,7 @@ export function Callout({ tone = 'info', message, children, action, className, i
         borderRadius: 'var(--ds-radius-md)',
         color: cfg.textColor,
         fontSize: 'var(--ds-text-caption)',
-        lineHeight: 1.5,
+        lineHeight: 'var(--ds-text-caption-lh)',
       }}
     >
       <Box component={Icon as React.ElementType} aria-hidden='true' sx={{ fontSize: 14, color: cfg.iconColor, flexShrink: 0, marginTop: '1px' }} />

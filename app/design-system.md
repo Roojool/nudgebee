@@ -1385,7 +1385,7 @@ Submenus (legacy `subMenu`) are intentionally not carried over (DS caps nesting 
 
 #### `Banner` — `import { Banner } from '@ui/Banner'`
 
-Page/section-level persistent message (one per surface, max). **Variants:** `tone` `info`·`success`·`warning`·`critical` · `surface` `page`·`section` · `actionsPlacement` `inline`·`below`.
+Page/section-level persistent message (one per surface, max). **Variants:** `tone` `info`·`success`·`warning`·`critical` · `surface` `page`·`section` · `actionsPlacement` `inline`·`below`. `warning`/`critical` render `role='alert'` (interrupts), `info`/`success` render `role='status'` (polite) — same rule and palette as `Callout` (`ds/internal/feedbackTones`).
 
 ```tsx
 <Banner tone='warning' title='Quota almost full' message="You're at 90% of your node quota." />
@@ -1420,7 +1420,7 @@ Compact inline hint, in the flow of a form. **Variants:** `tone` `info`·`succes
 | `action`  | `{ label, onClick, id? }`                  | —        | —   |
 | `id`      | `string`                                   | —        | —   |
 
-Pass the text as `message` or as children — one of the two, though neither is type-enforced. Other props (`data-testid`, `className`, …) pass through to the root, except `role`/`aria-live`, which the tone decides (`warning`/`critical`: `alert` + assertive; `info`/`success`: `status` + polite). `info`/`success` render `role='status'`; `warning`/`critical` render `role='alert'`.
+Pass the text as `message` or as children — one of the two, though neither is type-enforced. Other props (`data-testid`, `className`, `id`, …) pass through to the root. `role` and `aria-live` aren't accepted: the tone sets the role — `warning`/`critical` render `role='alert'` (interrupts), `info`/`success` render `role='status'` (polite) — and the role alone carries the urgency. An unknown tone falls back to `info`, with a console warning in development.
 
 **Don't:** use it as a page- or section-level notice (`Banner`); give it more than one action; use it for a field's own validation error (`Input` has `error`/`helperText`).
 

@@ -14,12 +14,16 @@
     <h2>Callout or Banner</h2>
     <p>
       A Banner speaks for a page or a section and is padded to match; a Callout speaks for one field. Use a Banner when the message survives beyond
-      the field it sits next to, and a Callout when it explains what the user is filling in. Never stack the two on one surface.
+      the field it sits next to, and a Callout when it explains what the user is filling in. The two can share a page when the Callout sits next to
+      the field it explains. A page-level message that loses to a more severe Banner folds into that Banner, or moves next to the field it concerns —
+      it never becomes a Callout floating in the page body.
     </p>
     <h2>Tone and action</h2>
     <p>
-      Four tones: info, success, warning and critical. Warning and critical announce themselves to screen readers; info and success do not. One
-      optional action renders under the message as a link-tone button — a Callout is a hint, not a decision, so it never carries two.
+      Four tones: info, success, warning and critical. Warning and critical render as alerts and interrupt a screen reader; info and success are
+      status regions, so a change to their text is read politely, without interrupting. An unknown tone falls back to info (with a warning in
+      development). One optional action renders under the message as a link-tone button — a Callout is a hint, not a decision, so it never carries
+      two.
     </p>
   </body>
 </html>
