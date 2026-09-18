@@ -12,6 +12,7 @@ import { Banner } from '@ui/Banner';
 import { safeJSONParse } from 'src/utils/common';
 import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX } from '@lib/annotationKeys';
+import { detectGitOpsManager } from '@utils/workloadManager';
 import recommendationApi from '@api1/recommendation';
 import apiTickets from '@api1/tickets';
 import k8sApi from '@api1/kubernetes';
@@ -30,30 +31,6 @@ import { detectGitProvider } from './gitProvider';
 
 const betaBadge = <SafeIcon src={BetaIcon} alt='Beta Icon' width={16} height={12} style={{ marginLeft: ds.space[0] }} />;
 const externalLinkBadge = <SafeIcon src={ExternalLinkIcon} alt='Open in new tab' width={12} height={12} />;
-
-// Detects whether a workload is declaratively managed (GitOps / Helm / Argo CD /
-// Flux) so a manual "Deploy Fix" — which patches the live pods directly — can warn
-// that the change will be reverted on the next reconcile. Returns the manager's
-// display name and the git repo to raise a PR against, when either is known.
-const detectGitOpsManager = (
-  annotations: Record<string, string> = {},
-  labels: Record<string, string> = {}
-): { manager: string | null; gitRepo: string | null } => {
-  const annKeys = Object.keys(annotations);
-  const labKeys = Object.keys(labels);
-  const gitRepo = annotations[ANNOTATIONS.CI_GIT_REPO] || annotations[ANNOTATIONS.WORKLOAD_GIT_REPO] || null;
-  let manager: string | null = null;
-  if (annKeys.some((k) => k.startsWith('argocd.argoproj.io/')) || labels['argocd.argoproj.io/instance']) {
-    manager = 'Argo CD';
-  } else if ([...annKeys, ...labKeys].some((k) => k.includes('fluxcd.io'))) {
-    manager = 'Flux';
-  } else if (labels['app.kubernetes.io/managed-by'] === 'Helm' || annotations['meta.helm.sh/release-name']) {
-    manager = 'Helm';
-  } else if (gitRepo) {
-    manager = 'GitOps';
-  }
-  return { manager, gitRepo };
-};
 
 interface ResolveModalProps {
   open: boolean;

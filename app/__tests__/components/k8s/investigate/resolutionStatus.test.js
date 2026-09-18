@@ -85,8 +85,7 @@ describe('describeResolution', () => {
 // operators this about Nubi's actions — the card actions should not be silent about it.
 describe('describeActionKind', () => {
   it('classifies the actions we can classify honestly', () => {
-    expect(describeActionKind('LastDeploymentCard')).toMatchObject({ kind: 'fix', text: 'Fix', tone: 'success' });
-    expect(describeActionKind('MemoryAllocationCard')).toMatchObject({ kind: 'fix', tone: 'success' });
+    expect(describeActionKind('MemoryAllocationCard')).toMatchObject({ kind: 'fix', text: 'Fix', tone: 'success' });
     // The code fix changes the cause in the source; its effect line carries the "not until it is
     // merged and deployed" caveat that the chip alone cannot.
     expect(describeActionKind('AskAiCard')).toMatchObject({ kind: 'fix', tone: 'success' });
@@ -99,8 +98,16 @@ describe('describeActionKind', () => {
     expect(describeActionKind(undefined)).toBeNull();
   });
 
+  // A rollback removes the cause only when the change caused the problem, which nothing on the
+  // page knows. Tagged "Fix", it rode on a Slack rate-limit spike and on an OOM three weeks after an
+  // unrelated env edit, and stayed next to "Recurred 5 times since — this did not stop it".
+  it('does not call a rollback a fix', () => {
+    expect(describeActionKind('LastDeploymentCard')).toBeNull();
+    expect(describeActionKind('LastDeploymentCard_0')).toBeNull();
+  });
+
   it('explains the difference in words, not just colour', () => {
-    expect(describeActionKind('LastDeploymentCard').help).toMatch(/removes the cause/i);
+    expect(describeActionKind('MemoryAllocationCard').help).toMatch(/removes the cause/i);
   });
 });
 
@@ -108,12 +115,14 @@ describe('describeActionKind', () => {
 // running pod. The effect line is where that is stated.
 describe('describeActionEffect', () => {
   it('names the consequence, not just the change', () => {
-    expect(describeActionEffect('LastDeploymentCard')).toMatch(/rolling restart/i);
+    expect(describeActionEffect('LastDeploymentCard')).toMatch(/restarts the pods/i);
     expect(describeActionEffect('MemoryAllocationCard')).toMatch(/rolling restart/i);
   });
 
-  it('says whether the action can be undone', () => {
-    expect(describeActionEffect('LastDeploymentCard')).toMatch(/reversible/i);
+  // It writes back only the fields the change touched — "puts the workload back on the spec it ran
+  // before" promised a whole-spec restore it never did.
+  it('says a rollback writes back only what the change replaced', () => {
+    expect(describeActionEffect('LastDeploymentCard')).toMatch(/values this change replaced/i);
   });
 
   // The code fix is the one action that changes nothing when it runs — approving it opens a PR.
@@ -196,7 +205,7 @@ describe('describeUndo', () => {
 
   it('offers to undo a revert from the event diff', () => {
     const u = describeUndo(done(), 'LastDeploymentCard');
-    expect(u.label).toBe('Undo revert');
+    expect(u.label).toBe('Undo rollback');
     expect(u.payload).toMatchObject({ revert: true, undo: true });
   });
 
@@ -237,19 +246,14 @@ describe('describeUndo', () => {
 // does not. Keying on the raw id silently skipped every numbered card, so the revert card lost its
 // Fix label, its effect line and its Undo button while the resource card kept all three.
 describe('card ids with a positional suffix', () => {
-  it('classifies a suffixed card the same as a bare one', () => {
-    expect(describeActionKind('LastDeploymentCard_0')).toMatchObject({ kind: 'fix' });
-    expect(describeActionKind('LastDeploymentCard_3')).toMatchObject({ kind: 'fix' });
-    expect(describeActionKind('LastDeploymentCard')).toMatchObject({ kind: 'fix' });
-  });
-
   it('describes the effect of a suffixed card', () => {
-    expect(describeActionEffect('LastDeploymentCard_0')).toMatch(/rolling restart/i);
+    expect(describeActionEffect('LastDeploymentCard_0')).toBe(describeActionEffect('LastDeploymentCard'));
+    expect(describeActionEffect('LastDeploymentCard_0')).toBeTruthy();
   });
 
   it('offers Undo on a suffixed card', () => {
     const u = describeUndo({ id: 'r1', status: 'Success' }, 'LastDeploymentCard_0');
-    expect(u).toMatchObject({ label: 'Undo revert' });
+    expect(u).toMatchObject({ label: 'Undo rollback' });
   });
 
   // Only a trailing index is stripped; an unrelated card must not be coerced into a known one.
@@ -263,7 +267,7 @@ describe('describeActionTitle', () => {
   // The card text names the finding, not the action. Attaching a state to the finding produced
   // "Last Deployment Change · Done", which reads as the deployment change being done.
   it('names what the action does, not what the card found', () => {
-    expect(describeActionTitle('LastDeploymentCard_0', 'Last Deployment Change')).toBe('Revert the last deployment change');
+    expect(describeActionTitle('LastDeploymentCard_0', 'Last Deployment Change')).toBe('Roll back the last deployment change');
     expect(describeActionTitle('MemoryAllocationCard', 'Check if Resource allocation is sufficient')).toBe('Adjust resource requests and limits');
   });
 

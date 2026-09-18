@@ -29,6 +29,7 @@ import {
   describeUndo,
   describeActionTitle,
   describeUndoTarget,
+  describeChoiceTitle,
   cardOffersAction,
 } from '@components/k8s/investigate/resolutionStatus';
 import EventRaisePrPanel from '@components/k8s/investigate/cards/EventRaisePrPanel';
@@ -294,11 +295,19 @@ const remediationRunLabel = (run, options = []) => {
   const data = typeof run?.data === 'string' ? safeJSONParse(run.data) : run?.data;
   const cardId = data?.data?.card_id;
   if (cardId) {
+    // Named by what the run did, the same words as its row — the card's own title names the
+    // evidence ("Deployment Changes"), which says nothing about what was run.
     const card = options.find((option) => option?.id === cardId);
-    if (card?.text) return card.text;
     // The card is not on this event any more (rules change, evidence ages out); fall back to a
     // readable form of its id rather than showing the raw "MemoryAllocationCard".
-    return cardId.replace(/Card$/, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+    return describeActionTitle(
+      cardId,
+      card?.text ||
+        cardId
+          .replace(/_\d+$/, '')
+          .replace(/Card$/, '')
+          .replace(/([a-z])([A-Z])/g, '$1 $2')
+    );
   }
   if (run?.type === 'CommandExecution') {
     const summary = commandSummary(run?.type_reference_id);
@@ -1828,7 +1837,8 @@ const Investigate = () => {
 
   // How many ways there are to act on this event right now. Drives the tab badge and the
   // signpost at the end of the analysis, so both agree without recomputing the filter.
-  const remediationActionCount = matchedOptions.filter(shouldShowResolveButton).length;
+  const remediationRows = matchedOptions.filter(shouldShowResolveButton);
+  const remediationActionCount = remediationRows.length;
 
   // Undo dispatches through the same apply endpoint as everything else, so it is recorded, audited
   // and polled exactly like the action it reverses — an undo is an action, not a special case.
@@ -2719,7 +2729,7 @@ const Investigate = () => {
                                     overflow: 'hidden',
                                   }}
                                 >
-                                  {matchedOptions.filter(shouldShowResolveButton).map((resolvableOption, actionIndex) => {
+                                  {remediationRows.map((resolvableOption, actionIndex) => {
                                     const resolution = isK8s ? getResolutionForCard(resolvableOption.id) : undefined;
                                     const outcome = resolution ? describeResolution(resolution) : null;
                                     const settled = resolution && resolution.status !== 'Failed';
@@ -2745,25 +2755,38 @@ const Investigate = () => {
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], flexWrap: 'wrap' }}>
                                             <Text
-                                              value={describeActionTitle(resolvableOption.id, resolvableOption.text, resolvableOption.actionSubject)}
+                                              value={
+                                                resolvableOption.choosesTarget
+                                                  ? describeChoiceTitle(resolvableOption.id, resolvableOption.text)
+                                                  : describeActionTitle(resolvableOption.id, resolvableOption.text, resolvableOption.actionSubject)
+                                              }
                                               sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }}
                                             />
                                             {/* Whether this removes the cause or only restores service —
                                                 the distinction the remediation panel already draws for
                                                 Nubi's actions, applied to these too. */}
                                             {(() => {
-                                              const kind = describeActionKind(resolvableOption.id);
+                                              // Once it has run, what happened (Done, recurred since) is the answer; a
+                                              // "Fix" chip beside "this did not stop it" contradicts it.
+                                              const kind = settled ? null : describeActionKind(resolvableOption.id);
                                               return kind ? <Label tone={kind.tone} text={kind.text} size='sm' tooltip={kind.help} /> : null;
                                             })()}
                                           </Box>
-                                          {/* What it will do, before it is done — the confirmation dialog
-                                              shows a diff but never mentions the rolling restart. */}
-                                          {!settled && describeActionEffect(resolvableOption.id) && (
-                                            <Text
-                                              value={describeActionEffect(resolvableOption.id)}
-                                              sx={{ fontSize: ds.text.caption, color: ds.gray[600] }}
-                                            />
-                                          )}
+                                          {/* What it acts on and what it will do, before it is done — the
+                                              confirmation dialog shows a diff but never mentions the
+                                              rolling restart. The subject line (when the change landed,
+                                              what it touched) stays once the action has run. */}
+                                          {(() => {
+                                            // With several changes to pick from, the dialog states the effect beside the pick.
+                                            const effect =
+                                              settled || resolvableOption.choosesTarget ? null : describeActionEffect(resolvableOption.id);
+                                            const detail = resolvableOption.actionDetail;
+                                            // The effect is a sentence on its own; after the detail it continues the line.
+                                            const line = [detail, effect && detail ? effect.charAt(0).toLowerCase() + effect.slice(1) : effect]
+                                              .filter(Boolean)
+                                              .join(' · ');
+                                            return line ? <Text value={line} sx={{ fontSize: ds.text.caption, color: ds.gray[600] }} /> : null;
+                                          })()}
                                           {outcome?.isSlow && (
                                             <Text
                                               value='Taking longer than expected — it may still complete.'
@@ -3050,7 +3073,7 @@ const Investigate = () => {
                               </Box>
                             )}
 
-                            {matchedOptions
+                            {remediationRows
                               .filter((option) => option.id === openResolveComponentId)
                               .map((option) => {
                                 const ResolveComponent = option?.getResolveComponent?.();

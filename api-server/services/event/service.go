@@ -26,6 +26,7 @@ import (
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"nudgebee/services/triage"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -1705,33 +1706,107 @@ func assertNoLaterChangeOnSamePaths(ctx *security.RequestContext, change models.
 		ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
 		return common.ErrorBadRequest("event resolution: cannot verify whether a later change touched the same fields; not reverting")
 	}
-	// What the change being reverted left behind at each path. A later change only conflicts if it
-	// moved the field somewhere ELSE: reverting writes this change's `old` back, which is safe
-	// exactly while the live value is still this change's `new`.
-	appliedValues := changedValuesOf(change)
-
-	for _, l := range later {
-		for path, laterValue := range changedValuesOf(l) {
-			if !targeted[path] {
-				continue
-			}
-			// The same change recorded twice is not a later change. Dev has these in quantity —
-			// undo-test-app carries pairs of config-change events sharing a timestamp, a path and
-			// both values — and treating a duplicate record as a conflict would refuse a revert
-			// that is perfectly safe, which is worse than the gap it was meant to close.
-			if applied, ok := appliedValues[path]; ok && sameChangedValue(applied, laterValue) {
-				continue
-			}
-			when := ""
-			if l.StartsAt != nil {
-				when = l.StartsAt.UTC().Format(time.RFC3339)
-			}
-			return common.ErrorBadRequest(fmt.Sprintf(
-				"event resolution: %q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
-				path, when))
-		}
+	if reason := laterChangeConflict(change, targeted, later); reason != "" {
+		return common.ErrorBadRequest("event resolution: " + reason)
 	}
 	return nil
+}
+
+// listIndex matches one list position in a recorded path: "env[2]" in
+// "spec.template.spec.containers[0].env[2].value". listItem matches a path naming a whole list item.
+var (
+	listIndex = regexp.MustCompile(`\[(\d+)\]`)
+	listItem  = regexp.MustCompile(`^(.*)\[(\d+)\]$`)
+)
+
+// laterChangeConflict reports why reverting `change` at the targeted paths would be unsafe given
+// the changes recorded after it, or "" when it is safe.
+//
+// Recorded paths address list items by POSITION ("containers[1].env[2]"), and the agent writes a
+// revert at that position. A position only means the same item while nothing was added to or
+// removed from the list ahead of it, so three kinds of later change conflict:
+//   - the same path moved to a different value (reverting would undo that later change);
+//   - a parent or child of the path changed — a whole env entry replaced, or one field inside an
+//     entry the revert rewrites whole;
+//   - an item was added or removed at or before the position in the same list, so the position
+//     now points at a different item and the revert would overwrite the wrong entry.
+//
+// A later record carrying the value this change itself left is the same change recorded twice
+// (dev has these in quantity) and is not a conflict.
+func laterChangeConflict(change models.Event, targeted map[string]bool, later []models.Event) string {
+	// What the change being reverted left behind at each path. Reverting writes this change's
+	// `old` back, which is safe exactly while the live value is still this change's `new`.
+	appliedValues := changedValuesOf(change)
+	for _, l := range later {
+		when := ""
+		if l.StartsAt != nil {
+			when = l.StartsAt.UTC().Format(time.RFC3339)
+		}
+		laterNew := changedValuesOf(l)
+		laterOld := changedOldValuesOf(l)
+		for laterPath, laterValue := range laterNew {
+			if applied, ok := appliedValues[laterPath]; ok && sameChangedValue(applied, laterValue) {
+				continue
+			}
+			for path := range targeted {
+				if laterPath == path || isPathAncestor(laterPath, path) || isPathAncestor(path, laterPath) {
+					return fmt.Sprintf(
+						"%q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
+						path, when)
+				}
+				// An add or remove shows as one side of the item absent.
+				if laterValue != nil && laterOld[laterPath] != nil {
+					continue
+				}
+				if shiftsListPosition(laterPath, path) {
+					return fmt.Sprintf(
+						"a later change (%s) added or removed an item in the list %q belongs to, so that position now holds a different item — reverting would write to the wrong entry.",
+						when, path)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// isPathAncestor reports whether `ancestor` names a field or list item that contains `path`.
+func isPathAncestor(ancestor, path string) bool {
+	return strings.HasPrefix(path, ancestor+".") || strings.HasPrefix(path, ancestor+"[")
+}
+
+// shiftsListPosition reports whether adding or removing the list item at `itemPath` ("…env[1]")
+// moves an item `path` addresses by position ("…env[2].value"): same list, at or before it.
+func shiftsListPosition(itemPath, path string) bool {
+	item := listItem.FindStringSubmatch(itemPath)
+	if item == nil {
+		return false
+	}
+	list := item[1]
+	changedAt, _ := strconv.Atoi(item[2])
+	for _, loc := range listIndex.FindAllStringSubmatchIndex(path, -1) {
+		if path[:loc[0]] != list {
+			continue
+		}
+		position, _ := strconv.Atoi(path[loc[2]:loc[3]])
+		return changedAt <= position
+	}
+	return false
+}
+
+// changedOldValuesOf maps each path a change touched to the value it replaced — the other side of
+// changedValuesOf.
+func changedOldValuesOf(e models.Event) map[string]any {
+	values := map[string]any{}
+	for _, entry := range extractRevertPaths(e, false) {
+		change, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := change["path"].(string); path != "" {
+			values[path] = change["old"]
+		}
+	}
+	return values
 }
 
 // hasManifestPayload reports whether the request carries a pre-change manifest under its per-kind
@@ -1874,6 +1949,14 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 		return map[string]any{}, common.ErrorBadRequest("event resolution: this event carries several recorded changes; select the change to revert")
 	}
 	kind := resourceKeys[1]
+	// A change to another object the workload uses — a ConfigMap it reads — is filed under the
+	// workload's resource, so it reaches here looking like the workload's own change and passes the
+	// same-resource check. Its paths are that object's (`data.*`); writing them onto the workload is
+	// never what anyone asked for.
+	if other := changedObjectKind(r); other != "" {
+		return map[string]any{}, common.ErrorBadRequest(fmt.Sprintf(
+			"event resolution: this change is to a %s, not to the %s itself, so it cannot be reverted onto the workload", other, kind))
+	}
 	request := map[string]any{
 		"name":      resourceKeys[2],
 		"namespace": r.SubjectNamespace,
@@ -1894,6 +1977,48 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo boo
 		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, this event has no recorded configuration change to undo")
 	}
 	return request, nil
+}
+
+// revertableWorkloadKinds are the kinds a revert can write to, as recorded in a diff's resource_name
+// ("deployment/<namespace>/<name>.yaml").
+var revertableWorkloadKinds = map[string]bool{"deployment": true, "statefulset": true, "daemonset": true, "rollout": true, "replicaset": true}
+
+// changedObjectKind names the object an event's recorded change was made to when that is not a
+// workload, or returns "". Known from the diff's resource_name, or — for a record without one — from
+// the paths: a change touching only `data`, `binaryData` or `stringData` is a ConfigMap or Secret.
+func changedObjectKind(r models.Event) string {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return ""
+	}
+	for _, item := range r.Evidences.Array() {
+		evidence, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if evidenceType, _ := evidence["type"].(string); evidenceType != "diff" {
+			continue
+		}
+		dataMap, _ := evidence["data"].(map[string]any)
+		if resourceName, _ := dataMap["resource_name"].(string); resourceName != "" {
+			kind := strings.ToLower(strings.SplitN(resourceName, "/", 2)[0])
+			if !revertableWorkloadKinds[kind] {
+				return kind
+			}
+			return ""
+		}
+	}
+	paths := extractRevertPaths(r, false)
+	if len(paths) == 0 {
+		return ""
+	}
+	for _, entry := range paths {
+		change, _ := entry.(map[string]any)
+		path, _ := change["path"].(string)
+		if !strings.HasPrefix(path, "data.") && !strings.HasPrefix(path, "binaryData.") && !strings.HasPrefix(path, "stringData.") {
+			return ""
+		}
+	}
+	return "ConfigMap or Secret"
 }
 
 func countDiffEvidences(r models.Event) int {

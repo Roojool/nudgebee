@@ -9,6 +9,7 @@ import { Label } from '@ui/Label';
 import { MemoryHeadroomCheck, MemoryUsageFacts } from './MemoryUsageFacts';
 import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX, CI_REQUEST_ANNOTATIONS } from '@lib/annotationKeys';
+import { detectGitOpsManager } from '@utils/workloadManager';
 import k8sApi from '@api1/kubernetes';
 import { Link } from '@ui/Link';
 import AutoOptimizeForm from '@components/autopilot/form/AutoOptimizeVerticalRightSizingForm';
@@ -84,27 +85,6 @@ const containerSpecAllocation = (workload, containerName) => {
 const knownValue = (v) => {
   const num = typeof v === 'string' ? parseFloat(v) : v;
   return Number.isFinite(num) && num > 0 ? num : null;
-};
-
-// Detects whether a workload is declaratively managed (GitOps / Helm / Argo CD /
-// Flux) so a manual "Update" — which patches the live pods directly — can warn
-// that the change will be reverted on the next reconcile. Returns the manager's
-// display name and the git repo to raise a PR against, when either is known.
-const detectGitOpsManager = (annotations = {}, labels = {}) => {
-  const annKeys = Object.keys(annotations);
-  const labKeys = Object.keys(labels);
-  const gitRepo = annotations[ANNOTATIONS.CI_GIT_REPO] || annotations[ANNOTATIONS.WORKLOAD_GIT_REPO] || null;
-  let manager = null;
-  if (annKeys.some((k) => k.startsWith('argocd.argoproj.io/')) || labels['argocd.argoproj.io/instance']) {
-    manager = 'Argo CD';
-  } else if ([...annKeys, ...labKeys].some((k) => k.includes('fluxcd.io'))) {
-    manager = 'Flux';
-  } else if (labels['app.kubernetes.io/managed-by'] === 'Helm' || annotations['meta.helm.sh/release-name']) {
-    manager = 'Helm';
-  } else if (gitRepo) {
-    manager = 'GitOps';
-  }
-  return { manager, gitRepo };
 };
 
 // Beyond this many containers the segmented control wraps badly; use a dropdown.

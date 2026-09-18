@@ -11,6 +11,68 @@ import { Button } from '@ui/Button';
 import { toast as snackbar } from '@ui/Toast';
 import { parseHttpResponseBodyMessage, safeJSONParse } from 'src/utils/common';
 import { ds } from '@utils/colors';
+import { Callout } from '@ui/Callout';
+import { formatClockCompact } from '@shared/format/Datetime';
+import { detectGitOpsManager } from '@utils/workloadManager';
+import { describeChangeTiming, isRolloutOnlyKey, nameListPositions, revertTargetLabel } from '@components/k8s/investigate/changeRollback';
+
+// What a rollback's rolling restart looks like for each kind — a DaemonSet restarts a pod on every
+// node, which "rolling restart" alone does not tell anyone approving it.
+const RESTART_IMPACT_BY_KIND = {
+  deployment: 'Replaces the pods one by one (rolling update).',
+  rollout: 'Replaces the pods through the Rollout’s own strategy.',
+  statefulset: 'Replaces the pods one at a time, highest ordinal first.',
+  daemonset: 'Replaces the pod on every node it runs on.',
+};
+
+// Reads who deploys this workload from the manifest recorded with the change. The snapshot is
+// serialised snake_case, so owner references may arrive under either spelling.
+const workloadManagerFromManifest = (manifest) => {
+  if (typeof manifest !== 'string' || !manifest) return null;
+  try {
+    const metadata = yaml.load(manifest)?.metadata || {};
+    return detectGitOpsManager(metadata.annotations || {}, metadata.labels || {}, metadata.ownerReferences || metadata.owner_references || []);
+  } catch {
+    return null;
+  }
+};
+
+// Whether a rollback done here will last, in the operator's terms, or null when nothing redeploys
+// the workload behind our back. A repo annotation alone (manager 'GitOps') names where the source
+// lives, not that anything syncs from it, so it is not warned about.
+const describeRollbackDurability = (managed, namespace) => {
+  if (!managed?.manager) return null;
+  if (managed.operator) {
+    return {
+      tone: 'critical',
+      blocks: true,
+      message: `${managed.operator.kind} ${managed.operator.name} owns this workload and rewrites it from its own spec, so a rollback here is undone within seconds. Change the ${managed.operator.kind} resource instead.`,
+    };
+  }
+  if (managed.manager === 'Argo CD' || managed.manager === 'Flux') {
+    return {
+      tone: 'warning',
+      message: `Deployed by ${managed.manager}. If auto-sync or self-heal is on, the next sync puts this change straight back — roll back in Git or in ${managed.manager} for it to stick.`,
+    };
+  }
+  if (managed.manager === 'Helm') {
+    const release = managed.helmRelease;
+    return {
+      tone: 'warning',
+      message: release
+        ? `Deployed by Helm (release ${release}). The next helm upgrade re-applies this change, and Helm's history will not show this rollback. To roll back through Helm instead — which rolls back everything in release ${release}, not only this workload:`
+        : "Deployed by Helm. The next helm upgrade re-applies this change, and Helm's history will not show this rollback.",
+      command: release ? `helm rollback ${release} -n ${namespace || '<namespace>'}` : '',
+    };
+  }
+  return null;
+};
+
+// A value as it reads in the manifest: strings bare (no JSON quotes), structures as JSON.
+const formatFieldValue = (value) => {
+  if (value === null || value === undefined || value === '') return '(not set)';
+  return typeof value === 'string' ? value : JSON.stringify(value);
+};
 
 const InvestigateResolution = ({
   row,
@@ -19,6 +81,7 @@ const InvestigateResolution = ({
   isRevertTheDevelopment = false,
   cardId = '',
   changeEventId = '',
+  changeChoices = [],
 }) => {
   const [requestBody, setRequestBody] = useState({});
   const [selectedOption, setSelectedOption] = useState('');
@@ -36,7 +99,11 @@ const InvestigateResolution = ({
   // container command means approving something you have not seen.
   const [selectedChange, setSelectedChange] = useState(null);
   const [selectedChangeError, setSelectedChangeError] = useState('');
-  const revertsSelectedChange = !!changeEventId && changeEventId !== row?.id;
+  // The change being rolled back. Starts at the one the caller named and moves when the operator
+  // picks another from the list — the row outside only says how many there are.
+  const [activeChangeId, setActiveChangeId] = useState(changeEventId);
+  useEffect(() => setActiveChangeId(changeEventId), [changeEventId]);
+  const revertsSelectedChange = !!activeChangeId && activeChangeId !== row?.id;
 
   useEffect(() => {
     if (!revertsSelectedChange) {
@@ -48,7 +115,7 @@ const InvestigateResolution = ({
     setSelectedChange(null);
     setSelectedChangeError('');
     apiKubernetes
-      .resolveEventRecord(changeEventId, row?.cloud_account_id)
+      .resolveEventRecord(activeChangeId, row?.cloud_account_id)
       .then((res) => {
         if (cancelled) return;
         const event = res?.data?.events?.[0];
@@ -64,7 +131,61 @@ const InvestigateResolution = ({
     return () => {
       cancelled = true;
     };
-  }, [revertsSelectedChange, changeEventId, row?.cloud_account_id]);
+  }, [revertsSelectedChange, activeChangeId, row?.cloud_account_id]);
+
+  // Who deploys the workload decides whether a rollback here lasts. Read from the manifest recorded
+  // with the change being rolled back — the state that change left, i.e. the one live now.
+  const revertDiff = (() => {
+    if (!isRevertTheDevelopment) return null;
+    const source = revertsSelectedChange ? selectedChange : row;
+    const evidences = Array.isArray(source?.evidences) ? source.evidences : [];
+    return evidences.find((f) => f?.type == 'diff')?.data || null;
+  })();
+  const durability = revertDiff
+    ? describeRollbackDurability(
+        workloadManagerFromManifest(revertDiff.new),
+        String(revertDiff.resource_name || '').split('/')[1] || row?.subject_namespace
+      )
+    : null;
+
+  // Several recorded changes: the operator picks which one to roll back, here where its fields are
+  // shown, rather than in the action row.
+  const changePicker =
+    isRevertTheDevelopment && changeChoices.length > 1 ? (
+      <Box>
+        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)', mb: ds.space[1] }}>{'Which change to roll back'}</Typography>
+        <RadioGroup value={activeChangeId} onChange={(e) => setActiveChangeId(e.target.value)}>
+          <Box sx={{ border: '1px solid var(--ds-gray-200)', borderRadius: 'var(--ds-radius-sm)' }}>
+            {changeChoices.map((choice, index) => (
+              <FormControlLabel
+                key={choice.changeEventId}
+                value={choice.changeEventId}
+                disabled={loading}
+                control={<Radio size='small' />}
+                sx={{
+                  m: 0,
+                  px: ds.space[2],
+                  py: ds.space[1],
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  borderTop: index === 0 ? 'none' : '1px solid var(--ds-gray-200)',
+                }}
+                label={
+                  <Box>
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)' }}>
+                      {[choice.when, choice.timing].filter(Boolean).join(' · ')}
+                    </Typography>
+                    <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
+                      {choice.summary ? `changes ${choice.summary}` : ''}
+                    </Typography>
+                  </Box>
+                }
+              />
+            ))}
+          </Box>
+        </RadioGroup>
+      </Box>
+    ) : null;
 
   const handleRadioChange = (e) => {
     const value = e.target.value;
@@ -108,6 +229,7 @@ const InvestigateResolution = ({
   const renderConditionalFields = () => {
     let existingVolume = '';
     let revertChanges = [];
+    let revertFields = [];
     let diffExists = false;
     const json = row?.evidences.find((f) => f.type == 'json')?.data ?? '';
     if (json) {
@@ -137,46 +259,110 @@ const InvestigateResolution = ({
       // that spells it init_containers.
       const updatedValues = Array.isArray(diff.updated_values) ? diff.updated_values : [];
       if (updatedValues.length) {
-        revertChanges = updatedValues.map((change) => [
-          { text: stripKind(change?.path ?? '') },
-          { text: renderValue(change?.old) },
-          { text: renderValue(change?.new) },
-        ]);
+        revertFields = updatedValues.map((change) => ({ path: stripKind(change?.path ?? ''), old: change?.old, new: change?.new }));
       } else {
         const oldData = yaml.load(diff.old);
         const newData = yaml.load(diff.new);
-        revertChanges = (diff.updated_paths ?? []).map((path) => {
+        revertFields = (diff.updated_paths ?? []).map((path) => {
           const updatedPath = stripKind(path);
-          return [
-            { text: updatedPath },
-            { text: renderValue(getNestedValue(oldData, updatedPath)) },
-            { text: renderValue(getNestedValue(newData, updatedPath)) },
-          ];
+          return { path: updatedPath, old: getNestedValue(oldData, updatedPath), new: getNestedValue(newData, updatedPath) };
         });
       }
+      revertChanges = revertFields.map((f) => [{ text: f.path }, { text: renderValue(f.old) }, { text: renderValue(f.new) }]);
     }
 
     if (isRevertTheDevelopment) {
       // Nothing is confirmable until the selected change has loaded, and a revert dispatched
       // from an empty table would undo fields the operator never saw.
       if (revertsSelectedChange && !selectedChange) {
-        return <Typography>{selectedChangeError || 'Loading the change you selected…'}</Typography>;
+        return (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3] }}>
+            {changePicker}
+            <Typography>{selectedChangeError || 'Loading the change you selected…'}</Typography>
+          </Box>
+        );
       }
+      const changedAt = revertsSelectedChange ? selectedChange?.starts_at : evidences.find((f) => f?.type == 'diff')?.start_at;
+      const timing = describeChangeTiming(changedAt, row?.starts_at);
+      const kind = String(diff?.resource_name || '')
+        .split('/')[0]
+        .toLowerCase();
+      const touchesPods = revertFields.some((f) => f.path.startsWith('spec.template'));
+      // Positions become names ("containers[sidecar]") so a workload with several containers says
+      // which one the rollback touches. The manifests are best-effort: unparseable ones are skipped.
+      const manifests = [diff?.new, diff?.old].map((m) => {
+        try {
+          return typeof m === 'string' ? yaml.load(m) : null;
+        } catch {
+          return null;
+        }
+      });
+      const monoSx = { fontSize: 'var(--ds-text-small)', fontFamily: 'var(--ds-font-mono)', wordBreak: 'break-all' };
       return (
-        <>
-          {diff?.resource_name && <Typography>Resource Name: {diff?.resource_name}</Typography>}
-          {revertsSelectedChange && selectedChange?.starts_at && (
-            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
-              {`Undoing the change deployed at ${selectedChange.starts_at}`}
-            </Typography>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3] }}>
+          {changePicker}
+          <Box>
+            {diff?.resource_name && (
+              <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)' }}>
+                {revertTargetLabel(diff.resource_name) || diff.resource_name}
+              </Typography>
+            )}
+            {changedAt && (
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
+                {`Undoes the change deployed ${formatClockCompact(changedAt)}${timing ? ` · ${timing}` : ''}`}
+              </Typography>
+            )}
+          </Box>
+          {durability && (
+            <Callout
+              tone={durability.tone}
+              message={
+                <>
+                  {durability.message}
+                  {durability.command && (
+                    <Box component='code' sx={{ display: 'block', mt: ds.space[1], fontFamily: 'var(--ds-font-mono)', userSelect: 'all' }}>
+                      {durability.command}
+                    </Box>
+                  )}
+                </>
+              }
+            />
           )}
-          <CustomTable
-            tableData={revertChanges}
-            headers={['Path', 'Old Value', 'New Value']}
-            totalRows={revertChanges?.length}
-            rowsPerPage={revertChanges?.length}
-          />
-        </>
+          {/* Current value first, then what the rollback writes: "Old / New" named the change's own
+              sides and left the operator to work out which one they were about to apply. */}
+          <Box sx={{ border: '1px solid var(--ds-gray-200)', borderRadius: 'var(--ds-radius-sm)' }}>
+            {revertFields.map((f, index) => (
+              <Box
+                key={`${f.path}_${index}`}
+                sx={{
+                  p: ds.space[3],
+                  borderTop: index === 0 ? 'none' : '1px solid var(--ds-gray-200)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: ds.space[1],
+                }}
+              >
+                <Typography sx={{ ...monoSx, color: 'var(--ds-gray-700)' }} title={f.path}>
+                  {nameListPositions(f.path, manifests, f.new ?? f.old)}
+                  {isRolloutOnlyKey(f.path) && (
+                    <Typography component='span' sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)', fontFamily: 'inherit' }}>
+                      {'  (restart marker)'}
+                    </Typography>
+                  )}
+                </Typography>
+                <Box sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: ds.space[3], rowGap: ds.space[1] }}>
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{'Now'}</Typography>
+                  <Typography sx={{ ...monoSx, color: 'var(--ds-red-600)' }}>{formatFieldValue(f.new)}</Typography>
+                  <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{'After rollback'}</Typography>
+                  <Typography sx={{ ...monoSx, color: 'var(--ds-green-600)' }}>{formatFieldValue(f.old)}</Typography>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+          {touchesPods && RESTART_IMPACT_BY_KIND[kind] && (
+            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{RESTART_IMPACT_BY_KIND[kind]}</Typography>
+          )}
+        </Box>
       );
     } else if (aggregationKey === 'KubePersistentVolumeFillingUp' || aggregationKey == 'KubernetesVolumeOutOfDiskSpace') {
       return (
@@ -375,6 +561,9 @@ const InvestigateResolution = ({
     if (revertsSelectedChange && !selectedChange) {
       return;
     }
+    if (durability?.blocks) {
+      return;
+    }
     if (!validateValuesBeforeSubmit()) {
       return;
     }
@@ -388,7 +577,7 @@ const InvestigateResolution = ({
           ? {
               revert: true,
               ...(cardId && { card_id: cardId }),
-              ...(revertsSelectedChange && { change_event_id: changeEventId }),
+              ...(revertsSelectedChange && { change_event_id: activeChangeId }),
             }
           : { ...requestBody, ...(cardId && { card_id: cardId }) },
         'kubernetes',
@@ -447,8 +636,8 @@ const InvestigateResolution = ({
         {/* Dispatching before the selected change has loaded approves a diff the operator has not
             seen — the dialog is still showing "Loading…" at that point. The server validates the
             change independently, so this is about consent, not corruption. */}
-        <Button size='md' onClick={handleSubmit} loading={loading} disabled={revertsSelectedChange && !selectedChange}>
-          Submit
+        <Button size='md' onClick={handleSubmit} loading={loading} disabled={(revertsSelectedChange && !selectedChange) || !!durability?.blocks}>
+          {isRevertTheDevelopment ? 'Roll back' : 'Submit'}
         </Button>
       </Box>
     </>
@@ -462,6 +651,14 @@ InvestigateResolution.propTypes = {
   isRevertTheDevelopment: PropTypes.bool,
   cardId: PropTypes.string,
   changeEventId: PropTypes.string,
+  changeChoices: PropTypes.arrayOf(
+    PropTypes.shape({
+      changeEventId: PropTypes.string,
+      when: PropTypes.string,
+      timing: PropTypes.string,
+      summary: PropTypes.string,
+    })
+  ),
 };
 
 export default InvestigateResolution;
