@@ -137,3 +137,32 @@ func TestOpenObserveMetricNonLabelColumns(t *testing.T) {
 		assert.False(t, skip, "%q is a real label and must be offered", col)
 	}
 }
+
+// The utilisation query builders emit a __CLUSTER__ placeholder that relay-server
+// substitutes on the agent path and PrometheusSaasMetricSource expands itself. This
+// path does neither, so the source has to expand it before the query leaves — an
+// unexpanded token reaches OpenObserve verbatim and fails to parse.
+func TestOpenObserveMetricSourceExpandsClusterPlaceholder(t *testing.T) {
+	var received string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseForm())
+		received = r.Form.Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	_, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{
+		AccountId: "test",
+		Queries:   map[string]string{"cpu_real": `sum(rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[5m]))`},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, received, "__CLUSTER__", "placeholder must not reach OpenObserve")
+	assert.Contains(t, received, `mode!="idle"`, "the rest of the selector must survive expansion")
+}

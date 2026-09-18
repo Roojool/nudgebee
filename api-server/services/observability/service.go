@@ -3244,6 +3244,13 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 			swRequest = buildSolarWindsRequestParams(meta, buildSolarWindsGroupBy(meta), "SUM")
 		}
 
+	// OpenObserve speaks PromQL but its engine is a subset: no falling-back `or`, no
+	// binary vector arithmetic, no quantile() aggregation. The cluster keys depend on
+	// all three, so they are built and reduced in openobserve_queries.go; the workload
+	// and node keys still come from the Prometheus builders there.
+	case "openobserve":
+		return fetchOpenObserveUtilisation(ctx, req, meta, integrationSource, instant)
+
 	case "ES":
 		return fetchESMetricUtilisation(ctx, req, meta)
 

@@ -89,6 +89,13 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 	start, end, step := openObserveMetricQueryRangeParams(req)
 
 	for queryKey, rawQuery := range req.Queries {
+		// The utilisation query builders emit a __CLUSTER__ placeholder that relay-server
+		// substitutes on the agent path and PrometheusSaasMetricSource expands itself. This
+		// path does neither, so it must expand the token here -- otherwise it reaches
+		// OpenObserve verbatim and every query fails to parse. OpenObserveConfig carries no
+		// additional-labels field (the org is the tenant boundary), so it expands to empty.
+		// Runs before matcher injection so that operates on valid PromQL.
+		rawQuery = integrations.ExpandClusterPlaceholder(rawQuery, "")
 		query, err := injectPromQLMatchers(rawQuery, req.LabelMatchers, req.Labels)
 		if err != nil {
 			errorMsg := err.Error()
