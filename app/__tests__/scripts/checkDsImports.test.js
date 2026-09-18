@@ -30,13 +30,13 @@ describe('check-ds-imports', () => {
       const src = [
         "import WidgetCard from '@ui/WidgetCard';",
         "import CustomStepper from '../common/navigation/CustomStepper';",
-        "export { default as Badge } from '@shared/widgets/NBStatusBadge';",
+        "export { default as Field } from '@shared/forms/CustomTextField';",
         "const Nav = dynamic(() => import('@components/common/navigation/VerticalStepNavigation'));",
       ].join('\n');
       expect(keys(findRestrictedImports(src, 'src/components/k8s/Page.tsx'))).toEqual([
         'legacy:WidgetCard',
         'legacy:CustomStepper',
-        'legacy:NBStatusBadge',
+        'legacy:CustomTextField',
         'legacy:VerticalStepNavigation',
       ]);
     });

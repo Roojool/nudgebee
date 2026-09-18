@@ -62,7 +62,6 @@ app-specific component built from primitives.
 **Deprecated — labels & status:**
 
 - `common/CustomLabels` — **removed** (no longer in the tree). Use `ds/Label`. `CustomLabels` auto-derived tone from text content; `ds/Label` requires an explicit `tone` (`neutral`/`info`/`success`/`warning`/`critical`).
-- `common/NBStatusBadge` (`@shared/widgets/NBStatusBadge`) — still in use for the K8s status-badge pattern; prefer `ds/StatusIndicator` / `ds/Label` for new code.
 
 ### Content & formatting
 
@@ -1566,7 +1565,7 @@ These live under `@shared/*` and are kept here because §1–§3 reference them.
 | `CustomDateTimePicker`   | `@shared/widgets/CustomDateTimePicker` | Single date+time field.                                                  |
 | `CopyButton`             | `@shared/buttons/CopyButton`           | Copy-to-clipboard icon button.                                           |
 | `DownloadButton`         | `@shared/buttons/DownloadButton`       | Download trigger (wraps `ds/Button` + `file-saver`).                     |
-| `NBStatusBadge`          | `@shared/widgets/NBStatusBadge`        | K8s status badge; prefer `ds/StatusIndicator`/`ds/Label`.                |
+| `NBStatusBadge`          | `@shared/widgets/NBStatusBadge`        | Triage status badge, on `ds/Label` + `ds/DropdownMenu`.                  |
 | `CustomTextField`        | `@shared/forms/CustomTextField`        | **Legacy** → `ds/Input`.                                                 |
 | `ErrorBoundary`          | `@shared/ErrorBoundary`                | Error boundary (no `ds/ErrorBoundary`).                                  |
 

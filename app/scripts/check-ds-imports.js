@@ -86,7 +86,6 @@ const LEGACY_REPLACEMENTS = {
   'components/common/navigation/CustomStepper': '@ui/Stepper',
   'components/common/navigation/NewVerticalStepper': '@ui/Stepper',
   'components/common/navigation/VerticalStepNavigation': '@ui/Stepper',
-  'components/common/widgets/NBStatusBadge': '@ui/StatusIndicator or @ui/Label',
 };
 
 // The primitives themselves, and the compositions design-system.md sanctions
