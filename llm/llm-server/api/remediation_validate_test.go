@@ -541,3 +541,21 @@ func TestRecoveringStrandedWorkSurvivesValidation(t *testing.T) {
 	require.Contains(t, recovery.VerifyCommand, "list-message-move-tasks", "a read-only task status check is a valid verify")
 	require.Empty(t, recovery.RollbackCommand, "moving messages back is not an inverse; none should be invented")
 }
+
+// A plan command the Run button's executor would refuse must not reach the panel. The unquoted
+// jsonpath is the shape the prompt itself used to teach; the relay rejects its bare braces.
+func TestExecutorRejectedCommandsAreRemovedFromPlan(t *testing.T) {
+	exec := "kubectl scale deployment web -n demo --replicas 3"
+	p := planWith("replicas too low",
+		act("fix", 80, exec, "kubectl get deployment web -n demo -o jsonpath={.spec.replicas}", "kubectl scale deployment web -n demo --replicas={2}"),
+		act("fix", 70, `kubectl patch deployment web -n demo -p {"spec":{"replicas":3}}`, "", ""),
+	)
+	validatePlanCommands(p)
+	require.Len(t, p.Actions, 1, "unrunnable execute is dropped")
+	assert.Equal(t, "kubectl get deployment web -n demo -o jsonpath='{.spec.replicas}'", p.Actions[0].VerifyCommand, "unrunnable verify is replaced by the derived, quoted read")
+	assert.Empty(t, p.Actions[0].RollbackCommand, "unrunnable rollback is cleared")
+
+	assert.NotEmpty(t, remediationCommandRejection("kubectl get pods -n demo -o jsonpath={.items[*].metadata.name}"))
+	assert.Empty(t, remediationCommandRejection("kubectl get pods -n demo -o jsonpath='{.items[*].metadata.name}'"))
+	assert.Empty(t, remediationCommandRejection(`aws ec2 describe-instances --region us-east-1 --query "Reservations[].Instances[?State.Name=='running']"`))
+}

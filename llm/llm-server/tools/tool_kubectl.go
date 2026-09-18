@@ -804,7 +804,7 @@ func ValidateKubectlRelayCommand(command string) error {
 	}
 
 	if hasUnquotedRelayMetachars(trimmed) {
-		return errors.New("kubectl: compound commands, pipelines, and redirections are blocked at the relay boundary")
+		return errors.New("kubectl: compound commands, pipelines, redirections, and unquoted ( ) { } are blocked at the relay boundary; single-quote arguments such as -o jsonpath='{...}'")
 	}
 
 	if hasShellExpansion(trimmed) {

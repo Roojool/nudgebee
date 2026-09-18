@@ -481,6 +481,14 @@ func validatePlanCommands(plan *RemediationPlan) []planValidationNote {
 			blockedNames = append(blockedNames, resourceNamesIn(exec)...)
 		}
 
+		// A command the Run button would refuse is not an action the operator can take. A placeholder
+		// action is exempt: it is kept on purpose, to tell the operator what to do by hand.
+		if !blockedValue && exec != "" && remediationCommandRejection(exec) != "" {
+			note(a.Action, "execute_rejected_by_executor_dropped", exec)
+			blockedNames = append(blockedNames, resourceNamesIn(exec)...)
+			continue
+		}
+
 		// An action that depends on a step that cannot run inherits its uselessness. The audit found
 		// a plan whose first action created a registry secret from placeholder credentials, whose
 		// second attached that secret to a ServiceAccount, and whose third restarted the workload:
@@ -547,6 +555,9 @@ func validatedVerify(a *RemediationAction, exec string, note func(string, string
 			return derived
 		}
 		return ""
+	case remediationCommandRejection(v) != "":
+		note(a.Action, "verify_rejected_by_executor_replaced", v)
+		return derived
 	case v == exec:
 		note(a.Action, "verify_same_as_execute_cleared", v)
 		return derived // "" when nothing can be derived
@@ -584,6 +595,10 @@ func validatedRollback(a *RemediationAction, exec string, note func(string, stri
 	rb := strings.TrimSpace(a.RollbackCommand)
 	if rb == "" || exec == "" {
 		return rb
+	}
+	if remediationCommandRejection(rb) != "" {
+		note(a.Action, "rollback_rejected_by_executor_cleared", rb)
+		return ""
 	}
 	if rb == exec {
 		// `rollout undo` undone by `rollout undo` puts the broken revision back.

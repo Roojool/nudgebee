@@ -498,34 +498,8 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "command is required"}}))
 		return
 	}
-	if len(command) > maxRemediationCommandLen {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command is too long"}}))
-		return
-	}
-	// Checked before the metacharacter guard: that guard is quote-aware for cloud CLI commands, and
-	// stripping quoted content is only sound once the quotes are known to be balanced. An unbalanced
-	// quote would otherwise let the stripper swallow the rest of the command, metacharacters included.
-	if isStructurallyTruncated(command) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"}}))
-		return
-	}
-	cloudCliTool := tools.CloudCliToolFor(command)
-	// A remediation command is a single invocation. Reject shell metacharacters up front: they let a
-	// single string smuggle a second command (e.g. "kubectl get pods; kubectl delete ns prod") past
-	// the safety blocklist while the shell on the workspace pod still evaluates it. This also blunts
-	// indirect prompt injection, since the plan is seeded from attacker-influencable investigation text.
-	//
-	// Cloud CLI commands are checked with quoted content removed. JMESPath carries ( ) | inside
-	// --query arguments routinely ("Reservations[].Instances[?State.Name=='running']"), and rejecting
-	// those leaves the cloud plan unable to express most of what it needs. Quoted text cannot start a
-	// second command precisely because it stays quoted, so only unquoted metacharacters are a smuggling
-	// risk — and those the stripped check still catches.
-	metaCheckTarget := command
-	if cloudCliTool != "" {
-		metaCheckTarget = tools.StripQuotedContentForShellCheck(command)
-	}
-	if containsShellMetacharacters(metaCheckTarget) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"}}))
+	if reason := remediationCommandRejection(command); reason != "" {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: reason}}))
 		return
 	}
 
@@ -695,6 +669,48 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		persistRemediationVerification(ctx, request.EventId, request.ExecuteCommand, command, response, exitCodeReported)
 	}
 	c.JSON(200, buildApiResponse(response, nil))
+}
+
+// remediationCommandRejection returns why the Run button refuses this command before it runs, or ""
+// when it goes through. Plan generation checks every command with it as well (validatePlanCommands),
+// so the panel is not handed a command its own executor rejects. Account-scoped checks — RBAC, the
+// account's provider — need a request, so they stay in processRemediationExecute.
+func remediationCommandRejection(command string) string {
+	if len(command) > maxRemediationCommandLen {
+		return "remediation: command is too long"
+	}
+	// Checked before the metacharacter guard: that guard is quote-aware for cloud CLI commands, and
+	// stripping quoted content is only sound once the quotes are known to be balanced. An unbalanced
+	// quote would otherwise let the stripper swallow the rest of the command, metacharacters included.
+	if isStructurallyTruncated(command) {
+		return "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"
+	}
+	// A remediation command is a single invocation. Reject shell metacharacters up front: they let a
+	// single string smuggle a second command (e.g. "kubectl get pods; kubectl delete ns prod") past
+	// the safety blocklist while the shell on the workspace pod still evaluates it. This also blunts
+	// indirect prompt injection, since the plan is seeded from attacker-influencable investigation text.
+	//
+	// Cloud CLI commands are checked with quoted content removed. JMESPath carries ( ) | inside
+	// --query arguments routinely ("Reservations[].Instances[?State.Name=='running']"), and rejecting
+	// those leaves the cloud plan unable to express most of what it needs. Quoted text cannot start a
+	// second command precisely because it stays quoted, so only unquoted metacharacters are a smuggling
+	// risk — and those the stripped check still catches.
+	metaCheckTarget := command
+	if tools.CloudCliToolFor(command) != "" {
+		metaCheckTarget = tools.StripQuotedContentForShellCheck(command)
+	}
+	if containsShellMetacharacters(metaCheckTarget) {
+		return "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"
+	}
+	// The kubectl relay applies its own grammar (ExecuteContainerJob), stricter than the guard above:
+	// it also rejects unquoted { }, so `-o jsonpath={.spec.replicas}` fails there as a transport
+	// error. Run the same check here so the refusal says why, and so generation can drop the command.
+	if fields := strings.Fields(command); len(fields) > 0 && fields[0] == "kubectl" {
+		if err := tools.ValidateKubectlRelayCommand(command); err != nil {
+			return "remediation: " + err.Error()
+		}
+	}
+	return ""
 }
 
 // isVerifySlot reports whether this run is an action's verify command.
