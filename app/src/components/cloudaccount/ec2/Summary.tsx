@@ -344,7 +344,7 @@ const ClusterSummary = ({ accountId, ec2Summary = {}, serviceName = '' }: any) =
           <Chart.Doughnut
             borderWidth={0}
             borderRadius={0}
-            values={[spotInstances, reservedInstances]}
+            values={[reservedInstances, spotInstances]}
             labels={[labels.reservedLabel, labels.spotLabel]}
             displayValue={instancesCount}
             valueUnit=''
