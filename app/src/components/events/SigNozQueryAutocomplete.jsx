@@ -15,6 +15,7 @@ import {
   // The chip-overflow tooltip below stays on MUI: its content is styled for a dark
   // surface and holds interactive delete buttons, neither of which ds/Tooltip's
   // light surface or link-only 'interactive' variant can express.
+  // ds-imports-allow: dark, interactive chip-overflow tooltip (see comment above)
   Tooltip as MuiTooltip,
 } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
