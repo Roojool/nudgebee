@@ -1205,6 +1205,15 @@ async function loadRunDetail(runId, silent) {
     metaItems.push({label: 'Accuracy', value: sc(oa)});
     metaItems.push({label: 'Avg Scores', value: `Answer: ${sc01(summary.avg_similarity||0)} · Relevancy: ${sc01(summary.avg_relevancy||0)} · Planner: ${sc01(summary.avg_planner||0)}`});
   }
+  const verdictRows = (s.test_results || []).filter(t => t.verdict_status || t.verdict_error);
+  if (verdictRows.length) {
+    const n = (st) => verdictRows.filter(t => t.verdict_status === st).length;
+    const errors = verdictRows.filter(t => t.verdict_error).length;
+    const parts = Object.keys(VERDICT_LABELS).map(st => `<span class="${VERDICT_CLS[st]} font-semibold">${n(st)} ${VERDICT_LABELS[st]}</span>`);
+    if (n('pending')) parts.push(`<span class="text-gray-400 italic">${n('pending')} Judging…</span>`);
+    if (errors) parts.push(`<span class="text-orange-500 font-semibold">${errors} Error</span>`);
+    metaItems.push({label: 'Verdicts', value: parts.join(' · ')});
+  }
   if (models !== '—') metaItems.push({label: 'Model', value: models});
   const meta = metaItems.map(m => `<span class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">${m.label}</span> <span class="text-[11px] text-gray-600">${m.value}</span>`);
 
