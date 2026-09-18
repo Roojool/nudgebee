@@ -750,6 +750,13 @@ func SyncUserRoles(context *security.RequestContext, request UserSyncRolesReques
 		return UserSyncRolesResponse{}, err
 	}
 
+	// Drop the user's cached security context, or the old roles stay in force for its 30m TTL.
+	if added > 0 || removed > 0 {
+		if err := security.InvalidateCacheForUser(userId); err != nil {
+			context.GetLogger().Error("Error invalidating cache", "error", err, "user_id", userId)
+		}
+	}
+
 	for _, role := range rolesToAdd {
 		audit.LogChange(context, audit.ChangeInput{
 			EventCategory: audit.EventCategoryRole,

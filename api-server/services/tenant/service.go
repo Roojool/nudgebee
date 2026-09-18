@@ -534,15 +534,17 @@ func UpsertTenantUserRole(ctx *security.RequestContext, request TenantUserRoleUp
 
 	defer func() {
 		ctx.GetLogger().Info("Invalidating cache for user")
-		err := ctx.GetSecurityContext().InvalidateCache()
+		// The target user's roles changed, not the caller's — drop the target's
+		// cached security context, or the old roles stay in force for its 30m TTL.
+		err := security.InvalidateCacheForUser(request.UserId)
 		if err != nil {
-			slog.Error("Error invalidating cache", "error", err, "user_id", request.UserId)
+			ctx.GetLogger().Error("Error invalidating cache", "error", err, "user_id", request.UserId)
 		}
 	}()
 
 	// remove all roles and return success
 	if request.Role == "" {
-		_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = 'tenant' AND user_id = $1", request.UserId)
+		_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = 'tenant' AND user_id = $1 AND tenant_id = $2", request.UserId, ctx.GetSecurityContext().GetTenantId())
 		if err != nil {
 			ctx.GetLogger().Error("Error deleting group role", "error", err)
 			return TenantUserRoleUpsertResponse{}, common.ErrorInternal("Error updating group role")
@@ -829,14 +831,18 @@ func UpsertAccountUserRole(ctx *security.RequestContext, request AccountUserRole
 
 	defer func() {
 		ctx.GetLogger().Info("Invalidating cache for user, because account role is updated")
-		err := ctx.GetSecurityContext().InvalidateCache()
+		err := security.InvalidateCacheForUser(request.UserId)
 		if err != nil {
-			slog.Error("Error invalidating cache", "error", err, "user_id", request.UserId)
+			ctx.GetLogger().Error("Error invalidating cache", "error", err, "user_id", request.UserId)
 		}
 	}()
 
-	// if empty then remove all roles
-	_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = $2 AND user_id = $1", request.UserId, security.RBAC_ENTITY_TYPE_ACCOUNT)
+	// if empty then remove all roles — in this tenant only; the user's account
+	// roles in other tenants are not the caller's to replace. Rows with a NULL
+	// tenant_id predate V325 (which backfilled tenant roles only): they grant
+	// nothing, but still hold the (role, user_id, entity_type, entity_id) unique
+	// key, so leaving them would make the re-insert below fail.
+	_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = $2 AND user_id = $1 AND (tenant_id = $3 OR tenant_id IS NULL)", request.UserId, security.RBAC_ENTITY_TYPE_ACCOUNT, ctx.GetSecurityContext().GetTenantId())
 	if err != nil {
 		ctx.GetLogger().Error("Error deleting user role", "error", err)
 		return AccountUserRoleUpsertResponse{}, common.ErrorInternal("Error updating user role")
@@ -1059,14 +1065,18 @@ func UpsertK8sAccountNamespaceUserRole(ctx *security.RequestContext, request K8s
 
 	defer func() {
 		ctx.GetLogger().Info("Invalidating cache for user, because namespace role is updated")
-		err := ctx.GetSecurityContext().InvalidateCache()
+		err := security.InvalidateCacheForUser(request.UserId)
 		if err != nil {
-			slog.Error("Error invalidating cache", "error", err, "user_id", request.UserId)
+			ctx.GetLogger().Error("Error invalidating cache", "error", err, "user_id", request.UserId)
 		}
 	}()
 
-	// if empty then remove all roles
-	_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = $2 AND user_id = $1", request.UserId, security.RBAC_ENTITY_TYPE_K8S_NAMESPACE)
+	// if empty then remove all roles — in this tenant only; the user's namespace
+	// roles in other tenants are not the caller's to replace. Rows with a NULL
+	// tenant_id predate V325 (which backfilled tenant roles only): they grant
+	// nothing, but still hold the (role, user_id, entity_type, entity_id) unique
+	// key, so leaving them would make the re-insert below fail.
+	_, err = manager.Db.Exec("DELETE FROM user_roles WHERE entity_type = $2 AND user_id = $1 AND (tenant_id = $3 OR tenant_id IS NULL)", request.UserId, security.RBAC_ENTITY_TYPE_K8S_NAMESPACE, ctx.GetSecurityContext().GetTenantId())
 	if err != nil {
 		ctx.GetLogger().Error("Error deleting user role", "error", err)
 		return AccountUserRoleUpsertResponse{}, common.ErrorInternal("Error updating user role")
