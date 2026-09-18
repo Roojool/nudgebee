@@ -201,6 +201,11 @@ re-styling MUI's Menu or Popover**:
 - **`OverlaySearch`** — search input row pinned at the top of a surface.
 - **`OverlaySelectAll`** — "Select All" / "Clear All" row for multi-select lists.
 
+MUI `Paper` still backs the floating surfaces these don't cover — the `CustomDrawer` panel, the
+query-builder suggestion dropdowns, and `Autocomplete`'s `PaperComponent` slot. `ds/Card` is a
+static page container and can't stand in for those, so the import gate doesn't ask it to; do use
+`ds/Card` when you want a card.
+
 All live in `ds/internal/Overlay.tsx`. They're **not for app code** — only consumed by other `ds/*`
 components (`DropdownMenu`, `Select`, `FilterDropdown`). The visual tokens that drive them live in
 `--ds-overlay-*` (see `app/src/styles/theme-tokens.css`).

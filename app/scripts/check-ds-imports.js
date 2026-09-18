@@ -39,7 +39,9 @@ const ts = require('typescript');
 // unambiguously. Deliberately absent: Box/Stack/Grid/Typography (layout, used
 // by the doc's own examples), CircularProgress, Collapse, Popover/Popper,
 // Radio, List (#37517 was closed as the wrong primitive), Tabs (no ds/Tabs
-// file), Autocomplete (no ds/Autocomplete).
+// file), Autocomplete (no ds/Autocomplete), Paper (6 of its 7 uses are floating
+// surfaces — the drawer panel, suggestion dropdowns, Autocomplete's paper slot —
+// which ds/Card, a static page container, cannot serve).
 const MUI_REPLACEMENTS = {
   Accordion: '@ui/Accordion',
   AccordionDetails: '@ui/Accordion',
@@ -60,7 +62,6 @@ const MUI_REPLACEMENTS = {
   Link: '@ui/Link',
   Menu: '@ui/DropdownMenu',
   MenuItem: '@ui/DropdownMenu',
-  Paper: '@ui/Card',
   Select: '@ui/Select',
   Skeleton: '@ui/Skeleton',
   Step: '@ui/Stepper',

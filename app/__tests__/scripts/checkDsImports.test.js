@@ -41,6 +41,11 @@ describe('check-ds-imports', () => {
       ]);
     });
 
+    it('does not flag MUI Paper — its uses are floating surfaces, not ds/Card containers', () => {
+      const src = "import { Paper, Popper, Card } from '@mui/material';";
+      expect(keys(findRestrictedImports(src, 'src/x.tsx'))).toEqual(['@mui/material:Card']);
+    });
+
     it('allows MUI TextField when the file uses MUI Autocomplete', () => {
       const src = "import { Autocomplete, TextField, Chip } from '@mui/material';";
       expect(keys(findRestrictedImports(src, 'src/x.tsx'))).toEqual(['@mui/material:Chip']);
@@ -94,7 +99,7 @@ describe('check-ds-imports', () => {
     });
 
     it('treats every restricted import in a new file as new', () => {
-      expect(keys(newRestrictedImports(null, "import { Paper } from '@mui/material';", 'src/new.tsx'))).toEqual(['@mui/material:Paper']);
+      expect(keys(newRestrictedImports(null, "import { Chip } from '@mui/material';", 'src/new.tsx'))).toEqual(['@mui/material:Chip']);
     });
 
     it('does not flag an import that moved between subpath and named form', () => {
