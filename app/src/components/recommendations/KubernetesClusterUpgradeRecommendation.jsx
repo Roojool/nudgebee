@@ -17,7 +17,7 @@ import { action } from 'src/utils/actionStyles';
 import Text from '@shared/format/Text';
 import apiUser from '@api1/user';
 import { SeverityIcon } from '@ui/SeverityIcon';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import CustomTicketLink from '@shared/CustomTicketLink';
 import { toast as snackbar } from '@ui/Toast';
@@ -335,7 +335,7 @@ const KubernetesClusterUpgradeRecommendation = (props) => {
           mt={2}
           mb={2}
         >
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: 'var(--ds-space-3) var(--ds-space-4)' }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Recommendations'
@@ -346,7 +346,7 @@ const KubernetesClusterUpgradeRecommendation = (props) => {
                   : totalKubernetesClusterUpgradeRecommendationCount ?? '—'
               }
             />
-          </WidgetCard>
+          </Card>
         </Box>
       )}
       <ListingLayout id='cluster-upgrade-recommendation'>

@@ -32,7 +32,7 @@ import { syncFilterFromQuery } from '@utils/common';
 
 // DS V2 primitives — phased in alongside the legacy components. Visual swap only;
 // API calls, handlers, and modal forms (AutoOptimizeForm and friends) untouched.
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import { CostCallout } from '@ui/CostCallout';
@@ -552,16 +552,16 @@ const KubernetesRightSizing = ({ enabledSummary = true, enabledFilters = true, i
           mt={ds.space[4]}
           mb={ds.space[4]}
         >
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Recommendations'
               info={{ tooltip: 'Active right-sizing recommendations across all workloads' }}
               value={Number.isFinite(kubernetesFixedCount) ? kubernetesFixedCount.toLocaleString() : kubernetesFixedCount ?? '—'}
             />
-          </WidgetCard>
+          </Card>
 
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Cost'
@@ -574,18 +574,18 @@ const KubernetesRightSizing = ({ enabledSummary = true, enabledFilters = true, i
                 )
               }
             />
-          </WidgetCard>
+          </Card>
 
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Savings Potential'
               info={{ tooltip: 'Estimated yearly savings if every recommendation is applied' }}
               value={<CostCallout size='lg' tone='high-savings' value={(Number(kubernetesRightSizingEstimatedSaving) || 0) * 12} period='/ yr' />}
             />
-          </WidgetCard>
+          </Card>
 
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Expense Recommendations'
@@ -595,7 +595,7 @@ const KubernetesRightSizing = ({ enabledSummary = true, enabledFilters = true, i
               }}
               value={Number.isFinite(underProvisionedResources) ? underProvisionedResources.toLocaleString() : underProvisionedResources ?? '—'}
             />
-          </WidgetCard>
+          </Card>
         </Box>
       )}
       <KubernetesRightSizingUpdateForm

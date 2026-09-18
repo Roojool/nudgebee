@@ -136,11 +136,6 @@ jest.mock('@ui/Stat', () => ({
   Stat: ({ label, value }) => <div data-testid={`summary-${label}`}>{value}</div>,
 }));
 
-jest.mock('@ui/WidgetCard', () => ({
-  __esModule: true,
-  default: ({ children }) => <div data-testid='widget-card'>{children}</div>,
-}));
-
 jest.mock('@components/tickets/TicketCreatePopupForm', () => ({
   __esModule: true,
   default: ({ open, ticketData, onSuccess, onFailure, onClose }) =>

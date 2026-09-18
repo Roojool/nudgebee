@@ -19,7 +19,7 @@ import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import CustomTooltip from '@ui/Tooltip';
 import SafeIcon from '@shared/icons/SafeIcon';
 
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Stat } from '@ui/Stat';
 import CustomTable from '@shared/tables/CustomTable';
@@ -451,14 +451,14 @@ const KubernetesBestPractices = ({ enabledSummary = true, enabledFilters = true,
           mt={2}
           mb={2}
         >
-          <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+          <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
             <Stat
               size='md'
               label='Total Recommendations'
               info={{ tooltip: 'Active best-practice recommendations across the cluster' }}
               value={Number.isFinite(totalBestPracticeCount) ? totalBestPracticeCount.toLocaleString() : totalBestPracticeCount ?? '—'}
             />
-          </WidgetCard>
+          </Card>
         </Box>
       )}
 

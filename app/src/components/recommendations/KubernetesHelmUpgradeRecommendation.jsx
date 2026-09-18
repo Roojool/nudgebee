@@ -20,7 +20,7 @@ import { titleCase } from '@lib/formatter';
 import apiUser from '@api1/user';
 import Text from '@shared/format/Text';
 import CustomLink from '@shared/CustomLink';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { ds } from 'src/utils/colors';
 import RefreshIcon from '@mui/icons-material/Refresh';
@@ -235,7 +235,7 @@ const KubernetesHelmUpgradeRecommendation = ({ accountId, showUpdatedEmptyData =
         mt={2}
         mb={2}
       >
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Recommendations'
@@ -246,7 +246,7 @@ const KubernetesHelmUpgradeRecommendation = ({ accountId, showUpdatedEmptyData =
                 : totalKubernetesHelmUpgradeRecommendationCount ?? '—'
             }
           />
-        </WidgetCard>
+        </Card>
       </Box>
       <ListingLayout id='cluster-upgrade-recommendation'>
         <ListingLayout.Toolbar

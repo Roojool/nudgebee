@@ -87,6 +87,16 @@ jest.mock('@shared/NewCustomButton', () => ({
   ),
 }));
 
+jest.mock('@ui/Divider', () => ({
+  __esModule: true,
+  Divider: () => <hr data-testid='divider' />,
+}));
+
+jest.mock('@ui/Stat', () => ({
+  __esModule: true,
+  Stat: ({ label, value }) => <div data-testid={`summary-${label}`}>{value}</div>,
+}));
+
 jest.mock('@components/k8s/common/ClusterNameWithRegion', () => ({
   __esModule: true,
   default: ({ name, region }) => (

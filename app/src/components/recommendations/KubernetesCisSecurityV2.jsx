@@ -9,7 +9,7 @@ import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import TicketsIcon from '@assets/sidebar-icon/tickets-icon.svg';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import Text from '@shared/format/Text';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import Datetime from '@shared/format/Datetime';
 import { hasWriteAccess } from '@lib/auth';
 import PropTypes from 'prop-types';
@@ -304,7 +304,7 @@ const KubernetesCisSecurity = (props) => {
       {dismissal.modal}
       {!props?.disableInfographic && (
         <Box sx={{ display: 'flex', gap: 'var(--ds-space-3)' }} mt={2} mb={2}>
-          <WidgetCard sx={{ mt: 0, minWidth: '160px' }}>
+          <Card sx={{ minWidth: '160px', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
             <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-regular)', color: 'var(--ds-gray-600)' }}>
               Total Recommendations
             </Typography>
@@ -313,7 +313,7 @@ const KubernetesCisSecurity = (props) => {
             >
               {totalKubernetesSecurityCount}
             </Typography>
-          </WidgetCard>
+          </Card>
         </Box>
       )}
       <ListingLayout id='best-practices'>

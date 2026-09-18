@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import recommendationApi from '@api1/recommendation';
 import { ListingLayout } from '@ui/ListingLayout';
 import DownloadButton from '@shared/buttons/DownloadButton';
-import WidgetCard from '@ui/WidgetCard';
+import { Card } from '@ui/Card';
 import { Stat } from '@ui/Stat';
 import { ds } from 'src/utils/colors';
 import PropTypes from 'prop-types';
@@ -130,7 +130,7 @@ const KubernetesKubeVersionRecommendation = ({ accountId, showUpdatedEmptyData =
         mt={2}
         mb={2}
       >
-        <WidgetCard sx={{ flex: 1, minWidth: 0, mt: 0, padding: `${ds.space[3]} ${ds.space[4]}` }}>
+        <Card size='sm' sx={{ flex: 1, minWidth: 0 }}>
           <Stat
             size='md'
             label='Total Recommendations'
@@ -141,7 +141,7 @@ const KubernetesKubeVersionRecommendation = ({ accountId, showUpdatedEmptyData =
                 : totalKubernetesKubeVersionRecommendationCount ?? '—'
             }
           />
-        </WidgetCard>
+        </Card>
       </Box>
       <ListingLayout id='kube-version'>
         <ListingLayout.Toolbar actions={<DownloadButton onClick={() => ({ tableId: kubernetesKubeVersionTable })} />} />
