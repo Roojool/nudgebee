@@ -147,4 +147,9 @@ jobs:
           # Turns an unreachable database into a failure in THIS job only, so the
           # suite cannot quietly stop running here.
           REQUIRE_DB_TESTS: "true"
-        run: go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ -run '_DB$' -v
+        # triage/eventrule: which suppression rows a mute owns is decided in SQL over
+        # jsonb tags and nullable match columns (alert-rule mute, epic #38553). Only
+        # the Mute tests: triage's other _DB test needs a migrated database.
+        run: |
+          go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ -run '_DB$' -v
+          go test ./triage/ ./eventrule/ -run 'Mute.*_DB$' -v

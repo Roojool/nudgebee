@@ -281,6 +281,55 @@ func handleEventRuleAction(actionPayload *ActionRequest, c *gin.Context, tracer 
 		c.JSON(200, capabilities)
 		return
 
+	case "eventrules_get_event_alert_controls":
+		var controlsRequest triage.EventAlertControlsRequest
+		if relayRequest["request"] != nil {
+			relayRequest = relayRequest["request"].(map[string]interface{})
+		}
+		if err := common.UnmarshalMapToStruct(relayRequest, &controlsRequest); err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		controls, err := triage.GetEventAlertControls(ctx, controlsRequest)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		c.JSON(200, controls)
+		return
+
+	case "eventrules_update_event_mute":
+		var muteRequest triage.UpdateEventMuteRequest
+		if relayRequest["request"] != nil {
+			relayRequest = relayRequest["request"].(map[string]interface{})
+		}
+		if err := common.UnmarshalMapToStruct(relayRequest, &muteRequest); err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		controls, err := triage.UpdateEventMute(ctx, muteRequest)
+		defer func() {
+			auditEvent.AccountId = muteRequest.AccountID
+			auditEvent.EventAction = audit.EventActionUpdate
+			auditEvent.EventTime = time.Now()
+			// A rejected mute has no resolved alert; the audit target is required.
+			auditEvent.EventTarget = muteRequest.EventID
+			if controls != nil && controls.Alert != "" {
+				auditEvent.EventTarget = controls.Alert
+			}
+			auditEvent.EventState = muteRequest
+			if auditErr := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); auditErr != nil {
+				ctx.GetLogger().Error("failed to create audit event for event alert mute", "error", auditErr)
+			}
+		}()
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			auditEvent.EventStatus = audit.EventStatusFailure
+			return
+		}
+		c.JSON(200, controls)
+		return
+
 	default:
 		c.JSON(400, common.ErrorActionBadRequest("invalid action name - "+actionPayload.Action.Name))
 		return

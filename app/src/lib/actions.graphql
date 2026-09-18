@@ -529,6 +529,18 @@ type Mutation {
 }
 
 type Query {
+  eventrules_get_event_alert_controls(
+    request: EventRulesGetEventAlertControlsRequest!
+  ): jsonb
+}
+
+type Mutation {
+  eventrules_update_event_mute(
+    request: EventRulesUpdateEventMuteRequest!
+  ): jsonb
+}
+
+type Query {
   anomaly_grouping_v2(
     where: ListAnomalyWhereRequest
   ): AnomalyGroupingsResponse
@@ -3389,6 +3401,19 @@ input EventRulesGetCapabilitiesRequest {
 input EventRulesUpdateMuteRequest {
   rule_id: String!
   account_id: String!
+  muted: Boolean!
+}
+
+input EventRulesGetEventAlertControlsRequest {
+  event_id: String!
+  account_id: String!
+}
+
+input EventRulesUpdateEventMuteRequest {
+  event_id: String!
+  account_id: String!
+  scope: String!
+  duration_hours: Int!
   muted: Boolean!
 }
 

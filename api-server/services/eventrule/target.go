@@ -57,12 +57,16 @@ type RuleOperations struct {
 
 // RuleCapabilities is the per-rule answer of eventrules_get_capabilities.
 type RuleCapabilities struct {
-	RuleID     string         `json:"rule_id"`
-	Alert      string         `json:"alert"`
-	Source     string         `json:"source"`
-	Target     RuleTargetKind `json:"target"`
-	Muted      bool           `json:"muted"`
-	Operations RuleOperations `json:"operations"`
+	RuleID  string         `json:"rule_id"`
+	Alert   string         `json:"alert"`
+	Source  string         `json:"source"`
+	Target  RuleTargetKind `json:"target"`
+	Enabled bool           `json:"enabled"`
+	Muted   bool           `json:"muted"`
+	// MutedWorkloads counts workloads with their own active mute of this rule
+	// (muted from an event, scope "workload"), independent of Muted.
+	MutedWorkloads int            `json:"muted_workloads"`
+	Operations     RuleOperations `json:"operations"`
 }
 
 // RuleLocator is what a provider write needs to find the upstream rule.
@@ -96,6 +100,7 @@ type RuleTarget struct {
 	// using the agent's own nudgebee-prometheus.rules.
 	SendPromLocator bool
 	Muted           bool
+	MutedWorkloads  int
 	Operations      RuleOperations
 }
 
@@ -132,12 +137,14 @@ type AgentCapabilities struct {
 // Capabilities is the public view of a resolved target.
 func (t *RuleTarget) Capabilities() RuleCapabilities {
 	return RuleCapabilities{
-		RuleID:     t.ID,
-		Alert:      t.Rule.Alert,
-		Source:     t.Rule.Source,
-		Target:     t.Kind,
-		Muted:      t.Muted,
-		Operations: t.Operations,
+		RuleID:         t.ID,
+		Alert:          t.Rule.Alert,
+		Source:         t.Rule.Source,
+		Target:         t.Kind,
+		Enabled:        t.Enabled,
+		Muted:          t.Muted,
+		MutedWorkloads: t.MutedWorkloads,
+		Operations:     t.Operations,
 	}
 }
 
@@ -516,6 +523,10 @@ func computeOperations(t *RuleTarget, env capabilityEnv) RuleOperations {
 		switch {
 		case t.Category == azureScheduledQueryCategory:
 			write = unavailable("log search (scheduled query) alerts cannot be changed from Nudgebee")
+		case t.Rule.AlertType != "" && t.Rule.AlertType != "metric":
+			// cloud-collector changes Azure metric alerts only; an activity-log or log
+			// alert ("Azure Resource Deleted") fails with "not found in any subscription".
+			write = unavailable("only Azure metric alerts can be changed from Nudgebee; this one is a log or activity-log alert")
 		case t.Locator.AzureID != "":
 		case t.Ambiguous:
 			write = unavailable(ambiguousReason)
@@ -626,20 +637,36 @@ func loadAgentCapabilities(ctx stdctx.Context, db *sqlx.DB, accountID string) Ag
 	return AgentCapabilities(status)
 }
 
-// loadMutedRuleIDs returns which of the given event_rules ids have an enabled mute.
-func loadMutedRuleIDs(ctx stdctx.Context, db *sqlx.DB, tenantID string, ids []string) (map[string]bool, error) {
-	var muted []string
-	err := db.SelectContext(ctx, &muted, `
-		SELECT DISTINCT action_value->>'`+MuteMarkerKey+`'
+// muteState is what is muted for one rule: the whole rule, and/or single workloads.
+type muteState struct {
+	Rule      bool
+	Workloads int
+}
+
+// loadMuteStates returns the active (enabled, unexpired) mutes of the given
+// event_rules ids. A mute row without a scope predates scopes and is rule-wide.
+func loadMuteStates(ctx stdctx.Context, db *sqlx.DB, tenantID string, ids []string) (map[string]muteState, error) {
+	var rows []struct {
+		RuleID    string `db:"rule_id"`
+		RuleWide  bool   `db:"rule_wide"`
+		Workloads int    `db:"workloads"`
+	}
+	err := db.SelectContext(ctx, &rows, `
+		SELECT action_value->>'`+MuteMarkerKey+`' AS rule_id,
+		       bool_or(COALESCE(action_value->>'`+MuteScopeKey+`', '`+MuteScopeRule+`') = '`+MuteScopeRule+`') AS rule_wide,
+		       COUNT(DISTINCT (match_namespace, match_service))
+		         FILTER (WHERE action_value->>'`+MuteScopeKey+`' = '`+MuteScopeWorkload+`') AS workloads
 		FROM event_triage_rules
 		WHERE tenant_id = $1 AND enabled = TRUE
-		  AND action_value->>'`+MuteMarkerKey+`' = ANY($2)`, tenantID, pq.Array(ids))
+		  AND (effective_until IS NULL OR effective_until > NOW())
+		  AND action_value->>'`+MuteMarkerKey+`' = ANY($2)
+		GROUP BY 1`, tenantID, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("eventrule: load mutes: %w", err)
 	}
-	out := make(map[string]bool, len(muted))
-	for _, id := range muted {
-		out[id] = true
+	out := make(map[string]muteState, len(rows))
+	for _, r := range rows {
+		out[r.RuleID] = muteState{Rule: r.RuleWide, Workloads: r.Workloads}
 	}
 	return out, nil
 }
@@ -647,6 +674,20 @@ func loadMutedRuleIDs(ctx stdctx.Context, db *sqlx.DB, tenantID string, ids []st
 // MuteMarkerKey is the action_value key that ties a triage suppression rule to
 // the event_rules row it mutes.
 const MuteMarkerKey = "mute_event_rule_id"
+
+// MuteScopeKey is the action_value key holding a mute's scope. Rows without it
+// (Alert Manager mutes made before scopes existed) are rule-wide.
+const MuteScopeKey = "mute_scope"
+
+// MuteAlertKey is the action_value key holding the alert key a mute matches. It
+// identifies an event-built mute when the event maps to no event_rules row.
+const MuteAlertKey = "mute_alert"
+
+// Mute scopes.
+const (
+	MuteScopeRule     = "rule"
+	MuteScopeWorkload = "workload"
+)
 
 // HasGitIntegration reports whether the tenant has an enabled github/gitlab integration.
 func HasGitIntegration(ctx stdctx.Context, db *sqlx.DB, tenantID string) bool {
@@ -695,11 +736,11 @@ func resolveRuleTargets(ctx *security.RequestContext, db *sqlx.DB, ids []string,
 	if err != nil {
 		return nil, err
 	}
-	muted, err := loadMutedRuleIDs(ctx.GetContext(), db, tenantID, ids)
+	muted, err := loadMuteStates(ctx.GetContext(), db, tenantID, ids)
 	if err != nil {
 		// A failed mute lookup must not hide the rule's other controls.
 		ctx.GetLogger().Warn("eventrule: mute status lookup failed", "error", err)
-		muted = map[string]bool{}
+		muted = map[string]muteState{}
 	}
 
 	agentCache := map[string]bool{}
@@ -747,7 +788,8 @@ func resolveRuleTargets(ctx *security.RequestContext, db *sqlx.DB, ids []string,
 			env.hasGit = *hasGit
 		}
 		t.Locator = buildLocator(t, opts)
-		t.Muted = muted[t.ID]
+		t.Muted = muted[t.ID].Rule
+		t.MutedWorkloads = muted[t.ID].Workloads
 		t.Operations = computeOperations(t, env)
 		out = append(out, t)
 	}

@@ -113,6 +113,7 @@ import { MdOutlineCategory } from 'react-icons/md';
 import DatadogMonitorSearch from '@components/k8s/investigate/cards/DatadogMonitorSearch';
 import SafeIcon from '@shared/icons/SafeIcon';
 import RemediationPanel from '@components/k8s/investigate/cards/RemediationPanel';
+import EventAlertControlsSection from '@components/k8s/investigate/EventAlertControlsSection';
 // Cloud-specific card imports
 import CloudTrailEventCard from '@components/cloudaccount/investigate/cards/CloudTrailEventCard';
 import EventBridgeEventCard from '@components/cloudaccount/investigate/cards/EventBridgeEventCard';
@@ -446,6 +447,8 @@ const Investigate = () => {
   }, [selectedCluster?.cloud_provider, allCluster, router.query.accountId, router.query.source]);
 
   const [row, setRow] = useState({});
+  // Whether the Remediation tab's "Stop this alert" section rendered.
+  const [hasAlertControls, setHasAlertControls] = useState(false);
   const [queryParam, setQueryParam] = useState({
     aggregationKey: '',
     serviceKey: '',
@@ -2712,7 +2715,7 @@ const Investigate = () => {
                                 );
                               })()}
 
-                            {remediationActionCount === 0 && previousRuns.length === 0 && (
+                            {remediationActionCount === 0 && previousRuns.length === 0 && !hasAlertControls && (
                               <Text value='No fixes are available for this event yet.' sx={{ fontSize: ds.text.bodyLg, color: ds.gray[600] }} />
                             )}
 
@@ -2900,6 +2903,28 @@ const Investigate = () => {
                                 </Box>
                               </Box>
                             )}
+
+                            {/* Acting on the alert itself: mute it in the product, or change the rule
+                                where it is defined. Below the fixes, because for a real fault the fix
+                                comes first; not a remediation row, because a mute stops nothing. */}
+                            {row?.id &&
+                              (() => {
+                                const alertAccountId = row?.cloud_account_id || router.query.accountId;
+                                const detailsPrefix = isCloud ? '/cloud-account/details' : '/kubernetes/details';
+                                return (
+                                  <EventAlertControlsSection
+                                    accountId={alertAccountId}
+                                    eventId={row.id}
+                                    canWrite={hasWriteAccess(alertAccountId)}
+                                    alertManagerHref={`${detailsPrefix}/${alertAccountId}?name=${encodeURIComponent(
+                                      row?.aggregation_key || ''
+                                    )}#monitoring/alert-manager`}
+                                    triageRulesHref={`${detailsPrefix}/${alertAccountId}#events/triage-rules`}
+                                    headingSx={remediationSectionSx}
+                                    onVisibilityChange={setHasAlertControls}
+                                  />
+                                );
+                              })()}
 
                             {/* Automations are remediation too: running one changes the system and
                                 writes a WorkflowExecution resolution, so it appears in History

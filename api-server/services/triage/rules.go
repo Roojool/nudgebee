@@ -461,6 +461,12 @@ func ApplyTriageRuleActions(ctx context.Context, db *sqlx.DB, event *models.Even
 
 			// Create classification record for suppression (so drilldown works)
 			if event.CloudAccountId != nil && event.Tenant != nil {
+				// A muted firing was silenced on purpose, not judged to be noise:
+				// alert-quality and analytics tell the two apart by reason code.
+				reasonCode := "known_noise"
+				if result.Suppression.Muted {
+					reasonCode = ReasonCodeMuted
+				}
 				classificationID := uuid.New().String()
 				systemUserID := "00000000-0000-0000-0000-000000000000" // System UUID for auto-suppression
 				classification := EventClassification{
@@ -469,7 +475,7 @@ func ApplyTriageRuleActions(ctx context.Context, db *sqlx.DB, event *models.Even
 					CloudAccountID: *event.CloudAccountId,
 					TenantID:       *event.Tenant,
 					Classification: ClassificationFalsePositive,
-					ReasonCode:     "known_noise", // Suppressed events are treated as known noise
+					ReasonCode:     reasonCode,
 					ApplyScope:     ApplyScopeThisEvent,
 					ClassifiedBy:   systemUserID,
 					ClassifiedAt:   time.Now().UTC(),
@@ -535,6 +541,7 @@ func applySuppressionRule(rule *TriageRule) *SuppressionResult {
 	return &SuppressionResult{
 		Action:    rule.Action,
 		NewStatus: newStatus,
+		Muted:     isMuteRule(rule),
 	}
 }
 

@@ -104,6 +104,18 @@ mutation UpdateEventRuleMute {
 }
 `;
 
+export const GET_EVENT_ALERT_CONTROLS = `
+query GetEventAlertControls {
+  controls: eventrules_get_event_alert_controls(request: __REQUEST__)
+}
+`;
+
+export const UPDATE_EVENT_MUTE = `
+mutation UpdateEventMute {
+  controls: eventrules_update_event_mute(request: __REQUEST__)
+}
+`;
+
 export interface EventRuleCapability {
   available: boolean;
   reason?: string;
@@ -115,7 +127,10 @@ export interface EventRuleCapabilities {
   alert: string;
   source: string;
   target: string;
+  enabled?: boolean;
   muted: boolean;
+  // Workloads muted on their own from the investigation screen.
+  muted_workloads?: number;
   operations: {
     edit_definition: EventRuleCapability;
     update_threshold: EventRuleCapability;
@@ -124,6 +139,37 @@ export interface EventRuleCapabilities {
     mute: EventRuleCapability;
     pr: EventRuleCapability;
   };
+}
+
+export type EventMuteScopeName = 'workload' | 'rule';
+
+export interface EventMuteScope {
+  scope: EventMuteScopeName;
+  namespace?: string;
+  owner?: string;
+  matched_7d: number;
+  workloads_7d: number;
+  muted: boolean;
+  expires_at?: string | null;
+}
+
+export interface EventSuppression {
+  rule_id: string;
+  name: string;
+  is_mute: boolean;
+  mute_scope?: EventMuteScopeName;
+  expires_at?: string | null;
+}
+
+// What the investigation screen can do about an event's alert.
+export interface EventAlertControls {
+  event_id: string;
+  alert: string;
+  source: string;
+  rule: EventRuleCapabilities | null;
+  rule_location?: { namespace: string; name: string; managed_by?: string };
+  scopes: EventMuteScope[];
+  suppressions: EventSuppression[];
 }
 
 // The first GraphQL error message, so a rejected rule change shows the server's reason.
@@ -677,6 +723,25 @@ const apiKubernetes1 = {
   async updateEventRuleMute(data: { rule_id: string; account_id: string; muted: boolean }) {
     try {
       const response = await queryGraphQL(UPDATE_EVENT_RULE_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventRuleMute', {});
+      return {
+        data: response?.data,
+      };
+    } catch (error) {
+      return error;
+    }
+  },
+  async getEventAlertControls(data: { event_id: string; account_id: string }): Promise<EventAlertControls | null> {
+    try {
+      const response = await queryGraphQL(GET_EVENT_ALERT_CONTROLS.replace('__REQUEST__', gqlStringify(data)), 'GetEventAlertControls', {});
+      return response?.data?.data?.controls || null;
+    } catch (error) {
+      console.warn('failed to fetch event alert controls', error);
+      return null;
+    }
+  },
+  async updateEventMute(data: { event_id: string; account_id: string; scope: EventMuteScopeName; duration_hours: number; muted: boolean }) {
+    try {
+      const response = await queryGraphQL(UPDATE_EVENT_MUTE.replace('__REQUEST__', gqlStringify(data)), 'UpdateEventMute', {});
       return {
         data: response?.data,
       };

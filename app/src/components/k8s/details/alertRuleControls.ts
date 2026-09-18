@@ -1,4 +1,5 @@
 import type { EventRuleCapabilities } from '@api1/kubernetes1';
+import { getBrandTitle } from '@hooks/useTenantBranding';
 
 // Alert Manager row controls, shared by the Kubernetes and cloud account lists.
 // A control is offered only when the backend reports that the change reaches the
@@ -22,6 +23,17 @@ export const ALERT_RULE_MENU = {
   none: 'no-changes',
 } as const;
 
+// "Mute in <product>" when branding has loaded, plain "Mute" until then.
+export const muteInBrandLabel = (): string => {
+  const title = getBrandTitle();
+  return title ? `Mute in ${title}` : 'Mute';
+};
+
+// Muted as a whole, or muted for some workloads from the investigation screen.
+const hasAnyMute = (caps?: EventRuleCapabilities): boolean => !!caps?.muted || (caps?.muted_workloads ?? 0) > 0;
+
+export const pluralize = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+
 export const buildAlertRuleMenuItems = (item: AlertRuleItem | undefined, canWrite: boolean): AlertRuleMenuItem[] => {
   const caps = item?.capabilities;
   // Until capabilities arrive (or if they failed) show nothing rather than a control
@@ -37,10 +49,13 @@ export const buildAlertRuleMenuItems = (item: AlertRuleItem | undefined, canWrit
   if (item.enabled && ops?.edit_definition?.available) {
     menus.push({ id: ALERT_RULE_MENU.edit, label: 'Edit' });
   }
-  if (caps.muted) {
+  // Unmute is offered for any active mute, including a workload mute of a rule
+  // whose own Mute is not offered (datadog, built-in checks).
+  if (hasAnyMute(caps)) {
     menus.push({ id: ALERT_RULE_MENU.unmute, label: 'Unmute' });
-  } else if (ops?.mute?.available) {
-    menus.push({ id: ALERT_RULE_MENU.mute, label: 'Mute in Nudgebee' });
+  }
+  if (!caps.muted && ops?.mute?.available) {
+    menus.push({ id: ALERT_RULE_MENU.mute, label: muteInBrandLabel() });
   }
   if (!menus.length) {
     menus.push({ id: ALERT_RULE_MENU.none, label: 'Change this rule where it is defined', disabled: true });
@@ -50,7 +65,12 @@ export const buildAlertRuleMenuItems = (item: AlertRuleItem | undefined, canWrit
 
 export const alertRuleStatusText = (item: AlertRuleItem | undefined): string => {
   const status = item?.enabled ? 'Enabled' : 'Disabled';
-  return item?.capabilities?.muted ? `${status} · Muted` : status;
+  const caps = item?.capabilities;
+  if (caps?.muted) {
+    return `${status} · Muted`;
+  }
+  const workloads = caps?.muted_workloads ?? 0;
+  return workloads > 0 ? `${status} · Muted for ${pluralize(workloads, 'workload')}` : status;
 };
 
 // Dialogs build their title while closed too, so an absent item gives an empty title.
@@ -61,8 +81,18 @@ export const muteConfirmTitle = (item: AlertRuleItem | undefined, mute: boolean)
   if (!item) {
     return '';
   }
-  return mute
-    ? `Mute "${item.alert}" in Nudgebee? New events are kept but marked Suppressed and send no notifications. The rule itself is not changed.`
+  if (mute) {
+    const title = getBrandTitle();
+    return `Mute "${item.alert}"${
+      title ? ` in ${title}` : ''
+    }? New events are kept but marked Suppressed and send no notifications. The rule itself is not changed.`;
+  }
+  const workloads = item.capabilities?.muted_workloads ?? 0;
+  return workloads > 0
+    ? `Unmute "${item.alert}" everywhere, including ${pluralize(
+        workloads,
+        'workload'
+      )} muted on their own? New events will be handled normally again.`
     : `Unmute "${item.alert}"? New events will be handled normally again.`;
 };
 

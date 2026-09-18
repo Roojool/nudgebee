@@ -2,9 +2,7 @@ package triage
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -13,7 +11,6 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 
-	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -30,12 +27,35 @@ func MuteAlertnamePattern(alert string) string {
 	return "^" + regexp.QuoteMeta(alert) + "$"
 }
 
-func muteActionValue(ruleID string) (string, error) {
-	b, err := json.Marshal(map[string]string{eventrule.MuteMarkerKey: ruleID})
+// muteActionValue tags a suppression rule as a mute. ruleID is the event_rules row
+// it belongs to ("" when the event maps to none); alert is the matched alert key.
+func muteActionValue(ruleID, scope, alert string) (string, error) {
+	v := map[string]string{eventrule.MuteScopeKey: scope}
+	if ruleID != "" {
+		v[eventrule.MuteMarkerKey] = ruleID
+	}
+	if alert != "" {
+		v[eventrule.MuteAlertKey] = alert
+	}
+	b, err := json.Marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("mute: marshal action_value: %w", err)
 	}
 	return string(b), nil
+}
+
+// isMuteRule reports whether a suppression rule was created by Mute.
+func isMuteRule(rule *TriageRule) bool {
+	if rule == nil || rule.ActionValue == nil || *rule.ActionValue == "" {
+		return false
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(*rule.ActionValue), &v); err != nil {
+		return false
+	}
+	_, marker := v[eventrule.MuteMarkerKey]
+	_, scope := v[eventrule.MuteScopeKey]
+	return marker || scope
 }
 
 // UpdateRuleMuteRequest is the eventrules_update_mute input.
@@ -76,7 +96,7 @@ func UpdateRuleMute(ctx *security.RequestContext, req UpdateRuleMuteRequest) (ev
 
 	if req.Muted {
 		err = muteRule(ctx.GetContext(), dbms.Db, sc.GetTenantId(), req.AccountID, sc.GetUserId(),
-			target.ID, target.Rule.Alert, eventrule.MuteEventSources(target.Rule.Source))
+			target.ID, target.Rule.Alert, eventrule.MuteEventSources(target.Rule.Source), nil)
 	} else {
 		err = unmuteRule(ctx.GetContext(), dbms.Db, sc.GetTenantId(), req.AccountID, sc.GetUserId(), target.ID)
 	}
@@ -91,78 +111,29 @@ func UpdateRuleMute(ctx *security.RequestContext, req UpdateRuleMuteRequest) (ev
 	return caps, nil
 }
 
-// muteRule enables one suppression rule per source, reusing rows from an earlier
-// mute so repeated mute/unmute does not pile up rules.
-func muteRule(ctx context.Context, db *sqlx.DB, tenantID, accountID, userID, ruleID, alert string, sources []string) error {
-	if len(sources) == 0 {
-		return fmt.Errorf("%w: mute: no event sources for this rule", eventrule.ErrOperationUnavailable)
-	}
-	actionValue, err := muteActionValue(ruleID)
-	if err != nil {
-		return err
-	}
-	pattern := MuteAlertnamePattern(alert)
-	name := "Muted alert rule: " + alert
-	description := "Created by Mute in Alert Manager. Events from this alert rule are kept but marked suppressed."
+// muteRule enables the rule-wide mute of an alert rule on every given source,
+// reusing rows from an earlier rule-wide mute so repeated mute/unmute does not
+// pile up rules. expiresAt nil means until unmuted.
+func muteRule(ctx context.Context, db *sqlx.DB, tenantID, accountID, userID, ruleID, alert string, sources []string, expiresAt *time.Time) error {
+	return upsertMute(ctx, db, muteSpec{
+		tenantID: tenantID, accountID: accountID,
+		ruleID: ruleID, alert: alert, scope: eventrule.MuteScopeRule, sources: sources,
+	}, userID, expiresAt)
+}
 
-	tx, err := db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("mute: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, source := range sources {
-		var existingID string
-		err := tx.GetContext(ctx, &existingID, `
-			SELECT id FROM event_triage_rules
-			WHERE tenant_id = $1 AND account_id = $2 AND match_source = $3
-			  AND action_value->>'`+eventrule.MuteMarkerKey+`' = $4
-			ORDER BY created_at LIMIT 1`, tenantID, accountID, source, ruleID)
-		switch {
-		case err == nil:
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE event_triage_rules
-				SET enabled = TRUE, match_alertname = $2, rule_type = $3, action = $4,
-				    effective_until = NULL, updated_by = $5, updated_at = NOW()
-				WHERE id = $1`, existingID, pattern, RuleTypeSuppression, ActionSuppress, userID); err != nil {
-				return fmt.Errorf("mute: re-enable rule for %s: %w", source, err)
-			}
-		case errors.Is(err, sql.ErrNoRows):
-			src := source
-			now := time.Now().UTC()
-			rule := &TriageRule{
-				ID:             uuid.New().String(),
-				TenantID:       &tenantID,
-				AccountID:      &accountID,
-				RuleType:       RuleTypeSuppression,
-				MatchSource:    &src,
-				MatchAlertname: &pattern,
-				Action:         ActionSuppress,
-				ActionValue:    &actionValue,
-				Priority:       200,
-				IsEditable:     true,
-				CanOverride:    true,
-				Enabled:        true,
-				Name:           &name,
-				Description:    &description,
-				CreatedBy:      &userID,
-				CreatedAt:      now,
-				UpdatedAt:      now,
-			}
-			if err := insertTriageRuleTx(ctx, tx, rule); err != nil {
-				return fmt.Errorf("mute: insert rule for %s: %w", source, err)
-			}
-		default:
-			return fmt.Errorf("mute: look up rule for %s: %w", source, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("mute: commit: %w", err)
+// lockMute serialises mute writes for one (account, rule or alert, scope,
+// workload), so a double click or two users cannot insert duplicate rows between
+// the lookup and the insert. Held until the transaction ends.
+func lockMute(ctx context.Context, tx *sqlx.Tx, accountID, identity, scope, namespace, owner string) error {
+	key := accountID + "|" + identity + "|" + scope + "|" + namespace + "|" + owner
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 38553))`, key); err != nil {
+		return fmt.Errorf("mute: lock: %w", err)
 	}
 	return nil
 }
 
-// unmuteRule disables every suppression rule tied to the alert rule.
+// unmuteRule disables every suppression rule tied to the alert rule, whatever its
+// scope: Unmute in Alert Manager unmutes the rule everywhere.
 func unmuteRule(ctx context.Context, db *sqlx.DB, tenantID, accountID, userID, ruleID string) error {
 	if _, err := db.ExecContext(ctx, `
 		UPDATE event_triage_rules

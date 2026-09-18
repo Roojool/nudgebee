@@ -30,11 +30,30 @@ func TestMuteAlertnamePattern_MatchesOnlyThatAlert(t *testing.T) {
 }
 
 func TestMuteActionValue(t *testing.T) {
-	v, err := muteActionValue("r-1")
+	v, err := muteActionValue("r-1", eventrule.MuteScopeRule, "HighCPU")
 	assert.NoError(t, err)
-	assert.JSONEq(t, `{"`+eventrule.MuteMarkerKey+`":"r-1"}`, v)
+	assert.JSONEq(t, `{"mute_event_rule_id":"r-1","mute_scope":"rule","mute_alert":"HighCPU"}`, v)
 	// action_value is JSONB; CreateTriageRule's validator must accept it.
 	assert.NoError(t, validateJSONBField(&v, "action_value"))
+
+	// An event that maps to no alert rule carries no marker.
+	v, err = muteActionValue("", eventrule.MuteScopeWorkload, "report_crash_loop")
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"mute_scope":"workload","mute_alert":"report_crash_loop"}`, v)
+}
+
+func TestIsMuteRule(t *testing.T) {
+	str := func(s string) *string { return &s }
+	assert.True(t, isMuteRule(&TriageRule{ActionValue: str(`{"mute_event_rule_id":"r-1"}`)}), "Alert Manager mute from before scopes")
+	assert.True(t, isMuteRule(&TriageRule{ActionValue: str(`{"mute_scope":"workload","mute_alert":"a"}`)}))
+	assert.False(t, isMuteRule(&TriageRule{ActionValue: str(`{"reason":"noise"}`)}))
+	assert.False(t, isMuteRule(&TriageRule{ActionValue: str(`not json`)}))
+	assert.False(t, isMuteRule(&TriageRule{}))
+
+	// The winning suppression says whether it was a mute, so the firing's
+	// classification is recorded as muted rather than as known noise.
+	assert.True(t, applySuppressionRule(&TriageRule{Action: ActionSuppress, ActionValue: str(`{"mute_scope":"rule"}`)}).Muted)
+	assert.False(t, applySuppressionRule(&TriageRule{Action: ActionSuppress}).Muted)
 }
 
 // AC-9: Alert Tuning's direct option is the resolver's answer for the operation

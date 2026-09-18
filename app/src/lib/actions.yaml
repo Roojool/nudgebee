@@ -2023,6 +2023,35 @@ actions:
       - role: tenant_admin
       - role: account_admin
     comment: Mute or unmute an alert rule in Nudgebee (suppression rules; the source rule is not changed)
+  - name: eventrules_get_event_alert_controls
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+    comment: What the investigation screen can do about an event's alert — the alert rule it belongs to and its capabilities, the mute scopes with 7-day counts, and the suppressions that apply
+  - name: eventrules_update_event_mute
+    definition:
+      kind: synchronous
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/eventrule'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: account_admin
+    comment: Mute or unmute an event's alert in Nudgebee for its workload or for every firing, for a set time (suppression rules; the source rule is not changed)
   - name: alertmanager_update_rule
     definition:
       kind: synchronous

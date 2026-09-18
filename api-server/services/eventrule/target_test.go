@@ -177,6 +177,19 @@ func TestComputeOperations(t *testing.T) {
 			},
 		},
 		{
+			// Verified on dev: turning off "Azure Resource Deleted" (alert_type log)
+			// failed in cloud-collector with "metric alert not found".
+			name:   "Azure log / activity-log alert is not writable",
+			target: resolved("Azure_Monitor_Alert", func(r *RuleTarget) { r.Rule.AlertType = "log" }),
+			env:    testEnv(false, false, false),
+			check: func(t *testing.T, ops RuleOperations) {
+				assert.False(t, ops.DisableAtSource.Available)
+				assert.False(t, ops.UpdateThreshold.Available)
+				assert.Contains(t, ops.DisableAtSource.Reason, "metric alerts")
+				assert.True(t, ops.Mute.Available)
+			},
+		},
+		{
 			name:   "Azure found by name warns; disable offered too",
 			target: resolved("Azure_Monitor_Alert", nil),
 			env:    testEnv(false, false, false),
