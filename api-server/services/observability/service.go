@@ -3166,6 +3166,9 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	if err != nil {
 		return OutputMetricQuery{}, err
 	}
+	if metricsProvider == "" {
+		return OutputMetricQuery{}, nil
+	}
 
 	// --- 1. Extract Metadata ---
 	meta, err := parseRequestMetadata(req.Request)
