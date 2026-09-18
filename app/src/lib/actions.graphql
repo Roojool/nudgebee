@@ -202,9 +202,9 @@ type Mutation {
 }
 
 type Mutation {
-  ai_generate_prometheus_query(
-    request: AIGetPrometheusQueryRequest!
-  ): AIGetPrometheusQueryResponse
+  ai_generate_metrics_query(
+    request: AIGetMetricsQueryRequest!
+  ): AIGetMetricsQueryResponse
 }
 
 type Query {
@@ -4152,11 +4152,12 @@ input NudgebeeAIGetPrometheusQueryRequest {
   user_id: String
 }
 
-input AIGetPrometheusQueryRequest {
+input AIGetMetricsQueryRequest {
   account_id: String!
   query: String!
   user_id: String
   async: Boolean
+  index: String
 }
 
 input AIGetLogQueryRequest {
@@ -7680,11 +7681,11 @@ type NudgebeeAIGetPrometheusQuery {
   chain_name: String
 }
 
-type AIGetPrometheusQueryResponse {
-  data: AIGetPrometheusQuery!
+type AIGetMetricsQueryResponse {
+  data: AIGeneratedQuery!
 }
 
-type AIGetPrometheusQuery {
+type AIGeneratedQuery {
   response: [String!]!
   query: String!
   agent_step_response: [String!]!
@@ -7695,7 +7696,7 @@ type AIGetPrometheusQuery {
 }
 
 type AIGetLogQueryResponse {
-  data: AIGetPrometheusQuery!
+  data: AIGeneratedQuery!
 }
 
 type GenerateFeedbackResponse {

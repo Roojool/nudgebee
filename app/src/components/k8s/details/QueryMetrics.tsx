@@ -737,8 +737,13 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       instant: instant,
       ...(metricsProvider !== null && metricsProvider !== undefined ? { metric_provider: metricsProvider } : {}),
       ...(metricsProvider === 'solarwinds' && solarwindsRequest ? { request: solarwindsRequest } : {}),
+      // query_type tells the backend the query is raw ES text rather than the
+      // cross-provider builder shape. Gating it on the Code tab alone meant a query
+      // written by the AI tab arrived unlabelled, so the backend parsed it as a
+      // builder where-clause list and rejected it outright. Builder mode is the only
+      // mode that must omit it.
       ...(metricsProvider === 'ES' && esIndex
-        ? { request: { metric_name: esIndex, ...(qLEditor === 'code' ? { query_type: esQueryType || 'dsl' } : {}) } }
+        ? { request: { metric_name: esIndex, ...(qLEditor !== 'build' ? { query_type: esQueryType || 'dsl' } : {}) } }
         : {}),
       // The backend records query history; this flag distinguishes a real submit
       // from the date-range/instant-toggle re-runs that reuse this same path.

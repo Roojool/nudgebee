@@ -324,11 +324,11 @@ export function createConversationFetcher(): ConversationFetcher {
 }
 
 const api = {
-  async askNudgebeeAiGeneratePrometheusQuery(data: GenerateQueryRequest) {
+  async askNudgebeeAiGenerateMetricsQuery(data: GenerateQueryRequest) {
     if (data.account_id === 'demo') return null;
-    const ASK_AI_GENERATE_PROMETHEUS_QUERY = `
-        mutation AskNudgebeeAiGeneratePrometheusQuery {
-          ai_generate_prometheus_query(request: __REQUEST__) {
+    const ASK_AI_GENERATE_METRICS_QUERY = `
+        mutation AskNudgebeeAiGenerateMetricsQuery {
+          ai_generate_metrics_query(request: __REQUEST__) {
             data {
               agent_step_response
               response
@@ -344,9 +344,12 @@ const api = {
     query.account_id = data.account_id;
     query.query = data.query;
     query.async = true;
+    // Only meaningful when the account's metrics provider is Elasticsearch, where the
+    // generator resolves the query against this index instead of the account default.
+    if (data.index) query.index = data.index;
     const response = await queryGraphQL(
-      ASK_AI_GENERATE_PROMETHEUS_QUERY.replace('__REQUEST__', gqlStringify(query)),
-      'AskNudgebeeAiGeneratePrometheusQuery',
+      ASK_AI_GENERATE_METRICS_QUERY.replace('__REQUEST__', gqlStringify(query)),
+      'AskNudgebeeAiGenerateMetricsQuery',
       {}
     );
     return response;

@@ -505,10 +505,10 @@ actions:
       - role: tenant_admin
       - role: tenant_admin_readonly
       - role: tenant_usage
-  - name: ai_generate_prometheus_query
+  - name: ai_generate_metrics_query
     definition:
       kind: synchronous
-      handler: '{{LLM_SERVER_URL}}/v1/completions/prometheus-query'
+      handler: '{{LLM_SERVER_URL}}/v1/completions/metrics-query'
       forward_client_headers: true
       headers:
         - name: X-ACTION-TOKEN
@@ -522,7 +522,7 @@ actions:
       - role: account_admin_readonly
       - role: account_admin
       - role: tenant_admin
-    comment: Generate Prometheus Query
+    comment: Generate Metrics Query
   - name: ai_generate_workflow
     comment: Generate an automation workflow from a natural-language description
     definition:
@@ -7406,7 +7406,7 @@ custom_types:
     - name: ApplicationRequest
     - name: ApplicationMetricsRequest
     - name: NudgebeeAIGetPrometheusQueryRequest
-    - name: AIGetPrometheusQueryRequest
+    - name: AIGetMetricsQueryRequest
     - name: AIGetLogQueryRequest
     - name: AiFeedbackCreateRequest
     - name: GetInvestigateQueryRequest
@@ -7878,8 +7878,8 @@ custom_types:
     - name: ApplicationDeploymentMetrics
     - name: NudgebeeAIGetPrometheusQueryResponse
     - name: NudgebeeAIGetPrometheusQuery
-    - name: AIGetPrometheusQueryResponse
-    - name: AIGetPrometheusQuery
+    - name: AIGetMetricsQueryResponse
+    - name: AIGeneratedQuery
     - name: AIGetLogQueryResponse
     - name: GenerateFeedbackResponse
     - name: FeedbackResponse

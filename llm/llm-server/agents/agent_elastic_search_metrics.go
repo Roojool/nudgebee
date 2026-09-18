@@ -444,139 +444,7 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 		)
 	}
 
-	// --- Schema routing table (only rows for detected schemas) ---
-	if len(schemas) > 0 {
-		instructions = append(instructions,
-			"**Schema Routing (CRITICAL — pick fields by index pattern):**",
-			"  Different ingestion pipelines store metrics with completely different field schemas. ALWAYS identify the schema before writing the query:",
-			"  | Index pattern                           | Schema                       | Timestamp | Metric-name field |",
-			"  |-----------------------------------------|------------------------------|-----------|-------------------|",
-		)
-	}
-	if schemas[schemaOTel] {
-		instructions = append(instructions,
-			fmt.Sprintf("  | %-39s | OTel collector               | `%s` | `name.keyword` |", "`"+indexFor(schemaOTel)+"`", tsFor(schemaOTel, esTimestampOTel)),
-		)
-	}
-	if schemas[schemaMetricbeat] {
-		instructions = append(instructions,
-			fmt.Sprintf("  | %-39s | Metricbeat (ECS)             | `%s` | (embedded field) |", "`"+indexFor(schemaMetricbeat)+"`", tsFor(schemaMetricbeat, esTimestampECS)),
-		)
-	}
-	if schemas[schemaElasticK8s] {
-		instructions = append(instructions,
-			fmt.Sprintf("  | %-39s | Elastic Agent / kube-state   | `%s` | (embedded path) |", "`"+indexFor(schemaElasticK8s)+"`", tsFor(schemaElasticK8s, esTimestampECS)),
-		)
-	}
-	if schemas[schemaCloudWatch] {
-		instructions = append(instructions,
-			fmt.Sprintf("  | %-39s | Elastic Agent AWS CloudWatch | `%s` | `aws.cloudwatch.metric_name.keyword` (value under `aws.<svc>.metrics.<metric>.<stat>`) |", "`"+indexFor(schemaCloudWatch)+"`", tsFor(schemaCloudWatch, esTimestampECS)),
-		)
-	}
-	if schemas[schemaElasticK8s] || schemas[schemaCloudWatch] {
-		instructions = append(instructions,
-			"  Elastic Agent indices do NOT have a `name`/`name.keyword` field — the metric is identified by the index itself, and the value lives at a fully-qualified path (e.g. `kubernetes.container.cpu.usage.nanocores`). Filter on that path's existence.",
-		)
-	}
-
-	// --- OTel fast path (only if account uses OTel indices) ---
-	if schemas[schemaOTel] {
-		instructions = append(instructions,
-			fmt.Sprintf("**OTel Schema Fast Path (for `%s`):**", indexFor(schemaOTel)),
-			"  For standard K8s CPU, Memory, Network, or Filesystem metrics, call `es_metrics_query` directly — no discovery needed.",
-			"  **Query fields:**",
-			fmt.Sprintf("    * Metric name: `name.keyword` | Timestamp: `%s` | Value: `value`", tsFor(schemaOTel, esTimestampOTel)),
-			"    * Namespace: `attributes.resource.attributes.k8s@namespace@name.keyword`",
-			"    * Pod: `attributes.resource.attributes.k8s@pod@name.keyword`",
-			"    * Container: `attributes.resource.attributes.k8s@container@name.keyword`",
-			"    * Node: `attributes.resource.attributes.k8s@node@name.keyword`",
-			"  **CPU:** `container.cpu.usage`, `k8s.pod.cpu.usage`, `k8s.node.cpu.usage`",
-			"  **Memory:** `container.memory.usage`, `container.memory.working_set`, `container.memory.rss`, `k8s.pod.memory.usage`, `k8s.node.memory.usage`",
-			"  **Network:** `k8s.pod.network.io`, `k8s.pod.network.errors` (filter direction: `receive`/`transmit` via `attributes.metric.attributes.direction.keyword`)",
-			"  **Filesystem:** `container.filesystem.usage`, `container.filesystem.capacity`, `k8s.node.filesystem.usage`",
-			"  **Volume:** `k8s.volume.available`, `k8s.volume.capacity`, `k8s.volume.inodes`, `k8s.volume.inodes.free`, `k8s.volume.inodes.used`",
-			"  **K8s Cluster (k8scluster receiver):** `k8s.container.cpu_request`, `k8s.container.cpu_limit`, `k8s.container.memory_request`, `k8s.container.restarts`, `k8s.pod.phase`, `k8s.deployment.desired`, `k8s.deployment.available`, `k8s.daemonset.desired_scheduled_nodes`, `k8s.daemonset.ready_nodes`, `k8s.replicaset.desired`, `k8s.hpa.current_replicas`, `k8s.hpa.desired_replicas`",
-			"  **Example (pod CPU):**",
-			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"term":{"name.keyword":"container.cpu.usage"}},{"term":{"attributes.resource.attributes.k8s@namespace@name.keyword":"default"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaOTel), tsFor(schemaOTel, esTimestampOTel)),
-		)
-	}
-
-	// --- Elastic Agent K8s fast path (only if account uses elastic_k8s indices) ---
-	if schemas[schemaElasticK8s] {
-		instructions = append(instructions,
-			fmt.Sprintf("**Elastic Agent K8s Fast Path (query these fields on `%s`):**", indexFor(schemaElasticK8s)),
-			"  Filter by `exists` on the value path plus dimension filters. Use `@timestamp`. Dimension fields are keyword-mapped — do NOT append `.keyword`.",
-			"  **Dimensions:** `kubernetes.namespace`, `kubernetes.pod.name`, `kubernetes.container.name`, `kubernetes.node.name`, `kubernetes.deployment.name`, `kubernetes.labels.<name>`",
-			"  **Container fields:** CPU: `kubernetes.container.cpu.usage.nanocores`, `kubernetes.container.cpu.limit.nanocores` | Memory: `kubernetes.container.memory.usage.bytes`, `kubernetes.container.memory.workingset.bytes`, `kubernetes.container.memory.rss.bytes`, `kubernetes.container.memory.limit.bytes` | FS: `kubernetes.container.fs.usage.bytes`, `kubernetes.container.fs.capacity.bytes` | Status: `kubernetes.container.status.phase`, `kubernetes.container.status.ready`, `kubernetes.container.status.restarts`",
-			"  **Pod fields:** CPU: `kubernetes.pod.cpu.usage.nanocores` | Memory: `kubernetes.pod.memory.usage.bytes`, `kubernetes.pod.memory.workingset.bytes` | Network: `kubernetes.pod.network.rx.bytes`, `kubernetes.pod.network.tx.bytes`, `kubernetes.pod.network.rx.errors`, `kubernetes.pod.network.tx.errors`",
-			"  **Node fields:** CPU: `kubernetes.node.cpu.usage.nanocores` | Memory: `kubernetes.node.memory.usage.bytes`, `kubernetes.node.memory.available.bytes` | FS: `kubernetes.node.fs.usage.bytes`, `kubernetes.node.fs.capacity.bytes` | Network: `kubernetes.node.network.rx.bytes`, `kubernetes.node.network.tx.bytes`",
-			"  **Volume fields:** `kubernetes.volume.available.bytes`, `kubernetes.volume.capacity.bytes`, `kubernetes.volume.used.bytes`, `kubernetes.volume.inodes.count`, `kubernetes.volume.inodes.free`",
-			"  **Event fields:** `kubernetes.event.count`, `kubernetes.event.type` (Normal/Warning), `kubernetes.event.reason`, `kubernetes.event.involved_object.kind`, `kubernetes.event.involved_object.name`",
-			"  **kube-state fields:**",
-			"    - state_pod: `kubernetes.pod.status.phase`, `kubernetes.pod.status.ready`, `kubernetes.pod.status.scheduled`",
-			"    - state_container: `kubernetes.container.status.phase`, `kubernetes.container.status.ready`, `kubernetes.container.status.restarts`, `kubernetes.container.status.waiting.reason`",
-			"    - state_deployment: `kubernetes.deployment.replicas.desired`, `kubernetes.deployment.replicas.available`, `kubernetes.deployment.replicas.unavailable`, `kubernetes.deployment.paused`",
-			"    - state_replicaset: `kubernetes.replicaset.replicas.desired`, `kubernetes.replicaset.replicas.ready`, `kubernetes.replicaset.replicas.available`",
-			"    - state_daemonset: `kubernetes.daemonset.replicas.desired`, `kubernetes.daemonset.replicas.ready`, `kubernetes.daemonset.replicas.misscheduled`",
-			"    - state_job: `kubernetes.job.pods.active`, `kubernetes.job.pods.succeeded`, `kubernetes.job.pods.failed`",
-			"    - state_node: `kubernetes.node.status.ready` (1=True, 0=False), `kubernetes.node.cpu.allocatable.cores`, `kubernetes.node.memory.allocatable.bytes`",
-			"    - state_persistentvolume: `kubernetes.persistentvolume.capacity.bytes`, `kubernetes.persistentvolume.phase`",
-			"    - state_persistentvolumeclaim: `kubernetes.persistentvolumeclaim.capacity.bytes`, `kubernetes.persistentvolumeclaim.phase`, `kubernetes.persistentvolumeclaim.request_storage.bytes`",
-			"  **Example (container CPU):**",
-			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.container.cpu.usage.nanocores"}},{"term":{"kubernetes.namespace":"default"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
-			"  **Example (deployment replicas):**",
-			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.deployment.replicas.available"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
-		)
-	}
-
-	// --- CloudWatch fast path (only if account uses cloudwatch indices) ---
-	if schemas[schemaCloudWatch] {
-		instructions = append(instructions,
-			fmt.Sprintf("**AWS CloudWatch Fast Path (query these fields on `%s`):**", indexFor(schemaCloudWatch)),
-			"  Filter by `exists` on the metric value path plus dimension filters. Use `@timestamp`. Do NOT append `.keyword` to dimension fields.",
-			"  **Dimensions:** `cloud.region`, `cloud.account.id`, `aws.dimensions.InstanceId`, `aws.dimensions.DBInstanceIdentifier`, `aws.dimensions.FunctionName`, `aws.dimensions.QueueName`, `aws.dimensions.BucketName`",
-			"  **Metric value paths (suffix: `.avg`, `.max`, `.min`, `.sum`, `.count`):**",
-			"    - EC2: `aws.ec2.metrics.CPUUtilization.avg`, `aws.ec2.metrics.NetworkIn.sum`, `aws.ec2.metrics.NetworkOut.sum`, `aws.ec2.metrics.StatusCheckFailed.max`",
-			"    - RDS: `aws.rds.metrics.CPUUtilization.avg`, `aws.rds.metrics.FreeableMemory.avg`, `aws.rds.metrics.FreeStorageSpace.avg`, `aws.rds.metrics.DatabaseConnections.avg`, `aws.rds.metrics.ReadLatency.avg`",
-			"    - Lambda: `aws.lambda.metrics.Invocations.sum`, `aws.lambda.metrics.Errors.sum`, `aws.lambda.metrics.Duration.avg`, `aws.lambda.metrics.Throttles.sum`",
-			"    - SQS: `aws.sqs.metrics.NumberOfMessagesSent.sum`, `aws.sqs.metrics.ApproximateNumberOfMessagesVisible.avg`, `aws.sqs.metrics.ApproximateAgeOfOldestMessage.max`",
-			"    - S3: `aws.s3.metrics.BucketSizeBytes.avg`, `aws.s3.metrics.NumberOfObjects.avg`, `aws.s3.metrics.AllRequests.sum`",
-			"    - ALB: `aws.applicationelb.metrics.RequestCount.sum`, `aws.applicationelb.metrics.HTTPCode_Target_5XX_Count.sum`, `aws.applicationelb.metrics.TargetResponseTime.avg`",
-			"  **Example (EC2 CPU):**",
-			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"aws.ec2.metrics.CPUUtilization.avg"}},{"term":{"aws.dimensions.InstanceId":"i-0123456789abcdef0"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaCloudWatch), tsFor(schemaCloudWatch, esTimestampECS)),
-		)
-	}
-
-	// --- Field discovery and query patterns (always included, schema-aware) ---
-	// Schema-gated: `__name__` exists in no schema we support, and handing that hint
-	// to an Elastic Agent account had the model emitting `__name__` term/prefix filters.
-	var discoveryHints []string
-	if schemas[schemaOTel] {
-		discoveryHints = append(discoveryHints,
-			"  - **OTel:** sample doc `__name__` → query `name.keyword`. `resource.attributes.k8s@namespace@name` → `attributes.resource.attributes.k8s@namespace@name.keyword`. Append `.keyword` to all text fields.",
-		)
-	}
-	if schemas[schemaElasticK8s] {
-		discoveryHints = append(discoveryHints,
-			"  - **Elastic Agent K8s:** no `name` field — filter by `exists` on the value path. Dimension fields (e.g. `kubernetes.namespace`) are keyword-mapped; do NOT append `.keyword`.",
-		)
-	}
-	if schemas[schemaCloudWatch] {
-		discoveryHints = append(discoveryHints,
-			"  - **CloudWatch:** metric value at `aws.<service>.metrics.<MetricName>.<stat>`. Use `aws.cloudwatch.metric_name.keyword` to filter by name when multiple metrics are present.",
-		)
-	}
-
-	instructions = append(instructions,
-		"**Field Discovery (for custom/non-standard metrics only):**",
-		"  If the metric is NOT in the templates above:",
-		"  - Step 1: Call `metrics_list` with the index pattern to discover metric names.",
-		"  - Step 2: Fetch a `size:1` sample document to inspect the field structure.",
-	)
-	instructions = append(instructions, discoveryHints...)
-	instructions = append(instructions,
-		"**Query Patterns:** Use `bool`/`filter` queries only. Do NOT use `size:0` or `aggs` — the backend extracts time-series from document hits, not aggregation results.",
-	)
+	instructions = append(instructions, esSchemaGuidance(schemas, targets, timestampField, fallbackIndex)...)
 
 	// Timestamp rule — tailored to the account's schemas.
 	tsRule := buildTimestampRule(schemas, timestampField)
@@ -719,6 +587,175 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 			Module: "elasticsearch_metrics",
 		},
 	}
+}
+
+// esSchemaGuidance returns the schema-specific half of the ES metrics prompt: the
+// routing table, the per-schema field catalogues, and the query-shape rules. It is
+// shared by the executing agent (buildSystemPrompt) and the generation-only query
+// writer (ESMetricsQueryAgent) so every field name is spelled in exactly one place.
+// Two prompts carrying their own copies is how one of them ends up naming a field
+// this account does not have — the failure the schema detection exists to prevent.
+//
+// fallbackIndex is used when a schema has no resolved target, matching the caller's
+// own fallback so the guidance never names an index the account cannot query.
+func esSchemaGuidance(
+	schemas map[esMetricSchema]bool,
+	targets map[esMetricSchema]schemaTarget,
+	timestampField string,
+	fallbackIndex string,
+) []string {
+	indexFor := func(sc esMetricSchema) string {
+		if t, ok := targets[sc]; ok && t.index != "" {
+			return t.index
+		}
+		return fallbackIndex
+	}
+	tsFor := func(sc esMetricSchema, dflt string) string {
+		if t, ok := targets[sc]; ok && t.timestamp != "" {
+			return t.timestamp
+		}
+		if timestampField != "" {
+			return timestampField
+		}
+		return dflt
+	}
+
+	var instructions []string
+	// --- Schema routing table (only rows for detected schemas) ---
+	if len(schemas) > 0 {
+		instructions = append(instructions,
+			"**Schema Routing (CRITICAL — pick fields by index pattern):**",
+			"  Different ingestion pipelines store metrics with completely different field schemas. ALWAYS identify the schema before writing the query:",
+			"  | Index pattern                           | Schema                       | Timestamp | Metric-name field |",
+			"  |-----------------------------------------|------------------------------|-----------|-------------------|",
+		)
+	}
+	if schemas[schemaOTel] {
+		instructions = append(instructions,
+			fmt.Sprintf("  | %-39s | OTel collector               | `%s` | `name.keyword` |", "`"+indexFor(schemaOTel)+"`", tsFor(schemaOTel, esTimestampOTel)),
+		)
+	}
+	if schemas[schemaMetricbeat] {
+		instructions = append(instructions,
+			fmt.Sprintf("  | %-39s | Metricbeat (ECS)             | `%s` | (embedded field) |", "`"+indexFor(schemaMetricbeat)+"`", tsFor(schemaMetricbeat, esTimestampECS)),
+		)
+	}
+	if schemas[schemaElasticK8s] {
+		instructions = append(instructions,
+			fmt.Sprintf("  | %-39s | Elastic Agent / kube-state   | `%s` | (embedded path) |", "`"+indexFor(schemaElasticK8s)+"`", tsFor(schemaElasticK8s, esTimestampECS)),
+		)
+	}
+	if schemas[schemaCloudWatch] {
+		instructions = append(instructions,
+			fmt.Sprintf("  | %-39s | Elastic Agent AWS CloudWatch | `%s` | `aws.cloudwatch.metric_name.keyword` (value under `aws.<svc>.metrics.<metric>.<stat>`) |", "`"+indexFor(schemaCloudWatch)+"`", tsFor(schemaCloudWatch, esTimestampECS)),
+		)
+	}
+	if schemas[schemaElasticK8s] || schemas[schemaCloudWatch] {
+		instructions = append(instructions,
+			"  Elastic Agent indices do NOT have a `name`/`name.keyword` field — the metric is identified by the index itself, and the value lives at a fully-qualified path (e.g. `kubernetes.container.cpu.usage.nanocores`). Filter on that path's existence.",
+		)
+	}
+
+	// --- OTel fast path (only if account uses OTel indices) ---
+	if schemas[schemaOTel] {
+		instructions = append(instructions,
+			fmt.Sprintf("**OTel Schema Fast Path (for `%s`):**", indexFor(schemaOTel)),
+			"  For standard K8s CPU, Memory, Network, or Filesystem metrics, call `es_metrics_query` directly — no discovery needed.",
+			"  **Query fields:**",
+			fmt.Sprintf("    * Metric name: `name.keyword` | Timestamp: `%s` | Value: `value`", tsFor(schemaOTel, esTimestampOTel)),
+			"    * Namespace: `attributes.resource.attributes.k8s@namespace@name.keyword`",
+			"    * Pod: `attributes.resource.attributes.k8s@pod@name.keyword`",
+			"    * Container: `attributes.resource.attributes.k8s@container@name.keyword`",
+			"    * Node: `attributes.resource.attributes.k8s@node@name.keyword`",
+			"  **CPU:** `container.cpu.usage`, `k8s.pod.cpu.usage`, `k8s.node.cpu.usage`",
+			"  **Memory:** `container.memory.usage`, `container.memory.working_set`, `container.memory.rss`, `k8s.pod.memory.usage`, `k8s.node.memory.usage`",
+			"  **Network:** `k8s.pod.network.io`, `k8s.pod.network.errors` (filter direction: `receive`/`transmit` via `attributes.metric.attributes.direction.keyword`)",
+			"  **Filesystem:** `container.filesystem.usage`, `container.filesystem.capacity`, `k8s.node.filesystem.usage`",
+			"  **Volume:** `k8s.volume.available`, `k8s.volume.capacity`, `k8s.volume.inodes`, `k8s.volume.inodes.free`, `k8s.volume.inodes.used`",
+			"  **K8s Cluster (k8scluster receiver):** `k8s.container.cpu_request`, `k8s.container.cpu_limit`, `k8s.container.memory_request`, `k8s.container.restarts`, `k8s.pod.phase`, `k8s.deployment.desired`, `k8s.deployment.available`, `k8s.daemonset.desired_scheduled_nodes`, `k8s.daemonset.ready_nodes`, `k8s.replicaset.desired`, `k8s.hpa.current_replicas`, `k8s.hpa.desired_replicas`",
+			"  **Example (pod CPU):**",
+			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"term":{"name.keyword":"container.cpu.usage"}},{"term":{"attributes.resource.attributes.k8s@namespace@name.keyword":"default"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaOTel), tsFor(schemaOTel, esTimestampOTel)),
+		)
+	}
+
+	// --- Elastic Agent K8s fast path (only if account uses elastic_k8s indices) ---
+	if schemas[schemaElasticK8s] {
+		instructions = append(instructions,
+			fmt.Sprintf("**Elastic Agent K8s Fast Path (query these fields on `%s`):**", indexFor(schemaElasticK8s)),
+			"  Filter by `exists` on the value path plus dimension filters. Use `@timestamp`. Dimension fields are keyword-mapped — do NOT append `.keyword`.",
+			"  **Dimensions:** `kubernetes.namespace`, `kubernetes.pod.name`, `kubernetes.container.name`, `kubernetes.node.name`, `kubernetes.deployment.name`, `kubernetes.labels.<name>`",
+			"  **Container fields:** CPU: `kubernetes.container.cpu.usage.nanocores`, `kubernetes.container.cpu.limit.nanocores` | Memory: `kubernetes.container.memory.usage.bytes`, `kubernetes.container.memory.workingset.bytes`, `kubernetes.container.memory.rss.bytes`, `kubernetes.container.memory.limit.bytes` | FS: `kubernetes.container.fs.usage.bytes`, `kubernetes.container.fs.capacity.bytes` | Status: `kubernetes.container.status.phase`, `kubernetes.container.status.ready`, `kubernetes.container.status.restarts`",
+			"  **Pod fields:** CPU: `kubernetes.pod.cpu.usage.nanocores` | Memory: `kubernetes.pod.memory.usage.bytes`, `kubernetes.pod.memory.workingset.bytes` | Network: `kubernetes.pod.network.rx.bytes`, `kubernetes.pod.network.tx.bytes`, `kubernetes.pod.network.rx.errors`, `kubernetes.pod.network.tx.errors`",
+			"  **Node fields:** CPU: `kubernetes.node.cpu.usage.nanocores` | Memory: `kubernetes.node.memory.usage.bytes`, `kubernetes.node.memory.available.bytes` | FS: `kubernetes.node.fs.usage.bytes`, `kubernetes.node.fs.capacity.bytes` | Network: `kubernetes.node.network.rx.bytes`, `kubernetes.node.network.tx.bytes`",
+			"  **Volume fields:** `kubernetes.volume.available.bytes`, `kubernetes.volume.capacity.bytes`, `kubernetes.volume.used.bytes`, `kubernetes.volume.inodes.count`, `kubernetes.volume.inodes.free`",
+			"  **Event fields:** `kubernetes.event.count`, `kubernetes.event.type` (Normal/Warning), `kubernetes.event.reason`, `kubernetes.event.involved_object.kind`, `kubernetes.event.involved_object.name`",
+			"  **kube-state fields:**",
+			"    - state_pod: `kubernetes.pod.status.phase`, `kubernetes.pod.status.ready`, `kubernetes.pod.status.scheduled`",
+			"    - state_container: `kubernetes.container.status.phase`, `kubernetes.container.status.ready`, `kubernetes.container.status.restarts`, `kubernetes.container.status.waiting.reason`",
+			"    - state_deployment: `kubernetes.deployment.replicas.desired`, `kubernetes.deployment.replicas.available`, `kubernetes.deployment.replicas.unavailable`, `kubernetes.deployment.paused`",
+			"    - state_replicaset: `kubernetes.replicaset.replicas.desired`, `kubernetes.replicaset.replicas.ready`, `kubernetes.replicaset.replicas.available`",
+			"    - state_daemonset: `kubernetes.daemonset.replicas.desired`, `kubernetes.daemonset.replicas.ready`, `kubernetes.daemonset.replicas.misscheduled`",
+			"    - state_job: `kubernetes.job.pods.active`, `kubernetes.job.pods.succeeded`, `kubernetes.job.pods.failed`",
+			"    - state_node: `kubernetes.node.status.ready` (1=True, 0=False), `kubernetes.node.cpu.allocatable.cores`, `kubernetes.node.memory.allocatable.bytes`",
+			"    - state_persistentvolume: `kubernetes.persistentvolume.capacity.bytes`, `kubernetes.persistentvolume.phase`",
+			"    - state_persistentvolumeclaim: `kubernetes.persistentvolumeclaim.capacity.bytes`, `kubernetes.persistentvolumeclaim.phase`, `kubernetes.persistentvolumeclaim.request_storage.bytes`",
+			"  **Example (container CPU):**",
+			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.container.cpu.usage.nanocores"}},{"term":{"kubernetes.namespace":"default"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
+			"  **Example (deployment replicas):**",
+			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"kubernetes.deployment.replicas.available"}},{"term":{"kubernetes.namespace":"production"}},{"range":{"%s":{"gte":"now-30m"}}}]}}}}`, indexFor(schemaElasticK8s), tsFor(schemaElasticK8s, esTimestampECS)),
+		)
+	}
+
+	// --- CloudWatch fast path (only if account uses cloudwatch indices) ---
+	if schemas[schemaCloudWatch] {
+		instructions = append(instructions,
+			fmt.Sprintf("**AWS CloudWatch Fast Path (query these fields on `%s`):**", indexFor(schemaCloudWatch)),
+			"  Filter by `exists` on the metric value path plus dimension filters. Use `@timestamp`. Do NOT append `.keyword` to dimension fields.",
+			"  **Dimensions:** `cloud.region`, `cloud.account.id`, `aws.dimensions.InstanceId`, `aws.dimensions.DBInstanceIdentifier`, `aws.dimensions.FunctionName`, `aws.dimensions.QueueName`, `aws.dimensions.BucketName`",
+			"  **Metric value paths (suffix: `.avg`, `.max`, `.min`, `.sum`, `.count`):**",
+			"    - EC2: `aws.ec2.metrics.CPUUtilization.avg`, `aws.ec2.metrics.NetworkIn.sum`, `aws.ec2.metrics.NetworkOut.sum`, `aws.ec2.metrics.StatusCheckFailed.max`",
+			"    - RDS: `aws.rds.metrics.CPUUtilization.avg`, `aws.rds.metrics.FreeableMemory.avg`, `aws.rds.metrics.FreeStorageSpace.avg`, `aws.rds.metrics.DatabaseConnections.avg`, `aws.rds.metrics.ReadLatency.avg`",
+			"    - Lambda: `aws.lambda.metrics.Invocations.sum`, `aws.lambda.metrics.Errors.sum`, `aws.lambda.metrics.Duration.avg`, `aws.lambda.metrics.Throttles.sum`",
+			"    - SQS: `aws.sqs.metrics.NumberOfMessagesSent.sum`, `aws.sqs.metrics.ApproximateNumberOfMessagesVisible.avg`, `aws.sqs.metrics.ApproximateAgeOfOldestMessage.max`",
+			"    - S3: `aws.s3.metrics.BucketSizeBytes.avg`, `aws.s3.metrics.NumberOfObjects.avg`, `aws.s3.metrics.AllRequests.sum`",
+			"    - ALB: `aws.applicationelb.metrics.RequestCount.sum`, `aws.applicationelb.metrics.HTTPCode_Target_5XX_Count.sum`, `aws.applicationelb.metrics.TargetResponseTime.avg`",
+			"  **Example (EC2 CPU):**",
+			fmt.Sprintf(`    {"index":"%s","query":{"query":{"bool":{"filter":[{"exists":{"field":"aws.ec2.metrics.CPUUtilization.avg"}},{"term":{"aws.dimensions.InstanceId":"i-0123456789abcdef0"}},{"range":{"%s":{"gte":"now-1h"}}}]}}}}`, indexFor(schemaCloudWatch), tsFor(schemaCloudWatch, esTimestampECS)),
+		)
+	}
+
+	// --- Field discovery and query patterns (always included, schema-aware) ---
+	// Schema-gated: `__name__` exists in no schema we support, and handing that hint
+	// to an Elastic Agent account had the model emitting `__name__` term/prefix filters.
+	var discoveryHints []string
+	if schemas[schemaOTel] {
+		discoveryHints = append(discoveryHints,
+			"  - **OTel:** sample doc `__name__` → query `name.keyword`. `resource.attributes.k8s@namespace@name` → `attributes.resource.attributes.k8s@namespace@name.keyword`. Append `.keyword` to all text fields.",
+		)
+	}
+	if schemas[schemaElasticK8s] {
+		discoveryHints = append(discoveryHints,
+			"  - **Elastic Agent K8s:** no `name` field — filter by `exists` on the value path. Dimension fields (e.g. `kubernetes.namespace`) are keyword-mapped; do NOT append `.keyword`.",
+		)
+	}
+	if schemas[schemaCloudWatch] {
+		discoveryHints = append(discoveryHints,
+			"  - **CloudWatch:** metric value at `aws.<service>.metrics.<MetricName>.<stat>`. Use `aws.cloudwatch.metric_name.keyword` to filter by name when multiple metrics are present.",
+		)
+	}
+
+	instructions = append(instructions,
+		"**Field Discovery (for custom/non-standard metrics only):**",
+		"  If the metric is NOT in the templates above:",
+		"  - Step 1: Call `metrics_list` with the index pattern to discover metric names.",
+		"  - Step 2: Fetch a `size:1` sample document to inspect the field structure.",
+	)
+	instructions = append(instructions, discoveryHints...)
+	instructions = append(instructions,
+		"**Query Patterns:** Use `bool`/`filter` queries only. Do NOT use `size:0` or `aggs` — the backend extracts time-series from document hits, not aggregation results.",
+	)
+
+	return instructions
 }
 
 // buildTimestampRule returns a concise timestamp rule tailored to the active schemas.

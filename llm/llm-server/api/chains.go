@@ -79,11 +79,13 @@ type ConversationApiRequest struct {
 	// question a response answers. Never read or interpreted here; passed
 	// through unchanged.
 	ReplyRef string `json:"reply_ref,omitempty"`
-	// Index optionally pins /log-query generation to a specific Elasticsearch
-	// index — the logs tab's "Select an Index" dropdown selection. It scopes the
-	// field list the query generator is shown (fields are per-index) and is the
-	// index the generated query is resolved against. Ignored for backends with
-	// no index concept (Loki, …) and by every other handler.
+	// Index optionally pins query generation to a specific Elasticsearch index —
+	// the "Select an Index" dropdown selection on the logs and metrics tabs. It
+	// scopes the field list the query generator is shown (fields are per-index)
+	// and is the index the generated query is resolved against. Honoured by
+	// /log-query and /prometheus-query (the latter only when the account's
+	// metrics provider is Elasticsearch). Ignored for backends with no index
+	// concept (Loki, Prometheus, …) and by every other handler.
 	Index string `json:"index,omitempty"`
 	// Resolution optionally resolves a pending follow-up without answering
 	// it. Only "dismiss" is supported (soft-skip the question, then end the
@@ -1580,7 +1582,10 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		c.JSON(http.StatusOK, buildApiResponse(map[string]string{"status": "terminated"}, nil))
 	})
 
-	groupV2.POST("/prometheus-query", func(c *gin.Context) {
+	// metricsQueryHandler generates ONE provider-native metrics query from a natural
+	// language question — Elasticsearch DSL, a Datadog query or PromQL, whichever the
+	// account's metrics backend speaks. It does not execute it.
+	metricsQueryHandler := func(c *gin.Context) {
 		common.MetricsApiRequestsTotal("chains_prometheus_query")
 		requestMap := make(map[string]any)
 		err := c.ShouldBindJSON(&requestMap)
@@ -1664,7 +1669,21 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 
 		logger.Info("api: processing request", "request", slog.AnyValue(request))
 
-		var prometheusChain = &agents.PrometheusAgent{}
+		// Provider-aware query generation: the account's metrics backend decides the
+		// query language, so an ES account gets ES DSL rather than the PromQL this
+		// handler used to return unconditionally. Resolved before the budget check so
+		// an unsupported provider costs the tenant nothing.
+		metricsQueryChain, err := agents.NewMetricsQueryAgent(agentContext, request.AccountId, request.Index)
+		if err != nil {
+			logger.Error("api: unable to build metrics query agent", "error", err.Error())
+			c.JSON(http.StatusBadRequest, buildApiResponse(nil, []error{
+				common.Error{
+					Message: err.Error(),
+				},
+			}))
+			return
+		}
+
 		// Check budget limits for tenant and account
 		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, budget.ModuleUserInvestigation, logger) {
 			return
@@ -1675,7 +1694,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		}
 
 		handleRequestExecution(c, agentContext, request.Async, request.UserId, "chains_prometheus_query", logger, func(ctx *security.RequestContext) (core.NBAgentResponse, error) {
-			return core.HandleConversationSessionRequest(ctx, prometheusChain, request.UserId, request.AccountId, request.ConversationId, request.Query, core.ConversationSessionRequestWithSource(source))
+			return core.HandleConversationSessionRequest(ctx, metricsQueryChain, request.UserId, request.AccountId, request.ConversationId, request.Query, core.ConversationSessionRequestWithSource(source))
 		}, core.NBAgentResponse{
 			Response:       []string{},
 			Query:          request.Query,
@@ -1683,7 +1702,15 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			SessionId:      request.SessionId,
 			Status:         core.ConversationStatusInProgress,
 		})
-	})
+	}
+
+	groupV2.POST("/metrics-query", metricsQueryHandler)
+
+	// Deprecated alias for /metrics-query, kept because the app and llm-server deploy
+	// independently: during a rollout an app still on the old build calls this path,
+	// and removing it would 404 every AI-tab request until both services land. Delete
+	// once no deployed app references it.
+	groupV2.POST("/prometheus-query", metricsQueryHandler)
 
 	groupV2.POST("/log-query", func(c *gin.Context) {
 		common.MetricsApiRequestsTotal("chains_log_query")

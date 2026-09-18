@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"nudgebee/llm/agents/aws"
@@ -140,6 +141,241 @@ func getMetricsAgent(ctx *security.RequestContext, accountId string) (core.NBAge
 		return nil, err
 	}
 	return newMetricsAgent(ctx, accountId, metricsConnectionProvider), nil
+}
+
+const MetricsQueryAgentName = "metrics_query"
+
+// newMetricsQueryAgent is the generation-only twin of newMetricsAgent: same provider
+// switch, but every arm returns an agent that WRITES a query instead of running one.
+//
+// It backs the metrics tab's "AI" box, which needs a query to put in the editor. The
+// executing agents cannot serve that: they return an SRE prose report (the ES one is
+// explicitly told never to reveal its DSL) and reaching it costs a full ReAct loop —
+// one traced ES run spent 50s over six queries. Before this existed the endpoint
+// hardcoded PrometheusAgent, so every non-Prometheus account was handed PromQL for an
+// editor that speaks something else.
+//
+// Provider strings are matched exactly as newMetricsAgent matches them, so the two
+// routers cannot disagree about which backend an account is on.
+func newMetricsQueryAgent(ctx *security.RequestContext, accountId, requestedIndex string, provider services_server.ObservabilityProvider) (core.NBAgent, error) {
+	providerName := strings.ToLower(strings.TrimSpace(provider.Provider))
+
+	var writer core.NBAgent
+	switch providerName {
+	case "elasticsearch", "opensearch", "es":
+		writer = NewESMetricsQueryAgent(accountId, requestedIndex)
+	case "datadog":
+		if ddAgent, ok := core.GetNBAgent(ctx, DatadogMetricsQueryAgentName, accountId, ""); ok {
+			writer = ddAgent
+		} else {
+			slog.Warn("metrics_query: datadog metrics query agent not found", "accountId", accountId)
+		}
+	case "aws", "gcp", "azure":
+		// Cloud-only accounts read metrics through a CLI agent (aws/gcloud/az). There
+		// is no query language behind the metrics editor for them, so generating one
+		// would produce a string the Code tab can never run. Say so instead.
+		return nil, fmt.Errorf("AI query generation is not supported for the %q metrics provider — it has no query editor language", providerName)
+	}
+
+	if writer == nil {
+		// Prometheus, VictoriaMetrics and Chronosphere all speak PromQL, and
+		// promql_query is already a generation-only agent with a strict
+		// {"promql": ...} contract. It is also the right default for an account
+		// whose provider we could not resolve — matching newMetricsAgent's default.
+		promqlAgent, ok := core.GetNBAgent(ctx, PromqlAgentName, accountId, "")
+		if !ok {
+			return nil, fmt.Errorf("metrics_query: promql query agent not registered")
+		}
+		writer = promqlAgent
+	}
+
+	return &metricsQueryAgent{
+		accountId: accountId,
+		provider:  provider.Provider,
+		agent:     writer,
+	}, nil
+}
+
+// NewMetricsQueryAgent resolves the account's metrics provider and returns the
+// generation-only agent for it. requestedIndex is the caller's Elasticsearch index
+// selection and is ignored by providers with no index concept.
+func NewMetricsQueryAgent(ctx *security.RequestContext, accountId, requestedIndex string) (core.NBAgent, error) {
+	metricsConnectionProvider, err := tools.GetMetricsProvider(accountId)
+	if err != nil {
+		return nil, fmt.Errorf("metrics_query: resolve metrics provider: %w", err)
+	}
+	return newMetricsQueryAgent(ctx, accountId, requestedIndex, metricsConnectionProvider)
+}
+
+// metricsQueryAgent runs the selected query writer and normalises its answer into one
+// envelope. The writers predate this wrapper and each answer in their own shape —
+// promql_query returns {"promql": ...}, datadog_metrics_query returns a bare query
+// string, ESMetricsQueryAgent returns {query, provider, index}. Normalising here means
+// the caller has a single contract regardless of provider.
+type metricsQueryAgent struct {
+	accountId string
+	provider  string
+	agent     core.NBAgent
+	executor  agentExecutorFunc
+}
+
+func (m *metricsQueryAgent) GetName() string { return MetricsQueryAgentName }
+
+func (m *metricsQueryAgent) GetNameAliases() []string { return []string{"Metrics Query"} }
+
+func (m *metricsQueryAgent) GetDescription() string {
+	return `Generates a single provider-native metrics query from a natural-language question, for whichever metrics backend the account is on. Generation only — it never executes the query.`
+}
+
+func (m *metricsQueryAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAgentRequest) core.NBAgentPrompt {
+	return core.NBAgentPrompt{
+		Role: "an SRE expert that writes one provider-native metrics query from natural language",
+	}
+}
+
+func (m *metricsQueryAgent) GetSupportedTools(ctx *security.RequestContext) []toolcore.NBTool {
+	return m.agent.GetSupportedTools(ctx)
+}
+
+func (m *metricsQueryAgent) GetPlannerType() core.AgentPlannerType {
+	return core.AgentPlannerTypeCustom
+}
+
+// metricsQueryResult is the response envelope. It matches logQueryResult
+// (agent_log_query.go) field-for-field so a caller handling generated queries has one
+// shape across logs and metrics rather than two.
+type metricsQueryResult struct {
+	Query    string `json:"query"`
+	Provider string `json:"provider"`
+	// Index is the Elasticsearch index the query is meant to run against. Empty for
+	// backends with no index concept.
+	Index string `json:"index,omitempty"`
+}
+
+func (m *metricsQueryAgent) Execute(ctx *security.RequestContext, query core.NBAgentRequest) (core.NBAgentResponse, error) {
+	nbRequestContext := toolcore.NbToolContext{
+		Ctx:                     ctx,
+		AccountId:               m.accountId,
+		ConversationId:          query.ConversationId,
+		ParentAgentId:           nestedAgentParentID(query),
+		MessageId:               query.MessageId,
+		QueryContext:            query.QueryContext,
+		QueryConfig:             query.QueryConfig,
+		UserId:                  query.UserId,
+		InheritSkillsFromAgents: append(query.InheritSkillsFromAgents, m.GetName()),
+		OriginalQuery:           query.OriginalQuery,
+		SelectedSkillIds:        query.SelectedSkillIds,
+		KnowledgePolicy:         string(query.KnowledgePolicy),
+		KnowledgePolicyResolved: query.KnowledgePolicyResolved,
+	}
+
+	nbToolCallRequest := toolcore.NBToolCallRequest{}
+	nbToolCallRequest.Command = query.Query
+	nbToolCallRequest.Context = query.QueryContext
+	nbToolCallRequest.Arguments = map[string]any{}
+
+	executor := m.executor
+	if executor == nil {
+		executor = core.ExecuteAgentToolCall
+	}
+	resp, err := executor(nbRequestContext, m.agent, nbToolCallRequest)
+	if err != nil {
+		return errorResponse(m.GetName(), fmt.Errorf("metrics query generation: %w", err)), nil
+	}
+	if len(resp.Response) == 0 {
+		return errorResponse(m.GetName(), fmt.Errorf("metrics query generation: %s returned no answer", m.agent.GetName())), nil
+	}
+
+	result, err := normaliseGeneratedMetricsQuery(m.provider, resp.Response[0])
+	if err != nil {
+		return errorResponse(m.GetName(), err), nil
+	}
+
+	data, err := common.MarshalJson(result)
+	if err != nil {
+		return errorResponse(m.GetName(), fmt.Errorf("metrics query generation: marshal result: %w", err)), nil
+	}
+
+	return core.NBAgentResponse{
+		AgentName: m.GetName(),
+		Response:  []string{string(data)},
+		Status:    core.ConversationStatusCompleted,
+	}, nil
+}
+
+// normaliseGeneratedMetricsQuery folds each writer's own answer shape into
+// metricsQueryResult.
+//
+// It never returns an empty query with a nil error: an empty editor box after a
+// spinner reads to the user as "the AI is broken" with nothing to act on, so an
+// unusable answer must surface as an error the caller can show.
+func normaliseGeneratedMetricsQuery(provider, raw string) (metricsQueryResult, error) {
+	trimmed := stripQueryCodeFence(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return metricsQueryResult{}, fmt.Errorf("metrics query generation: empty response")
+	}
+
+	result := metricsQueryResult{Provider: provider}
+
+	// ESMetricsQueryAgent already answers in the target shape; promql_query answers
+	// {"promql": "..."} or {"promql": ["q1","q2"]}. Both are JSON objects, so one
+	// decode covers them and anything else falls through to the bare-string case.
+	var envelope struct {
+		Query    string          `json:"query"`
+		Index    string          `json:"index"`
+		Provider string          `json:"provider"`
+		Promql   json.RawMessage `json:"promql"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err == nil {
+		if envelope.Provider != "" {
+			result.Provider = envelope.Provider
+		}
+		result.Index = envelope.Index
+
+		if strings.TrimSpace(envelope.Query) != "" {
+			result.Query = envelope.Query
+			return result, nil
+		}
+		if len(envelope.Promql) > 0 {
+			promql, perr := firstPromqlQuery(envelope.Promql)
+			if perr != nil {
+				return metricsQueryResult{}, perr
+			}
+			result.Query = promql
+			return result, nil
+		}
+		// A JSON object carrying neither key is not a query. Falling through here
+		// would put a raw JSON blob in the user's PromQL box.
+		return metricsQueryResult{}, fmt.Errorf("metrics query generation: response had no query (%s)", truncateString(trimmed, 200))
+	}
+
+	// Bare query text — datadog_metrics_query's contract, and the shape any future
+	// writer is most likely to use.
+	result.Query = trimmed
+	return result, nil
+}
+
+// firstPromqlQuery reads promql_query's value, which is a string for the single-query
+// case and an array when the agent was asked for several. The editor holds one query,
+// so the first is the one that matters.
+func firstPromqlQuery(rawPromql json.RawMessage) (string, error) {
+	var single string
+	if err := json.Unmarshal(rawPromql, &single); err == nil {
+		if strings.TrimSpace(single) == "" {
+			return "", fmt.Errorf("metrics query generation: promql_query returned an empty query")
+		}
+		return single, nil
+	}
+
+	var many []string
+	if err := json.Unmarshal(rawPromql, &many); err == nil {
+		for _, q := range many {
+			if strings.TrimSpace(q) != "" {
+				return q, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("metrics query generation: could not read a query out of promql_query's response")
 }
 
 // buildLargeMetricsMessage builds the truncation notice returned to whichever

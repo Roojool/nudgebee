@@ -631,6 +631,48 @@ const QueryModeSwitcher = ({
   // language is left exactly as the user set it, same as before.
   const esIndexEcho = (queryData) => (logProvider === 'ES' ? { index: queryData?.index || selectedEsIndex } : {});
 
+  // Applies a generated metrics query to the editor. The backend now answers in one
+  // {query, provider, index} envelope for every metrics provider, but the older
+  // PromQL path answered with a map KEYED by the query itself, and conversations
+  // generated before this change still carry that shape. Both are accepted so a
+  // replayed or in-flight older response is not dropped.
+  const applyGeneratedMetricsQuery = (queryData, conversationId) => {
+    const key = uuidv4();
+
+    if (typeof queryData?.query === 'string' && queryData.query.trim()) {
+      setQuery(queryData.query);
+      if (onQueryChange) {
+        onQueryChange({
+          query: queryData.query,
+          queryKeys: [key],
+          ...esIndexEcho(queryData),
+          // The generator writes DSL, so a user sitting on the KQL option would
+          // otherwise have the query run through the wrong parser.
+          ...(logProvider === 'ES' ? { queryType: 'dsl' } : {}),
+        });
+      }
+      sendConversationIdAndLLMResponseToParent(conversationId, queryData.query);
+      return true;
+    }
+
+    // Object.keys on a string returns character indices, which would put "0" in the
+    // editor as if it were a query. Only an object can carry the legacy key-map shape.
+    if (typeof queryData !== 'object' || queryData === null) {
+      return false;
+    }
+
+    const queries = Object.keys(queryData);
+    if (queries.length > 0) {
+      setQuery(queries[0]);
+      if (onQueryChange) {
+        onQueryChange({ query: queries[0], queryKeys: [key] });
+      }
+      sendConversationIdAndLLMResponseToParent(conversationId, queryData[queries[0]]);
+      return true;
+    }
+    return false;
+  };
+
   const handleGenerateQuery = () => {
     setIsLoadingGenerateQuestionText(true);
     if (onAiLoadingChange) {
@@ -638,7 +680,15 @@ const QueryModeSwitcher = ({
     }
     setQuery('');
     setHelperTextForLLM('');
+    // This switcher serves both the logs and the metrics tab, and the branch below
+    // used to be selected on logProvider alone. Every provider outside the
+    // Prometheus family therefore fell into the log-query branch even on the metrics
+    // tab — an ES metrics account had its AI button generating a LOG query against
+    // LOG indices, then echoing that log index into the metrics index picker.
+    // providerType is what distinguishes the two tabs, so it decides the branch.
+    const isMetricsTab = providerType === 'metrics';
     if (
+      !isMetricsTab &&
       logProvider &&
       logProvider !== 'datadog' &&
       logProvider !== 'prometheus' &&
@@ -727,11 +777,14 @@ const QueryModeSwitcher = ({
             onAiLoadingChange(false);
           }
         });
-    } else if (logProvider == 'prometheus' || logProvider == 'chronosphere' || logProvider == 'victoria-metrics') {
+    } else if (isMetricsTab || logProvider === 'prometheus' || logProvider === 'chronosphere' || logProvider === 'victoria-metrics') {
       apiAskNudgebee
-        .askNudgebeeAiGeneratePrometheusQuery({
+        .askNudgebeeAiGenerateMetricsQuery({
           account_id: accountId,
           query: generateQuestionText,
+          // Backend resolves the query language from the account's metrics provider;
+          // the index only scopes it when that provider is Elasticsearch.
+          ...(logProvider === 'ES' && selectedEsIndex ? { index: selectedEsIndex } : {}),
         })
         .then((res) => {
           const errors = res?.data?.errors || [];
@@ -743,7 +796,7 @@ const QueryModeSwitcher = ({
             }
             return;
           }
-          const data = res?.data?.data?.ai_generate_prometheus_query?.data;
+          const data = res?.data?.data?.ai_generate_metrics_query?.data;
           const sessionId = data?.session_id;
           if (sessionId) {
             startPolling(sessionId, (conv) => {
@@ -756,14 +809,10 @@ const QueryModeSwitcher = ({
                 if (result) {
                   const queryData = safeJSONParse(result.response);
                   if (queryData) {
-                    const queries = Object.keys(queryData);
-                    if (queries.length > 0) {
-                      const key = uuidv4();
-                      setQuery(queries[0]);
-                      if (onQueryChange) {
-                        onQueryChange({ query: queries[0], queryKeys: [key] });
-                      }
-                      sendConversationIdAndLLMResponseToParent(result.conversationId, queryData[queries[0]]);
+                    // A parsed response carrying no usable query would otherwise leave
+                    // the editor empty with no explanation once the spinner stops.
+                    if (!applyGeneratedMetricsQuery(queryData, result.conversationId)) {
+                      snackbar.error('Could not extract a query from the AI response. Try asking for a specific query.');
                     }
                   } else {
                     // Extract the first code block from the response (handles indented fences, inline code, and multi-query responses)
@@ -797,16 +846,8 @@ const QueryModeSwitcher = ({
           } else {
             const query = data?.response[0] ?? '{}';
             const queryData = safeJSONParse(query);
-            if (queryData) {
-              const queries = Object.keys(queryData);
-              if (queries.length > 0) {
-                const key = uuidv4();
-                setQuery(queries[0]);
-                if (onQueryChange) {
-                  onQueryChange({ query: queries[0], queryKeys: [key] });
-                }
-                sendConversationIdAndLLMResponseToParent(data?.conversation_id ?? '', queryData[queries[0]]);
-              }
+            if (queryData && !applyGeneratedMetricsQuery(queryData, data?.conversation_id ?? '')) {
+              snackbar.error('Could not extract a query from the AI response. Try asking for a specific query.');
             }
             setIsLoadingGenerateQuestionText(false);
             if (onAiLoadingChange) {
