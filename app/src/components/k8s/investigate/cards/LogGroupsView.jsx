@@ -20,7 +20,8 @@ const countColor = (level) => {
 };
 
 // Time of day in UTC for a timestamp the line carried itself, or null when it does not
-// parse. Epoch values arrive as numeric strings, in seconds or milliseconds.
+// parse. Epoch values arrive as numeric strings — seconds or milliseconds from log
+// lines, nanoseconds from some log providers.
 const timeOfDay = (value) => {
   if (!value) {
     return null;
@@ -28,7 +29,15 @@ const timeOfDay = (value) => {
   let date;
   if (/^\d+(\.\d+)?$/.test(value)) {
     const epoch = Number(value);
-    date = new Date(epoch < 1e12 ? epoch * 1000 : epoch);
+    let millis = epoch;
+    if (epoch >= 1e17) {
+      millis = epoch / 1e6;
+    } else if (epoch >= 1e14) {
+      millis = epoch / 1e3;
+    } else if (epoch < 1e12) {
+      millis = epoch * 1000;
+    }
+    date = new Date(millis);
   } else {
     date = new Date(value);
   }
@@ -99,12 +108,15 @@ const GroupRow = ({ group, testId }) => (
   </Box>
 );
 
-const LogGroupsView = ({ logs, additionalInfo, idPrefix = 'log-groups' }) => {
+// rawView replaces the plain-text viewer for cards whose rows have their own table.
+const LogGroupsView = ({ logs, additionalInfo, idPrefix = 'log-groups', rawView }) => {
   const [showRaw, setShowRaw] = useState(false);
   const [showRoutine, setShowRoutine] = useState(false);
 
+  const raw = rawView ?? <ConsoleLogOutput data={logs} />;
+
   if (!shouldShowLogGroups(additionalInfo)) {
-    return <ConsoleLogOutput data={logs} />;
+    return raw;
   }
 
   const groups = additionalInfo.log_groups;
@@ -136,11 +148,7 @@ const LogGroupsView = ({ logs, additionalInfo, idPrefix = 'log-groups' }) => {
           {showRaw ? 'Hide raw lines' : `Show all ${total.toLocaleString()} lines`}
         </Button>
       </Box>
-      {showRaw && (
-        <Box sx={{ mt: ds.space[3] }}>
-          <ConsoleLogOutput data={logs} />
-        </Box>
-      )}
+      {showRaw && <Box sx={{ mt: ds.space[3] }}>{raw}</Box>}
     </Box>
   );
 };

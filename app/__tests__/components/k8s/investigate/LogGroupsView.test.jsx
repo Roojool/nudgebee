@@ -84,6 +84,28 @@ describe('LogGroupsView', () => {
     expect(screen.getByText('error · Sep17 x')).toBeInTheDocument();
   });
 
+  it('reads nanosecond epochs from log providers', () => {
+    const info = {
+      log_total_lines: 30,
+      log_groups: [{ text: 'ns', count: 2, level: 'error', first_seen: '1789606984000000000', last_seen: '1789606990000000000' }],
+    };
+    render(<LogGroupsView logs='raw text' additionalInfo={info} />);
+
+    expect(screen.getByText('error · 01:03:04 – 01:03:10 UTC')).toBeInTheDocument();
+  });
+
+  it('uses the card’s own row view in place of the plain-text viewer', () => {
+    const table = <div data-testid='provider-table' />;
+    const { rerender } = render(<LogGroupsView additionalInfo={{ log_total_lines: 2, log_groups: groupedInfo.log_groups }} rawView={table} />);
+    expect(screen.getByTestId('provider-table')).toBeInTheDocument();
+
+    rerender(<LogGroupsView additionalInfo={groupedInfo} rawView={table} />);
+    expect(screen.queryByTestId('provider-table')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('log-groups-toggle-raw'));
+    expect(screen.getByTestId('provider-table')).toBeInTheDocument();
+    expect(screen.queryByTestId('raw-logs')).not.toBeInTheDocument();
+  });
+
   it('reveals the raw lines on request', () => {
     render(<LogGroupsView logs='raw text' additionalInfo={groupedInfo} />);
 

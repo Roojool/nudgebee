@@ -34,6 +34,22 @@ const renderCardContent = async (evidence) => {
   return render(<Content />);
 };
 
+describe('SignozDatadogLogCard grouped view', () => {
+  it('shows message groups instead of the table for a long provider log', async () => {
+    const groups = [{ text: 'HTTP error: 504 gateway timeout', count: 40, level: 'error' }];
+    await renderCardContent(logEvidence({ log_groups: groups, log_total_lines: 40 }));
+
+    expect(screen.getByText('HTTP error: 504 gateway timeout')).toBeInTheDocument();
+    expect(screen.queryByTestId('signoz-logs')).not.toBeInTheDocument();
+  });
+
+  it('keeps the table for a short provider log', async () => {
+    await renderCardContent(logEvidence({ log_groups: [{ text: 'x', count: 1, level: 'error' }], log_total_lines: 1 }));
+
+    expect(screen.getByTestId('signoz-logs')).toBeInTheDocument();
+  });
+});
+
 describe('SignozDatadogLogCard executed query', () => {
   it('shows the executed provider query and the provider alongside the logs', async () => {
     await renderCardContent(logEvidence({ executed_query: '{pod=~"relay-server-.*", namespace="ns-a"}', provider: 'loki' }));

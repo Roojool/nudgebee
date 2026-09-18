@@ -3,9 +3,12 @@ package playbooks
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nudgebee/logparser"
 )
@@ -92,10 +95,28 @@ func ComputeLogSummary(logs []map[string]any) map[string]any {
 // with no error-level lines, the one highlight is the last line the container printed,
 // which is usually why it stopped.
 func LogLinesSummary(output string, maxInsights int) LogLinesDigest {
-	var lines []string
+	var entries []LogEntry
 	for _, raw := range strings.Split(output, "\n") {
-		if line := strings.TrimSpace(raw); line != "" {
-			lines = append(lines, line)
+		entries = append(entries, LogEntry{Line: raw})
+	}
+	return SummarizeLogEntries(entries, maxInsights)
+}
+
+// LogEntry is one log record to group. Level and Timestamp are what the log source
+// declared for it, when it declared anything; a line's own fields are the fallback.
+type LogEntry struct {
+	Line      string
+	Level     string
+	Timestamp string
+}
+
+// SummarizeLogEntries is LogLinesSummary for logs that arrive as records rather than
+// one blob — a log provider's rows, each with its own severity and timestamp.
+func SummarizeLogEntries(entries []LogEntry, maxInsights int) LogLinesDigest {
+	var lines []LogEntry
+	for _, e := range entries {
+		if e.Line = strings.TrimSpace(e.Line); e.Line != "" {
+			lines = append(lines, e)
 		}
 	}
 	if len(lines) == 0 {
@@ -110,34 +131,43 @@ func LogLinesSummary(output string, maxInsights int) LogLinesDigest {
 	// source location would otherwise make every line its own group.
 	type group struct {
 		LogLineGroup
+		seen      seenRange
 		example   string
 		levelRank int
 		lastIndex int
 	}
 	var groups []*group
 	byKey := map[string]*group{}
-	for i, line := range lines {
-		fields := structuredLogFields(line)
-		text := logLineTextFromFields(line, fields)
+	for i, entry := range lines {
+		line := entry.Line
+		body, klogSource := splitKlogHeader(line)
+		fields := structuredLogFields(body)
+		// klog's structured form leads with the quoted message: `"detected a new container" pid=12`.
+		if quoted, err := strconv.QuotedPrefix(body); err == nil && fields["msg"] == "" {
+			if msg, err := strconv.Unquote(quoted); err == nil {
+				fields["msg"] = msg
+			}
+		}
+		text := logLineTextFromFields(body, fields)
 		key := logparser.NewPattern(text).Hash()
 		g, ok := byKey[key]
 		if !ok {
-			g = &group{LogLineGroup: LogLineGroup{Text: text, Source: firstNonEmpty(fields["source"], fields["caller"])}, example: line}
+			g = &group{LogLineGroup: LogLineGroup{Text: text, Source: firstNonEmpty(fields["source"], fields["caller"], klogSource)}, example: line}
 			byKey[key] = g
 			groups = append(groups, g)
 		}
 		g.Count++
 		g.lastIndex = i
 		level := lineLevel(line, fields)
+		if declared := logparser.GuessLevel(entry.Level); declared != logparser.LevelUnknown {
+			level = declared
+		}
 		levelCounts[level.String()]++
 		if rank := logLevelRank(level); rank > g.levelRank {
 			g.levelRank, g.Level = rank, level.String()
 		}
-		if ts := firstNonEmpty(fields["time"], fields["ts"], fields["timestamp"], fields["@timestamp"]); ts != "" {
-			if g.FirstSeen == "" {
-				g.FirstSeen = ts
-			}
-			g.LastSeen = ts
+		if ts := firstNonEmpty(entry.Timestamp, fields["time"], fields["ts"], fields["timestamp"], fields["@timestamp"]); ts != "" {
+			g.seen.add(ts)
 		}
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
@@ -177,6 +207,7 @@ func LogLinesSummary(output string, maxInsights int) LogLinesDigest {
 		if g.Level == "" {
 			g.Level = logparser.LevelUnknown.String()
 		}
+		g.FirstSeen, g.LastSeen = g.seen.first, g.seen.last
 		digest.Groups = append(digest.Groups, g.LogLineGroup)
 	}
 
@@ -193,7 +224,7 @@ func LogLinesSummary(output string, maxInsights int) LogLinesDigest {
 	}
 	if len(digest.Insights) == 0 {
 		digest.Insights = []PlaybookActionResponseInsight{{
-			Message:  "Last log line: " + truncateInsight(logLineText(lines[len(lines)-1])),
+			Message:  "Last log line: " + truncateInsight(logLineText(lines[len(lines)-1].Line)),
 			Severity: "Info",
 		}}
 	}
@@ -225,6 +256,88 @@ type LogLineGroup struct {
 	FirstSeen string `json:"first_seen,omitempty"`
 	LastSeen  string `json:"last_seen,omitempty"`
 	Source    string `json:"source,omitempty"`
+}
+
+// seenRange is the span a group's lines cover, kept as the timestamps were written.
+// Times are compared as times, because log providers return rows newest first. Once one
+// timestamp in a group parses, unparsed ones are ignored rather than allowed to replace
+// either end; a group with no parseable timestamp keeps arrival order.
+type seenRange struct {
+	first, last     string
+	firstAt, lastAt time.Time
+	hasParsed       bool
+}
+
+func (r *seenRange) add(ts string) {
+	at, ok := parseLogTime(ts)
+	switch {
+	case ok && !r.hasParsed:
+		r.first, r.last, r.firstAt, r.lastAt, r.hasParsed = ts, ts, at, at, true
+	case ok:
+		if at.Before(r.firstAt) {
+			r.first, r.firstAt = ts, at
+		}
+		if at.After(r.lastAt) {
+			r.last, r.lastAt = ts, at
+		}
+	case !r.hasParsed:
+		if r.first == "" {
+			r.first = ts
+		}
+		r.last = ts
+	}
+}
+
+// parseLogTime reads the timestamp forms log sources use: RFC 3339, or an epoch number
+// in seconds, milliseconds, microseconds or nanoseconds (SigNoz and CubeAPM send
+// nanoseconds).
+func parseLogTime(ts string) (time.Time, bool) {
+	if at, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+		return at, true
+	}
+	// Integers first: a nanosecond epoch (~1.7e18) is past float64's exact range.
+	if epoch, err := strconv.ParseInt(ts, 10, 64); err == nil && epoch > 0 {
+		switch {
+		case epoch >= 1e17:
+			return time.Unix(0, epoch).UTC(), true
+		case epoch >= 1e14:
+			return time.UnixMicro(epoch).UTC(), true
+		case epoch >= 1e11:
+			return time.UnixMilli(epoch).UTC(), true
+		}
+		return time.Unix(epoch, 0).UTC(), true
+	}
+	// Fractional values, as JSON logs often write them, on the same scales.
+	epoch, err := strconv.ParseFloat(ts, 64)
+	// ParseFloat accepts "Inf" and "NaN", which would otherwise become year 294247 and 1970.
+	if err != nil || math.IsInf(epoch, 0) || math.IsNaN(epoch) || epoch <= 0 {
+		return time.Time{}, false
+	}
+	switch {
+	case epoch >= 1e17:
+		return time.Unix(0, int64(epoch)).UTC(), true
+	case epoch >= 1e14:
+		return time.UnixMicro(int64(epoch)).UTC(), true
+	case epoch >= 1e11:
+		return time.UnixMicro(int64(epoch * 1e3)).UTC(), true
+	}
+	sec, frac := math.Modf(epoch)
+	return time.Unix(int64(sec), int64(frac*1e9)).UTC(), true
+}
+
+// klogHeader matches the header Kubernetes components write before every line:
+// level letter, date, time, thread id and file:line — "I0917 11:01:55.747443 1080759 container.go:202] …".
+var klogHeader = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}\.\d+\s+\d+ ([^\]\s]+)\] ?`)
+
+// splitKlogHeader returns a klog line's message and its file:line, or the line unchanged.
+// The header's timestamp would otherwise lead every group's text, and the level letter is
+// already read by logparser.GuessLevel on the full line.
+func splitKlogHeader(line string) (string, string) {
+	m := klogHeader.FindStringSubmatchIndex(line)
+	if m == nil {
+		return line, ""
+	}
+	return line[m[1]:], line[m[2]:m[3]]
 }
 
 func logLevelRank(level logparser.Level) int {
@@ -282,15 +395,22 @@ func structuredLogFields(line string) map[string]string {
 func logLineTextFromFields(line string, fields map[string]string) string {
 	msg := firstNonEmpty(fields["msg"], fields["message"], fields["log"], fields["body"])
 	errText := firstNonEmpty(fields["err"], fields["error"])
+	text := line
 	switch {
 	case msg != "" && errText != "":
-		return msg + ": " + errText
+		text = msg + ": " + errText
 	case msg != "":
-		return msg
+		text = msg
 	case errText != "":
-		return errText
+		text = errText
 	}
-	return line
+	// A multi-line record (a stack trace from a log provider) is represented by its
+	// first line, where the exception message sits — both for display and for grouping,
+	// so the same exception thrown from different call paths is one group.
+	if first, _, multi := strings.Cut(text, "\n"); multi {
+		text = strings.TrimSpace(first)
+	}
+	return text
 }
 
 // lineLevel prefers the level a structured line declares. Guessing from the whole line

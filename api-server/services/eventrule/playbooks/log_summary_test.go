@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,6 +102,83 @@ func TestLogLinesSummary_DeclaredLevelWinsOverWords(t *testing.T) {
 	assert.Equal(t, "1726531384.5", d.Groups[0].FirstSeen)
 	assert.Equal(t, "stats.go:12", d.Groups[0].Source)
 	assert.Equal(t, "Info", d.Insights[0].Severity, "no error group, so the highlight is the last line")
+}
+
+func TestLogLinesSummary_KlogHeader(t *testing.T) {
+	d := LogLinesSummary(`W0917 11:04:22.037377 1080759 container.go:1584] reclassified connection pid=846045 fd=12
+W0917 11:04:23.100001 1080759 container.go:1584] reclassified connection pid=846046 fd=13
+I0917 11:01:55.747561 1080759 registry.go:686] "detected a new container" pid=1245210 cg="/kubepods.slice/x"`, 3)
+
+	require.Len(t, d.Groups, 2)
+	assert.Equal(t, LogLineGroup{Text: "reclassified connection pid=846045 fd=12", Count: 2, Level: "warning", Source: "container.go:1584"}, d.Groups[0])
+	assert.Equal(t, "detected a new container", d.Groups[1].Text, "klog structured form leads with the quoted message")
+	assert.Equal(t, "registry.go:686", d.Groups[1].Source)
+}
+
+func TestSummarizeLogEntries_NewestFirstRows(t *testing.T) {
+	// Log providers return rows newest first.
+	d := SummarizeLogEntries([]LogEntry{
+		{Line: "timeout", Level: "error", Timestamp: "2026-09-17T11:01:55.759381437Z"},
+		{Line: "timeout", Level: "error", Timestamp: "2026-09-17T11:00:01.4976Z"},
+		{Line: "timeout", Level: "error", Timestamp: "2026-09-17T11:00:30Z"},
+	}, 3)
+
+	require.Len(t, d.Groups, 1)
+	assert.Equal(t, "2026-09-17T11:00:01.4976Z", d.Groups[0].FirstSeen)
+	assert.Equal(t, "2026-09-17T11:01:55.759381437Z", d.Groups[0].LastSeen)
+}
+
+func TestSeenRange(t *testing.T) {
+	t.Run("an unparsed timestamp never replaces a parsed end", func(t *testing.T) {
+		var r seenRange
+		for _, ts := range []string{"2024-01-01T10:00:00Z", "not-a-time", "2024-01-01T08:00:00Z"} {
+			r.add(ts)
+		}
+		assert.Equal(t, "2024-01-01T08:00:00Z", r.first)
+		assert.Equal(t, "2024-01-01T10:00:00Z", r.last)
+	})
+	t.Run("nanosecond epochs, newest first", func(t *testing.T) {
+		var r seenRange
+		for _, ts := range []string{"1726531390000000000", "1726531384000000000", "1726531386000000000"} {
+			r.add(ts)
+		}
+		assert.Equal(t, "1726531384000000000", r.first)
+		assert.Equal(t, "1726531390000000000", r.last)
+	})
+	t.Run("nothing parses: arrival order", func(t *testing.T) {
+		var r seenRange
+		for _, ts := range []string{"Sep17 a", "Sep17 b"} {
+			r.add(ts)
+		}
+		assert.Equal(t, "Sep17 a", r.first)
+		assert.Equal(t, "Sep17 b", r.last)
+	})
+}
+
+func TestParseLogTime(t *testing.T) {
+	want := time.Date(2024, 9, 17, 0, 3, 4, 0, time.UTC)
+	for _, ts := range []string{"2024-09-17T00:03:04Z", "1726531384", "1726531384000", "1726531384000000", "1726531384000000000"} {
+		at, ok := parseLogTime(ts)
+		assert.True(t, ok, ts)
+		assert.True(t, want.Equal(at), "%s → %s", ts, at)
+	}
+	at, ok := parseLogTime("1726531384123456789")
+	require.True(t, ok)
+	assert.Equal(t, 123456789, at.Nanosecond(), "nanosecond epochs keep full precision")
+	at, ok = parseLogTime("1726531384.5")
+	require.True(t, ok)
+	assert.Equal(t, 500000000, at.Nanosecond())
+	at, ok = parseLogTime("1726531384123.5")
+	require.True(t, ok, "fractional milliseconds")
+	assert.Equal(t, 123500000, at.Nanosecond())
+	at, ok = parseLogTime("1726531384123456.5")
+	require.True(t, ok, "fractional microseconds")
+	assert.Equal(t, 2024, at.Year())
+	assert.Equal(t, 123456000, at.Nanosecond())
+	for _, notATime := range []string{"Sep17", "Inf", "+Inf", "infinity", "NaN", "1e400"} {
+		_, ok = parseLogTime(notATime)
+		assert.False(t, ok, notATime)
+	}
 }
 
 func TestLogLinesSummary_TruncatesLongLinesOnRuneBoundary(t *testing.T) {

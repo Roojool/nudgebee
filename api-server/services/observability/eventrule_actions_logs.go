@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/nudgebee/logparser"
 	"github.com/samber/lo"
@@ -30,6 +32,10 @@ func init() {
 
 // Get top 2 error logs based on severity
 const actionLogMaxInsightErrors = 10
+
+// actionLogMaxGroupInsights is how many grouped highlights a log card gets when the
+// source provided none of its own.
+const actionLogMaxGroupInsights = 3
 
 // firstStringField returns the first key in obj that holds a non-empty value, coerced to a
 // string. Structured logs sometimes encode time/level/severity numerically (epoch timestamp
@@ -425,6 +431,26 @@ func outputLogsToInsightMaps(logs []OutputLog) []map[string]any {
 	})
 }
 
+// summarizeOutputLogs groups provider log rows the way pod log files are grouped, so
+// every log card can show what the lines say instead of every line.
+func summarizeOutputLogs(logs []OutputLog, maxInsights int) playbooks.LogLinesDigest {
+	entries := make([]playbooks.LogEntry, len(logs))
+	for i, l := range logs {
+		entries[i] = playbooks.LogEntry{Line: l.Message, Level: l.Severity, Timestamp: l.Timestamp}
+	}
+	return playbooks.SummarizeLogEntries(entries, maxInsights)
+}
+
+// putLogGroups stores the grouped view the log cards render, under the keys the
+// pod-log action uses.
+func putLogGroups(additionalInfo map[string]any, digest playbooks.LogLinesDigest) {
+	if len(digest.Groups) == 0 {
+		return
+	}
+	additionalInfo["log_groups"] = digest.Groups
+	additionalInfo["log_total_lines"] = digest.TotalLines
+}
+
 // extractLogLabelsFromOutputLogs applies regex + label extractors across a slice
 // of canonical logs and returns the collected labels (values de-duplicated into
 // arrays). Shared label extractor for all log actions.
@@ -457,14 +483,17 @@ func extractLogLabelsFromOutputLogs(logs []OutputLog, extractors []RegexLabelExt
 // keyword/5xx pattern extractor when no severity-tagged errors are present.
 func extractLogInsights(logs []OutputLog, maxErrors int) []playbooks.PlaybookActionResponseInsight {
 	var insights []playbooks.PlaybookActionResponseInsight
+	seen := map[string]bool{}
 	for _, l := range logs {
 		if len(insights) >= maxErrors {
 			break
 		}
 		sev := strings.ToUpper(l.Severity)
-		if (sev == "ERROR" || sev == "FATAL") && l.Message != "" {
+		// The same error logged three times read as three identical highlights.
+		if (sev == "ERROR" || sev == "FATAL") && l.Message != "" && !seen[l.Message] {
+			seen[l.Message] = true
 			insights = append(insights, playbooks.PlaybookActionResponseInsight{
-				Message:  fmt.Sprintf("%s: %s", sev, l.Message),
+				Message:  prefixSeverity(sev, l.Message),
 				Severity: "Critical",
 			})
 		}
@@ -473,6 +502,20 @@ func extractLogInsights(logs []OutputLog, maxErrors int) []playbooks.PlaybookAct
 		insights = actionLogExtractErrorPatterns(outputLogsToInsightMaps(logs), maxErrors)
 	}
 	return insights
+}
+
+// prefixSeverity labels a message with its severity unless the message already opens
+// with it — "ERROR: report generation failed" otherwise became "ERROR: ERROR: …".
+func prefixSeverity(sev, message string) string {
+	upper := strings.ToUpper(strings.TrimSpace(message))
+	// Only a whole word counts: "Errors occurred" does not already carry "ERROR".
+	if rest, ok := strings.CutPrefix(upper, sev); ok {
+		next, _ := utf8.DecodeRuneInString(rest)
+		if rest == "" || !unicode.IsLetter(next) && !unicode.IsDigit(next) {
+			return message
+		}
+	}
+	return fmt.Sprintf("%s: %s", sev, message)
 }
 
 // buildLogsActionResponse assembles the standard LogsActionResponse from canonical
@@ -500,6 +543,7 @@ func buildLogsActionResponse(logs []OutputLog, title string, additionalInfo map[
 	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
+	putLogGroups(additionalInfo, summarizeOutputLogs(logs, 0))
 	insight := extractLogInsights(logs, maxInsights)
 	metadata := map[string]any{
 		"query-result-version": "1.0",
@@ -1307,6 +1351,7 @@ func (a *signozLogsAction) executeRawQueryLegacy(ctx playbooks.PlaybookActionCon
 	if summary := playbooks.ComputeLogSummary(logEntries); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
+	putLogGroups(additionalInfo, playbooks.SummarizeLogEntries(signozLogEntries(logEntries), 0))
 
 	// Generate SigNoz logs explorer URL
 	baseURL := getSignozBaseURL(ctx.GetAccountId())
@@ -1416,6 +1461,17 @@ func (a *signozLogsAction) extractLogEntries(data map[string]any) []map[string]a
 	}
 
 	return logEntries
+}
+
+// signozLogEntries maps SigNoz rows onto the fields the grouping reads.
+func signozLogEntries(rows []map[string]any) []playbooks.LogEntry {
+	entries := make([]playbooks.LogEntry, 0, len(rows))
+	for _, row := range rows {
+		body, _ := row["body"].(string)
+		severity, _ := row["severity_text"].(string)
+		entries = append(entries, playbooks.LogEntry{Line: body, Level: severity, Timestamp: firstStringField(row, "timestamp")})
+	}
+	return entries
 }
 
 func (a *signozLogsAction) extractTopErrorLogs(data map[string]any) []playbooks.PlaybookActionResponseInsight {
@@ -1869,6 +1925,13 @@ func (a *observabilityLogAction) fetchLogsViaLogsEnricher(ctx playbooks.Playbook
 	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
+	// The agent sends no insight for a log file, so without these the card has no
+	// summary line at all.
+	digest := summarizeOutputLogs(logs, actionLogMaxGroupInsights)
+	putLogGroups(additionalInfo, digest)
+	if len(insight) == 0 {
+		insight = digest.Insights
+	}
 	if filename != "" {
 		additionalInfo["filename"] = filename
 	}
@@ -1985,6 +2048,13 @@ func (a *observabilityLogAction) fetchLogsViaKubectl(ctx playbooks.PlaybookActio
 	insight := playbooks.InsightFromRelayResponse(relayResponse)
 	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
+	}
+	// The agent sends no insight for a log file, so without these the card has no
+	// summary line at all.
+	digest := summarizeOutputLogs(logs, actionLogMaxGroupInsights)
+	putLogGroups(additionalInfo, digest)
+	if len(insight) == 0 {
+		insight = digest.Insights
 	}
 	additionalInfo["filename"] = fmt.Sprintf("%s-%s.log", workloadName, namespace)
 	metadata := map[string]any{

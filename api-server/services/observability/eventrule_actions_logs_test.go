@@ -475,6 +475,61 @@ func TestBuildLogsActionResponse(t *testing.T) {
 	assert.NotEmpty(t, resp.GetInsights())
 
 	assert.Contains(t, resp.ExtractLabels(), "status_code")
+
+	groups, ok := ai["log_groups"].([]playbooks.LogLineGroup)
+	require.True(t, ok, "provider logs carry the grouped view the log card renders")
+	require.Len(t, groups, 2)
+	assert.Equal(t, playbooks.LogLineGroup{Text: "status=500 error serving request", Count: 1, Level: "error", FirstSeen: "t1", LastSeen: "t1"}, groups[0])
+	assert.Equal(t, 2, ai["log_total_lines"])
+}
+
+func TestSummarizeOutputLogs(t *testing.T) {
+	// The job-failure event behind this change: two Loki rows, the provider's severity
+	// on each, and the error message already carrying its own "ERROR:" prefix.
+	logs := []OutputLog{
+		{Timestamp: "2026-09-18T04:42:00.82894806Z", Message: "nightly-report: generating report", Severity: "unknown"},
+		{Timestamp: "2026-09-18T04:42:00.82896782Z", Message: "ERROR: report generation failed: cannot write /data/report.csv: permission denied", Severity: "error"},
+	}
+	d := summarizeOutputLogs(logs, 3)
+
+	require.Len(t, d.Groups, 2)
+	assert.Equal(t, "error", d.Groups[0].Level, "the provider's severity decides the level")
+	assert.Equal(t, "2026-09-18T04:42:00.82896782Z", d.Groups[0].FirstSeen)
+	assert.Equal(t, []playbooks.PlaybookActionResponseInsight{
+		{Message: "Error logged: ERROR: report generation failed: cannot write /data/report.csv: permission denied", Severity: "High"},
+	}, d.Insights)
+}
+
+func TestSummarizeOutputLogs_StackTraceGroupsOnFirstLine(t *testing.T) {
+	trace := func(frame string) OutputLog {
+		return OutputLog{Message: "java.lang.IllegalStateException: pool exhausted\n\tat " + frame, Severity: "ERROR"}
+	}
+	d := summarizeOutputLogs([]OutputLog{trace("a.Foo.run(Foo.java:10)"), trace("b.Bar.call(Bar.java:22)")}, 3)
+
+	require.Len(t, d.Groups, 1, "one exception, two call paths")
+	assert.Equal(t, "java.lang.IllegalStateException: pool exhausted", d.Groups[0].Text)
+	assert.Equal(t, 2, d.Groups[0].Count)
+}
+
+func TestExtractLogInsights_DeduplicatesRepeatedErrors(t *testing.T) {
+	logs := []OutputLog{
+		{Message: "failed to get write symbol", Severity: "error"},
+		{Message: "failed to get write symbol", Severity: "error"},
+		{Message: "disk full", Severity: "error"},
+	}
+	assert.Equal(t, []playbooks.PlaybookActionResponseInsight{
+		{Message: "ERROR: failed to get write symbol", Severity: "Critical"},
+		{Message: "ERROR: disk full", Severity: "Critical"},
+	}, extractLogInsights(logs, 10))
+}
+
+func TestPrefixSeverity(t *testing.T) {
+	assert.Equal(t, "ERROR: boom", prefixSeverity("ERROR", "boom"))
+	assert.Equal(t, "ERROR: report generation failed", prefixSeverity("ERROR", "ERROR: report generation failed"))
+	assert.Equal(t, "error: lower-case already", prefixSeverity("ERROR", "error: lower-case already"))
+	assert.Equal(t, "ERROR: Errors occurred in batch", prefixSeverity("ERROR", "Errors occurred in batch"), "a word starting with the severity is not the severity")
+	assert.Equal(t, "ERROR", prefixSeverity("ERROR", "ERROR"))
+	assert.Equal(t, "ERROR— disk full", prefixSeverity("ERROR", "ERROR— disk full"), "a multi-byte separator is not a letter")
 }
 
 func TestAddExecutedQueryInfo(t *testing.T) {
