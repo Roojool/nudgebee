@@ -464,6 +464,26 @@ func processRemediationGet(c *gin.Context, tracer trace.Tracer, meter metric.Met
 		c.JSON(200, buildApiResponse(plan, nil))
 		return
 	}
+	// A plan is built from the investigation and its report. When either was re-run after the
+	// plan was saved, the plan describes the previous analysis (dev event db61122a: the report
+	// said "configuration error", the restored plan still said "undetermined"). Returning no plan
+	// makes the panel build one from the current analysis, as above.
+	var inputs []*events.EventAnalysis
+	for _, t := range []events.EventAnalysisType{events.AnalysisTypeInvestigation, events.AnalysisTypeDetailedResponse} {
+		a, aErr := repo.GetEventAnalysis(ctx, request.EventId, info.Fingerprint, info.AggregationKey, request.AccountId, t)
+		if aErr != nil {
+			ctx.GetLogger().Warn("remediation_get: unable to read analysis to check the plan's age", "error", aErr, "analysis_type", t)
+			continue
+		}
+		if a != nil {
+			inputs = append(inputs, a)
+		}
+	}
+	if planOlderThanAnalysis(saved, inputs...) {
+		ctx.GetLogger().Info("remediation_get: saved plan predates the current analysis, regenerating")
+		c.JSON(200, buildApiResponse(plan, nil))
+		return
+	}
 	if err := json.Unmarshal([]byte(saved.Analysis), &plan); err != nil {
 		ctx.GetLogger().Warn("remediation_get: failed to parse saved plan", "error", err)
 		plan = RemediationPlan{}
@@ -476,6 +496,17 @@ func processRemediationGet(c *gin.Context, tracer trace.Tracer, meter metric.Met
 func planSavedForEvent(saved *events.EventAnalysis, eventId string) bool {
 	owner := strings.TrimSpace(saved.RelatedEventId)
 	return owner != "" && strings.EqualFold(owner, strings.TrimSpace(eventId))
+}
+
+// planOlderThanAnalysis reports whether a completed analysis the plan was built from was
+// updated after the plan was saved.
+func planOlderThanAnalysis(plan *events.EventAnalysis, inputs ...*events.EventAnalysis) bool {
+	for _, a := range inputs {
+		if a != nil && a.Status == string(events.AnalysisStatusCompleted) && a.UpdatedAt.After(plan.UpdatedAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistRemediationPlan upserts the plan into event_log_analysis under the `remediation` analysis

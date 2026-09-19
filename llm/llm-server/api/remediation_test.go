@@ -6,6 +6,7 @@ import (
 	"nudgebee/llm/workspace"
 	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/common"
 	"nudgebee/llm/events"
@@ -693,4 +694,17 @@ func TestPlanSavedForEvent_OnlyRestoresThisIncidentsPlan(t *testing.T) {
 		"a plan generated for an earlier firing of the same alert")
 	assert.False(t, planSavedForEvent(&events.EventAnalysis{}, thisEvent),
 		"a row with no event id belongs to no incident")
+}
+
+// A plan restored after its investigation was re-run describes the previous analysis.
+func TestPlanOlderThanAnalysis(t *testing.T) {
+	saved := &events.EventAnalysis{UpdatedAt: time.Date(2026, 9, 19, 7, 7, 0, 0, time.UTC)}
+	completed := string(events.AnalysisStatusCompleted)
+	rerun := &events.EventAnalysis{Status: completed, UpdatedAt: time.Date(2026, 9, 19, 10, 20, 0, 0, time.UTC)}
+	earlier := &events.EventAnalysis{Status: completed, UpdatedAt: time.Date(2026, 9, 19, 7, 4, 0, 0, time.UTC)}
+	running := &events.EventAnalysis{Status: string(events.AnalysisStatusInProgress), UpdatedAt: rerun.UpdatedAt}
+
+	assert.True(t, planOlderThanAnalysis(saved, earlier, rerun), "investigation re-run after the plan")
+	assert.False(t, planOlderThanAnalysis(saved, earlier), "plan built from the current analysis")
+	assert.False(t, planOlderThanAnalysis(saved, running, nil), "a run still in progress keeps the plan until it completes")
 }

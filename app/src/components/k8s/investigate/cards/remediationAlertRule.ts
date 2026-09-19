@@ -127,9 +127,34 @@ export const alertRuleChangeSummary = (change: AlertRuleChange, controls: EventA
   const name = alertDisplayName(controls?.alert || '');
   if (change.operation === 'disable') return `Turns ${name || 'the rule'} off where it is defined, for everyone.`;
   if (change.operation === 'mute') {
-    const scope = (controls?.scopes || []).find((s) => s.scope === change.mute_scope);
-    const who = change.mute_scope === 'workload' && scope ? `${scope.namespace}/${scope.owner}` : 'every workload';
-    return `New ${name || 'alerts'} alerts for ${who} are still recorded but notify no one.`;
+    return `New ${alertsLabel(name)} for ${muteTarget(change, controls)} are still recorded but notify no one.`;
   }
   return '';
+};
+
+// alertsLabel is "<name> alerts", or "alerts" before the name has loaded.
+const alertsLabel = (name: string): string => (name ? `${name} alerts` : 'alerts');
+
+// muteTarget names what a plan mute covers: one workload, or every workload. A
+// workload mute whose scope has not loaded yet is still one workload.
+const muteTarget = (change: AlertRuleChange, controls: EventAlertControls | null): string => {
+  if (change.mute_scope !== 'workload') return 'every workload';
+  const scope = (controls?.scopes || []).find((s) => s.scope === 'workload');
+  return scope?.namespace && scope?.owner ? `${scope.namespace}/${scope.owner}` : 'this workload';
+};
+
+// alertRuleMuteConfirm is the title and body of the confirmation for a plan mute. It
+// names what is muted and says that real failures there go quiet too: a mute cannot
+// tell a harmless firing from a real one.
+export const alertRuleMuteConfirm = (change: AlertRuleChange, controls: EventAlertControls | null, days: number): { title: string; text: string } => {
+  const name = alertDisplayName(controls?.alert || '');
+  const target = muteTarget(change, controls);
+  const where = target === 'every workload' ? 'everywhere' : `on ${target} only`;
+  const period = days === 1 ? '1 day' : `${days} days`;
+  return {
+    title: `Mute ${name || 'this alert'} ${where}`,
+    text: `For ${period}, ${alertsLabel(
+      name
+    )} for ${target} are still recorded but notify no one — including real failures, not only the harmless ones.`,
+  };
 };

@@ -11,6 +11,7 @@ import {
   alertRuleApplyLabel,
   alertRuleChangeSummary,
   alertRuleChangeWarning,
+  alertRuleMuteConfirm,
   isAlertRuleChangeApplied,
   type AlertRuleChange,
 } from './remediationAlertRule';
@@ -84,12 +85,13 @@ export default function AlertRuleChangeAction({ change, controls, accountId, eve
     window.dispatchEvent(new Event(ALERT_RULE_CHANGED_EVENT));
   };
 
+  const muteConfirm = change.operation === 'mute' ? alertRuleMuteConfirm(change, controls, PLAN_MUTE_HOURS / 24) : null;
   const confirmText =
     change.operation === 'edit'
       ? 'The rule will be changed where it is defined, as shown.'
       : change.operation === 'disable'
       ? 'The alert stops firing for everyone until it is turned back on.'
-      : 'For 7 days, new alerts are still recorded but notify no one.';
+      : muteConfirm?.text || '';
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3] }}>
@@ -128,7 +130,7 @@ export default function AlertRuleChangeAction({ change, controls, accountId, eve
       <Modal
         open={confirmOpen}
         handleClose={() => setConfirmOpen(false)}
-        title={`${label} — ${controls?.alert || 'alert rule'}`}
+        title={muteConfirm?.title || `${label} — ${controls?.alert || 'alert rule'}`}
         confirmText={label}
         onConfirm={apply}
         loader={busy}

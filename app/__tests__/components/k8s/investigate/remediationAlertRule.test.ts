@@ -2,6 +2,7 @@ import type { EventAlertControls } from '@api1/kubernetes1';
 import {
   alertRuleApplyLabel,
   alertRuleChangeWarning,
+  alertRuleMuteConfirm,
   buildAlertRuleContext,
   isAlertRuleChangeApplied,
 } from '@components/k8s/investigate/cards/remediationAlertRule';
@@ -111,5 +112,31 @@ describe('card copy', () => {
     expect(alertRuleApplyLabel({ operation: 'mute' })).toBe('Mute');
     expect(alertRuleChangeWarning({ operation: 'edit' }, controls())).toBe('managed by Helm');
     expect(alertRuleChangeWarning({ operation: 'mute' }, controls())).toBeUndefined();
+  });
+});
+
+describe('alertRuleMuteConfirm', () => {
+  const mute = (mute_scope: string) => ({ operation: 'mute', mute_scope, rule_id: 'r-1' });
+
+  it('names the one workload a workload mute covers, and that real failures go quiet too', () => {
+    const c = alertRuleMuteConfirm(mute('workload'), controls(), 7);
+    expect(c.title).toContain('on demo/fraud-detection only');
+    expect(c.text).toContain('For 7 days');
+    expect(c.text).toContain('demo/fraud-detection');
+    expect(c.text).toContain('including real failures');
+  });
+
+  it('never describes a workload mute as covering every workload before its scope loads', () => {
+    const c = alertRuleMuteConfirm(mute('workload'), null, 7);
+    expect(c.title).toContain('on this workload only');
+    expect(c.text).not.toContain('every workload');
+    expect(c.text).not.toContain('alert alerts');
+    expect(c.text).toContain('For 7 days, alerts for this workload');
+  });
+
+  it('says a rule mute covers every workload', () => {
+    const c = alertRuleMuteConfirm(mute('rule'), controls(), 7);
+    expect(c.title).toContain('everywhere');
+    expect(c.text).toContain('every workload');
   });
 });
