@@ -22,7 +22,7 @@ const NATIVE_STATE_OPTIONS: Record<string, string[]> = {
   AmazonEC2: ['running', 'stopped', 'terminated', 'shutting-down', 'pending'],
   AmazonRDS: ['available', 'deleting', 'backing-up', 'modifying', 'configuring-enhanced-monitoring', 'inaccessible-encryption-credentials'],
   'Compute Engine': ['RUNNING', 'TERMINATED', 'STOPPING', 'STAGING'],
-  'Cloud SQL': ['RUNNABLE'],
+  'Cloud SQL': ['RUNNABLE', 'STOPPED'],
   'microsoft.compute/virtualmachines': ['running', 'deallocated', 'stopped'],
   'microsoft.sql/servers': ['Online', 'Paused'],
   'microsoft.sql/managedinstances': ['Ready', 'Stopped', 'Stopping', 'Starting', 'Provisioning'],
