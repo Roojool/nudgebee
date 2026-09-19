@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Autocomplete, Box, Chip, IconButton, TextField, Typography } from '@mui/material';
+import { Autocomplete, Box, Chip, IconButton, InputAdornment, TextField, Typography } from '@mui/material';
 import { Add, DragIndicator } from '@mui/icons-material';
 import { DeleteIconRed } from '@assets';
 import { Button } from '@ui/Button';
@@ -13,6 +13,8 @@ import { StableTextField } from '../StableFormFields';
 import { createTaskLabel, generateNodeCategories } from '../../constants/nodeCategories';
 import { getTaskIcon, PROVIDER_COLOR_LOGOS } from '../../nodes/ActionNode';
 import { validateTaskId } from '../../utils/taskUtils';
+import { renderCategoryOrTaskIcon } from '../../utils/taskIcon';
+import { buildInitialSubTaskParams } from '../../utils/subtaskDefaults';
 import type { PreviousTask } from '../../utils/templateUtils';
 import SubTaskParamForm from './SubTaskParamForm';
 
@@ -36,6 +38,8 @@ interface ActionOption {
   description?: string;
   icon: any;
   category: string;
+  categoryIcon?: any;
+  categoryColor?: string;
 }
 
 interface SubTasksEditorProps {
@@ -55,6 +59,8 @@ interface SubTasksEditorProps {
   extraSuggestions?: TemplateSuggestion[];
   // Distinguishes data-testids / uid namespace between containers ('foreach' | 'group')
   testIdPrefix: string;
+  // Workflow account, prefilled into a newly picked action's account_id field
+  accountId?: string;
   // Container-specific copy for the header caption and empty state
   copy: { helperText: React.ReactNode; emptyStateText: string };
 }
@@ -115,6 +121,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
   extraSuggestions = [],
   testIdPrefix,
   copy,
+  accountId,
 }) => {
   // Stable per-row uids so React keys (and expansion state) survive
   // reorders — index keys would break TemplateTextField focus. Keyed by
@@ -150,7 +157,15 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
       if (key === 'triggers') continue;
       for (const [taskName, sub] of Object.entries<any>(category.subcategories ?? {})) {
         if (blockedTypes.has(taskName) || sub.deprecated) continue;
-        options.push({ name: taskName, label: sub.label, description: sub.description, icon: sub.icon, category: category.label });
+        options.push({
+          name: taskName,
+          label: sub.label,
+          description: sub.description,
+          icon: sub.icon,
+          category: category.label,
+          categoryIcon: category.icon,
+          categoryColor: category.color,
+        });
       }
     }
     return options.sort((a, b) => a.category.localeCompare(b.category) || a.label.localeCompare(b.label));
@@ -174,9 +189,10 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
     onChange(value.map((sub, i) => (i === index ? nextSub : sub)));
   };
 
-  const updateSubTaskParam = (index: number, fieldName: string, fieldValue: any) => {
+  const updateSubTaskParam = (index: number, fieldName: string, fieldValue: any, clearFields: string[] = []) => {
     const current = value[index] ?? {};
     const params = { ...(current.params ?? {}) };
+    for (const field of clearFields) delete params[field];
     if (fieldValue === undefined) {
       delete params[fieldName];
     } else {
@@ -206,9 +222,20 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
     onChange(value.filter((_, i) => i !== index));
   };
 
+  // Auto-filled params alone (defaults / workflow account) don't warrant a
+  // "configured parameters will be lost" confirmation.
+  const hasUserParams = (sub: SubTask | undefined): boolean => {
+    const params = sub?.params ?? {};
+    if (Object.keys(params).length === 0) return false;
+    const definition = sub?.type ? taskDefinitions.find((d: any) => d.name === sub.type) : null;
+    const initial = buildInitialSubTaskParams(definition, accountId);
+    const keys = Object.keys(params);
+    // Per-key compare: a cleared-then-retyped field re-enters at the end, so key order can differ
+    return keys.length !== Object.keys(initial).length || keys.some((k) => JSON.stringify(params[k]) !== JSON.stringify(initial[k]));
+  };
+
   const requestDelete = (index: number) => {
-    const params = value[index]?.params ?? {};
-    if (Object.keys(params).length === 0) {
+    if (!hasUserParams(value[index])) {
       handleDelete(index);
     } else {
       setPendingDelete(index);
@@ -216,13 +243,14 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
   };
 
   const applyTypeChange = (index: number, newType: string) => {
-    updateSubTask(index, { type: newType, params: {} });
+    const definition = taskDefinitions.find((d: any) => d.name === newType);
+    updateSubTask(index, { type: newType, params: buildInitialSubTaskParams(definition, accountId) });
   };
 
   const requestTypeChange = (index: number, newType: string) => {
     const current = value[index] ?? {};
     if (newType === current.type) return;
-    if (Object.keys(current.params ?? {}).length > 0) {
+    if (hasUserParams(current)) {
       setPendingTypeChange({ index, newType });
     } else {
       applyTypeChange(index, newType);
@@ -308,16 +336,77 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
               disabled={viewOnlyMode}
               disableClearable={!!sub.type}
               ListboxProps={{ sx: { py: 0 } }}
+              renderGroup={(params) => {
+                const groupOption = actionOptions.find((o) => o.category === params.group);
+                return (
+                  <li key={params.key}>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        px: 1.5,
+                        py: 0.75,
+                        position: 'sticky',
+                        top: 0,
+                        zIndex: 1,
+                        backgroundColor: 'var(--ds-background-100, white)',
+                        borderBottom: `1px solid ${ds.gray[200]}`,
+                      }}
+                      data-testid={`${testIdPrefix}-subtask-action-group-${params.group}`}
+                    >
+                      {groupOption?.categoryIcon && (
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 24,
+                            height: 24,
+                            borderRadius: 'var(--ds-radius-md)',
+                            backgroundColor: `color-mix(in srgb, ${groupOption.categoryColor} 10%, transparent)`,
+                            border: `1px solid color-mix(in srgb, ${groupOption.categoryColor} 35%, transparent)`,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {renderCategoryOrTaskIcon(groupOption.categoryIcon, params.group, 14)}
+                        </Box>
+                      )}
+                      <Typography
+                        sx={{
+                          fontSize: 'var(--ds-text-small)',
+                          fontWeight: 'var(--ds-font-weight-semibold)',
+                          fontFamily: 'var(--ds-font-display)',
+                          color: 'var(--ds-brand-500)',
+                        }}
+                      >
+                        {params.group}
+                      </Typography>
+                    </Box>
+                    <ul style={{ padding: 0 }}>{params.children}</ul>
+                  </li>
+                );
+              }}
               renderOption={(props, option) => (
-                <li {...props} key={option.name} style={{ ...(props as any).style, paddingTop: 3, paddingBottom: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
-                    {option.icon && (
-                      <SafeIcon src={option.icon} alt={option.label} width={18} height={18} style={{ objectFit: 'contain', flexShrink: 0 }} />
-                    )}
+                <li {...props} key={option.name} style={{ ...(props as any).style, paddingTop: 4, paddingBottom: 4 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, flexShrink: 0 }}>
+                      {option.icon && renderCategoryOrTaskIcon(option.icon, option.label, 20)}
+                    </Box>
                     <Box sx={{ minWidth: 0 }}>
-                      <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700], lineHeight: 1.3 }}>{option.label}</Typography>
+                      <Typography
+                        sx={{
+                          fontSize: 'var(--ds-text-small)',
+                          fontWeight: 'var(--ds-font-weight-semibold)',
+                          fontFamily: 'var(--ds-font-display)',
+                          color: 'var(--ds-brand-500)',
+                          lineHeight: 1.3,
+                        }}
+                      >
+                        {option.label}
+                      </Typography>
                       {option.description && (
-                        <Typography noWrap sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], lineHeight: 1.3 }}>
+                        <Typography noWrap sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', lineHeight: 1.3 }}>
                           {option.description}
                         </Typography>
                       )}
@@ -325,7 +414,32 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
                   </Box>
                 </li>
               )}
-              renderInput={(params) => <TextField {...params} placeholder='Select action' error={!!typeError} helperText={typeError || undefined} />}
+              renderInput={(params) => {
+                const selectedIcon = actionOptions.find((o) => o.name === sub.type)?.icon;
+                return (
+                  <TextField
+                    {...params}
+                    placeholder='Select action'
+                    error={!!typeError}
+                    helperText={typeError || undefined}
+                    InputProps={{
+                      ...params.InputProps,
+                      startAdornment: selectedIcon ? (
+                        <InputAdornment position='start' sx={{ ml: 0.5, mr: 0 }}>
+                          <Box
+                            data-testid={`${testIdPrefix}-subtask-${index}-selected-action-icon`}
+                            sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, flexShrink: 0 }}
+                          >
+                            {renderCategoryOrTaskIcon(selectedIcon, actionLabelFor(sub.type), 18)}
+                          </Box>
+                        </InputAdornment>
+                      ) : (
+                        params.InputProps.startAdornment
+                      ),
+                    }}
+                  />
+                );
+              }}
               data-testid={`${testIdPrefix}-subtask-${index}-type-picker`}
             />
           </Box>
@@ -335,7 +449,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
           <SubTaskParamForm
             taskDefinition={taskDefinition}
             values={sub.params ?? {}}
-            onChange={(fieldName, fieldValue) => updateSubTaskParam(index, fieldName, fieldValue)}
+            onChange={(fieldName, fieldValue, clearFields) => updateSubTaskParam(index, fieldName, fieldValue, clearFields)}
             errors={paramErrorsFor(index)}
             disabled={viewOnlyMode}
             extraSuggestions={extraSuggestions}

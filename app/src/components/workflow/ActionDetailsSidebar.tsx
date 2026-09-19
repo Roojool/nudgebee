@@ -2049,6 +2049,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               blockedTypes={SUBTASK_BLOCKED_TYPES}
               extraSuggestions={loopItemSuggestions}
               testIdPrefix='foreach'
+              accountId={accountId}
               copy={{
                 helperText: (
                   <>Sub-tasks run sequentially for each item. Use {`{{ LoopItem.${itemVarName} }}`} in parameters to reference the current item.</>
@@ -2078,6 +2079,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               workflowConfigs={workflowConfigs}
               blockedTypes={SUBTASK_BLOCKED_TYPES}
               testIdPrefix='group'
+              accountId={accountId}
               copy={{
                 helperText: 'Tasks run together as a single step, in order.',
                 emptyStateText: 'No tasks yet. Add the tasks that should run together as one step.',
