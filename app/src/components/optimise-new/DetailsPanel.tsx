@@ -37,14 +37,12 @@ import {
   nodeTypeLabel,
   impactSignalSources,
   getChangeClass,
-  changeClassLabel,
   deriveVerdict,
   criticalityTone,
   criticalityLabel,
   businessCriticalCount,
   observedAgeLabel,
   OBSERVED_AGE_HELP,
-  CHANGE_CLASS_HELP,
   destructiveKindOf,
   CRITICALITY_HELP,
   coverageSubtitle,
@@ -62,6 +60,7 @@ import {
   sortByRisk,
   neighbourhoodSummary,
   neighbourhoodStartsOpen,
+  safetyChipFor,
   type DependentRef,
   type ImpactSummary,
   type CommonTraits,
@@ -419,15 +418,6 @@ const BlastRadiusSection = ({ rec, footnote }: { rec: any; footnote?: string }) 
   if (!hasBlastRadiusData(rec)) return null;
   const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass, destructiveKindOf(rec));
   const quietReason = quietSafetyReason(impact, verdict.tone, changeClass);
-  // The band and the change class together are the verdict, so the chip's
-  // tooltip explains both — the summary line below has no room for the second.
-  const bandHelp = [
-    SAFETY_BAND_COPY[safety.key].why,
-    SAFETY_BAND_COPY[safety.key].action,
-    changeClass ? `${changeClassLabel(changeClass)} change — ${CHANGE_CLASS_HELP[changeClass]}` : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
   return (
     <Card
       elevation='flat'
@@ -452,15 +442,6 @@ const BlastRadiusSection = ({ rec, footnote }: { rec: any; footnote?: string }) 
               </Typography>
             </DsTooltip>
           </Box>
-          {band && (
-            <DsTooltip variant='explainer' title={`Safety: ${safety.label}`} desc={bandHelp}>
-              <Box component='span' sx={{ display: 'inline-flex', cursor: 'help' }}>
-                <Label size='sm' tone={safety.tone} dot>
-                  {safety.label}
-                </Label>
-              </Box>
-            </DsTooltip>
-          )}
         </Box>
       }
     >
@@ -607,6 +588,7 @@ const DetailsPanel = ({ fullRecommendation: rec, trend, accounts = {}, onViewEvi
       <InterpretationPanel
         onViewEvidence={hasRightSizingChange ? undefined : onViewEvidence}
         {...interpretation}
+        safety={safetyChipFor(rec)}
         risk={showBlastRadius ? undefined : interpretation.risk}
       />
 
@@ -632,35 +614,6 @@ const DetailsPanel = ({ fullRecommendation: rec, trend, accounts = {}, onViewEvi
           old subtree instead of replacing it, so a card accumulates on every
           recommendation switch. */}
       <OwnershipSection key={`ownership-${rec?.id}`} rec={rec} />
-
-      {/* Additional recommendation steps — the first step is surfaced as the
-          interpretation "why", so only render the remainder here (if any). */}
-      {details?.recommendations?.length > 1 && (
-        <>
-          <Divider sx={{ my: 0 }} />
-          <Box>
-            <SectionHeading>Recommendations</SectionHeading>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
-              {details.recommendations.slice(1).map((step: string, idx: number) => (
-                <Box key={step.substring(0, 60)} sx={{ display: 'flex', gap: ds.space[2], alignItems: 'flex-start' }}>
-                  <Typography
-                    sx={{
-                      fontSize: ds.text.small,
-                      fontWeight: ds.weight.semibold,
-                      color: ds.blue[600],
-                      minWidth: ds.space.mul(0, 10),
-                      mt: ds.space[0],
-                    }}
-                  >
-                    {idx + 1}.
-                  </Typography>
-                  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], lineHeight: 1.6 }}>{step}</Typography>
-                </Box>
-              ))}
-            </Box>
-          </Box>
-        </>
-      )}
 
       {/* Remediation Steps — from catalog mitigations (interpolated) */}
       {mitigations && mitigations.length > 0 && (
@@ -734,53 +687,6 @@ const DetailsPanel = ({ fullRecommendation: rec, trend, accounts = {}, onViewEvi
         </SummaryCard>
       )}
 
-      {/* Compliance */}
-      {details?.compliances?.length > 0 && (
-        <>
-          <Divider sx={{ my: 0 }} />
-          <Box>
-            <SectionHeading>Compliance</SectionHeading>
-            <Box sx={{ display: 'flex', gap: ds.space[2], flexWrap: 'wrap' }}>
-              {details.compliances.map((c: string) => (
-                <Label key={c} size='sm' tone='neutral'>
-                  {c}
-                </Label>
-              ))}
-            </Box>
-          </Box>
-        </>
-      )}
-
-      {/* References */}
-      {details?.references?.length > 0 && (
-        <>
-          <Divider sx={{ my: 0 }} />
-          <Box>
-            <SectionHeading>References</SectionHeading>
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
-              {details.references.map((url: string) => (
-                <Box
-                  key={url}
-                  component='a'
-                  href={url}
-                  target='_blank'
-                  rel='noopener noreferrer'
-                  sx={{
-                    fontSize: ds.text.small,
-                    color: ds.blue[600],
-                    textDecoration: 'none',
-                    wordBreak: 'break-all',
-                    '&:hover': { textDecoration: 'underline' },
-                  }}
-                >
-                  {url.replace(/https?:\/\//, '').replace(/\/$/, '')}
-                </Box>
-              ))}
-            </Box>
-          </Box>
-        </>
-      )}
-
       {/* Linked Items */}
       {(rec.ticket || hasRenderablePRState(rec.resolution)) && (
         <>
@@ -829,6 +735,112 @@ const DetailsPanel = ({ fullRecommendation: rec, trend, accounts = {}, onViewEvi
             </Box>
           </Box>
         </>
+      )}
+
+      {/* Why this matters — the rationale, the catalog's further steps,
+          compliance and references, folded behind one disclosure. They were the
+          tallest part of the tab and the least often read; the verdict above
+          already says what to do, and the chart says why. */}
+      {(interpretation.whyNow || details?.recommendations?.length > 1 || details?.compliances?.length > 0 || details?.references?.length > 0) && (
+        <Box data-testid='recommendation-rationale'>
+          <CollapsableCard
+            defaultOpen={false}
+            elevation='flat'
+            header={
+              <Box sx={{ display: 'flex', alignItems: 'baseline', gap: ds.space[2], flexWrap: 'wrap' }}>
+                <Typography
+                  sx={{ fontFamily: 'var(--ds-font-display)', fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}
+                >
+                  Why this matters
+                </Typography>
+                <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500] }}>
+                  {[
+                    interpretation.whyNow && 'rationale',
+                    details?.recommendations?.length > 1 && 'further steps',
+                    details?.compliances?.length > 0 && 'compliance',
+                    details?.references?.length > 0 && 'references',
+                  ]
+                    .filter(Boolean)
+                    .join(', ')}
+                </Typography>
+              </Box>
+            }
+          >
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[4] }}>
+              {interpretation.whyNow && (
+                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700], lineHeight: 1.6 }}>{interpretation.whyNow}</Typography>
+              )}
+              {details?.recommendations?.length > 1 && (
+                <>
+                  <Box>
+                    <SectionHeading>Further steps</SectionHeading>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+                      {details.recommendations.slice(1).map((step: string, idx: number) => (
+                        <Box key={step.substring(0, 60)} sx={{ display: 'flex', gap: ds.space[2], alignItems: 'flex-start' }}>
+                          <Typography
+                            sx={{
+                              fontSize: ds.text.small,
+                              fontWeight: ds.weight.semibold,
+                              color: ds.blue[600],
+                              minWidth: ds.space.mul(0, 10),
+                              mt: ds.space[0],
+                            }}
+                          >
+                            {idx + 1}.
+                          </Typography>
+                          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], lineHeight: 1.6 }}>{step}</Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                </>
+              )}
+
+              {details?.compliances?.length > 0 && (
+                <>
+                  <Box>
+                    <SectionHeading>Compliance</SectionHeading>
+                    <Box sx={{ display: 'flex', gap: ds.space[2], flexWrap: 'wrap' }}>
+                      {details.compliances.map((c: string) => (
+                        <Label key={c} size='sm' tone='neutral'>
+                          {c}
+                        </Label>
+                      ))}
+                    </Box>
+                  </Box>
+                </>
+              )}
+
+              {details?.references?.length > 0 && (
+                <>
+                  <Box>
+                    <SectionHeading>References</SectionHeading>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
+                      {details.references.map((url: string) => (
+                        <Box
+                          key={url}
+                          component='a'
+                          href={url}
+                          target='_blank'
+                          rel='noopener noreferrer'
+                          sx={{
+                            fontSize: ds.text.small,
+                            color: ds.blue[600],
+                            textDecoration: 'none',
+                            wordBreak: 'break-all',
+                            '&:hover': { textDecoration: 'underline' },
+                          }}
+                        >
+                          {url.replace(/https?:\/\//, '').replace(/\/$/, '')}
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                </>
+              )}
+            </Box>
+          </CollapsableCard>
+        </Box>
       )}
 
       {/* Metadata */}

@@ -29,6 +29,7 @@ import {
   sortByRisk,
   neighbourhoodSummary,
   neighbourhoodStartsOpen,
+  safetyChipFor,
   type DependentRef,
 } from '../safetyBand';
 
@@ -527,5 +528,38 @@ describe('neighbourhoodSummary', () => {
   it('is null when there is nothing beyond the impacted list', () => {
     expect(neighbourhoodSummary({ dependent_count: 3 })).toBeNull();
     expect(neighbourhoodSummary(null)).toBeNull();
+  });
+});
+
+describe('safetyChipFor', () => {
+  const rec = (band: string | undefined, cls?: string, rule = 'pod_right_sizing') => ({
+    rule_name: rule,
+    safety_band: band,
+    finops_score_breakdown: { safety_band: band, change_class: cls },
+  });
+
+  it('presents the band as the action it calls for, with the why, the what-to-do and the change class on hover', () => {
+    const chip = safetyChipFor(rec('risky', 'reductive'));
+    expect(chip).toMatchObject({ label: 'Plan it', tone: 'warning' });
+    expect(chip!.help).toMatch(/^Production callers are in the blast radius/);
+    expect(chip!.help).toMatch(/Apply with a safeguard/);
+    expect(chip!.help).toMatch(/Reductive change — /);
+  });
+
+  it('reads an irreversible change from the class, never as "Plan it"', () => {
+    expect(safetyChipFor(rec('risky', 'destructive', 'unused_pvc'))).toMatchObject({ label: 'Irreversible', tone: 'critical' });
+    expect(safetyChipFor(rec('risky', 'destructive', 'abandoned_resource'))).toMatchObject({ label: 'Stops workload', tone: 'critical' });
+  });
+
+  it('leaves the change class out of the help when the row has none', () => {
+    const chip = safetyChipFor(rec('safe'));
+    expect(chip).toMatchObject({ label: 'Safe', tone: 'success' });
+    expect(chip!.help).not.toMatch(/change — /);
+  });
+
+  it('claims nothing for a recommendation the graph has not assessed', () => {
+    expect(safetyChipFor(rec(undefined))).toBeNull();
+    expect(safetyChipFor({ rule_name: 'pod_right_sizing' })).toBeNull();
+    expect(safetyChipFor(null)).toBeNull();
   });
 });

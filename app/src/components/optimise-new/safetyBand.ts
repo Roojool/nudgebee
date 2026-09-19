@@ -588,3 +588,21 @@ export const neighbourhoodSummary = (impact?: ImpactSummary | null): string | nu
   if (attached > 0) parts.push(`${plural(attached, 'attached resource')}`);
   return parts.length > 0 ? `Also in the neighbourhood: ${parts.join(' · ')}` : null;
 };
+
+// safetyChipFor is the one reading of a recommendation's safety for the chip at
+// the top of the Details tab: the band presented as the action it calls for,
+// with the why, the what-to-do and the change class behind it on hover. Null
+// when the graph has not assessed the recommendation, so nothing is claimed.
+export const safetyChipFor = (rec: any): { label: string; tone: LabelTone; help: string } | null => {
+  if (!rec?.safety_band) return null;
+  const presented = presentRecommendation(rec);
+  const cls = getChangeClass(rec);
+  const help = [
+    SAFETY_BAND_COPY[presented.key].why,
+    SAFETY_BAND_COPY[presented.key].action,
+    cls ? `${changeClassLabel(cls)} change — ${CHANGE_CLASS_HELP[cls]}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return { label: presented.label, tone: presented.tone, help };
+};

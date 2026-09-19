@@ -41,6 +41,15 @@ beforeEach(() => {
 });
 
 describe('useRightSizingTrend', () => {
+  it('tolerates the drawer rendering with no recommendation at all', () => {
+    const { result, rerender } = renderHook(({ rec }) => useRightSizingTrend(rec), { initialProps: { rec: null as any } });
+    expect(fetchTrend).not.toHaveBeenCalled();
+    expect(result.current.hasData).toBe(false);
+    expect(result.current.loading).toBe(false);
+    rerender({ rec: undefined as any });
+    expect(fetchTrend).not.toHaveBeenCalled();
+  });
+
   it('never fetches for a recommendation with no container data', () => {
     const { result } = renderHook(() => useRightSizingTrend({ id: 'r', account_id: 'a', recommendation: { reason: 'unused' } }));
     expect(fetchTrend).not.toHaveBeenCalled();

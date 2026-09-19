@@ -95,7 +95,12 @@ function options(format: (v: number) => string) {
     titleFont: { size: 11 },
     bodyFont: { size: 11 },
     callbacks: {
-      label: (item: any) => ` ${item.dataset.label}: ${format(Number(item.raw))}`,
+      // A gap (null) or a value that does not read as a number shows a dash,
+      // never "0m" pretending to be a reading.
+      label: (item: any) => {
+        const value = Number(item.raw);
+        return ` ${item.dataset.label}: ${item.raw == null || !Number.isFinite(value) ? '—' : format(value)}`;
+      },
     },
   };
   // Two date ticks, day only: the full "Sep 12, 05:30 PM" labels collide at
