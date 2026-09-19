@@ -238,6 +238,9 @@ export function Input({
   const describedBy =
     [hasError ? errorId : null, !hasError && help ? helpId : null, instructionText ? instrId : null].filter(Boolean).join(' ') || undefined;
 
+  const fillColor = effectiveDisabled || readOnly ? 'var(--ds-background-200)' : 'var(--ds-background-100)';
+  const focusRing = `0 0 0 3px ${hasError ? 'var(--ds-red-100)' : 'var(--ds-blue-100)'}`;
+
   const inputBaseSx = {
     width: '100%',
     height: isTextarea ? 'auto' : tokens.height,
@@ -257,8 +260,14 @@ export function Input({
     '&:hover': effectiveDisabled ? undefined : { borderColor: hasError ? 'var(--ds-red-600)' : 'var(--ds-gray-400)' },
     '&:focus': {
       borderColor: hasError ? 'var(--ds-red-500)' : 'var(--ds-blue-500)',
-      boxShadow: `0 0 0 3px ${hasError ? 'var(--ds-red-100)' : 'var(--ds-blue-100)'}`,
+      boxShadow: focusRing,
     },
+    // Browser autofill paints its own blue fill that CSS can't override; an inset shadow covers it.
+    '&:-webkit-autofill': {
+      boxShadow: `inset 0 0 0 1000px ${fillColor}`,
+      WebkitTextFillColor: effectiveDisabled ? 'var(--ds-gray-500)' : 'var(--ds-gray-700)',
+    },
+    '&:-webkit-autofill:focus': { boxShadow: `inset 0 0 0 1000px ${fillColor}, ${focusRing}` },
     '&:disabled': { color: 'var(--ds-gray-500)', cursor: 'not-allowed' },
     '&[readonly]': { backgroundColor: 'var(--ds-background-200)', cursor: 'default' },
     '&::placeholder': { color: 'var(--ds-gray-500)' },
