@@ -2,7 +2,6 @@ import { Box, Typography } from '@mui/material';
 import { useState, type ReactNode } from 'react';
 import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined';
 import { Card } from '@ui/Card';
-import { Banner } from '@ui/Banner';
 import { Label } from '@ui/Label';
 import { Link } from '@ui/Link';
 import { Button as DsButton } from '@ui/Button';
@@ -14,7 +13,7 @@ import useResourceOwner, { derivedText, type ChainLevel } from '@hooks/useResour
 import { isTenantAdmin } from '@lib/auth';
 
 const OWNERSHIP_HELP =
-  'Who is accountable for this resource. An owner can be set directly on it, matched by an ownership rule, or inherited from the namespace or cloud account above it.';
+  'Who is accountable for this resource. An owner can be set directly on it, matched by an ownership rule, or inherited from the namespace or cloud account above it. Setting one routes findings like this to the right team.';
 
 // OwnershipRow — label + value pair with a fixed 150px label column, so every
 // row's value starts at the same x.
@@ -163,12 +162,15 @@ const OwnershipSection = ({ rec }: { rec: any }) => {
             )}
           </>
         ) : (
-          <Banner
-            surface='section'
-            tone='info'
-            title='No owner set yet'
-            message='No ownership rule or assignment covers this resource yet. Add one to route findings like this to the right team.'
-          />
+          // One row, matching the resolved state's height. A full callout for
+          // "nobody has claimed this yet" outweighed the change the reader
+          // opened the panel to see; the Assign owner action is already in the
+          // card header, and the reason lives in the heading's tooltip.
+          <OwnershipRow label='Owner'>
+            <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>
+              Not set{canAssign ? '' : ' — no ownership rule or assignment covers this resource yet'}
+            </Typography>
+          </OwnershipRow>
         )}
         {assignOpen && (
           <AssignOwnerModal

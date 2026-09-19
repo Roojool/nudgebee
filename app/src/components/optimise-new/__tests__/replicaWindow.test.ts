@@ -41,17 +41,25 @@ describe('formatReplicaWindow', () => {
 describe('pod right-sizing impact line', () => {
   const recData = { app: [entry('cpu', 1, 0.5, { replicas }), entry('memory', 4 * 1024 ** 3, 2 * 1024 ** 3, { replicas })] };
 
+  // The dollar figure itself moved out of this line — the panel header already
+  // states it — so the replica window is carried as the assumption behind it.
   it('says which replica count the saving assumed', () => {
     const summary = summarizeRightSizing(recData);
     expect(summary?.replicas).toEqual({ avg: 3.2, min: 2, max: 10, windowHours: 336 });
     const r = buildInterpretation({ category: 'RightSizing', ruleName: 'pod_right_sizing', savings: 42, recData } as any);
-    expect(r.impact).toContain('~$42/mo savings at an average of 3.2 replicas over 14 days (2–10)');
+    expect(r.impact).toContain('the figure assumes an average of 3.2 replicas over 14 days (2–10)');
   });
 
-  it('keeps the old wording when the row has no replica window', () => {
+  it('says nothing about replicas when the row has no replica window', () => {
     const legacy = { app: [entry('cpu', 1, 0.5)] };
     const r = buildInterpretation({ category: 'RightSizing', ruleName: 'pod_right_sizing', savings: 42, recData: legacy } as any);
-    expect(r.impact).toContain('~$42/mo savings');
+    expect(r.impact).toContain('Reclaims');
     expect(r.impact).not.toContain('replica');
+  });
+
+  it('never restates the saving the panel header already shows', () => {
+    const r = buildInterpretation({ category: 'RightSizing', ruleName: 'pod_right_sizing', savings: 42, recData } as any);
+    expect(r.impact).not.toContain('$42');
+    expect(r.impact).not.toMatch(/\$\d+\/mo savings/);
   });
 });

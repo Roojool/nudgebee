@@ -597,18 +597,6 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {}, onViewEvidence, 
           resolved title, description and insight (replaces the generic blurb). */}
       <InterpretationPanel onViewEvidence={onViewEvidence} {...interpretation} risk={showBlastRadius ? undefined : interpretation.risk} />
 
-      {/* Ownership — who is accountable for this resource, and how that was
-          derived. Keyed like Blast Radius below (the drawer is reused, not
-          remounted), but the key MUST stay distinct from its sibling's: two
-          siblings sharing one key makes React strand the old subtree instead of
-          replacing it, so a card accumulates on every recommendation switch. */}
-      <OwnershipSection key={`ownership-${rec?.id}`} rec={rec} />
-
-      {/* Blast Radius & Safety — knowledge-graph impact + safety band. Keyed by
-          rec id so the "Show all" toggle state resets when the persistent detail
-          drawer swaps to a different recommendation (it isn't remounted). */}
-      <BlastRadiusSection key={rec?.id} rec={rec} footnote={interpretation.risk} />
-
       {/* What applying does — surfaced prominently so the impact is clear before the
           user clicks Apply (e.g. the async, non-disruptive EBS gp2→gp3 modification). */}
       {recData?.apply_impact && (
@@ -617,6 +605,20 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {}, onViewEvidence, 
 
       {/* Recommendation Summary — key "what changes" data from JSONB */}
       <RecommendationSummary recData={recData} category={category} ruleName={ruleName} />
+
+      {/* Blast Radius & Safety — knowledge-graph impact + safety band. Keyed by
+          rec id so the "Show all" toggle state resets when the persistent detail
+          drawer swaps to a different recommendation (it isn't remounted). */}
+      <BlastRadiusSection key={rec?.id} rec={rec} footnote={interpretation.risk} />
+
+      {/* Ownership — who is accountable for this resource, and how that was
+          derived. Sits after the change and its blast radius: the reader came
+          for what changes, not for who owns it. Keyed like Blast Radius above
+          (the drawer is reused, not remounted), but the key MUST stay distinct
+          from its sibling's: two siblings sharing one key makes React strand the
+          old subtree instead of replacing it, so a card accumulates on every
+          recommendation switch. */}
+      <OwnershipSection key={`ownership-${rec?.id}`} rec={rec} />
 
       {/* Additional recommendation steps — the first step is surfaced as the
           interpretation "why", so only render the remainder here (if any). */}
@@ -903,7 +905,10 @@ const SummaryCard = ({
 const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
   const containers = extractContainerData(recData);
   // Per-container dollars, when the producers stamped the per-entry figures.
-  const split = splitSavings(recData);
+  // A single container has nothing to split: its figure is the workload's,
+  // already in the panel header, and the two round differently ("+$1" against
+  // "<$0.73/mo"), which reads as a discrepancy rather than a breakdown.
+  const split = containers.length > 1 ? splitSavings(recData) : null;
   const dollarsByContainer = new Map(split?.containers.map((c) => [c.name, c.total]) ?? []);
   if (containers.length === 0) return null;
   return (
@@ -918,10 +923,14 @@ const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
           <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
             Recommended Resource Changes
           </Typography>
-          <Box sx={{ flex: 1 }} />
-          <Label size='sm' tone='neutral'>
-            {containers.length} {containers.length === 1 ? 'container' : 'containers'}
-          </Label>
+          {containers.length > 1 && (
+            <>
+              <Box sx={{ flex: 1 }} />
+              <Label size='sm' tone='neutral'>
+                {containers.length} containers
+              </Label>
+            </>
+          )}
         </Box>
       }
     >

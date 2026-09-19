@@ -158,14 +158,27 @@ export function formatReplicaWindow(r: RightSizingSummary['replicas']): string {
   return ` at an average of ${avg} ${noun}${over}${range}`;
 }
 
+// resourceNames says which requests move, in the order the table lists them.
+const resourceNames = (changed: RightSizingSummary['changedResources']): string => {
+  if (changed.length === 2) return 'CPU and memory requests';
+  if (changed[0] === 'cpu') return 'CPU requests';
+  if (changed[0] === 'memory') return 'memory requests';
+  return 'resource requests';
+};
+
 function podRightSizing(
   summary: RightSizingSummary,
   savings: number,
   split: SavingsSplit | null = null
 ): Pick<InterpretationData, 'verdict' | 'impact' | 'impactIsCost' | 'evidence' | 'confidence' | 'observedWindow'> {
-  const containerLabel = summary.containerCount > 1 ? `${summary.primary} (+${summary.containerCount - 1} more)` : summary.primary;
+  // The verdict names the action; the current → recommended figures live in the
+  // "Recommended Resource Changes" table right below it, which also carries the
+  // percentages, so spelling them here made the reader parse the same four
+  // numbers twice. The container is named only when there is more than one —
+  // with a single container the table's one row already names it.
+  const containerLabel = summary.containerCount > 1 ? ` on ${summary.primary} (+${summary.containerCount - 1} more)` : '';
   const verdict = summary.changeText
-    ? `${DIRECTION_VERB[summary.direction]} ${containerLabel}: ${summary.changeText}`
+    ? `${DIRECTION_VERB[summary.direction]} ${resourceNames(summary.changedResources)}${containerLabel}`
     : 'Right-size resource requests to match observed usage';
 
   let impact: string;
@@ -174,23 +187,28 @@ function podRightSizing(
   // The dollar figure is per pod times replicas; say which replica count it
   // assumed so a swing on an autoscaled workload reads as a range, not a bug.
   const atReplicas = formatReplicaWindow(summary.replicas);
+  // The replica window qualifies the dollar figure, which now lives only in the
+  // panel header, so it is stated as the assumption behind it rather than
+  // trailing a number this line no longer prints. formatReplicaWindow leads
+  // with " at" for the cost line below; here the verb already carries it.
+  const assumption = atReplicas ? `; the figure assumes${atReplicas.replace(/^ at /, ' ')}` : '';
   if (split && Math.round(split.gross) >= 1 && Math.round(split.cost) >= 1) {
     // Name containers by the side they contributed to, not by their own net: a
     // container whose cpu saving and memory cost cancel still belongs on both.
     const saver = split.containers.filter((c) => (c.cpu ?? 0) > 0 || (c.memory ?? 0) > 0).map((c) => c.name);
     const payer = split.containers.filter((c) => (c.cpu ?? 0) < 0 || (c.memory ?? 0) < 0).map((c) => c.name);
-    const netText =
-      Math.round(Math.abs(split.net)) >= 1 ? `net ${split.net > 0 ? 'saves' : 'costs'} ~$${Math.round(Math.abs(split.net))}/mo` : 'net ~$0/mo';
     const sameContainers = saver.join(', ') === payer.join(', ');
-    impact = sameContainers
-      ? `Saves ~$${Math.round(split.gross)}/mo and costs ~$${Math.round(split.cost)}/mo more on ${saver.join(', ')} · ${netText}${atReplicas}.`
-      : `Saves ~$${Math.round(split.gross)}/mo on ${saver.join(', ')} · costs ~$${Math.round(split.cost)}/mo more on ${payer.join(
-          ', '
-        )} · ${netText}${atReplicas}.`;
-    impactIsCost = Math.round(split.net) >= 1;
+    // The panel header already carries the gross, the cost and the net. What it
+    // cannot show is which container is on which side of that split, so that is
+    // all this line adds — and with one container there is no side to name, so
+    // the slot is dropped rather than restating the header. It is no longer a
+    // money statement either way, so it never renders in the savings tone.
+    if (summary.containerCount === 1) impact = '';
+    else if (sameContainers) impact = `Saves and costs more on the same container, ${saver.join(', ')}${assumption}.`;
+    else impact = `Saves on ${saver.join(', ')} · costs more on ${payer.join(', ')}${assumption}.`;
   } else if (Math.round(savings) >= 1) {
-    impact = `~$${Math.round(savings)}/mo savings${atReplicas}${summary.reclaimText ? ` · reclaims ${summary.reclaimText}` : ''}.`;
-    impactIsCost = true;
+    // The header states the saving. Reclaimed capacity is the part it cannot.
+    impact = summary.reclaimText ? `Reclaims ${summary.reclaimText}${assumption}.` : '';
   } else if (monthlyIncrease >= 1) {
     // Raising requests buys reliability at a monthly price, and that price is
     // the whole basis for the trade-off, so name it rather than reporting
@@ -318,7 +336,7 @@ export function buildInterpretation({
         confidence: r.confidence,
         observedWindow: r.observedWindow,
         whyNow,
-        impact: r.impact,
+        impact: r.impact || undefined,
         impactIsCost: r.impactIsCost,
         risk: sharedRisk,
         evidence: r.evidence,
