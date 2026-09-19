@@ -10,6 +10,7 @@ logic in the ml-k8s-server.
 import asyncio
 import json
 import logging
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -860,8 +861,8 @@ class VolumeRightsizingService:
 
             price_per_gb = pricing["price_per_gb"]
             if utilization > self.overprovisioning_threshold:
-                recommended_size_gb = capacity_gb * 1.2
-                savings = -(capacity_gb * 0.2 * price_per_gb)
+                recommended_size_gb = float(math.ceil(capacity_gb * 1.2))
+                savings = -((recommended_size_gb - capacity_gb) * price_per_gb)
                 reason, priority, algorithm = (
                     "Volume is over 90% full, recommend increasing size",
                     "High",
@@ -878,7 +879,9 @@ class VolumeRightsizingService:
 
                 pfss90_gb = current_free_gb + 10 * (current_free_gb - free_7_days_ago_gb)
                 mfss_gb = max(0.0, min(pfss90_gb, free_7_days_ago_gb))
-                recommended_size_gb = (capacity_gb - mfss_gb) * 1.3
+                # A claim is sized in whole GiB, and the record truncates to an
+                # int: a fractional size below one GiB used to become 0.
+                recommended_size_gb = float(max(1, math.ceil((capacity_gb - mfss_gb) * 1.3)))
                 logger.info(
                     f"[{pvc_id}] Projected Max Free Space: {mfss_gb:.2f} GB. Recommended Size: "
                     f"{recommended_size_gb:.2f} GB."
