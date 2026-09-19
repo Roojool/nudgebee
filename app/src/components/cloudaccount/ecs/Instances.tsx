@@ -1,9 +1,10 @@
-import { Box, Chip, List, ListItem, Stack, Typography } from '@mui/material';
+import { Box, List, ListItem, Stack, Typography } from '@mui/material';
 import React, { useEffect, useState, type JSX } from 'react';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import apiCloudAccount from '@api1/cloud-account';
 import CloudAccountTable from '@components/cloudaccount/CloudAccountTable';
 import { hasWriteAccess } from '@lib/auth';
+import { Chip } from '@ui/Chip';
 import { Label } from '@ui/Label';
 import ECSSummary from './Summary'; // Corrected import
 import ECSCloudLogs from './CloudLogs';
@@ -747,7 +748,7 @@ const ECSNetworkDetails = ({ ecsDetails }: ECSNetworkDetailsProps) => {
             <List dense>
               {networkConfig.Subnets.map((subnet) => (
                 <ListItem key={subnet} sx={{ py: ds.space[1] }}>
-                  <Chip label={subnet} size='small' />
+                  <Chip size='md'>{subnet}</Chip>
                 </ListItem>
               ))}
             </List>
@@ -763,7 +764,7 @@ const ECSNetworkDetails = ({ ecsDetails }: ECSNetworkDetailsProps) => {
             <List dense>
               {networkConfig.SecurityGroups.map((sg) => (
                 <ListItem key={sg} sx={{ py: ds.space[1] }}>
-                  <Chip label={sg} size='small' />
+                  <Chip size='md'>{sg}</Chip>
                 </ListItem>
               ))}
             </List>
@@ -851,7 +852,9 @@ const ECSDeploymentConfiguration = ({ ecsDetails }: ECSDeploymentConfigurationPr
                 <List dense sx={{ pl: ds.space[4] }}>
                   {deployConfig.Alarms.AlarmNames.map((alarmName) => (
                     <ListItem key={alarmName} sx={{ py: 0.2, px: 0 }}>
-                      <Chip label={alarmName} size='small' />
+                      <Chip size='md' displayTooltip tooltipCharLimit={60}>
+                        {alarmName}
+                      </Chip>
                     </ListItem>
                   ))}
                 </List>
@@ -940,7 +943,7 @@ const ECSDeploymentsDetails = ({ ecsDetails }: ECSDeploymentsDetailsProps) => {
                   <List dense disablePadding sx={{ pl: ds.space[2] }}>
                     {deployment.CapacityProviderStrategy.map((cp, cpIndex) => (
                       <ListItem key={cpIndex} sx={{ py: 0.2, px: 0 }}>
-                        <Chip size='small' label={`${cp.CapacityProvider} (Weight: ${cp.Weight ?? 'N/A'}, Base: ${cp.Base ?? 'N/A'})`} />
+                        <Chip size='md'>{`${cp.CapacityProvider} (Weight: ${cp.Weight ?? 'N/A'}, Base: ${cp.Base ?? 'N/A'})`}</Chip>
                       </ListItem>
                     ))}
                   </List>
@@ -1295,7 +1298,7 @@ const ECSClusterCapacityProviders = ({ clusterDetails }: { clusterDetails: any }
             <List dense>
               {capacityProviders.map((cp: string) => (
                 <ListItem key={cp} sx={{ py: ds.space[1] }}>
-                  <Chip label={cp} size='small' />
+                  <Chip size='md'>{cp}</Chip>
                 </ListItem>
               ))}
             </List>
@@ -1309,7 +1312,7 @@ const ECSClusterCapacityProviders = ({ clusterDetails }: { clusterDetails: any }
             <List dense>
               {defaultStrategy.map((strategy: any) => (
                 <ListItem key={strategy.CapacityProvider} sx={{ py: ds.space[1] }}>
-                  <Chip size='small' label={`${strategy.CapacityProvider} (Weight: ${strategy.Weight ?? 'N/A'}, Base: ${strategy.Base ?? 'N/A'})`} />
+                  <Chip size='md'>{`${strategy.CapacityProvider} (Weight: ${strategy.Weight ?? 'N/A'}, Base: ${strategy.Base ?? 'N/A'})`}</Chip>
                 </ListItem>
               ))}
             </List>
@@ -1349,7 +1352,9 @@ const ECSClusterTagsDisplay = ({ clusterDetails }: { clusterDetails: any }) => {
       <List dense>
         {tags.map((tag: { Key: string; Value: string }) => (
           <ListItem key={tag.Key} sx={{ py: ds.space[1], display: 'flex', justifyContent: 'start' }}>
-            <Chip label={`${tag.Key}: ${tag.Value}`} size='small' />
+            <Chip size='md' displayTooltip tooltipCharLimit={60}>
+              {`${tag.Key}: ${tag.Value}`}
+            </Chip>
           </ListItem>
         ))}
       </List>
@@ -1575,7 +1580,7 @@ const ECSTaskContainers = ({ taskDetails }: ECSTaskContainersProps) => {
                   <List dense disablePadding sx={{ pl: ds.space[2] }}>
                     {container.NetworkInterfaces.map((ni, niIndex) => (
                       <ListItem key={niIndex} sx={{ py: 0.2, px: 0 }}>
-                        <Chip size='small' label={`Private IP: ${ni.PrivateIpv4Address || 'N/A'}`} />
+                        <Chip size='md'>{`Private IP: ${ni.PrivateIpv4Address || 'N/A'}`}</Chip>
                       </ListItem>
                     ))}
                   </List>
@@ -1666,7 +1671,9 @@ const ECSTaskTagsDisplay = ({ taskDetails }: ECSTaskTagsDisplayProps) => {
       <List dense>
         {tags.map((tag) => (
           <ListItem key={tag.Key} sx={{ py: ds.space[1], display: 'flex', justifyContent: 'start' }}>
-            <Chip label={`${tag.Key}: ${tag.Value}`} size='small' />
+            <Chip size='md' displayTooltip tooltipCharLimit={60}>
+              {`${tag.Key}: ${tag.Value}`}
+            </Chip>
           </ListItem>
         ))}
       </List>

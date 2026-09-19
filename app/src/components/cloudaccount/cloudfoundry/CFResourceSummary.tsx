@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Typography, Chip } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import apiCloudAccount from '@api1/cloud-account';
 import SummarySkeletonLoader from '@shared/SummarySkeletonLoader';
+import { Chip } from '@ui/Chip';
 import { ds } from '@utils/colors';
 
 const parseResource = (r: any) => ({
@@ -96,22 +97,9 @@ const OrgSummaryContent = ({ resources, apps }: { resources: any[]; apps: any[] 
                 <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[700] }}>{org.name}</Typography>
               </Box>
               <Box sx={{ display: 'flex', gap: ds.space[4] }}>
-                <Chip label={`${stats.appCount} apps`} size='small' sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }} />
-                <Chip
-                  label={`${stats.runningApps} running`}
-                  size='small'
-                  color='success'
-                  variant='outlined'
-                  sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }}
-                />
-                {stats.memoryMB > 0 && (
-                  <Chip
-                    label={`${stats.memoryMB} MB`}
-                    size='small'
-                    variant='outlined'
-                    sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }}
-                  />
-                )}
+                <Chip>{`${stats.appCount} apps`}</Chip>
+                <Chip tone='success'>{`${stats.runningApps} running`}</Chip>
+                {stats.memoryMB > 0 && <Chip>{`${stats.memoryMB} MB`}</Chip>}
               </Box>
             </Box>
           );
@@ -172,22 +160,9 @@ const SpaceSummaryContent = ({ resources, apps }: { resources: any[]; apps: any[
                 </Box>
               </Box>
               <Box sx={{ display: 'flex', gap: ds.space[4] }}>
-                <Chip label={`${stats.appCount} apps`} size='small' sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }} />
-                <Chip
-                  label={`${stats.runningApps} running`}
-                  size='small'
-                  color='success'
-                  variant='outlined'
-                  sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }}
-                />
-                {stats.memoryMB > 0 && (
-                  <Chip
-                    label={`${stats.memoryMB} MB`}
-                    size='small'
-                    variant='outlined'
-                    sx={{ fontSize: ds.text.caption, height: ds.space.mul(0, 11) }}
-                  />
-                )}
+                <Chip>{`${stats.appCount} apps`}</Chip>
+                <Chip tone='success'>{`${stats.runningApps} running`}</Chip>
+                {stats.memoryMB > 0 && <Chip>{`${stats.memoryMB} MB`}</Chip>}
               </Box>
             </Box>
           );
@@ -233,15 +208,6 @@ const RouteSummaryContent = ({ resources, apps }: { resources: any[]; apps: any[
             const spaceTag = route.tags?.space;
             const space = Array.isArray(spaceTag) ? spaceTag[0] : spaceTag || '-';
 
-            const getAppDotColor = (info: any, active: boolean) => {
-              if (!info) return ds.gray[300];
-              return active ? ds.green[500] : ds.red[500];
-            };
-            const getAppBorderColor = (info: any, active: boolean) => {
-              if (!info) return ds.gray[200];
-              return active ? ds.green[200] : ds.red[200];
-            };
-
             return (
               <Box
                 key={route.resourse_id || route.name}
@@ -252,7 +218,7 @@ const RouteSummaryContent = ({ resources, apps }: { resources: any[]; apps: any[
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: destApps.length > 0 ? ds.space[2] : 0 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-                    <Chip label={protocol} size='small' variant='outlined' sx={{ fontSize: ds.text.caption, height: 20, fontFamily: ds.font.mono }} />
+                    <Chip sx={{ fontFamily: ds.font.mono }}>{protocol}</Chip>
                     <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color: ds.gray[700], fontFamily: ds.font.mono }}>
                       {url}
                     </Typography>
@@ -266,28 +232,9 @@ const RouteSummaryContent = ({ resources, apps }: { resources: any[]; apps: any[
                       const appInfo = appMap[appGuid];
                       const isActive = appInfo?.status?.toLowerCase() === 'active';
                       return (
-                        <Chip
-                          key={appGuid}
-                          icon={
-                            <Box
-                              sx={{
-                                width: ds.space.mul(0, 3),
-                                height: ds.space.mul(0, 3),
-                                borderRadius: '50%',
-                                backgroundColor: getAppDotColor(appInfo, isActive),
-                                ml: ds.space[1],
-                              }}
-                            />
-                          }
-                          label={appInfo?.name || appGuid.substring(0, 8) + '...'}
-                          size='small'
-                          variant='outlined'
-                          sx={{
-                            fontSize: ds.text.caption,
-                            height: ds.space.mul(0, 11),
-                            borderColor: getAppBorderColor(appInfo, isActive),
-                          }}
-                        />
+                        <Chip key={appGuid} dot dotVariant='filled' tone={!appInfo ? 'neutral' : isActive ? 'success' : 'critical'} displayTooltip>
+                          {appInfo?.name || appGuid.substring(0, 8) + '...'}
+                        </Chip>
                       );
                     })}
                   </Box>

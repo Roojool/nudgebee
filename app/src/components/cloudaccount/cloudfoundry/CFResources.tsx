@@ -1,4 +1,4 @@
-import { Box, Typography, Chip } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import React, { useEffect, useState } from 'react';
 import apiCloudAccount from '@api1/cloud-account';
 import CloudAccountTable from '../CloudAccountTable';
@@ -8,6 +8,7 @@ import { usePagination } from '@hooks/usePagination';
 import TagsCell from '../TagsCell';
 import CloudAccountEvents from '../CloudAccountEvents';
 import type { ICustomTableRow } from '../ec2/types';
+import { Chip } from '@ui/Chip';
 import { ListingLayout } from '@ui/ListingLayout';
 import FilterDropdown from '@ui/FilterDropdown';
 import CustomSearch from '@shared/CustomSearch';
@@ -102,7 +103,11 @@ const mapRouteRow = (item: any, enrichment?: AppEnrichment): ICustomTableRow[] =
         <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: ds.space[1] }}>
           {destApps.map((guid: string) => {
             const appName = enrichment?.appNames?.[guid] || guid.substring(0, 8) + '...';
-            return <Chip key={guid} label={appName} size='small' variant='outlined' sx={{ fontSize: ds.text.caption, height: '20px' }} />;
+            return (
+              <Chip key={guid} size='xs' displayTooltip>
+                {appName}
+              </Chip>
+            );
           })}
         </Box>
       ) : (
