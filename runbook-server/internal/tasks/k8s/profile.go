@@ -76,15 +76,37 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 	}
 
 	namespace, _ := params["namespace"].(string)
-	podName, _ := params["pod_name"].(string)
-	if namespace == "" || podName == "" {
+	// `name` is the pod or the workload, depending on kind; `pod_name` is the
+	// name this task shipped with and stays accepted.
+	name, _ := params["name"].(string)
+	if name == "" {
+		name, _ = params["pod_name"].(string)
+	}
+	if namespace == "" || name == "" {
 		return nil, errors.New("namespace and pod_name are required")
 	}
 	if !k8sNameRegex.MatchString(namespace) {
 		return nil, fmt.Errorf("invalid namespace format: %s", namespace)
 	}
-	if !k8sNameRegex.MatchString(podName) {
-		return nil, fmt.Errorf("invalid pod_name format: %s", podName)
+	if !k8sNameRegex.MatchString(name) {
+		return nil, fmt.Errorf("invalid pod_name format: %s", name)
+	}
+
+	// Events name the workload, not the pod — a PodMemoryReachingLimit fires
+	// with subject_type=deployment and subject_name=<deployment>, and the pod
+	// appears only in the title text. Passing that through as a pod name fails
+	// with `pods "<deployment>" not found`, which is how every event-triggered
+	// profile failed before this.
+	kind, _ := params["kind"].(string)
+	if kind == "" {
+		kind = "Pod"
+	}
+	if !k8sNameRegex.MatchString(strings.ToLower(kind)) {
+		return nil, fmt.Errorf("invalid kind format: %s", kind)
+	}
+	targetPodName, _ := params["target_pod_name"].(string)
+	if targetPodName != "" && !k8sNameRegex.MatchString(targetPodName) {
+		return nil, fmt.Errorf("invalid target_pod_name format: %s", targetPodName)
 	}
 
 	profileType, _ := params["profile_type"].(string)
@@ -106,7 +128,7 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 	request := map[string]any{
 		"account_id":       accountID,
 		"namespace":        namespace,
-		"pod_name":         podName,
+		"pod_name":         name,
 		"profile_type":     profileType,
 		"profile_duration": duration,
 	}
@@ -125,6 +147,12 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 			"request": request,
 		}, nil
 	}
+
+	podName, err := ResolveTargetPod(taskCtx, accountID, namespace, kind, name, targetPodName)
+	if err != nil {
+		return nil, err
+	}
+	request["pod_name"] = podName
 
 	submitted, err := callProfileAction(taskCtx, profileSubmitAction, request)
 	if err != nil {
@@ -390,13 +418,30 @@ func (t *ProfileTask) InputSchema() *types.Schema {
 				Order:     2,
 				DependsOn: []string{"account_id"},
 			},
+			"kind": {
+				Type:        types.PropertyTypeString,
+				Required:    false,
+				Default:     "Pod",
+				Description: "Kind of the resource named below. Events name the workload rather than the pod, so a Deployment/DaemonSet/StatefulSet is resolved to one of its pods.",
+				Title:       "Kind",
+				Order:       3,
+				Options:     []string{"Pod", "Deployment", "DaemonSet", "StatefulSet", "ReplicaSet", "Rollout"},
+			},
 			"pod_name": {
 				Type:        types.PropertyTypeString,
 				Required:    true,
-				Description: "Pod to profile.",
-				Title:       "Pod",
-				Order:       3,
-				DependsOn:   []string{"account_id", "namespace"},
+				Description: "Pod to profile, or the workload to pick a pod from when kind is not Pod.",
+				Title:       "Pod or workload",
+				Order:       4,
+				DependsOn:   []string{"account_id", "namespace", "kind"},
+			},
+			"target_pod_name": {
+				Type:        types.PropertyTypeString,
+				Required:    false,
+				Description: "Optional: profile this specific pod of the workload. Without it the oldest pod is chosen, so repeated runs stay on the same replica.",
+				Title:       "Target Pod Name",
+				Order:       5,
+				DependsOn:   []string{"account_id", "namespace", "kind", "pod_name"},
 			},
 			"profile_type": {
 				Type:        types.PropertyTypeString,
@@ -404,7 +449,7 @@ func (t *ProfileTask) InputSchema() *types.Schema {
 				Default:     "cpu",
 				Description: "What to sample. CPU produces a flamegraph; memory produces a heap profile or histogram, depending on the language.",
 				Title:       "Profile Type",
-				Order:       4,
+				Order:       6,
 				Options:     []string{"cpu", "memory"},
 			},
 			"profile_duration": {
@@ -413,14 +458,14 @@ func (t *ProfileTask) InputSchema() *types.Schema {
 				Default:     defaultProfileDuration,
 				Description: "Seconds to sample for, up to 600. Give this task a timeout of at least the duration plus five minutes.",
 				Title:       "Duration (seconds)",
-				Order:       5,
+				Order:       7,
 			},
 			"application_language": {
 				Type:        types.PropertyTypeString,
 				Required:    false,
 				Description: "Leave empty to let the profiler detect it. Set it only when detection has no signal for the pod.",
 				Title:       "Language",
-				Order:       6,
+				Order:       8,
 				Options:     []string{"go", "java", "python", "node", "ruby"},
 			},
 		},

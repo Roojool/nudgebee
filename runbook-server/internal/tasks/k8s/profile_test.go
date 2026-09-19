@@ -77,6 +77,8 @@ func TestProfileTask_Execute_Validation(t *testing.T) {
 		{"missing pod", map[string]any{"namespace": "shop"}, "namespace and pod_name are required"},
 		{"bad namespace", map[string]any{"namespace": "shop;rm -rf /", "pod_name": "web-0"}, "invalid namespace format"},
 		{"bad pod", map[string]any{"namespace": "shop", "pod_name": "web 0"}, "invalid pod_name format"},
+		{"bad kind", map[string]any{"namespace": "shop", "pod_name": "web-0", "kind": "Deploy;ment"}, "invalid kind format"},
+		{"bad target pod", map[string]any{"namespace": "shop", "pod_name": "web", "kind": "Deployment", "target_pod_name": "a b"}, "invalid target_pod_name format"},
 		{"bad profile type", map[string]any{"namespace": "shop", "pod_name": "web-0", "profile_type": "allocations"}, "profile_type must be cpu or memory"},
 		{"duration over the cap", map[string]any{"namespace": "shop", "pod_name": "web-0", "profile_duration": 900}, "at most 600s"},
 	}
@@ -85,6 +87,24 @@ func TestProfileTask_Execute_Validation(t *testing.T) {
 			_, err := task.Execute(taskCtx, tc.params)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.expect)
+		})
+	}
+}
+
+// TestProfileTask_Execute_AcceptsNameAsAlias — the task shipped with pod_name
+// and the live automation still sends it; `name` is the shape the rest of the
+// k8s tasks use, so both have to work.
+func TestProfileTask_Execute_AcceptsNameAsAlias(t *testing.T) {
+	task := &ProfileTask{}
+	taskCtx := testutils.NewTestTaskContext("tenant", "account", "user", slog.Default())
+	taskCtx.(*testutils.MockTaskContext).DryRun = true
+
+	for _, key := range []string{"pod_name", "name"} {
+		t.Run(key, func(t *testing.T) {
+			out, err := task.Execute(taskCtx, map[string]any{"namespace": "shop", key: "web-0"})
+			require.NoError(t, err)
+			req := out.(map[string]any)["request"].(map[string]any)
+			assert.Equal(t, "web-0", req["pod_name"])
 		})
 	}
 }
