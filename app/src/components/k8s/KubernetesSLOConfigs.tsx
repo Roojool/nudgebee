@@ -13,9 +13,9 @@ import KubernetesTracesListing from './details/KubernetesTracesListing';
 import ThreeDotLoader from '@shared/ThreeDotLoader';
 import { Label } from '@ui/Label';
 import Text from '@shared/format/Text';
-import { Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import { Modal } from '@ui/Modal';
-import { DeleteIconRed as DeleteIcon } from '@assets';
+import { DeleteIconRed as DeleteIcon, EditIcon } from '@assets';
 import KubernetesEventsTable from '@components/events/KubernetesEvents';
 import SLOConfigDialog from '@components/k8s/common/SLOConfigDialog';
 import { sloFingerprint } from '@lib/eventFingerprint';
@@ -39,6 +39,10 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
   const [refreshKey, setRefreshKey] = useState(0);
   const [deleteTarget, setDeleteTarget] = useState<{ workloadName: string; workloadNamespace: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [editTarget, setEditTarget] = useState<{
+    workload: { name: string; namespace: string; cloud_resource_id: string };
+    config: any[];
+  } | null>(null);
 
   // Cross-filter: namespace options narrow when a workload is selected
   const namespaceFilter = useMemo(() => {
@@ -58,6 +62,15 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
       return;
     }
     setDeleteTarget({ workloadName, workloadNamespace });
+  };
+
+  const handleEdit = (workloadName: string, workloadNamespace: string, config: any[]) => {
+    if (!hasWriteAccess(accountId, workloadNamespace)) {
+      snackbar.error('You do not have write access to update SLO configs');
+      return;
+    }
+    // slo_config stores no workload id and the upsert keys on name/namespace, so none is needed.
+    setEditTarget({ workload: { name: workloadName, namespace: workloadNamespace, cloud_resource_id: '' }, config });
   };
 
   const confirmDelete = () => {
@@ -92,7 +105,7 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
     { name: 'Latency', width: '12%' },
     { name: 'Availability', width: '12%' },
     { name: 'Observation (30D)', width: '30%' },
-    { name: '', width: '5%' },
+    { name: '', width: '8%' },
   ];
 
   // Fetch all SLO configs unfiltered — drives the cross-filtered dropdown options
@@ -129,7 +142,7 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
         const workloadFqdn: string[] = [];
         if (filteredData.length > 0) {
           const groupedWorkloads = filteredData.reduce((acc: any, cur: any) => {
-            const { workload_name, workload_namespace, name, threshold, goal, id, window, created_at, updated_at } = cur;
+            const { workload_name, workload_namespace, name, threshold, goal, id, enabled, window, created_at, updated_at } = cur;
             const key = `${workload_namespace}_${workload_name}`;
 
             if (!acc[key]) {
@@ -143,7 +156,7 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
               };
             }
 
-            acc[key].config.push({ name, threshold, goal, id });
+            acc[key].config.push({ name, threshold, goal, id, enabled });
 
             return acc;
           }, {});
@@ -201,16 +214,29 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
                 component: <ThreeDotLoader />,
               },
               {
-                component: hasWriteAccess(accountId) ? (
-                  <Button
-                    tone='secondary'
-                    composition='icon-only'
-                    aria-label={`Delete SLO config for ${m.workload_name}`}
-                    disabled={deleting}
-                    id={`slo-delete-${m.workload_namespace}-${m.workload_name}`}
-                    onClick={() => handleDelete(m.workload_name, m.workload_namespace)}
-                    icon={<SafeIcon src={DeleteIcon} alt='delete' width={20} height={20} />}
-                  />
+                // Namespace admins may update SLOs in their namespaces; delete stays account-level.
+                component: hasWriteAccess(accountId, m.workload_namespace) ? (
+                  <Box sx={{ display: 'flex', gap: 'var(--ds-space-2)' }}>
+                    <Button
+                      tone='secondary'
+                      composition='icon-only'
+                      aria-label={`Edit SLO config for ${m.workload_name}`}
+                      id={`slo-edit-${m.workload_namespace}-${m.workload_name}`}
+                      onClick={() => handleEdit(m.workload_name, m.workload_namespace, m.config)}
+                      icon={<SafeIcon src={EditIcon} alt='edit' width={20} height={20} />}
+                    />
+                    {hasWriteAccess(accountId) && (
+                      <Button
+                        tone='secondary'
+                        composition='icon-only'
+                        aria-label={`Delete SLO config for ${m.workload_name}`}
+                        disabled={deleting}
+                        id={`slo-delete-${m.workload_namespace}-${m.workload_name}`}
+                        onClick={() => handleDelete(m.workload_name, m.workload_namespace)}
+                        icon={<SafeIcon src={DeleteIcon} alt='delete' width={20} height={20} />}
+                      />
+                    )}
+                  </Box>
                 ) : null,
               },
             ];
@@ -414,6 +440,15 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
         open={openSLODialog}
         onClose={() => setOpenSLODialog(false)}
         accountId={accountId}
+        onSuccess={() => setRefreshKey((prev) => prev + 1)}
+      />
+      <SLOConfigDialog
+        open={editTarget !== null}
+        onClose={() => setEditTarget(null)}
+        accountId={accountId}
+        workload={editTarget?.workload}
+        initialConfig={editTarget?.config}
+        isEdit
         onSuccess={() => setRefreshKey((prev) => prev + 1)}
       />
       <Modal
