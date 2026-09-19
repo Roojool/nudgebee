@@ -561,7 +561,7 @@ func virtualKubectlConfig(ctx *security.RequestContext, req WorkspaceExecuteRequ
 		return "", true, fmt.Errorf("kubectl config requires a subcommand")
 	}
 	subcommand := argv[configIndex+1]
-	if subcommand != "current-context" && subcommand != "get-contexts" && subcommand != "view" {
+	if subcommand != "current-context" && subcommand != "get-contexts" && subcommand != "get-clusters" && subcommand != "view" {
 		return "", true, fmt.Errorf("kubectl config %s is unavailable: workspace kubeconfig is virtual and read-only", subcommand)
 	}
 	contexts, err := tools.ListKubernetesTargets(ctx, req.AccountId)
@@ -612,6 +612,13 @@ func virtualKubectlConfig(ctx *security.RequestContext, req WorkspaceExecuteRequ
 			fmt.Fprintf(&b, "%s         %s   %s   nubi-user   \n", marker, target.Name, target.Name)
 		}
 		return b.String(), true, nil
+	}
+	if subcommand == "get-clusters" {
+		var names []string
+		for _, target := range contexts {
+			names = append(names, target.Name)
+		}
+		return "NAME\n" + strings.Join(names, "\n") + trailingNewline(names), true, nil
 	}
 
 	config := map[string]any{"apiVersion": "v1", "kind": "Config", "current-context": current}
