@@ -18,10 +18,16 @@ describe('singleReplicaOutage', () => {
 });
 
 describe('podRightSizingRisk', () => {
-  it('prepends the outage warning only when it applies, and never claims a restart is unconditional', () => {
+  it('warns of the outage only when it applies, and never claims a restart is unconditional', () => {
     const plain = podRightSizingRisk({ kind: 'Deployment', pods: 1 });
     expect(plain).toMatch(/unless the no-restart \(in-place\) apply is used/);
     expect(plain).not.toMatch(/single pod/);
-    expect(podRightSizingRisk({ kind: 'StatefulSet', pods: 1 })).toMatch(/^This StatefulSet runs a single pod/);
+    expect(podRightSizingRisk({ kind: 'StatefulSet', pods: 1 })).toMatch(/single pod/);
+  });
+
+  it('names the in-place apply once — the two caveats used to be concatenated', () => {
+    const single = podRightSizingRisk({ kind: 'StatefulSet', pods: 1 });
+    expect(single.match(/in-place/g)).toHaveLength(1);
+    expect(single.match(/resource requests/g)).toHaveLength(1);
   });
 });

@@ -16,9 +16,8 @@ import { isTenantAdmin } from '@lib/auth';
 const OWNERSHIP_HELP =
   'Who is accountable for this resource. An owner can be set directly on it, matched by an ownership rule, or inherited from the namespace or cloud account above it.';
 
-// OwnershipRow — label + value pair. Deliberately the same 150px label column as
-// SafetyRow in DetailsPanel, so this card's rows line up with the Blast Radius
-// rows directly beneath it.
+// OwnershipRow — label + value pair with a fixed 150px label column, so every
+// row's value starts at the same x.
 const OwnershipRow = ({ label, children }: { label: string; children: ReactNode }) => (
   <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
     <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], fontWeight: ds.weight.medium, flexShrink: 0, minWidth: '150px' }}>

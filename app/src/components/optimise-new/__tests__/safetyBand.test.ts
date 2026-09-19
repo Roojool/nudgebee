@@ -3,17 +3,15 @@ import {
   dependentRoleLabel,
   provenanceLabel,
   isProdEnvironment,
-  coverageTone,
   coverageSubtitle,
+  coveragePhrase,
   coverageExplainer,
   prodChipState,
-  formatEnvironment,
   dependentCountNoun,
   nodeTypeLabel,
   impactSignalSources,
   getChangeClass,
   changeClassLabel,
-  changeClassTone,
   deriveVerdict,
   criticalityTone,
   criticalityLabel,
@@ -23,6 +21,15 @@ import {
   presentRecommendation,
   presentBandOnly,
   coverageLabel,
+  hasBlastRadiusData,
+  SAFETY_BAND_COPY,
+  commonTraits,
+  sharedTraitText,
+  quietSafetyReason,
+  sortByRisk,
+  neighbourhoodSummary,
+  neighbourhoodStartsOpen,
+  type DependentRef,
 } from '../safetyBand';
 
 describe('safetyBand dependent categorization helpers', () => {
@@ -47,12 +54,14 @@ describe('safetyBand dependent categorization helpers', () => {
   });
 
   it('grades coverage presentation per tier', () => {
-    expect(coverageTone('high')).toBe('success');
-    expect(coverageTone('observed')).toBe('info');
-    expect(coverageTone('low')).toBe('warning');
-    expect(coverageTone(undefined)).toBe('neutral');
-    expect(coverageSubtitle('low')).toBe('Based on a single source');
+    expect(coverageSubtitle('low')).toBe('one source, not cross-checked');
+    expect(coverageSubtitle('high')).toBe('two or more signals agree');
     expect(coverageSubtitle(undefined)).toBeNull();
+    // 'none' has no subtitle — coveragePhrase already says the resource is missing.
+    expect(coverageSubtitle('none')).toBeNull();
+    expect(coveragePhrase('high')).toBe('High coverage');
+    expect(coveragePhrase('none')).toBe('not in the dependency graph');
+    expect(coveragePhrase(undefined)).toBeNull();
     expect(coverageExplainer('high', 3)).toBeNull();
     expect(coverageExplainer('observed', 0)).toMatch(/reports nothing calling/);
     expect(coverageExplainer('observed', 4)).toMatch(/not been corroborated/);
@@ -87,18 +96,6 @@ describe('prodChipState', () => {
   it('treats a pre-resolution zero as unknown, not as evidence of absence', () => {
     expect(prodChipState({ production_dependents: 0 })).toBe('unknown');
     expect(prodChipState({ production_dependents: 0, environment_resolved: false })).toBe('unknown');
-  });
-});
-
-describe('formatEnvironment', () => {
-  it('prettifies the account-tier spellings', () => {
-    expect(formatEnvironment('prod')).toBe('Production');
-    expect(formatEnvironment('non_prod')).toBe('Non-production');
-    expect(formatEnvironment('non-prod')).toBe('Non-production');
-  });
-
-  it('passes free-form label values through unchanged', () => {
-    expect(formatEnvironment('staging')).toBe('staging');
   });
 });
 
@@ -148,13 +145,11 @@ describe('getChangeClass', () => {
 });
 
 describe('changeClass presentation', () => {
-  it('maps class to label and tone', () => {
+  it('maps class to label', () => {
     expect(changeClassLabel('additive')).toBe('Additive');
-    expect(changeClassTone('additive')).toBe('success');
-    expect(changeClassTone('reductive')).toBe('warning');
-    expect(changeClassTone('destructive')).toBe('critical');
+    expect(changeClassLabel('reductive')).toBe('Reductive');
+    expect(changeClassLabel('destructive')).toBe('Destructive');
     expect(changeClassLabel(null)).toBeNull();
-    expect(changeClassTone(null)).toBe('neutral');
   });
 });
 
@@ -339,5 +334,198 @@ describe('band presentation', () => {
   it('keeps coverage words out of the band vocabulary', () => {
     expect(coverageLabel('observed')).toBe('Observed');
     expect(coverageLabel(undefined)).toBe('');
+  });
+});
+
+describe('hasBlastRadiusData', () => {
+  it('renders the card for a band alone, or for any part of an impact rollup', () => {
+    expect(hasBlastRadiusData({ safety_band: 'safe' })).toBe(true);
+    expect(hasBlastRadiusData({ finops_score_breakdown: { impact_summary: { coverage_confidence: 'low' } } })).toBe(true);
+    expect(hasBlastRadiusData({ finops_score_breakdown: JSON.stringify({ impact_summary: { dependent_count: 0 } }) })).toBe(true);
+  });
+
+  it('stays hidden for recommendations the graph has never scored', () => {
+    expect(hasBlastRadiusData({ finops_score_breakdown: { impact_summary: {} } })).toBe(false);
+    expect(hasBlastRadiusData({ finops_score_breakdown: null })).toBe(false);
+    expect(hasBlastRadiusData(undefined)).toBe(false);
+  });
+});
+
+describe('SAFETY_BAND_COPY', () => {
+  it('gives every band a reason and a positive action line', () => {
+    for (const key of ['safe', 'quick_check', 'plan', 'irreversible', 'stops', 'not_assessed'] as const) {
+      expect(SAFETY_BAND_COPY[key].why.length).toBeGreaterThan(0);
+      expect(SAFETY_BAND_COPY[key].action).toMatch(/^[A-Z]/);
+      expect(SAFETY_BAND_COPY[key].action).not.toMatch(/sure\?/i);
+    }
+  });
+});
+
+describe('commonTraits', () => {
+  const caller = (name: string, extra: Partial<DependentRef> = {}): DependentRef => ({
+    name,
+    node_type: 'Workload',
+    relationship: 'CALLS',
+    sources: ['traces'],
+    ...extra,
+  });
+
+  it('names the value each trait settles on, so the list can state it once', () => {
+    expect(commonTraits([caller('a'), caller('b'), caller('c')])).toEqual({
+      nodeType: 'Workload',
+      role: 'Caller',
+      provenance: 'Observed in traces',
+    });
+  });
+
+  it('still hoists the majority value when one row differs — the outlier keeps its chips', () => {
+    const deps = [caller('a'), caller('b'), caller('ip', { node_type: 'ExternalService', sources: ['dns'] })];
+    expect(commonTraits(deps)).toEqual({ nodeType: 'Workload', role: 'Caller', provenance: 'Observed in traces' });
+  });
+
+  it('hoists nothing when every row differs — there the trait is the per-row information', () => {
+    const deps = [caller('a', { node_type: 'Pod', relationship: 'MOUNTS', sources: ['k8s'] }), caller('b')];
+    expect(commonTraits(deps)).toEqual({ nodeType: null, role: null, provenance: null });
+  });
+
+  it('hoists nothing from a single row or an empty list', () => {
+    expect(commonTraits([caller('a')])).toEqual({ nodeType: null, role: null, provenance: null });
+    expect(commonTraits([])).toEqual({ nodeType: null, role: null, provenance: null });
+  });
+
+  it('reads roles from the list direction, so a downstream list settles on "Calls"', () => {
+    expect(commonTraits([caller('a'), caller('b')], 'downstream').role).toBe('Calls');
+  });
+
+  it('ignores rows the backend left unattributed rather than counting them as a value', () => {
+    const deps = [caller('a', { node_type: undefined, relationship: undefined, sources: undefined }), caller('b'), caller('c')];
+    expect(commonTraits(deps)).toEqual({ nodeType: 'Workload', role: 'Caller', provenance: 'Observed in traces' });
+  });
+});
+
+describe('sharedTraitText', () => {
+  const caller = (name: string, extra: Partial<DependentRef> = {}): DependentRef => ({
+    name,
+    node_type: 'Workload',
+    relationship: 'CALLS',
+    sources: ['traces'],
+    ...extra,
+  });
+
+  it('states the traits plainly when every row really carries them', () => {
+    expect(sharedTraitText([caller('a'), caller('b')])).toBe('Workload · Caller · Observed in traces');
+  });
+
+  it('says "mostly" when a row departs, so a chipless row is not read as the norm', () => {
+    const deps = [caller('a'), caller('b'), caller('ip', { node_type: 'ExternalService' })];
+    expect(sharedTraitText(deps)).toBe('mostly Workload · Caller · Observed in traces');
+  });
+
+  it('is null when nothing is shared', () => {
+    expect(sharedTraitText([caller('a')])).toBeNull();
+    expect(sharedTraitText([])).toBeNull();
+  });
+});
+
+describe('quietSafetyReason', () => {
+  it('keeps the additive reason — nothing else on the card explains why those dependents are unaffected', () => {
+    const impact = { safety_reason: 'adds capacity only; 2 production dependent(s) are unaffected by a larger allocation', dependent_count: 2 };
+    expect(quietSafetyReason(impact, 'success', 'additive')).toBe(
+      'adds capacity only; 2 production dependent(s) are unaffected by a larger allocation'
+    );
+  });
+
+  it('drops a reason that restates the summary line', () => {
+    const impact = { safety_reason: '12 dependent(s); none detected as production', dependent_count: 12 };
+    expect(quietSafetyReason(impact, 'success', 'reductive')).toBeNull();
+    expect(quietSafetyReason({ safety_reason: 'no known dependents (well-observed in the graph)', dependent_count: 0 }, 'success', null)).toBeNull();
+  });
+
+  it('stays out of the way of a banner, and tolerates a summary with no reason', () => {
+    expect(quietSafetyReason({ safety_reason: 'anything', dependent_count: 3 }, 'warning', 'additive')).toBeNull();
+    expect(quietSafetyReason({ dependent_count: 0 }, 'success', 'additive')).toBeNull();
+    expect(quietSafetyReason(null, 'success', 'additive')).toBeNull();
+  });
+});
+
+describe('sharedTraitText', () => {
+  const caller = (name: string, extra: Partial<DependentRef> = {}): DependentRef => ({
+    name,
+    node_type: 'Workload',
+    relationship: 'CALLS',
+    sources: ['traces'],
+    ...extra,
+  });
+
+  it('states the traits plainly when every row really carries them', () => {
+    expect(sharedTraitText([caller('a'), caller('b')])).toBe('Workload · Caller · Observed in traces');
+  });
+
+  it('says "mostly" when a row departs, so a chipless row is not read as the norm', () => {
+    const deps = [caller('a'), caller('b'), caller('ip', { node_type: 'ExternalService' })];
+    expect(sharedTraitText(deps)).toBe('mostly Workload · Caller · Observed in traces');
+  });
+
+  it('is null when nothing is shared', () => {
+    expect(sharedTraitText([caller('a')])).toBeNull();
+    expect(sharedTraitText([])).toBeNull();
+  });
+});
+
+describe('neighbourhoodStartsOpen', () => {
+  // The backend floors a destructive change at Risky on any non-empty
+  // neighbourhood, downstream targets included (deriveDestructiveBand's
+  // neighborhoodEmpty), so all three lists are evidence for that verdict.
+  it('opens the lists for a destructive change with anything still hanging off the resource', () => {
+    expect(neighbourhoodStartsOpen('destructive', { hosted_workload_count: 4 })).toBe(true);
+    expect(neighbourhoodStartsOpen('destructive', { infrastructure_dependents: [{ name: 'eni-1' }] })).toBe(true);
+    // A load balancer still fronting live backends: the one thing that makes
+    // this removal dangerous is in the downstream list.
+    expect(neighbourhoodStartsOpen('destructive', { downstream_count: 5 })).toBe(true);
+    expect(neighbourhoodStartsOpen('destructive', { downstream_dependencies: [{ name: 'backend-1' }] })).toBe(true);
+  });
+
+  it('keeps them collapsed everywhere else, including a destructive change whose neighbourhood is empty', () => {
+    expect(neighbourhoodStartsOpen('destructive', { dependent_count: 3 })).toBe(false);
+    expect(neighbourhoodStartsOpen('reductive', { hosted_workload_count: 4 })).toBe(false);
+    expect(neighbourhoodStartsOpen(null, { infrastructure_count: 2 })).toBe(false);
+    expect(neighbourhoodStartsOpen('destructive', null)).toBe(false);
+  });
+});
+
+describe('sortByRisk', () => {
+  it('lists production first, then curated criticality, and otherwise keeps the backend order', () => {
+    const deps: DependentRef[] = [
+      { name: 'plain-1' },
+      { name: 'high', criticality: 'high' },
+      { name: 'prod', environment: 'prod' },
+      { name: 'plain-2' },
+      { name: 'critical', criticality: 'critical' },
+      { name: 'prod-critical', environment: 'production', criticality: 'critical' },
+    ];
+    expect(sortByRisk(deps).map((d) => d.name)).toEqual(['prod-critical', 'prod', 'critical', 'high', 'plain-1', 'plain-2']);
+  });
+
+  it('does not mutate the input', () => {
+    const deps: DependentRef[] = [{ name: 'b' }, { name: 'a', environment: 'prod' }];
+    sortByRisk(deps);
+    expect(deps.map((d) => d.name)).toEqual(['b', 'a']);
+  });
+});
+
+describe('neighbourhoodSummary', () => {
+  it('names each non-empty neighbourhood list with its count', () => {
+    expect(neighbourhoodSummary({ downstream_count: 9, hosted_workload_count: 1, infrastructure_count: 21 })).toBe(
+      'Also in the neighbourhood: 9 it depends on · 1 workload running here · 21 attached resources'
+    );
+  });
+
+  it('falls back to list lengths when the counts are absent', () => {
+    expect(neighbourhoodSummary({ downstream_dependencies: [{ name: 'a' }, { name: 'b' }] })).toBe('Also in the neighbourhood: 2 it depends on');
+  });
+
+  it('is null when there is nothing beyond the impacted list', () => {
+    expect(neighbourhoodSummary({ dependent_count: 3 })).toBeNull();
+    expect(neighbourhoodSummary(null)).toBeNull();
   });
 });

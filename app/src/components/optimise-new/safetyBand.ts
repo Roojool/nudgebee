@@ -158,14 +158,13 @@ export const safetyDotColor = (tone: LabelTone): string => TONE_DOT_COLOR[tone];
 // coverageLabel capitalises a coverage confidence ("high", "observed", …).
 export const coverageLabel = (cov?: string): string => (cov ? cov.charAt(0).toUpperCase() + cov.slice(1) : '');
 
-const CHANGE_CLASS_PRESENTATION: Record<ChangeClass, { label: string; tone: LabelTone }> = {
-  additive: { label: 'Additive', tone: 'success' },
-  reductive: { label: 'Reductive', tone: 'warning' },
-  destructive: { label: 'Destructive', tone: 'critical' },
+const CHANGE_CLASS_LABEL: Record<ChangeClass, string> = {
+  additive: 'Additive',
+  reductive: 'Reductive',
+  destructive: 'Destructive',
 };
 
-export const changeClassLabel = (cls?: ChangeClass | null): string | null => (cls ? CHANGE_CLASS_PRESENTATION[cls].label : null);
-export const changeClassTone = (cls?: ChangeClass | null): LabelTone => (cls ? CHANGE_CLASS_PRESENTATION[cls].tone : 'neutral');
+export const changeClassLabel = (cls?: ChangeClass | null): string | null => (cls ? CHANGE_CLASS_LABEL[cls] : null);
 
 // deriveVerdict turns the band plus the impact counts into the one-line
 // headline above the safety card. The band is the verdict, so the headline
@@ -355,15 +354,6 @@ export const CRITICALITY_HELP =
 // critical treatment consistently.
 export const isProdEnvironment = (env?: string): boolean => ['prod', 'production', 'prd'].includes((env || '').trim().toLowerCase());
 
-// formatEnvironment prettifies the account-tier spellings for chips; anything
-// else (a free-form workload label like "staging") renders as written.
-export const formatEnvironment = (env: string): string => {
-  const normalized = env.trim().toLowerCase();
-  if (normalized === 'prod') return 'Production';
-  if (normalized === 'non_prod' || normalized === 'non-prod') return 'Non-production';
-  return env;
-};
-
 // prodChipState decides what the production-dependents chip may claim.
 // 'prod' — production dependents exist (critical). 'verified-zero' — the
 // backend resolved environments and found none (success). 'unknown' — a
@@ -389,6 +379,9 @@ export const dependentCountNoun = (deps?: DependentRef[]): string => {
   return 'Dependent services';
 };
 
+export const DEPENDENT_COUNT_HELP =
+  'Resources that depend on this one directly. A "+" means the blast radius exceeded the traversal cap, so the true count is higher; the list itself is capped at 50, closest first.';
+
 // nodeTypeLabel renders a dependent's kind chip; ExternalService nodes are
 // unresolved IPs and say so instead of masquerading as a known service.
 export const nodeTypeLabel = (nodeType?: string): string | null => {
@@ -396,22 +389,34 @@ export const nodeTypeLabel = (nodeType?: string): string | null => {
   return nodeType === 'ExternalService' ? 'External (unresolved)' : nodeType;
 };
 
-// Graph-coverage presentation — tone, chip subtitle, ⓘ copy, and the
-// section-level explainer. Mirrors backend CoverageConfidence tiers
-// (knowledge_graph core impact.go): none / low / observed / high.
-export const coverageTone = (cov?: string): LabelTone =>
-  cov === 'high' ? 'success' : cov === 'observed' ? 'info' : cov === 'low' ? 'warning' : 'neutral';
-
+// Graph-coverage presentation — phrase, subtitle, ⓘ copy, and the section-level
+// explainer. Mirrors backend CoverageConfidence tiers (knowledge_graph core
+// impact.go): none / low / observed / high.
+// Said the way an engineer would say it out loud: how many things saw this, and
+// whether they agree. "Corroborated by 2+ sources" was the grader's phrasing,
+// not the reader's.
 const COVERAGE_SUBTITLE: Record<string, string> = {
-  high: 'Corroborated by 2+ sources',
-  observed: 'Single signal, actively watching',
-  low: 'Based on a single source',
-  none: 'Not found in the graph',
+  high: 'two or more signals agree',
+  observed: 'one live signal watching',
+  low: 'one source, not cross-checked',
 };
 export const coverageSubtitle = (cov?: string): string | null => (cov && COVERAGE_SUBTITLE[cov]) || null;
 
+// coveragePhrase names the reading itself. 'none' gets a phrase of its own —
+// "None coverage" is not something anyone says, and the honest reading is that
+// the resource is missing from the graph entirely.
+export const coveragePhrase = (cov?: string): string | null => {
+  if (!cov) return null;
+  return cov === 'none' ? 'not in the dependency graph' : `${coverageLabel(cov)} coverage`;
+};
+
 export const COVERAGE_HELP =
-  'How many independent signals confirm these dependencies. High = corroborated by 2+ sources; Observed = an active traffic signal (eBPF, traces, or APM) watches this scope; Low = single-source and unverified; None = the resource was not found in the graph.';
+  'How many independent signals saw these dependencies, and whether they agree. High = two or more signals agree; Observed = one live traffic signal (eBPF, traces or APM) is watching this scope; Low = a single source, never cross-checked against a second; None = the resource was not found in the graph.';
+
+// coverageIsCaveat separates a coverage reading that undercuts the card's own
+// claim — single-source, or the resource missing from the graph — from one that
+// supports it. Only the former earns an alert.
+export const coverageIsCaveat = (cov?: string): boolean => cov === 'low' || cov === 'none';
 
 // coverageExplainer — the "Why coverage is X" banner under the section. Null
 // when no caveat is needed (high coverage). Copy varies with whether any
@@ -432,4 +437,154 @@ export const coverageExplainer = (cov?: string, dependentCount?: number): string
     default:
       return null;
   }
+};
+
+// hasBlastRadiusData decides whether a recommendation renders the Blast Radius
+// & Safety card at all: a persisted band, or any part of an impact rollup.
+export const hasBlastRadiusData = (rec: any): boolean => {
+  if (!rec) return false;
+  if (rec.safety_band) return true;
+  const impact = getImpactSummary(rec);
+  return !!(impact && (impact.dependent_count != null || impact.production_dependents != null || impact.coverage_confidence || impact.safety_reason));
+};
+
+// Per-band copy. `why` explains the reading; `action` is what to do about it.
+// The banner shows the action alone — the headline above it already states the
+// reason, and the backend's reason string restates that headline — while the
+// chip tooltip shows both.
+export const SAFETY_BAND_COPY: Record<SafetyPresentation['key'], { why: string; action: string }> = {
+  safe: { why: 'No dependents were found and the graph is well-observed.', action: 'Apply now.' },
+  quick_check: {
+    why: 'Dependents exist but none look production, the change only adds capacity, or nothing was found but graph coverage is limited.',
+    action: 'A glance at the dependents, then apply.',
+  },
+  plan: {
+    why: 'Production callers are in the blast radius, or the blast radius is very large.',
+    action: 'Apply with a safeguard — a no-restart apply, a maintenance window, or a heads-up to the owner.',
+  },
+  irreversible: {
+    why: "This change removes the resource and can't be undone.",
+    action: 'Take a last look at what still points at it, and snapshot first where the resource supports it.',
+  },
+  stops: {
+    why: 'This stops the workload: its pods go, the manifest stays, so it can be scaled back up.',
+    action: 'Take a last look at what still calls it.',
+  },
+  not_assessed: {
+    why: "This resource isn't in the dependency graph yet, so impact isn't assessed.",
+    action: 'Apply as you normally would; the reading appears once the graph sees it.',
+  },
+};
+
+// quietSafetyReason is the backend's reason line, shown under a verdict calm
+// enough to need no banner. Most of those reasons restate the summary line word
+// for word ("12 dependent(s); none detected as production"), so only the
+// additive ones survive: there the reason explains why dependents the summary
+// counts do not raise the band, which nothing else on the card says.
+export const quietSafetyReason = (
+  impact: ImpactSummary | null | undefined,
+  tone: 'success' | 'warning' | 'critical',
+  changeClass: ChangeClass | null
+): string | null => {
+  if (!impact?.safety_reason || tone !== 'success') return null;
+  return changeClass === 'additive' ? impact.safety_reason : null;
+};
+
+// A trait that reads the same on most rows of a list says nothing about any one
+// row: "Caller" on all thirty callers, "Workload" under a heading that already
+// says workloads, one provenance under a coverage grade that already names it.
+// commonTraits names the value each trait settles on so the list can state it
+// once in its heading and the rows can show only what differs.
+export interface CommonTraits {
+  nodeType: string | null;
+  role: string | null;
+  provenance: string | null;
+}
+
+// A value has to cover at least two rows to be worth hoisting — in a list where
+// every row differs, the trait is exactly the per-row information we want kept.
+const MIN_SHARED_ROWS = 2;
+
+const modalLabel = (deps: DependentRef[], pick: (d: DependentRef) => string | null): string | null => {
+  const counts = new Map<string, number>();
+  for (const dep of deps) {
+    const label = pick(dep);
+    if (label) counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [label, count] of counts) {
+    if (count > bestCount) {
+      best = label;
+      bestCount = count;
+    }
+  }
+  return bestCount >= MIN_SHARED_ROWS ? best : null;
+};
+
+export const commonTraits = (deps: DependentRef[], direction: 'upstream' | 'downstream' = 'upstream'): CommonTraits => ({
+  nodeType: modalLabel(deps, (d) => nodeTypeLabel(d.node_type)),
+  role: modalLabel(deps, (d) => dependentRoleLabel(d.relationship, direction)),
+  provenance: modalLabel(deps, (d) => provenanceLabel(d.sources)),
+});
+
+// sharedTraitText is what the list's heading says instead of repeating the
+// hoisted traits on every row. It reports "mostly" unless every row really
+// carries all of them — a heading that overstates would make the rows without
+// chips read as something they are not.
+export const sharedTraitText = (deps: DependentRef[], direction: 'upstream' | 'downstream' = 'upstream'): string | null => {
+  const traits = commonTraits(deps, direction);
+  const shared = [traits.nodeType, traits.role, traits.provenance].filter(Boolean) as string[];
+  if (shared.length === 0) return null;
+  const everyRow = deps.every(
+    (d) =>
+      (!traits.nodeType || nodeTypeLabel(d.node_type) === traits.nodeType) &&
+      (!traits.role || dependentRoleLabel(d.relationship, direction) === traits.role) &&
+      (!traits.provenance || provenanceLabel(d.sources) === traits.provenance)
+  );
+  return `${everyRow ? '' : 'mostly '}${shared.join(' · ')}`;
+};
+
+// sortByRisk orders dependents most-at-risk first — production, then curated
+// criticality — and otherwise keeps the backend order (closest first). Only the
+// first few rows show before "Show more", so those must be the ones that decide
+// how the change is applied.
+const CRITICALITY_RANK: Record<string, number> = { critical: 0, high: 1 };
+const riskRank = (d: DependentRef): number => (isProdEnvironment(d.environment) ? 0 : 10) + (CRITICALITY_RANK[d.criticality || ''] ?? 2);
+
+export const sortByRisk = (deps: DependentRef[]): DependentRef[] =>
+  deps
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => riskRank(a.d) - riskRank(b.d) || a.i - b.i)
+    .map((x) => x.d);
+
+// Anything still hanging off the resource in any direction — what it fronts or
+// serves, what runs on it, what is attached to it — holds a destructive change
+// at Risky, and the backend grades it on exactly that set (deriveDestructiveBand's
+// neighborhoodEmpty in recommendation/safety_band.go). So on a destructive
+// change these lists open with the card: they are the evidence for the verdict,
+// not context. Everywhere else they start collapsed behind the summary.
+export const neighbourhoodStartsOpen = (changeClass: ChangeClass | null, impact?: ImpactSummary | null): boolean => {
+  if (changeClass !== 'destructive') return false;
+  const downstream = impact?.downstream_count ?? impact?.downstream_dependencies?.length ?? 0;
+  const hosted = impact?.hosted_workload_count ?? impact?.hosted_workloads?.length ?? 0;
+  const attached = impact?.infrastructure_count ?? impact?.infrastructure_dependents?.length ?? 0;
+  return downstream + hosted + attached > 0;
+};
+
+const plural = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
+// neighbourhoodSummary is the one-line label on the collapsed neighbourhood
+// lists — what the resource calls, what runs on it, what is attached to it —
+// none of which is a caller that breaks. Null when every list is empty.
+export const neighbourhoodSummary = (impact?: ImpactSummary | null): string | null => {
+  if (!impact) return null;
+  const downstream = impact.downstream_count ?? impact.downstream_dependencies?.length ?? 0;
+  const hosted = impact.hosted_workload_count ?? impact.hosted_workloads?.length ?? 0;
+  const attached = impact.infrastructure_count ?? impact.infrastructure_dependents?.length ?? 0;
+  const parts: string[] = [];
+  if (downstream > 0) parts.push(`${downstream} it depends on`);
+  if (hosted > 0) parts.push(`${plural(hosted, 'workload')} running here`);
+  if (attached > 0) parts.push(`${plural(attached, 'attached resource')}`);
+  return parts.length > 0 ? `Also in the neighbourhood: ${parts.join(' · ')}` : null;
 };

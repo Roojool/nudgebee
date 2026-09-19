@@ -68,12 +68,14 @@ const RISK_BY_RULE: Record<string, string> = {
 // count is "unknown", never "single".
 export const singleReplicaOutage = (workload?: WorkloadFacts): boolean => workload?.kind === 'StatefulSet' && workload?.pods === 1;
 
+// The single-pod case is a variant of the same caveat, not an addition to it:
+// concatenating the two made one paragraph name the in-place apply twice.
 const SINGLE_REPLICA_RISK =
-  'This StatefulSet runs a single pod — a rolling restart is a brief outage for its callers. Prefer the no-restart (in-place) apply where the cluster supports it, or apply in a maintenance window. ';
+  "Applying updates the workload's resource requests. This StatefulSet runs a single pod, so the restart is a brief outage for its callers — prefer the no-restart (in-place) apply where the cluster supports it, or a maintenance window. Reversible by reverting the change.";
 
-// podRightSizingRisk composes the restart caveat for a rightsizing rec.
+// podRightSizingRisk picks the restart caveat that fits the workload.
 export const podRightSizingRisk = (workload?: WorkloadFacts): string =>
-  (singleReplicaOutage(workload) ? SINGLE_REPLICA_RISK : '') + RISK_BY_RULE.pod_right_sizing;
+  singleReplicaOutage(workload) ? SINGLE_REPLICA_RISK : RISK_BY_RULE.pod_right_sizing;
 
 // Action-oriented verdicts for the K8s-native RightSizing rules, which have no
 // catalog title (it degrades to the prettified rule name, e.g. "Pod Right
