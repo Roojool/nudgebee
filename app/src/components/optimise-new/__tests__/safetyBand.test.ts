@@ -1,7 +1,6 @@
 import {
   destructiveKindOf,
   dependentRoleLabel,
-  proximityLabel,
   provenanceLabel,
   isProdEnvironment,
   coverageTone,
@@ -34,13 +33,6 @@ describe('safetyBand dependent categorization helpers', () => {
     expect(dependentRoleLabel('SOMETHING_NEW')).toBe('Dependent');
     expect(dependentRoleLabel('SOMETHING_NEW', 'downstream')).toBe('Depends on');
     expect(dependentRoleLabel(undefined)).toBeNull();
-  });
-
-  it('renders proximity as Direct / N hops', () => {
-    expect(proximityLabel(1)).toBe('Direct');
-    expect(proximityLabel(3)).toBe('3 hops');
-    expect(proximityLabel(0)).toBeNull();
-    expect(proximityLabel(undefined)).toBeNull();
   });
 
   it('collapses sources into the strongest provenance claim', () => {

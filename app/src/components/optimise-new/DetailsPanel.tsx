@@ -27,7 +27,6 @@ import {
   coverageLabel,
   getImpactSummary,
   dependentRoleLabel,
-  proximityLabel,
   provenanceLabel,
   isProdEnvironment,
   formatEnvironment,
@@ -107,11 +106,8 @@ const SafetyRow = ({ label, children }: { label: string; children: ReactNode }) 
 // toggle — the backend caps the list at 50, too many to render inline.
 const DEP_COLLAPSE_LIMIT = 3;
 
-const PROXIMITY_HELP =
-  "How many dependency steps away this workload is. 'Direct' = it depends on this resource immediately; 'N hops' = it's reached through intermediaries.";
-
 const BLAST_RADIUS_HELP =
-  'What else could be affected if you apply this change — the workloads that depend on this resource, how directly, and how confident we are in that picture.';
+  'What else could be affected if you apply this change — the workloads that depend on this resource, and how confident we are in that picture.';
 
 // Plain-language explanation for each safety reading, shown in the header chip tooltip.
 const SAFETY_BAND_HELP: Record<SafetyPresentation['key'], string> = {
@@ -136,14 +132,12 @@ const ChipTip = ({ title, children }: { title: string; children: ReactNode }) =>
 );
 
 // DependentRow — one blast-radius entry: identity line plus categorization
-// chips (kind, proximity, role, provenance, environment). Chips render only
-// when the backend attributed the field, so sparse graphs degrade to
-// name-only rows. Proximity is omitted downstream (always one hop).
+// chips (kind, role, provenance, environment). Chips render only when the
+// backend attributed the field, so sparse graphs degrade to name-only rows.
 const DependentRow = ({ dep, direction, computedAt }: { dep: DependentRef; direction: 'upstream' | 'downstream'; computedAt?: string }) => {
   const observedAge = direction === 'upstream' ? observedAgeLabel(dep, computedAt) : null;
   const id = dep.namespace ? `${dep.namespace}/${dep.name}` : dep.name;
   const role = dependentRoleLabel(dep.relationship, direction);
-  const proximity = direction === 'upstream' ? proximityLabel(dep.hops_away) : null;
   const provenance = provenanceLabel(dep.sources);
   return (
     <Box
@@ -178,15 +172,6 @@ const DependentRow = ({ dep, direction, computedAt }: { dep: DependentRef; direc
           <Label size='sm' tone='neutral'>
             {nodeTypeLabel(dep.node_type)}
           </Label>
-        )}
-        {proximity && (
-          <DsTooltip variant='explainer' title='Proximity' desc={PROXIMITY_HELP}>
-            <Box component='span' sx={{ display: 'inline-flex', cursor: 'help' }}>
-              <Label size='sm' tone='neutral'>
-                {proximity}
-              </Label>
-            </Box>
-          </DsTooltip>
         )}
         {role && (
           <Label size='sm' tone={direction === 'upstream' ? 'info' : 'neutral'}>

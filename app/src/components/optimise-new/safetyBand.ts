@@ -248,13 +248,6 @@ export const dependentRoleLabel = (relationship?: string, direction: 'upstream' 
   return UPSTREAM_ROLE[relationship] || 'Dependent';
 };
 
-// proximityLabel — 'Direct' for a one-hop dependent, 'N hops' when reached
-// through intermediaries.
-export const proximityLabel = (hops?: number): string | null => {
-  if (hops == null || hops <= 0) return null;
-  return hops === 1 ? 'Direct' : `${hops} hops`;
-};
-
 // Provenance buckets, strongest human-readable claim first: what the dependency
 // edge is backed by. Buckets mirror the backend discovery source names
 // (flow_sources/edge_priority.go).
