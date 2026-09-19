@@ -249,3 +249,21 @@ export const formatResolutionType = (type: unknown): string => {
     .replace(/\s+/g, ' ')
     .trim();
 };
+
+// Rules whose resource row is the workload itself. A pod-shaped row carries the
+// workload under the controller keys; a workload row keeps its name on the
+// row, so a scale-down's resolution read no workload at all.
+const WORKLOAD_RULES = new Set(['abandoned_resource', 'replica_right_sizing', 'pod_right_sizing']);
+
+/**
+ * The workload a resolution acted on, for the "workload:" line under the rule
+ * name. Empty for resolutions on resources that are not workloads (a volume).
+ */
+export const workloadLabelFor = (resolution: any): string => {
+  const rec = resolution?.recommendation;
+  const meta = rec?.cloud_resourse?.meta || {};
+  const fromMeta = meta.controller || meta.config?.labels?.['app.kubernetes.io/name'];
+  if (fromMeta) return String(fromMeta);
+  if (!WORKLOAD_RULES.has(rec?.rule_name)) return '';
+  return String(rec?.cloud_resourse?.name || '');
+};

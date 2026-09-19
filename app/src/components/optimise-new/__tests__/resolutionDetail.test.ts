@@ -5,6 +5,7 @@ import {
   formatQuantity,
   formatResolutionType,
   parseQuantity,
+  workloadLabelFor,
 } from '../resolutionDetail';
 
 // The two shapes this joins: what a resolution stores as applied (container →
@@ -257,5 +258,23 @@ describe('formatResolutionType', () => {
     expect(formatResolutionType(undefined)).toBe('');
     expect(formatResolutionType(42)).toBe('');
     expect(formatResolutionType({ type: 'PullRequest' })).toBe('');
+  });
+});
+
+describe('workloadLabelFor', () => {
+  it('reads the controller a pod-shaped row carries', () => {
+    const row = { recommendation: { rule_name: 'pod_right_sizing', cloud_resourse: { name: 'api-7d9f', meta: { controller: 'api' } } } };
+    expect(workloadLabelFor(row)).toBe('api');
+  });
+
+  it('falls back to the row name for a workload rule whose row is the workload itself', () => {
+    const row = { recommendation: { rule_name: 'abandoned_resource', cloud_resourse: { name: 'ledger-worker', meta: { namespace: 'payments' } } } };
+    expect(workloadLabelFor(row)).toBe('ledger-worker');
+  });
+
+  it('names no workload for a volume', () => {
+    const row = { recommendation: { rule_name: 'unused_pvc', cloud_resourse: { name: 'pvc-0a1b', meta: {} } } };
+    expect(workloadLabelFor(row)).toBe('');
+    expect(workloadLabelFor(undefined)).toBe('');
   });
 });

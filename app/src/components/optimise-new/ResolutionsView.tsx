@@ -29,7 +29,7 @@ import { SeverityIcon, type SeverityLevel } from '@ui/SeverityIcon';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import ResolutionDetailPanel from './ResolutionDetailPanel';
-import { describeResolutionReference, formatResolutionType } from './resolutionDetail';
+import { describeResolutionReference, formatResolutionType, workloadLabelFor } from './resolutionDetail';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -298,8 +298,7 @@ const ResolutionsView = () => {
           rec?.namespace ||
           '';
         const name = rec?.spec?.claimRef?.name || rec?.metadata?.name || '';
-        const workloadName =
-          rr.recommendation?.cloud_resourse?.meta?.controller || rr.recommendation?.cloud_resourse?.meta?.config?.labels?.['app.kubernetes.io/name'];
+        const workloadName = workloadLabelFor(rr);
 
         // The type, plus what it produced when that is something a reader can use.
         const reference = describeResolutionReference(rr.type_reference_id, rr.status, rr.data?.ticket_key);
