@@ -67,7 +67,11 @@ func (m RecommendationApplyTool) InputSchema() core.ToolSchema {
 			},
 			"change_class": {
 				Type:        core.ToolSchemaTypeString,
-				Description: "The recommendation's change_class from recommendation_view ('additive', 'reductive', 'destructive'); a destructive change is presented as Irreversible on the approval card.",
+				Description: "The recommendation's change_class from recommendation_view ('additive', 'reductive', 'destructive'); a destructive change is presented as Irreversible on the approval card, or as Stops workload when the rule scales a workload down.",
+			},
+			"rule_name": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "The recommendation's rule_name from recommendation_view. Needed for a destructive change: 'abandoned_resource' (or 'abandoned-resources') is a scale-down to zero replicas and reads Stops workload, not Irreversible.",
 			},
 		},
 		Required: []string{"recommendation_id"},
@@ -122,7 +126,15 @@ func applyDataValueLines(data map[string]any) string {
 // product's words (the stored band names the action, not the fear): the
 // fact, then the safeguard that makes applying fine. The user is here to
 // save money, so the line informs — it never warns them off.
-func applySafetyLine(band, reason, provider, changeClass string) string {
+// stopRules are destructive-class rules whose action stops the workload and
+// keeps its manifest rather than removing anything; the card names that
+// instead of calling the change irreversible. Mirrors the api-server's list.
+var stopRules = map[string]bool{
+	"abandoned_resource":  true,
+	"abandoned-resources": true,
+}
+
+func applySafetyLine(band, reason, provider, changeClass, ruleName string) string {
 	reason = strings.TrimSuffix(strings.TrimSpace(reason), ".")
 	safeguard := "apply in a maintenance window, or give the owning team a heads-up first"
 	switch provider {
@@ -130,6 +142,12 @@ func applySafetyLine(band, reason, provider, changeClass string) string {
 		safeguard = "use the no-restart (in-place) apply where the cluster supports it, or apply in a maintenance window"
 	}
 	if changeClass == "destructive" && (band == "safe" || band == "review" || band == "risky") {
+		if stopRules[strings.ToLower(strings.TrimSpace(ruleName))] {
+			if reason == "" {
+				reason = "this scales the workload to zero replicas"
+			}
+			return "Safety: Stops workload — " + reason + ". Safeguard: the pods stop but the manifest stays; scale it back up if anything turns out to need it."
+		}
 		if reason == "" {
 			reason = "this change removes the resource"
 		}
@@ -185,7 +203,8 @@ func (m RecommendationApplyTool) ConfirmationQuestion(toolInput string) string {
 		reason, _ := args["safety_reason"].(string)
 		provider, _ := args["provider"].(string)
 		changeClass, _ := args["change_class"].(string)
-		sections = append(sections, applySafetyLine(strings.TrimSpace(band), reason, provider, strings.TrimSpace(changeClass)))
+		ruleName, _ := args["rule_name"].(string)
+		sections = append(sections, applySafetyLine(strings.TrimSpace(band), reason, provider, strings.TrimSpace(changeClass), strings.TrimSpace(ruleName)))
 	}
 	if data, ok := args["data"].(map[string]any); ok {
 		if valueLines := applyDataValueLines(data); valueLines != "" {
