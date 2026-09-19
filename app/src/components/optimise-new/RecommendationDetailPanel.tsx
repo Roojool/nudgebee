@@ -24,6 +24,7 @@ import recommendationApi from '@api1/recommendation';
 import { daysSinceLong, dismissalLabel, getResourceDisplayName } from './utils';
 import { splitSavings } from './rightSizingData';
 import CommandExecutionHistory from '@components/cloudaccount/CommandExecutionHistory';
+import { useRightSizingTrend } from '@hooks/useRightSizingTrend';
 
 // Severity → DS Label tone (mirrors the summary list mapping).
 const SEVERITY_TONE: Record<string, LabelTone> = {
@@ -205,6 +206,11 @@ const RecommendationDetailPanel = ({
     }
   }, [open, initialTab]);
 
+  // One fetch of the usage trend for both tabs: the Details tab draws it
+  // compact under the change, the Evidence tab in full. Non-right-sizing
+  // recommendations never fetch.
+  const trend = useRightSizingTrend(recommendation);
+
   if (!recommendation) return null;
 
   const rec = recommendation;
@@ -359,6 +365,7 @@ const RecommendationDetailPanel = ({
         <Box sx={{ flex: 1, overflow: 'auto', display: activeTab === 0 ? 'block' : 'none' }}>
           <DetailsPanel
             fullRecommendation={rec}
+            trend={trend}
             accounts={accounts}
             onViewEvidence={() => setActiveTab(1)}
             onMitigationExecuted={() => setPrevHistoryRefreshKey((k) => k + 1)}
@@ -367,6 +374,7 @@ const RecommendationDetailPanel = ({
 
         <Box sx={{ flex: 1, overflow: 'auto', display: activeTab === 1 ? 'block' : 'none' }}>
           <EvidencePanel
+            trend={trend}
             recommendation={rec.recommendation}
             category={category}
             ruleName={ruleName}

@@ -1,6 +1,6 @@
 import { Box, Typography, CircularProgress } from '@mui/material';
 import { Divider } from '@ui/Divider';
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import { useEffectiveRecommendation } from '@hooks/useEffectiveRecommendation';
 import { Select as DsSelect } from '@ui/Select';
 import { ds } from 'src/utils/colors';
@@ -76,9 +76,15 @@ import { buildInterpretation } from './interpretation/buildInterpretation';
 import { splitSavings, extractContainerData, summarizeCloudRightSizing, formatCloudTargetSpec } from './rightSizingData';
 import { ResourceChangeCell } from './ResourceChangeCell';
 import ConfigIssuesList, { summarizeConfigIssues, LEVEL_TONE, LEVEL_NAME } from './evidence/configIssues';
+import UsageTrendMini from './UsageTrendMini';
+import { buildTrendSeries } from './evidence/trendSeries';
+import { Link as DsLink } from '@ui/Link';
+import type { RightSizingTrend } from '@hooks/useRightSizingTrend';
 
 interface DetailsPanelProps {
   fullRecommendation: any;
+  /** Pod right-sizing usage trend, fetched once by the drawer; drawn compact under the change. */
+  trend?: RightSizingTrend;
   accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string }>;
   /** Switches the parent panel to the Evidence tab (usage-trend chart/table). */
   onViewEvidence?: () => void;
@@ -524,7 +530,7 @@ const BlastRadiusSection = ({ rec, footnote }: { rec: any; footnote?: string }) 
   );
 };
 
-const DetailsPanel = ({ fullRecommendation: rec, accounts = {}, onViewEvidence, onMitigationExecuted }: DetailsPanelProps) => {
+const DetailsPanel = ({ fullRecommendation: rec, trend, accounts = {}, onViewEvidence, onMitigationExecuted }: DetailsPanelProps) => {
   const [details, setDetails] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -590,12 +596,19 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {}, onViewEvidence, 
   // The rule's apply caveat has one home: the Blast Radius card when the
   // recommendation carries one, the interpretation panel otherwise.
   const showBlastRadius = hasBlastRadiusData(rec);
+  // The change card carries the one link to the Evidence tab when it renders;
+  // otherwise the interpretation panel's usage strip keeps its own.
+  const hasRightSizingChange = ruleName === 'pod_right_sizing' && extractContainerData(recData).length > 0;
 
   return (
     <Box sx={{ p: ds.space[5], display: 'flex', flexDirection: 'column', gap: ds.space[5] }}>
       {/* Interpretation — verdict / why / impact / risk, re-framed from the
           resolved title, description and insight (replaces the generic blurb). */}
-      <InterpretationPanel onViewEvidence={onViewEvidence} {...interpretation} risk={showBlastRadius ? undefined : interpretation.risk} />
+      <InterpretationPanel
+        onViewEvidence={hasRightSizingChange ? undefined : onViewEvidence}
+        {...interpretation}
+        risk={showBlastRadius ? undefined : interpretation.risk}
+      />
 
       {/* What applying does — surfaced prominently so the impact is clear before the
           user clicks Apply (e.g. the async, non-disruptive EBS gp2→gp3 modification). */}
@@ -604,7 +617,7 @@ const DetailsPanel = ({ fullRecommendation: rec, accounts = {}, onViewEvidence, 
       )}
 
       {/* Recommendation Summary — key "what changes" data from JSONB */}
-      <RecommendationSummary recData={recData} category={category} ruleName={ruleName} />
+      <RecommendationSummary recData={recData} category={category} ruleName={ruleName} trend={trend} onViewEvidence={onViewEvidence} />
 
       {/* Blast Radius & Safety — knowledge-graph impact + safety band. Keyed by
           rec id so the "Show all" toggle state resets when the persistent detail
@@ -902,15 +915,29 @@ const SummaryCard = ({
 
 // ─── Recommendation Summary — renders key "what to change" data from JSONB ───
 
-const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
+const K8sRightSizingSummary = ({ recData, trend, onViewEvidence }: { recData: any; trend?: RightSizingTrend; onViewEvidence?: () => void }) => {
   const containers = extractContainerData(recData);
+  const first = containers[0];
+  const cpuRecommended = first?.cpu?.recommended?.request;
+  const memoryRecommended = first?.memory?.recommended?.request;
+  // The chart carries the recommendation: the recommended request drawn on
+  // seven days of usage, right under the table that states it. Null until the
+  // drawer's fetch returns rows, and never for a workload with no trend data.
+  // Memoised on the rows and the two targets, since building the series
+  // formats a date per row and the panel re-renders more often than they change.
+  const perPod = trend?.perPod;
+  const hasTrend = !!trend?.hasData;
+  const trendSeries = useMemo(
+    () => (hasTrend && perPod ? buildTrendSeries(perPod, cpuRecommended, memoryRecommended) : null),
+    [hasTrend, perPod, cpuRecommended, memoryRecommended]
+  );
+  if (containers.length === 0) return null;
   // Per-container dollars, when the producers stamped the per-entry figures.
   // A single container has nothing to split: its figure is the workload's,
   // already in the panel header, and the two round differently ("+$1" against
   // "<$0.73/mo"), which reads as a discrepancy rather than a breakdown.
   const split = containers.length > 1 ? splitSavings(recData) : null;
   const dollarsByContainer = new Map(split?.containers.map((c) => [c.name, c.total]) ?? []);
-  if (containers.length === 0) return null;
   return (
     <Card
       variant='accent'
@@ -923,13 +950,28 @@ const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
           <Typography sx={{ fontFamily: 'var(--ds-font-display)', fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
             Recommended Resource Changes
           </Typography>
+          <Box sx={{ flex: 1 }} />
           {containers.length > 1 && (
-            <>
-              <Box sx={{ flex: 1 }} />
-              <Label size='sm' tone='neutral'>
-                {containers.length} containers
-              </Label>
-            </>
+            <Label size='sm' tone='neutral'>
+              {containers.length} containers
+            </Label>
+          )}
+          {onViewEvidence && (
+            // The Evidence tab is React-state controlled (no route), so the hash
+            // href is a no-op we preventDefault on, then switch tabs.
+            <DsLink
+              href='#evidence'
+              secondaryText
+              onClick={(e) => {
+                e.preventDefault();
+                onViewEvidence();
+              }}
+              style={{ whiteSpace: 'nowrap' }}
+            >
+              <Box component='span' data-testid='view-full-evidence'>
+                Full evidence
+              </Box>
+            </DsLink>
           )}
         </Box>
       }
@@ -969,6 +1011,11 @@ const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
             : []),
         ])}
       />
+      {trend && (
+        <Box sx={{ mt: ds.space[3] }}>
+          <UsageTrendMini series={trendSeries} loading={trend.loading} basis={trend.perPod.source ? 'per pod' : 'all replicas'} />
+        </Box>
+      )}
     </Card>
   );
 };
@@ -1187,10 +1234,22 @@ const SUMMARY_HIDDEN_FIELDS = new Set([
   'id',
 ]);
 
-const RecommendationSummary = ({ recData, category, ruleName }: { recData: any; category: string; ruleName: string }) => {
+const RecommendationSummary = ({
+  recData,
+  category,
+  ruleName,
+  trend,
+  onViewEvidence,
+}: {
+  recData: any;
+  category: string;
+  ruleName: string;
+  trend?: RightSizingTrend;
+  onViewEvidence?: () => void;
+}) => {
   if (!recData || typeof recData !== 'object') return null;
 
-  if (ruleName === 'pod_right_sizing') return <K8sRightSizingSummary recData={recData} />;
+  if (ruleName === 'pod_right_sizing') return <K8sRightSizingSummary recData={recData} trend={trend} onViewEvidence={onViewEvidence} />;
   if (category === 'RightSizing' && !Array.isArray(recData)) return <CloudRightSizingSummary recData={recData} />;
   if (category === 'InfraUpgrade' || category === 'K8sVersionUpgrade') return <InfraUpgradeSummary recData={recData} />;
   if (category === 'Security') return <SecuritySummary recData={recData} />;
