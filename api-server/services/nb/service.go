@@ -161,6 +161,20 @@ func CleanupData(ctx *security.RequestContext, job ...string) {
 				Query:     fmt.Sprintf(`DELETE FROM sent_notifications WHERE created_at < now() - interval '%d days'`, config.Config.NBRetentionDaysCronEvents),
 			},
 			{
+				// Rows carry the full candidate set per search, so this table
+				// grows with question volume. Batched: a busy environment can
+				// accumulate tens of thousands of rows a day.
+				Name:      "llm_retrieval_trace",
+				Metastore: database.Metastore,
+				Batched:   true,
+				Query: fmt.Sprintf(`WITH to_del AS (
+					SELECT id FROM llm_retrieval_trace
+					WHERE created_at < now() - interval '%d days'
+					LIMIT %d
+				) DELETE FROM llm_retrieval_trace WHERE id IN (SELECT id FROM to_del)`,
+					config.Config.NBRetentionDaysRagRetrievalTrace, cleanupBatchSize),
+			},
+			{
 				Name:      "cloud_account_usage_report",
 				Metastore: database.Metastore,
 				Query:     fmt.Sprintf(`DELETE FROM cloud_account_usage_report WHERE report_date < now() - interval '%d days'`, config.Config.NBRetentionDaysCloudAccountUsageReport),

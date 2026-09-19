@@ -228,6 +228,12 @@ type appConfig struct {
 
 	NBRetentionDaysAiCostReportDispatchLog int `mapstructure:"nb_retention_days_ai_cost_report_dispatch_log"`
 
+	// llm_retrieval_trace (formerly llm_rag_audit, still readable under that
+	// name through a view) holds one row per knowledge-base or memory search,
+	// with every candidate and the scores behind it. Written on every search by
+	// rag-server, so it grows with question volume, not with data volume.
+	NBRetentionDaysRagRetrievalTrace int `mapstructure:"nb_retention_days_rag_retrieval_trace"`
+
 	// NBRetentionDaysEventAnalysis ages out event_log_analysis by the recency of
 	// the newest run for an event identity, not per row — see the
 	// event_log_analysis cleanup job in services/nb. Defaults to the critical
@@ -522,6 +528,7 @@ func init() {
 	viper.SetDefault("nb_retention_days_k8s_resources", 30)
 	viper.SetDefault("nb_retention_days_recommendations_archive", 30)
 	viper.SetDefault("nb_retention_days_ai_cost_report_dispatch_log", 7)
+	viper.SetDefault("nb_retention_days_rag_retrieval_trace", 30)
 	viper.SetDefault("nb_retention_days_event_analysis", 90)
 	viper.SetDefault("kg_edge_stale_after_days", 7)
 	viper.SetDefault("nb_retention_days_kg_inactive_edges", 14)
