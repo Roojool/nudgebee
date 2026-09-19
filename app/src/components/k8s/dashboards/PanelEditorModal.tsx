@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Stack, Typography } from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { Modal } from '@ui/Modal';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
@@ -944,7 +945,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                                       tone='ghost'
                                       composition='icon-only'
                                       aria-label={`Remove query ${i + 1}`}
-                                      icon={<DeleteOutlineIcon sx={{ fontSize: 18 }} />}
+                                      icon={<SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />}
                                       onClick={() => removeTarget(i)}
                                       id={`panel-remove-query-${i}`}
                                     />
@@ -1295,7 +1296,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                                   tone='ghost'
                                   composition='icon-only'
                                   aria-label='Remove link'
-                                  icon={<DeleteOutlineIcon sx={{ fontSize: 18 }} />}
+                                  icon={<SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />}
                                   // A link on an existing column keeps that column's other settings;
                                   // an added column has nothing left once its link is gone.
                                   onClick={() => patchColumns(columns.flatMap((c) => (c !== link ? [c] : c.name ? [{ ...c, link: undefined }] : [])))}

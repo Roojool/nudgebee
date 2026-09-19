@@ -2875,7 +2875,7 @@ const IntegrationDynamicFormModal = ({
                         </Typography>
                         {rules.length > 1 && (
                           <Button
-                            tone='danger'
+                            tone='ghost'
                             size='xs'
                             composition='icon-only'
                             icon={<SafeIcon src={NewDelete} alt='Remove rule' style={{ width: ds.space.mul(0, 7), height: ds.space.mul(0, 7) }} />}

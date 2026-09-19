@@ -1,5 +1,7 @@
 import { Box, Stack, Typography } from '@mui/material';
-import { DragIndicator, DeleteOutline as DeleteIconMui } from '@mui/icons-material';
+import { DragIndicator } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import React, { useEffect, useState, useMemo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { PromQLExtension } from '@prometheus-io/codemirror-promql';
@@ -1290,11 +1292,11 @@ const KubernetesCreateAlert: React.FC<KubernetesCreateAlertProps> = ({
                             />
                           </Box>
                           <DsButton
-                            tone='danger'
+                            tone='ghost'
                             size='sm'
                             composition='icon-only'
                             aria-label='Delete action'
-                            icon={<DeleteIconMui fontSize='small' />}
+                            icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                             onClick={() => handleDeleteAction(actionInstance.id)}
                           />
                         </Box>

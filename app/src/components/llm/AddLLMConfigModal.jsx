@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import Tooltip from '@ui/Tooltip';
 import PropTypes from 'prop-types';
 import { Box, Stack, Typography, CircularProgress } from '@mui/material';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { Modal } from '@ui/Modal';
@@ -2293,7 +2294,7 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
                         <Button
                           tone='ghost'
                           size='sm'
-                          icon={<DeleteOutlineIcon />}
+                          icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                           onClick={(e) => {
                             e.stopPropagation();
                             removeAgentRow(idx);
@@ -2332,7 +2333,7 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
                           <Button
                             tone='ghost'
                             size='sm'
-                            icon={<DeleteOutlineIcon />}
+                            icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                             onClick={() => removeAgentRow(idx)}
                             data-testid={`remove-agent-row-${idx}`}
                             aria-label='Remove row'

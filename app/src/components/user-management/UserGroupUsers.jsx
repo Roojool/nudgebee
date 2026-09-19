@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Box, IconButton } from '@mui/material';
-import { writeIcon } from '@assets';
+import { EditIcon } from '@assets';
 import apiUserManagement from '@api1/user';
 import { Label } from '@ui/Label';
 import { canManage } from '@lib/auth';
@@ -87,7 +87,7 @@ const UserGroupUsers = ({ groupId, onUserUpdate }) => {
                           width: ds.space[4],
                         }}
                         alt='more'
-                        src={writeIcon.default.src}
+                        src={EditIcon.default.src}
                       />
                     </IconButton>
                   ) : (

@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { Box, Typography, IconButton, CircularProgress } from '@mui/material';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed, EditIcon } from '@assets';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import ImageIcon from '@mui/icons-material/Image';
@@ -298,7 +298,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         '&:hover': { color: ds.gray[700], backgroundColor: ds.gray[100] },
                       }}
                     >
-                      <EditOutlinedIcon sx={{ fontSize: 16 }} />
+                      <SafeIcon src={EditIcon} alt='edit' width={16} height={16} />
                     </IconButton>
                   </Tooltip>
 
@@ -323,7 +323,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                         '&:hover': { color: ds.red[500] || '#EF4444', backgroundColor: ds.gray[100] },
                       }}
                     >
-                      <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+                      <SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />
                     </IconButton>
                   </Tooltip>
                 </Box>

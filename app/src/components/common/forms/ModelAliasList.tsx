@@ -14,7 +14,8 @@
 import * as React from 'react';
 import { Box, Stack } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { Input } from '@ui/Input';
 import { Button as DsButton } from '@ui/Button';
 import { ds } from '@utils/colors';
@@ -116,7 +117,7 @@ export default function ModelAliasList({ value, onChange, disabled }: ModelAlias
             tone='ghost'
             size='sm'
             composition='icon-only'
-            icon={<DeleteOutlineIcon sx={{ fontSize: 16 }} />}
+            icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
             aria-label='Remove model'
             disabled={disabled || (rows.length === 1 && !row.name && !row.served)}
             onClick={() => removeRow(i)}

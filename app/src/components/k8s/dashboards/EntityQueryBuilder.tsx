@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Stack, Typography } from '@mui/material';
-import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import { Button } from '@ui/Button';
 import { Input } from '@ui/Input';
@@ -228,7 +229,7 @@ const EntityQueryBuilder: React.FC<Props> = ({ draft, tables, onChange }) => {
                     tone='ghost'
                     composition='icon-only'
                     aria-label='Remove filter'
-                    icon={<DeleteOutlineIcon sx={{ fontSize: 18 }} />}
+                    icon={<SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />}
                     onClick={() => patch({ filters: draft.filters.filter((_f, i) => i !== index) })}
                     id={`remove-entity-filter-${index}`}
                   />

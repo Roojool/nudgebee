@@ -2,7 +2,6 @@ import { Handle, Position, useReactFlow, useStore } from 'reactflow';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseCircleOutlineIcon from '@mui/icons-material/PauseCircleOutline';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
@@ -44,6 +43,7 @@ import {
   SkipForwardIcon,
   timerSVG,
   McpIcon,
+  EditIcon,
 } from '@assets';
 import BaseNode from './BaseNode';
 import HalfEdgeAddButton from '@components/workflow/components/HalfEdgeAddButton';
@@ -767,7 +767,7 @@ const ActionNode = ({ id, data, isConnectable, selected, onTestTask, accountId, 
                 },
                 {
                   label: 'Rename',
-                  icon: <EditOutlinedIcon sx={{ fontSize: 'var(--ds-text-title)', color: 'var(--ds-gray-600)' }} />,
+                  icon: <SafeIcon src={EditIcon} alt='' width={16} height={16} />,
                   onClick: handleEditId,
                 },
                 {

@@ -3,7 +3,7 @@ import { useRouter } from 'next/router';
 import { Box, Stack, Typography } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
 import SafeIcon from '@shared/icons/SafeIcon';
-import { DeleteIconRed as deleteIcon, downloadIcon, K8sIcon, writeIconLight } from '@assets';
+import { DeleteIconRed as deleteIcon, downloadIcon, EditIcon, K8sIcon } from '@assets';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Button } from '@ui/Button';
 import { DropdownMenu } from '@ui/DropdownMenu';
@@ -500,7 +500,7 @@ const CustomDashboards: React.FC = () => {
                   tone='ghost'
                   composition='icon-only'
                   aria-label='Edit dashboard'
-                  icon={<SafeIcon src={writeIconLight} alt='edit' width={18} height={18} />}
+                  icon={<SafeIcon src={EditIcon} alt='edit' width={18} height={18} />}
                   onClick={() => openForEdit(d.id)}
                   id={`edit-dashboard-${d.id}`}
                 />

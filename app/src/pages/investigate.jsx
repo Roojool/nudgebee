@@ -17,7 +17,7 @@ import AiGenerateWorkflowModal from '@components/workflow/components/AiGenerateW
 import RunAutomationMenu from '@components/workflow/components/RunAutomationMenu';
 import EventAutomationRunsList from '@components/workflow/components/EventAutomationRunsList';
 import apiWorkflow from '@api1/workflow';
-import { SparklesIconBG } from '@assets';
+import { EditIcon, SparklesIconBG } from '@assets';
 import { getNubiIconUrl, useTenantBranding, getBrandTitle, toAssistantLabel, DEFAULT_TITLE } from '@hooks/useTenantBranding';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import { Label } from '@ui/Label';
@@ -108,7 +108,6 @@ import TimelineCard from '@components/k8s/investigate/cards/TimelineCard';
 import ImpactCard from '@components/k8s/investigate/cards/ImpactCard';
 import UpdateEvent from '@components/events/UpdateEvent';
 import EventClassifyModal from '@components/events/EventClassifyModal';
-import { LiaEditSolid } from 'react-icons/lia';
 import { MdOutlineCategory } from 'react-icons/md';
 import DatadogMonitorSearch from '@components/k8s/investigate/cards/DatadogMonitorSearch';
 import SafeIcon from '@shared/icons/SafeIcon';
@@ -2489,7 +2488,7 @@ const Investigate = () => {
                                 ? [
                                     {
                                       label: 'Update Event',
-                                      reactIcon: <LiaEditSolid color={ds.gray[700]} size={18} />,
+                                      icon: EditIcon,
                                       action: 'update-event',
                                     },
                                   ]

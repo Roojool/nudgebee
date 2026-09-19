@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Box } from '@mui/material';
-import EditIcon from '@mui/icons-material/Edit';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { EditIcon } from '@assets';
 import SaveIcon from '@mui/icons-material/CheckCircleOutline';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import Tooltip from '@ui/Tooltip';
@@ -89,7 +90,7 @@ function TicketsDescriptionEditor({ issueUrl, value, onChange, error }) {
                 <Button
                   tone='secondary'
                   composition='icon-only'
-                  icon={<EditIcon />}
+                  icon={<SafeIcon src={EditIcon} alt='edit' width={14} height={14} />}
                   size='sm'
                   aria-label='Edit description'
                   onClick={handleEditToggle}

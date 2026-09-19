@@ -21,8 +21,9 @@ import {
   Storage as ValueIcon,
   WarningAmber as WarningIcon,
   Add as AddIcon,
-  Delete as DeleteIconMui,
 } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { toast as snackbar } from '@ui/Toast';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import observability from '@api1/observability';
@@ -2189,11 +2190,11 @@ const LogQueryBuilderAutocomplete = ({
                   </Box>
 
                   <DsButton
-                    tone='danger'
+                    tone='ghost'
                     size='sm'
                     composition='icon-only'
                     aria-label='Delete operation'
-                    icon={<DeleteIconMui fontSize='small' />}
+                    icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                     onClick={() => deleteOperation(op.id)}
                   />
                 </Box>

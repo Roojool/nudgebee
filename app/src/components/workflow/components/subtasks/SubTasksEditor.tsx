@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Autocomplete, Box, Chip, IconButton, TextField, Typography } from '@mui/material';
-import { Add, DeleteOutline, DragIndicator } from '@mui/icons-material';
+import { Add, DragIndicator } from '@mui/icons-material';
+import { DeleteIconRed } from '@assets';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
 import Accordion from '@ui/Accordion';
@@ -392,7 +393,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
                     aria-label={`Delete sub-task ${sub.id || index + 1}`}
                     data-testid={`${testIdPrefix}-subtask-${index}-delete-btn`}
                   >
-                    <DeleteOutline sx={{ fontSize: 16, color: ds.gray[400] }} />
+                    <SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />
                   </IconButton>
                 )}
               </span>

@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Typography, TextField, Chip, Autocomplete } from '@mui/material';
 import { Switch } from '@ui/Switch';
 import { ToggleGroup } from '@ui/ToggleGroup';
-import { Add, Delete, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList, WrapText } from '@mui/icons-material';
+import { Add, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList, WrapText } from '@mui/icons-material';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed } from '@assets';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
 import CollapsableCard from '@ui/CollapsableCard';
@@ -400,7 +402,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
               tone='ghost'
               size='sm'
               aria-label='Remove item'
-              icon={<Delete fontSize='small' sx={{ color: 'var(--ds-red-500)' }} />}
+              icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
               onClick={() => removeItem(index)}
             />
           </Box>
@@ -590,7 +592,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
                   tone='ghost'
                   size='sm'
                   aria-label='Remove item'
-                  icon={<Delete sx={{ color: 'var(--ds-red-500)' }} />}
+                  icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                   onClick={() => removeItem(index)}
                 />
               </Box>
@@ -973,7 +975,7 @@ export const KeyValueEditor: React.FC<KeyValueEditorProps> = ({
                 size='sm'
                 disabled={disabled}
                 aria-label='Remove entry'
-                icon={<Delete fontSize='small' sx={{ color: 'var(--ds-red-500)' }} />}
+                icon={<SafeIcon src={DeleteIconRed} alt='delete' width={14} height={14} />}
                 onClick={() => removeEntry(entry.id)}
               />
             </Box>

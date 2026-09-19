@@ -12,7 +12,7 @@ import apiDashboard from '@api1/home';
 import apiKubernetes from '@api1/kubernetes';
 import SafeIcon from '@shared/icons/SafeIcon';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
-import { DeleteIconRed as deleteIcon, writeIconLight } from '@assets';
+import { DeleteIconRed as deleteIcon, EditIcon } from '@assets';
 import { canManage } from '@lib/auth';
 import useAdminAction from '@components/user-management/useAdminAction';
 import DeleteNotificationRuleModal from './DeleteNotificationRuleModal';
@@ -273,7 +273,7 @@ const Notifications = () => {
                     onClick={(e) => {
                       handleEditRuleModal(e, item);
                     }}
-                    icon={<SafeIcon src={writeIconLight} alt='edit' width={18} height={18} />}
+                    icon={<SafeIcon src={EditIcon} alt='edit' width={18} height={18} />}
                   />
                 </>
               ) : (

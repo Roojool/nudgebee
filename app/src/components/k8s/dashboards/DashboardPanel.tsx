@@ -14,7 +14,7 @@ import { Skeleton } from '@ui/Skeleton';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import Tooltip from '@ui/Tooltip';
 import { snackbar } from '@ui/Toast';
-import { downloadIcon, RefreshIcon, writeIconLight } from '@assets';
+import { downloadIcon, EditIcon, RefreshIcon } from '@assets';
 import { ds } from '@utils/colors';
 import { downloadJsonFile, filenameSlug } from '@utils/fileDownload';
 import CustomTable from '@shared/tables/CustomTable';
@@ -296,7 +296,7 @@ const DashboardPanel: React.FC<Props> = React.memo(function DashboardPanel({
     const items: { id: string; label: string; icon?: unknown; reactIcon?: React.ReactNode }[] = [];
     items.push({ id: 'view', label: 'View', reactIcon: <VisibilityOutlinedIcon sx={{ fontSize: 18 }} /> });
     if (panel.type !== 'text') items.push({ id: 'refresh', label: 'Refresh', icon: RefreshIcon });
-    if (onEdit) items.push({ id: 'edit', label: 'Edit', icon: writeIconLight });
+    if (onEdit) items.push({ id: 'edit', label: 'Edit', icon: EditIcon });
     items.push({ id: 'export', label: 'Export JSON', icon: downloadIcon });
     if (panel.type !== 'text') items.push({ id: 'export-png', label: 'Export PNG', icon: downloadIcon });
     items.push({ id: 'copy-link', label: 'Copy link', reactIcon: <LinkIcon sx={{ fontSize: 18 }} /> });

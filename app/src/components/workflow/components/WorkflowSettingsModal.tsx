@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Box, IconButton, Typography, Collapse } from '@mui/material';
 import { Input } from '@ui/Input';
 import { Button } from '@ui/Button';
-import { Close, Add, DragIndicator, Edit as EditIcon } from '@mui/icons-material';
+import { Close, Add, DragIndicator } from '@mui/icons-material';
 import { DurationField } from './advanced-config';
 import { Modal } from '@ui/Modal';
 import { FormCard, FormField } from '@shared/forms/FormComponents';
@@ -11,7 +11,7 @@ import { ds } from 'src/utils/colors';
 import { CodeEditor } from '@ui/CodeEditor';
 import type { WorkflowSettings, WorkflowInput } from '@components/workflow/types';
 import { parseDurationToSeconds } from '@components/workflow/utils/taskUtils';
-import { DeleteIconRed } from '@assets';
+import { DeleteIconRed, EditIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { hasFeatureAccessForAccount } from '@lib/auth';
 
@@ -700,7 +700,7 @@ const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
                                 size='xs'
                                 tooltip='Edit parameter'
                                 aria-label='Edit parameter'
-                                icon={<EditIcon sx={{ fontSize: 'var(--ds-text-title)' }} />}
+                                icon={<SafeIcon src={EditIcon} alt='edit' width={13} height={13} />}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleStartEdit(input);

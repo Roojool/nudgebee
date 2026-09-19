@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import { Input } from '@ui/Input';
 import { Button } from '@ui/Button';
-import EditIcon from '@mui/icons-material/Edit';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { EditIcon } from '@assets';
 import CheckIcon from '@mui/icons-material/Check';
 import CloseIcon from '@mui/icons-material/Close';
 import NewToggleButtons from './NewToggleButtons';
@@ -192,7 +193,7 @@ const WorkflowHeader: React.FC<WorkflowHeaderProps> = ({
                 tone='ghost'
                 size='sm'
                 aria-label='Edit title'
-                icon={<EditIcon fontSize='small' sx={{ color: 'var(--ds-gray-600)' }} />}
+                icon={<SafeIcon src={EditIcon} alt='edit' width={14} height={14} />}
                 onClick={handleTitleEdit}
               />
             )}

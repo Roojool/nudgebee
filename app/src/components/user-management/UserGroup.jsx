@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import apiUserManagement from '@api1/user';
 import CustomTable from '@shared/tables/CustomTable2';
 import { Box, Typography, List, ListItem, ListItemText } from '@mui/material';
-import { writeIcon } from '@assets';
+import { EditIcon } from '@assets';
 import GroupModal from './modal/GroupModal';
 import { canManage, canReadCustomRoles } from '@lib/auth';
 import useAdminAction from './useAdminAction';
@@ -159,7 +159,7 @@ function UserGroup({ groupNames = [], onUserUpdate }) {
                       tone='ghost'
                       composition='icon-only'
                       size='sm'
-                      icon={<SafeIcon src={writeIcon} alt='edit' width={16} height={16} />}
+                      icon={<SafeIcon src={EditIcon} alt='edit' width={16} height={16} />}
                       aria-label='Edit group'
                       onClick={(e) => {
                         handleEditGroupModal(e, item);

@@ -8,10 +8,9 @@ import { Chip } from '@ui/Chip';
 import { Input } from '@ui/Input';
 import { Switch } from '@ui/Switch';
 import { Select } from '@ui/Select';
-import EditIcon from '@mui/icons-material/Edit';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
-import { DeleteIconRed as DeleteIcon } from '@assets';
+import { DeleteIconRed as DeleteIcon, EditIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import apiBudget from '@api1/budget';
 import Loader from '@shared/Loader';
@@ -1044,7 +1043,7 @@ const ActiveConfigChip = ({ moduleLabel, cfg, onEdit, onDelete }) => {
         <Button
           tone='ghost'
           size='sm'
-          icon={<EditIcon sx={{ fontSize: 'var(--ds-text-body-lg)', color: 'var(--ds-gray-700)' }} />}
+          icon={<SafeIcon src={EditIcon} alt='edit' width={14} height={14} />}
           onClick={() => onEdit(cfg)}
           aria-label='Edit budget config'
         />

@@ -74,7 +74,7 @@ export class WorkflowLocators extends CommonLocators {
     this.createAccountSelect = page.locator("#wf-create-account-select");
     this.makeAnAutomationCard = page.getByText("Make an Automation", { exact: true });
 
-    this.editTitleBtn = page.locator('button:has([data-testid="EditIcon"])').first();
+    this.editTitleBtn = page.getByRole('button', { name: 'Edit title' }).first();
     this.titleInput = page.locator(".MuiOutlinedInput-input").first();
     this.confirmTitleBtn = page.locator('button:has([data-testid="CheckIcon"])').first();
     this.manualTriggerOption = page.getByTestId("trigger-option-manual");

@@ -359,7 +359,6 @@ export const electricBolt = require('@assets/electricbolt-icon.svg');
 export const newAwsLogo = require('@assets/logo/aws_logo.png');
 export const gcloudLogo = require('@assets/logo/gcloud.svg');
 
-export const writeIcon = require('@assets/new/write-icon.svg');
 export const writeIconLight = require('@assets/new/write-icon-light.svg');
 export const ArrowDown = require('@assets/arrow_down.svg');
 
@@ -594,7 +593,6 @@ export const ThumbsUpOutlineIcon = require('@assets/thumbs-up-outline.svg');
 export const ThumbsDownOutlineIcon = require('@assets/thumbs-down-outline.svg');
 export const ExpandIcon = require('@assets/expand-icon.svg');
 export const checklistIcon = require('@assets/checklist-icon.svg');
-export const EditNewIcon = require('@assets/new/edit-icon.png');
 export const ManualTriggerIconBlue = require('@assets/new/manual-icon-blue.svg');
 export const AutomateBlue = require('@assets/new/automate-blue.svg');
 export const TimelineIcon = require('@assets/kubernetes/timeline-icon.svg');

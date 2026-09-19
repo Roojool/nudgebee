@@ -29,7 +29,7 @@ jest.mock('@api1/user', () => ({
 
 jest.mock('@assets', () => ({
   DeleteIconRed: '/delete.svg',
-  writeIconLight: '/edit.svg',
+  EditIcon: '/edit.svg',
 }));
 
 jest.mock('@utils/colors');
