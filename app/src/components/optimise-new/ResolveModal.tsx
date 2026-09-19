@@ -8,6 +8,7 @@ import { formatMemory } from '@lib/formatter';
 import { ds } from 'src/utils/colors';
 import { singleReplicaOutage } from './interpretation/buildInterpretation';
 import { applyReadiness } from './applyReadiness';
+import SafetyAckModal from './SafetyAckModal';
 import { Banner } from '@ui/Banner';
 import { safeJSONParse } from 'src/utils/common';
 import { toast as snackbar } from '@ui/Toast';
@@ -988,32 +989,16 @@ const ResolveModal = ({ open, onClose, recommendation, clusterName, onSuccess }:
       </Modal>
 
       {/* ── Acknowledge the safety verdict before a Review/Risky deploy ── */}
-      <Modal width='sm' open={safetyConfirm} handleClose={() => setSafetyConfirm(false)} title='Ready to apply'>
-        <Box sx={{ p: ds.space[4] }} id='resolve-modal-safety-confirm'>
-          <Typography variant='body2' sx={{ color: ds.gray[700], fontWeight: ds.weight.semibold, mb: ds.space[2] }}>
-            {readiness?.title}
-          </Typography>
-          <Typography variant='body2' sx={{ color: ds.gray[700], mb: ds.space[5] }}>
-            {readiness?.message}
-          </Typography>
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3] }}>
-            <Button tone='secondary' size='md' onClick={() => setSafetyConfirm(false)} id='resolve-modal-safety-cancel'>
-              Cancel
-            </Button>
-            <Button
-              tone='primary'
-              size='md'
-              id='resolve-modal-safety-deploy'
-              onClick={() => {
-                setSafetyConfirm(false);
-                submitRecommendation({ safetyAcked: true });
-              }}
-            >
-              Deploy Fix
-            </Button>
-          </Box>
-        </Box>
-      </Modal>
+      <SafetyAckModal
+        open={safetyConfirm}
+        readiness={readiness}
+        confirmText='Deploy Fix'
+        onCancel={() => setSafetyConfirm(false)}
+        onConfirm={() => {
+          setSafetyConfirm(false);
+          submitRecommendation({ safetyAcked: true });
+        }}
+      />
 
       {/* ── Confirm large resource change ── */}
       <Modal width='sm' open={!!driftConfirm} handleClose={() => setDriftConfirm(null)} title='Confirm large resource change'>

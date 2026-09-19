@@ -225,6 +225,37 @@ func generateAgentTaskWithStatus(ctx AccountAdapterContext, recommendation model
 	return taskId, nil
 }
 
+// abandonedScaleParams names the workload an abandoned_resource scale-down
+// targets. The resource row is the workload itself, so its own name and type
+// are the target; the pod-shaped meta keys are read first for rows that carry
+// them. A task without a name or namespace is refused here rather than queued,
+// because the agent rejects it and the resolution then sits In Progress.
+func abandonedScaleParams(resource models.Resource) (map[string]any, error) {
+	meta, _ := resource.Meta.Object().(map[string]any)
+	str := func(v any) string {
+		s, _ := v.(string)
+		return s
+	}
+	name := str(meta["controller"])
+	if name == "" && resource.Name != nil {
+		name = *resource.Name
+	}
+	kind := str(meta["controllerKind"])
+	if kind == "" && resource.Type != nil {
+		kind = *resource.Type
+	}
+	namespace := str(meta["namespace"])
+	if name == "" || namespace == "" {
+		return nil, fmt.Errorf("abandoned_resource: workload name and namespace are required, got name=%q namespace=%q", name, namespace)
+	}
+	return map[string]any{
+		"name":          name,
+		"namespace":     namespace,
+		"kind":          kind,
+		"replica_count": 0,
+	}, nil
+}
+
 func (k *kuberntesAdapter) ApplyRecommendation(ctx AccountAdapterContext, request ApplyRecommendationRequest, existingRecommendations []models.RecommendationResolution, recommendResolutionId string) (ApplyRecommendationResponse, error) {
 	recommendationSource := "recommendation"
 	if request.ProviderConfig["recommendation_source"] != nil {
@@ -232,18 +263,16 @@ func (k *kuberntesAdapter) ApplyRecommendation(ctx AccountAdapterContext, reques
 	}
 	switch {
 	case request.Recommendation.Category == "RightSizing" && request.Recommendation.RuleName == "abandoned_resource":
-		resourceMeta := request.Resource.Meta.Object().(map[string]any)
+		params, err := abandonedScaleParams(request.Resource)
+		if err != nil {
+			return ApplyRecommendationResponse{}, err
+		}
 		ctx.GetLogger().Info(fmt.Sprintf("applying abandoned_resource recommendation: %s, %s, %s",
-			resourceMeta["namespace"], resourceMeta["controller"], resourceMeta["controllerKind"]))
+			params["namespace"], params["name"], params["kind"]))
 
 		taskId, err := generateAgentTask(ctx, request.Recommendation, "rightsizing_pvc", map[string]any{
-			"action_name": "replica_rightsizing",
-			"action_params": map[string]any{
-				"name":          resourceMeta["controller"],
-				"namespace":     resourceMeta["namespace"],
-				"kind":          resourceMeta["controllerKind"],
-				"replica_count": 0,
-			},
+			"action_name":   "replica_rightsizing",
+			"action_params": params,
 		}, recommendationSource)
 		if err != nil {
 			return ApplyRecommendationResponse{}, fmt.Errorf("failed to generate agent task: %w", err)

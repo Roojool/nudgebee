@@ -53,7 +53,7 @@ interface RecommendationDetailPanelProps {
   open: boolean;
   onClose: () => void;
   recommendation: any;
-  accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string }>;
+  accounts?: Record<string, { name: string; cloud_provider: string; account_access?: string; agentConnected?: boolean }>;
   initialTab?: number;
   onCreateTicket?: (rec: any) => void;
   onDismiss?: (rec: any) => void;
@@ -477,6 +477,7 @@ const RecommendationDetailPanel = ({
         <ActionBar
           fullRecommendation={rec}
           provider={accounts[rec.account_id]?.cloud_provider}
+          agentConnected={accounts[rec.account_id]?.agentConnected}
           onCreateTicket={onCreateTicket}
           onDismiss={onDismiss}
           onResolve={onResolve}

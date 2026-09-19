@@ -29,7 +29,10 @@ const REMOVAL_SAFEGUARD = "Removal can't be undone — confirm nothing still dep
 // the backend grades it Review for. Null when the recommendation row simply
 // wasn't loaded with its safety columns (the summary projection omits them);
 // that is "not fetched", not "unknown", so nothing is claimed.
-export const applyReadiness = (rec: any, inPlace: boolean): ApplyReadiness | null => {
+// `safeguard` replaces the default line for a change that is not a pod resize
+// or a delete: a volume resize has no in-place path to turn on, and a scale-down
+// keeps its manifest, so neither the restart line nor the snapshot line fits.
+export const applyReadiness = (rec: any, inPlace: boolean, safeguard?: string): ApplyReadiness | null => {
   if (!rec || (rec.safety_band === undefined && rec.finops_score_breakdown === undefined)) return null;
   const band: string | undefined = rec.safety_band || undefined;
   const impact = getImpactSummary(rec);
@@ -59,7 +62,7 @@ export const applyReadiness = (rec: any, inPlace: boolean): ApplyReadiness | nul
   return {
     tone: verdict.tone === 'critical' ? 'critical' : 'warning',
     title: verdict.title,
-    message: `${facts} ${destructive ? REMOVAL_SAFEGUARD : restartSafeguard(inPlace)}`.trim(),
+    message: `${facts} ${safeguard || (destructive ? REMOVAL_SAFEGUARD : restartSafeguard(inPlace))}`.trim(),
     needsAck: band === 'risky' || prod > 0 || destructive,
   };
 };

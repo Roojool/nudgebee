@@ -42,7 +42,9 @@ const getCurrencySymbol = (currency: string): string => {
 // resolves to the set of account ids in that environment and scopes the same
 // aggregates via `_in`.
 export function useSummaryData(accountId?: string | null, envFilter?: string | null) {
-  const [accounts, setAccounts] = useState<Record<string, { account_name: string; cloud_provider: string; account_env?: string }>>({});
+  const [accounts, setAccounts] = useState<
+    Record<string, { account_name: string; cloud_provider: string; account_env?: string; agent_connected?: boolean }>
+  >({});
   // Whether the accounts fetch has settled (success OR failure). `accounts` being
   // empty alone can't tell "still loading" from "loaded, none" (upstream down /
   // no cloud accounts) — this flag does, so the cost effect can clear costLoading
@@ -90,9 +92,16 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
       try {
         const data = await apiHome.getCloudAccounts();
         if (cancelled || !Array.isArray(data)) return;
-        const map: Record<string, { account_name: string; cloud_provider: string; account_env?: string }> = {};
+        const map: Record<string, { account_name: string; cloud_provider: string; account_env?: string; agent_connected?: boolean }> = {};
         data.forEach((a: any) => {
-          if (a.id) map[a.id] = { account_name: a.account_name, cloud_provider: a.cloud_provider, account_env: a.account_env };
+          if (a.id) {
+            map[a.id] = {
+              account_name: a.account_name,
+              cloud_provider: a.cloud_provider,
+              account_env: a.account_env,
+              agent_connected: a.agents?.[0]?.status === 'CONNECTED',
+            };
+          }
         });
         setAccounts(map);
       } catch (err) {

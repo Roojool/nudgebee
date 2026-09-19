@@ -27,6 +27,8 @@ import DismissModal from './DismissModal';
 import TicketLink from '@shared/links/TicketLink';
 import { formatMemory } from '@lib/formatter';
 import ResolveModal from './ResolveModal';
+import K8sActionModal from './K8sActionModal';
+import { k8sActionFor } from './k8sActions';
 import CliCommandModal from './CliCommandModal';
 import { Card } from '@ui/Card';
 import { ListingLayout } from '@ui/ListingLayout';
@@ -326,7 +328,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
   const { setAllCluster } = useData();
 
   // Accounts state: id → { name, cloud_provider }
-  const [accounts, setAccounts] = useState<Record<string, { name: string; cloud_provider: string }>>({});
+  const [accounts, setAccounts] = useState<Record<string, { name: string; cloud_provider: string; agentConnected: boolean }>>({});
 
   // Summary state — split into two independent fetches so the summary cards
   // (Total Recommendations, per-category counts) stay a static overview,
@@ -468,7 +470,15 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
     apiHome
       .getCloudAccounts()
       .then((res: any) => {
-        setAccounts(Object.fromEntries(res.map((v: any) => [v.id, { name: v.account_name, cloud_provider: v.cloud_provider || '' }])));
+        setAccounts(
+          Object.fromEntries(
+            res.map((v: any) => [
+              v.id,
+              // Same signal the connections page uses for an agent being up.
+              { name: v.account_name, cloud_provider: v.cloud_provider || '', agentConnected: v.agents?.[0]?.status === 'CONNECTED' },
+            ])
+          )
+        );
         const clusters = transformClusters(res);
         setAllCluster(clusters);
       })
@@ -2002,8 +2012,18 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
         />
       )}
 
-      {/* Direct Resolve modal */}
-      {resolveModalRec && (
+      {/* Direct Resolve modal. The three agent fixes that are not pod
+          right-sizing have their own confirm surface. */}
+      {resolveModalRec && k8sActionFor(resolveModalRec) && (
+        <K8sActionModal
+          open
+          onClose={() => setResolveModalRec(null)}
+          recommendation={resolveModalRec}
+          agentConnected={accounts[resolveModalRec.account_id]?.agentConnected}
+          onSuccess={fetchTableData}
+        />
+      )}
+      {resolveModalRec && !k8sActionFor(resolveModalRec) && (
         <ResolveModal
           open={!!resolveModalRec}
           onClose={() => setResolveModalRec(null)}

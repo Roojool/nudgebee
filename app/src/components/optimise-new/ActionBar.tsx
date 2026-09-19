@@ -3,7 +3,6 @@ import { useState } from 'react';
 import { ds } from 'src/utils/colors';
 import ContentCopyOutlinedIcon from '@mui/icons-material/ContentCopyOutlined';
 import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
-import RocketLaunchOutlinedIcon from '@mui/icons-material/RocketLaunchOutlined';
 import AutoFixHighOutlinedIcon from '@mui/icons-material/AutoFixHighOutlined';
 import DoNotDisturbOnOutlinedIcon from '@mui/icons-material/DoNotDisturbOnOutlined';
 import RestartAltOutlinedIcon from '@mui/icons-material/RestartAltOutlined';
@@ -15,11 +14,14 @@ import AlarmCreationModal from '@components/cloudaccount/AlarmCreationModal';
 import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import { hasCliCommand } from './cliCommands';
 import { hasWriteAccess, hasPermission, missingPermissionMessage } from '@lib/auth';
-import { safeParseJSON, panelActionBarSx, detailNavFor } from './utils';
+import { safeParseJSON, panelActionBarSx } from './utils';
+import { k8sActionFor } from './k8sActions';
 
 interface ActionBarProps {
   fullRecommendation: any;
   provider?: string;
+  /** False when the cluster's agent is not connected; undefined when unknown. */
+  agentConnected?: boolean;
   onCreateTicket?: (rec: any) => void;
   onResolve?: (rec: any) => void;
   onCopyCli?: (rec: any) => void;
@@ -27,7 +29,16 @@ interface ActionBarProps {
   onDismiss?: (rec: any) => void;
 }
 
-const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolve, onCopyCli, onAskNubi, onDismiss }: ActionBarProps) => {
+const ActionBar = ({
+  fullRecommendation: rec,
+  provider,
+  agentConnected,
+  onCreateTicket,
+  onResolve,
+  onCopyCli,
+  onAskNubi,
+  onDismiss,
+}: ActionBarProps) => {
   const { assistantName } = useTenantBranding();
   const [isAlarmModalOpen, setIsAlarmModalOpen] = useState(false);
 
@@ -38,7 +49,12 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
   const accountId = rec.account_id || '';
   const isK8sRightSizing = ruleName === 'pod_right_sizing';
   const isReplicaRightSizing = category === 'RightSizing' && ruleName === 'replica_right_sizing';
-  const detailNav = detailNavFor(category, ruleName);
+  // The other three agent fixes (reclaim / resize a volume, scale down a
+  // workload) open their own confirm modal. Each queues an agent task, so the
+  // button is disabled, not hidden, while the cluster's agent is down: the
+  // reader still sees the action exists and why it is not available.
+  const k8sAction = k8sActionFor(rec);
+  const agentDown = agentConnected === false;
   const recData = safeParseJSON(rec.recommendation);
   const hasAlarmConfig = recData?.alarm_config != null;
   const canWrite = hasWriteAccess(accountId);
@@ -53,11 +69,6 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
   // reactivate from Dismissed. Other statuses (InProgress, Closed, Archive)
   // would just earn an error toast.
   const showDismissAction = canWrite && (isDismissed || !rec.status || rec.status === 'Open');
-
-  const handleNavigateToDetail = () => {
-    const detailUrl = `/kubernetes/details/${accountId}#optimize/${detailNav?.fragment ?? ''}`;
-    window.open(detailUrl, '_blank');
-  };
 
   return (
     <>
@@ -74,6 +85,20 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
               id='action-bar-resolve'
             >
               Resolve
+            </Button>
+          )}
+          {k8sAction && canWrite && (
+            <Button
+              tone='primary'
+              size='sm'
+              icon={<AutoFixHighOutlinedIcon sx={{ color: ds.yellow[400] }} />}
+              iconPlacement='start'
+              onClick={() => onResolve?.(rec)}
+              id='action-bar-k8s-action'
+              disabled={agentDown}
+              tooltip={agentDown ? 'Agent not connected — reconnect the cluster agent to apply from here' : undefined}
+            >
+              {k8sAction.label}
             </Button>
           )}
           <Button
@@ -161,19 +186,6 @@ const ActionBar = ({ fullRecommendation: rec, provider, onCreateTicket, onResolv
               aria-label='Setup HPA AutoPilot'
               onClick={() => window.open(`/automation?accountId=${accountId}`, '_blank')}
               id='action-bar-autopilot'
-            />
-          )}
-
-          {detailNav && canWrite && (
-            <Button
-              tone='ghost'
-              composition='icon-only'
-              size='sm'
-              icon={<RocketLaunchOutlinedIcon />}
-              tooltip={detailNav.label}
-              aria-label={detailNav.label}
-              onClick={handleNavigateToDetail}
-              id='action-bar-detail-nav'
             />
           )}
         </Box>

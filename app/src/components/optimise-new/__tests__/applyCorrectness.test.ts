@@ -1,21 +1,4 @@
-import { detailNavFor } from '../utils';
 import { interpolateMitigations, recommendationDetails } from '@api1/recommendation/data';
-
-// Optimize cannot act on these three itself, so it sends the reader to the cluster
-// page. One shared fragment sent all of them to the right-sizing list, whichever
-// button was pressed, so a reclaim landed on a list the volume was not on.
-describe('detailNavFor', () => {
-  it('sends each rule to its own list', () => {
-    expect(detailNavFor('RightSizing', 'pv_rightsize')).toEqual({ label: 'Resize Volume', fragment: 'pv-rightsizing' });
-    expect(detailNavFor('RightSizing', 'unused_pvc')).toEqual({ label: 'Reclaim Volume', fragment: 'unused-volume' });
-    expect(detailNavFor('RightSizing', 'abandoned_resource')).toEqual({ label: 'Scale Down Workload', fragment: 'abandoned-resources' });
-  });
-
-  it('offers nothing for a rule or category it does not serve', () => {
-    expect(detailNavFor('RightSizing', 'pod_right_sizing')).toBeNull();
-    expect(detailNavFor('Configuration', 'unused_pvc')).toBeNull();
-  });
-});
 
 // The catalog's mitigations are executed by Apply, not just copied, so a value
 // baked into one is a value applied to a real resource that nobody chose.

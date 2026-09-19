@@ -290,24 +290,6 @@ export const filtersToUrlQuery = (filters: {
   return query;
 };
 
-// The three cost rules Optimize cannot act on itself. Each has its own list on
-// the cluster page, and each sends the reader to that list — a single shared
-// fragment dropped them all on right-sizing, whichever button they pressed.
-export interface DetailNav {
-  label: string;
-  fragment: string;
-}
-
-const DETAIL_NAV: Record<string, DetailNav> = {
-  pv_rightsize: { label: 'Resize Volume', fragment: 'pv-rightsizing' },
-  // A reclaim is a delete, not a resize; the label says which.
-  unused_pvc: { label: 'Reclaim Volume', fragment: 'unused-volume' },
-  abandoned_resource: { label: 'Scale Down Workload', fragment: 'abandoned-resources' },
-};
-
-export const detailNavFor = (category: string, ruleName: string): DetailNav | null =>
-  category === 'RightSizing' ? DETAIL_NAV[ruleName] ?? null : null;
-
 export const makeRuleFilterValue = (ruleName: string, category?: string): string =>
   category ? `${ruleName}${RULE_FILTER_SEP}${category}` : ruleName;
 
