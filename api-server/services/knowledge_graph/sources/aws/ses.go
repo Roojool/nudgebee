@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -81,4 +82,42 @@ func (s *AWSSource) createSESEdges(nodes []*core.DbNode, lookup *sources.NodeLoo
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AmazonSES",
+		NodeType: core.NodeTypeEmailService,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonSES",
+		Types:        []string{"configuration-set"},
+		NodeType:     core.NodeTypeEmailService,
+		SpecificType: "SESConfigurationSet",
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonSES",
+		Types:        []string{"identity"},
+		NodeType:     core.NodeTypeEmailService,
+		SpecificType: "SESIdentity",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// SES resources publish delivery notifications to SNS topics.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeEmailService, Name: "ses",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createSESEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). SES resources have no edges of their own.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"SESConfigurationSet", "SESIdentity"},
+		Creatable:     true,
+	}, nil)
 }

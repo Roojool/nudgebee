@@ -294,3 +294,35 @@ func (s *AWSSource) createCloudFormationEdges(reqCtx *security.RequestContext, n
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AWSCloudFormation",
+		NodeType: core.NodeTypeInfraStack,
+		Extract:  (*AWSSource).extractCloudFormationMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AWSCloudFormation",
+		Types:        []string{"stack"},
+		NodeType:     core.NodeTypeInfraStack,
+		SpecificType: "CloudFormationStack",
+		Extract:      (*AWSSource).extractCloudFormationMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// CloudFormation stacks manage the resources they created.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeInfraStack, Name: "cloudformation",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createCloudFormationEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// A stack MANAGES the resources it created, so those edges leave the stack but
+// are only discoverable from the stack's own expansion.
+func init() {
+	registerEdgesBuiltElsewhere(core.EdgeKind{Relationship: core.RelationshipManages})
+}

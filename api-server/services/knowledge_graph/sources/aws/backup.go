@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -188,4 +189,59 @@ func (s *AWSSource) createBackupPolicyEdges(nodes []*core.DbNode, lookup *source
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AWSBackup",
+		Types:        []string{"backup-plan"},
+		NodeType:     core.NodeTypeBackupPolicy,
+		SpecificType: "BackupPlan",
+		Extract:      (*AWSSource).extractBackupPolicyMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AWSBackup",
+		NodeType:     core.NodeTypeCloudResource,
+		SpecificType: "BackupVault",
+	})
+	registerKind(resourceKind{
+		Service:      "AWSBackup",
+		Types:        []string{"backup-vault"},
+		NodeType:     core.NodeTypeBackupVault,
+		SpecificType: "BackupVault",
+		Extract:      (*AWSSource).extractBackupVaultMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Backup vaults are encrypted by a KMS key; backup plans store into a vault.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeBackupVault, Name: "backup_vault",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createBackupVaultEdges(nodes, lookup, req), nil
+		}})
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeBackupPolicy, Name: "backup_plan",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createBackupPolicyEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Vaults have no edges of their own; plans
+// own their STORES_IN edge to the target vault.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"BackupVault"},
+		Creatable:     true,
+	}, nil)
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"BackupPlan"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeBackupVault},
+		Signature:     signature(edgeKind(core.RelationshipStoresIn, "")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createBackupPolicyEdges([]*core.DbNode{node}, lookup, req), nil
+	})
 }

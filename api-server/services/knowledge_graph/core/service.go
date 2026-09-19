@@ -584,6 +584,28 @@ func (s *Service) getActiveAccountsForTenant(ctx *security.RequestContext, tenan
 	return accounts, nil
 }
 
+// AccountRef is the minimal description of a cloud account that callers outside
+// the build need: its id and which provider it belongs to.
+type AccountRef struct {
+	ID            string
+	CloudProvider string
+}
+
+// ListActiveAccounts returns the tenant's active cloud accounts, optionally
+// restricted to accountIDs. It shares getActiveAccountsForTenant with the build,
+// so "active account" means the same thing to both.
+func (s *Service) ListActiveAccounts(ctx *security.RequestContext, tenantID string, accountIDs []string) ([]AccountRef, error) {
+	accounts, err := s.getActiveAccountsForTenant(ctx, tenantID, accountIDs)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]AccountRef, 0, len(accounts))
+	for _, a := range accounts {
+		refs = append(refs, AccountRef{ID: a.Id, CloudProvider: a.CloudProvider})
+	}
+	return refs, nil
+}
+
 // SourceCategory defines whether a source is account-specific or integration-specific
 type SourceCategory string
 

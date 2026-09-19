@@ -26,3 +26,23 @@ var azureFunctionAppSchema = core.SpecificTypeSchema{
 }
 
 func init() { core.RegisterSpecificTypeSchema(azureFunctionAppSchema) }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"functionapp", "sites"},
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "AzureFunctionApp",
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.logic",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "AzureFunctionApp",
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.web",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "AzureFunctionApp",
+	})
+}

@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // cloudTrailSchema — concrete schema for CloudTrail trails (NodeTypeLogAggregator).
@@ -191,4 +192,33 @@ func (s *AWSSource) createCloudTrailEdges(nodes []*core.DbNode, lookup *sources.
 	s.logger.Info("Created CloudTrail edges", "edges_created", len(edges))
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudTrailRows := resourceKind{
+		Service:      "AWSCloudTrail",
+		NodeType:     core.NodeTypeLogAggregator,
+		SpecificType: "CloudTrail",
+		Extract:      (*AWSSource).extractCloudTrailMetadata,
+	}
+	registerKind(cloudTrailRows)
+	registerKind(cloudTrailRows.withTypes("trail"))
+	registerKind(resourceKind{
+		Service:      "AWSCloudTrail",
+		Types:        []string{"eventdatastore"},
+		NodeType:     core.NodeTypeLogAggregator,
+		SpecificType: "CloudTrailEventDataStore",
+		Extract:      (*AWSSource).extractCloudTrailMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Trails and event data stores store their events in S3 and a log group.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeLogAggregator, Name: "cloudtrail",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createCloudTrailEdges(nodes, lookup, req), nil
+		}})
 }

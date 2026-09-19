@@ -407,3 +407,42 @@ func (s *AWSSource) buildServiceIdentityEdges(serviceIdentityNodes []*core.DbNod
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AWSIAM",
+		NodeType: core.NodeTypeCloudResource,
+	})
+	// IAM roles are already emitted as typed ServiceIdentity nodes by
+	// buildServiceIdentityNodes; a generic CloudResource node for the same row
+	// would be an orphan every IAM-aware edge builder skips (RUNS_AS / ASSUMES
+	// bind to ServiceIdentity via lookup.ByARN) — ~50 per AWS account (#31016).
+	registerKind(resourceKind{
+		Service:  "AWSIAM",
+		Types:    []string{"role"},
+		NodeType: core.NodeTypeCloudResource,
+		Suppress: true,
+	})
+	// IAM users belong on the same cloud-agnostic identity type, distinguished
+	// by their concrete label; the audit at #31016 found them sitting orphan in
+	// the CloudResource catch-all.
+	registerKind(resourceKind{
+		Service:      "AWSIAM",
+		Types:        []string{"user"},
+		NodeType:     core.NodeTypeServiceIdentity,
+		SpecificType: "IAMUser",
+		Node:         (*AWSSource).createServiceIdentityFromIAMUser,
+	})
+}
+
+// Per-resource updates (see patch.go). IAM roles become ServiceIdentity nodes
+// through buildServiceIdentityNodes (the row itself builds no node) and their
+// ASSUMES chains are a whole-account pass, so identities always rebuild.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"IAMRole", "IAMUser", string(core.NodeTypeServiceIdentity)},
+		AccountLevel:  true,
+	}, nil)
+}

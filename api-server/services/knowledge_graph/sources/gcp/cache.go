@@ -86,3 +86,22 @@ func nodeRedisEndpoints(node *core.DbNode) []string {
 	}
 	return out
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "Memorystore",
+		NodeType:     core.NodeTypeCache,
+		SpecificType: "MemorystoreInstance",
+	})
+}
+
+// Per-resource updates (see patch.go). Memorystore instances have no edges of
+// their own: CALLS edges start at the functions that use them.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"MemorystoreInstance"},
+		Creatable:     true,
+	}, nil)
+}

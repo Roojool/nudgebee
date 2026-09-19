@@ -120,3 +120,16 @@ func (s *GCPSource) createPersistentDiskAttachmentEdges(lookup *sources.NodeLook
 	s.logger.Info("created GCP persistent disk attachment edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "compute.googleapis.com/Disk",
+		Types:        []string{"storage"},
+		NodeType:     core.NodeTypeStorage,
+		SpecificType: "PersistentDisk",
+		Subtype:      "PersistentDisk",
+		Extract:      (*GCPSource).extractGCPPersistentDiskMetadata,
+	})
+}

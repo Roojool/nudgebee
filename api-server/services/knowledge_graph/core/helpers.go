@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,19 @@ func CanonicalWorkloadKind(kind string) string {
 		return canonical
 	}
 	return kind
+}
+
+// CanonicalWorkloadKinds returns the canonical PascalCase Kubernetes kinds this
+// package normalizes to. sources/k8s checks it against the kinds it declares:
+// a kind here that k8s does not build would normalize observed traffic to a
+// specific_type no node carries.
+func CanonicalWorkloadKinds() []string {
+	out := make([]string, 0, len(canonicalWorkloadKinds))
+	for _, canonical := range canonicalWorkloadKinds {
+		out = append(out, canonical)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // NewNode creates a new node with generated ID and timestamps.

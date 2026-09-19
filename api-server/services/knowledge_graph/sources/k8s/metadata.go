@@ -105,11 +105,12 @@ func (s *K8sSource) extractCommonK8sFields(properties map[string]interface{}, me
 	}
 }
 
-// extractKindSpecificFields extracts essential fields based on workload kind
+// extractKindSpecificFields extracts the fields the row's kind keeps out of its
+// spec. What that is per kind is declared with the kind (see kinds.go).
 func (s *K8sSource) extractKindSpecificFields(properties map[string]interface{}, metaMap map[string]interface{}, kind string) {
 	// serviceAccountName is read from the collector-flattened path
 	// (meta.config.service_account) regardless of Kind, so resolve it before
-	// the per-Kind switch.
+	// asking the kind.
 	if san := extractServiceAccountName(metaMap, kind); san != "" {
 		properties["service_account_name"] = san
 	}
@@ -119,112 +120,8 @@ func (s *K8sSource) extractKindSpecificFields(properties map[string]interface{},
 		return
 	}
 
-	switch kind {
-	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet":
-		// Replica count (important for scaling)
-		if replicas, ok := spec["replicas"].(float64); ok {
-			properties["replicas"] = int(replicas)
-		}
-		// Strategy (important for deployments)
-		if strategy, ok := spec["strategy"].(map[string]interface{}); ok {
-			if strategyType, ok := strategy["type"].(string); ok {
-				properties["strategy_type"] = strategyType
-			}
-		}
-
-	case "Pod":
-		// Node assignment (important for scheduling)
-		if nodeName, ok := spec["nodeName"].(string); ok {
-			properties["node_name"] = nodeName
-		}
-		// Restart policy
-		if restartPolicy, ok := spec["restartPolicy"].(string); ok {
-			properties["restart_policy"] = restartPolicy
-		}
-		// Pod / host IPs from status. These
-		// are indexed in QueryablePropertiesMap[Pod] for scheduling / network
-		// filtering but were never emitted; read them from the already-parsed
-		// status object (no new API call). Guarded — absent on unscheduled Pods.
-		if status, ok := metaMap["status"].(map[string]interface{}); ok {
-			if podIP, ok := status["podIP"].(string); ok && podIP != "" {
-				properties["pod_ip"] = podIP
-			}
-			if hostIP, ok := status["hostIP"].(string); ok && hostIP != "" {
-				properties["host_ip"] = hostIP
-			}
-		}
-
-	case "Service", "K8sService":
-		// Service type and IPs (critical for networking)
-		if clusterIP, ok := spec["clusterIP"].(string); ok {
-			properties["cluster_ip"] = clusterIP
-		}
-		if serviceType, ok := spec["type"].(string); ok {
-			properties["service_type"] = serviceType
-		}
-		// Ports (important for connectivity)
-		if ports, ok := spec["ports"].([]interface{}); ok && len(ports) > 0 {
-			properties["service_ports"] = ports
-		}
-
-	case "Ingress":
-		// Ingress class (important for routing)
-		if ingressClass, ok := spec["ingressClassName"].(string); ok {
-			properties["ingress_class"] = ingressClass
-		}
-
-		// Extract load balancer hostname from status (for connecting to AWS ELB)
-		if status, ok := metaMap["status"].(map[string]interface{}); ok {
-			if loadBalancer, ok := status["loadBalancer"].(map[string]interface{}); ok {
-				if ingresses, ok := loadBalancer["ingress"].([]interface{}); ok && len(ingresses) > 0 {
-					if firstIngress, ok := ingresses[0].(map[string]interface{}); ok {
-						// AWS ELBs use "hostname" field
-						if hostname, ok := firstIngress["hostname"].(string); ok && hostname != "" {
-							properties["load_balancer_hostname"] = hostname
-						}
-						// Some ingress controllers use "ip" field instead
-						if ip, ok := firstIngress["ip"].(string); ok && ip != "" {
-							properties["load_balancer_ip"] = ip
-						}
-					}
-				}
-			}
-		}
-
-		// Extract ingress rules (hosts and paths)
-		if rules, ok := spec["rules"].([]interface{}); ok && len(rules) > 0 {
-			hosts := make([]string, 0)
-			for _, rule := range rules {
-				if ruleMap, ok := rule.(map[string]interface{}); ok {
-					if host, ok := ruleMap["host"].(string); ok && host != "" {
-						hosts = append(hosts, host)
-					}
-				}
-			}
-			if len(hosts) > 0 {
-				properties["ingress_hosts"] = hosts
-			}
-		}
-
-	case "PersistentVolumeClaim":
-		// Storage request (important for capacity)
-		if resources, ok := spec["resources"].(map[string]interface{}); ok {
-			if requests, ok := resources["requests"].(map[string]interface{}); ok {
-				if storage, ok := requests["storage"].(string); ok {
-					properties["storage_request"] = storage
-				}
-			}
-		}
-		// Storage class (important for provisioning)
-		if storageClass, ok := spec["storageClassName"].(string); ok {
-			properties["storage_class"] = storageClass
-		}
-
-	case "ConfigMap", "Secret":
-		// Just count of keys (don't store actual data)
-		if data, ok := spec["data"].(map[string]interface{}); ok {
-			properties["key_count"] = len(data)
-		}
+	if extract := workloadKindFor(kind).Extract; extract != nil {
+		extract(s, properties, spec, metaMap)
 	}
 }
 

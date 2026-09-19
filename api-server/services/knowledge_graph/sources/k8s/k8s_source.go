@@ -90,19 +90,10 @@ func NewK8sSource(config K8sSourceConfig, logger *slog.Logger) (*K8sSource, erro
 	// TenantID and CloudAccountID are optional at creation time
 	// They will be provided in the SourceBuildRequest when BuildGraph is called
 
-	// Set default workload kinds if not specified
+	// Query for the kinds that declare themselves part of the inventory (see
+	// kinds.go); a caller may narrow it.
 	if len(config.WorkloadKinds) == 0 {
-		config.WorkloadKinds = []string{
-			"Deployment",
-			"StatefulSet",
-			"DaemonSet",
-			"ReplicaSet",
-			"Pod",
-			"Service",
-			"Job",
-			"CronJob",
-			"Ingress",
-		}
+		config.WorkloadKinds = defaultWorkloadKinds()
 	}
 
 	return &K8sSource{
@@ -146,9 +137,6 @@ func (s *K8sSource) GenerateUniqueKey(node *core.DbNode) string {
 	name, _ := core.GetNodePropertyString(node, "name")
 	keyComponents.Name = name
 
-	// Extract cluster name from properties (still needed for certain node types)
-	cluster, _ := core.GetNodePropertyString(node, "cluster")
-
 	// Always use CloudAccountID (UUID) for unique key consistency
 	// This ensures keys remain stable even if account names change
 	if node.CloudAccountID != "" {
@@ -170,31 +158,14 @@ func (s *K8sSource) GenerateUniqueKey(node *core.DbNode) string {
 		keyComponents.Hierarchy = namespace
 	}
 
-	// Handle special cases for cluster-scoped resources
-	switch node.NodeType {
-	case core.NodeTypeCluster:
-		// Cluster has no hierarchy
+	// Resources that belong to the cluster rather than to a namespace say so in
+	// their own file (see kinds.go): they have no namespace in their key, and
+	// some take their name from what they describe.
+	if rule, ok := clusterScopedKeyRules[node.NodeType]; ok {
 		keyComponents.Hierarchy = ""
-		// Cluster name is the resource name
-		if keyComponents.Name == "" {
-			keyComponents.Name = cluster
+		if keyComponents.Name == "" && rule.NameFallback != nil {
+			keyComponents.Name = rule.NameFallback(node)
 		}
-
-	case core.NodeTypeNamespace:
-		// Namespace itself has no parent namespace
-		keyComponents.Hierarchy = ""
-		// Namespace name is the resource name
-		if keyComponents.Name == "" {
-			keyComponents.Name = namespace
-		}
-
-	case core.NodeTypeNode:
-		// K8s worker node is cluster-scoped, not namespaced
-		keyComponents.Hierarchy = ""
-
-	case core.NodeTypePV:
-		// PersistentVolume is cluster-scoped, not namespaced
-		keyComponents.Hierarchy = ""
 	}
 
 	// Validate and build
@@ -443,42 +414,9 @@ func (s *K8sSource) BuildGraph(reqCtx *security.RequestContext, req *core.Source
 	}
 
 	// Resolve the cluster name from any K8s workload we already loaded —
-	// Karpenter CRDs live in the same K8s account so they share the
-	// cluster identity. Empty when no workloads (smoke-test path) — in
-	// that case we still emit the nodes but they won't link to the
-	// ManagedCluster via the phase-3 rule.
-	karpenterClusterName := ""
-	for _, w := range workloads {
-		if w.ClusterName != "" {
-			karpenterClusterName = w.ClusterName
-			break
-		}
-	}
-	// Fallback to K8s Nodes when no workloads carry the cluster name —
-	// can happen for a freshly-provisioned cluster or one whose workloads
-	// haven't been ingested yet. K8s Nodes are fetched from k8s_nodes and
-	// carry the same cluster_name. Without this, Karpenter CRDs wouldn't
-	// link back to their cluster on a cold-start build.
-	if karpenterClusterName == "" {
-		for _, n := range k8sNodes {
-			if n.ClusterName != "" {
-				karpenterClusterName = n.ClusterName
-				break
-			}
-		}
-	}
-
-	// Build a name-keyed lookup over the K8s Node graph nodes we already
-	// emitted. Used by the NodeClaim → RUNS_ON → Node intra-source edge.
-	// We reuse k8sNodeGraphNodes (the original list) rather than the
-	// mutated k8sNodeMap because convertWorkloadsToGraph may have removed
-	// entries when reconciling cluster identities.
-	k8sNodesByName := make(map[string]*core.DbNode, len(k8sNodeGraphNodes))
-	for _, n := range k8sNodeGraphNodes {
-		if name, ok := core.GetNodePropertyString(n, "name"); ok {
-			k8sNodesByName[name] = n
-		}
-	}
+	// Karpenter needs the cluster its CRDs belong to and a name-keyed view of
+	// the nodes it manages; karpenter.go works both out (see karpenterContext).
+	karpenterClusterName, k8sNodesByName := karpenterContext(workloads, k8sNodes, k8sNodeGraphNodes)
 
 	npNodes, npEdges, npByName := s.convertKarpenterNodePoolsToGraph(karpenterNodePools, karpenterClusterName, k8sClusterMap, req)
 	ncNodes, ncEdges := s.convertKarpenterNodeClaimsToGraph(karpenterNodeClaims, npByName, k8sNodesByName, karpenterClusterName, req)
@@ -518,15 +456,7 @@ func (s *K8sSource) BuildGraph(reqCtx *security.RequestContext, req *core.Source
 	// edges from the image refs already carried on those nodes. Deduped per build so
 	// a shared image is one node ("which workloads run image X"). Runs last, over the
 	// accumulated nodes (before the image nodes themselves are appended).
-	imageUsers := make([]*core.DbNode, 0)
-	for _, n := range nodes {
-		if _, ok := n.Properties["container_images"]; ok {
-			imageUsers = append(imageUsers, n)
-		} else if _, ok := n.Properties["primary_image"]; ok {
-			imageUsers = append(imageUsers, n)
-		}
-	}
-	imageNodes, imageEdges := s.createContainerImageNodesAndEdges(imageUsers, req)
+	imageNodes, imageEdges := s.createContainerImageNodesAndEdges(imageUsers(nodes), req)
 	nodes = append(nodes, imageNodes...)
 	edges = append(edges, imageEdges...)
 	s.logger.Info("emitted ContainerImage nodes + Workload→Image edges",

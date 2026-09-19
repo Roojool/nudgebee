@@ -170,3 +170,12 @@ func (s *GCPSource) ensureGCPDNSZoneNodes(nodes []*core.DbNode, lookup *sources.
 	}
 	return nodes
 }
+
+// Per-resource updates (see patch.go). DNS zones are created from gcloud by
+// ensureGCPDNSZoneNodes.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"CloudDNSZone", string(core.NodeTypeDNSZone)},
+		AccountLevel:  true,
+	}, nil)
+}

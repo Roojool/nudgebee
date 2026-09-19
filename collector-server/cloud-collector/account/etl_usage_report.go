@@ -9,6 +9,7 @@ import (
 	"maps"
 	"nudgebee/collector/cloud/common"
 	"nudgebee/collector/cloud/config"
+	"nudgebee/collector/cloud/kgnotify"
 	"nudgebee/collector/cloud/providers"
 	"nudgebee/collector/cloud/security"
 	"runtime/debug"
@@ -1348,8 +1349,8 @@ func ConsumeCloudAccountPostReportJobs(ctx *security.RequestContext, concurrency
 
 		logger.Info("postreport: successfully processed post-report job")
 
-		// Notify KG system that data has been updated for this tenant
-		publishKGUpdate(procCtx, job.TenantId)
+		// Ask the knowledge graph to rebuild this account from the refreshed inventory.
+		kgnotify.PublishAccountUpdate(procCtx, job.TenantId, job.AccountId)
 
 		return nil
 	}

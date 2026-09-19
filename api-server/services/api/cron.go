@@ -7,12 +7,14 @@ import (
 	"nudgebee/services/anomoly"
 	"nudgebee/services/application"
 	"nudgebee/services/common"
+	"nudgebee/services/config"
 	"nudgebee/services/crawl"
 	"nudgebee/services/event"
 	"nudgebee/services/eventrule"
 	"nudgebee/services/insight"
 	"nudgebee/services/integrations"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/knowledge_graph/changedetect"
 	"nudgebee/services/knowledge_graph/core"
 	kgmodels "nudgebee/services/knowledge_graph/models"
 	kgqueue "nudgebee/services/knowledge_graph/queue"
@@ -500,6 +502,25 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 					ctx.GetLogger().Error("cron: error refreshing knowledge graph", "error", err)
 				}
 			}()
+			c.JSON(200, gin.H{"status": "ok"})
+		case "kg_detect_inventory_changes":
+			if !config.Config.KGInventoryChangeDetectionEnabled {
+				c.JSON(200, gin.H{"status": "disabled"})
+				return
+			}
+			dbManager, err := database.GetDatabaseManager(database.Metastore)
+			if err != nil {
+				ctx.GetLogger().Error("cron: failed to get database manager", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to initialize database"})
+				return
+			}
+			detector, err := changedetect.NewDetector(dbManager, ctx.GetLogger())
+			if err != nil {
+				ctx.GetLogger().Error("cron: failed to create inventory change detector", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to create detector"})
+				return
+			}
+			go detector.Run(ctx)
 			c.JSON(200, gin.H{"status": "ok"})
 		case "build_knowledge_graph":
 			ctx.GetLogger().Info("cron: starting build_knowledge_graph - publishing to queue")

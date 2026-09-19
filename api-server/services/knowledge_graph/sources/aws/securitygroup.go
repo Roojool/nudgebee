@@ -5,6 +5,7 @@ import (
 
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // ec2SecurityGroupSchema — concrete schema for security groups. vpc_id is lifted by the
@@ -195,4 +196,26 @@ func (s *AWSSource) createSecurityGroupEdges(nodes []*core.DbNode, lookup *sourc
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"security_group"},
+		NodeType:     core.NodeTypeSecurityGroup,
+		SpecificType: "EC2SecurityGroup",
+		Extract:      (*AWSSource).extractSecurityGroupMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Security groups protect the resources that reference them and allow
+	// traffic from each other.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeSecurityGroup, Name: "security_group",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createSecurityGroupEdges(nodes, lookup, req), nil
+		}})
 }

@@ -157,6 +157,7 @@ var nodeCategoryMap = map[NodeType]NodeCategory{
 	NodeTypeNetworkInterface:    NodeCategoryInfrastructure,
 	NodeTypeRouteTable:          NodeCategoryInfrastructure,
 	NodeTypeCloudResource:       NodeCategoryInfrastructure,
+	NodeTypeInfraStack:          NodeCategoryInfrastructure,
 	NodeTypeNetworkGateway:      NodeCategoryInfrastructure,
 	NodeTypePrivateEndpoint:     NodeCategoryInfrastructure,
 	NodeTypeAPIGateway:          NodeCategoryInfrastructure,
@@ -186,6 +187,12 @@ func (nt NodeType) GetCategory() NodeCategory {
 	}
 	// Default to Infrastructure for unknown types
 	return NodeCategoryInfrastructure
+}
+
+// IsKnown reports whether the node type is one of the declared NodeTypes.
+func (nt NodeType) IsKnown() bool {
+	_, exists := nodeCategoryMap[nt]
+	return exists
 }
 
 // IsInfrastructure returns true if this node type is categorized as infrastructure

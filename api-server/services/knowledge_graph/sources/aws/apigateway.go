@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -148,4 +149,48 @@ func (s *AWSSource) createAPIGatewayEdges(nodes []*core.DbNode, lookup *sources.
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AmazonAPIGateway",
+		NodeType: core.NodeTypeAPIGateway,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonAPIGateway",
+		Types:        []string{"http-api"},
+		NodeType:     core.NodeTypeAPIGateway,
+		SpecificType: "APIGatewayHttpApi",
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonAPIGateway",
+		Types:        []string{"rest-api"},
+		NodeType:     core.NodeTypeAPIGateway,
+		SpecificType: "APIGatewayRestApi",
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonAPIGateway",
+		Types:        []string{"websocket-api"},
+		NodeType:     core.NodeTypeAPIGateway,
+		SpecificType: "APIGatewayWebSocketApi",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// API Gateway APIs route to Lambda functions and VPC endpoints.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeAPIGateway, Name: "api_gateway",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createAPIGatewayEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). APIs have no edges of their own.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"APIGatewayRestApi", "APIGatewayHttpApi", "APIGatewayWebSocketApi"},
+		Creatable:     true,
+	}, nil)
 }

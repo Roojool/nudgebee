@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log/slog"
 	"nudgebee/collector/cloud/common"
+	"nudgebee/collector/cloud/kgnotify"
 	"nudgebee/collector/cloud/providers" // Assuming config is needed for AWS provider instantiation
 	"reflect"
 	"regexp"
@@ -1881,6 +1882,11 @@ func (p *TemplatedEventBridgeProcessor) updateCloudResource(
 		"externalResourceId", resourceErid,
 		"newStatus", finalStatus,
 		"xmax", xmax)
+
+	// Update this resource's knowledge-graph node. The api-server re-reads the
+	// row, so the op is only a hint; a resource it has no node for yet makes it
+	// rebuild the account.
+	kgnotify.PublishResourceUpdate(pCtx.GetContext(), tenantID, accountID, resourceIdentity, kgnotify.OpFor(finalStatus != "Deleted"))
 
 	return map[string]any{
 		"operation":    operation,

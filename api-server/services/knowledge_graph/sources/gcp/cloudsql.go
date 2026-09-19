@@ -300,3 +300,17 @@ func (s *GCPSource) createCloudSQLReplicaEdges(nodes []*core.DbNode, lookup *sou
 	s.logger.Info("created GCP Cloud SQL replica edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudSqlRows := resourceKind{
+		Service:      "Cloud SQL",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "CloudSQLInstance",
+		Subtype:      "CloudSQL",
+		Extract:      (*GCPSource).extractGCPCloudSQLMetadata,
+	}
+	registerKind(cloudSqlRows)
+	registerKind(cloudSqlRows.withTypes("cloud-sql", "sqladmin.googleapis.com/instance/postgres_17", "sqladmin.googleapis.com/instance"))
+}

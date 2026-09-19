@@ -4,6 +4,7 @@ import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
 	"nudgebee/services/knowledge_graph/sources/model"
+	"nudgebee/services/security"
 )
 
 // ec2InstanceSchema is the fixed concrete per-specific_type property schema for the
@@ -417,4 +418,60 @@ func (s *AWSSource) createEC2EdgesViaEngine(nodes []*core.DbNode, lookup *source
 	edges := model.BuildEdges(nodes, awsEC2Rels, lookup, awsEdgeFactory(req))
 	edges = append(edges, s.createEC2EKSEdges(nodes, lookup, req)...)
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eC2Rows := resourceKind{
+		Service:      "AmazonEC2",
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "EC2Instance",
+		Extract:      (*AWSSource).extractComputeMetadata,
+	}
+	registerKind(resourceKind{
+		Service:  "AWSSystemsManager",
+		NodeType: core.NodeTypeCloudResource,
+	})
+	registerKind(eC2Rows)
+	registerKind(eC2Rows.withTypes("compute-instance"))
+	registerKind(resourceKind{
+		Service:      "AWSSystemsManager",
+		Types:        []string{"managedinstance"},
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "SSMManagedInstance",
+		// collapseComputeInstanceDuplicates folds this into the EC2 node of the
+		// same instance, which is how an EC2 instance is marked SSM-managed.
+		Props:   map[string]interface{}{"managed": true},
+		Extract: (*AWSSource).extractComputeMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Declarative-engine path. Byte-identical to createEC2Edges; see the
+	// fidelity test.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeComputeInstance, Name: "ec2",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEC2EdgesViaEngine(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). An instance's own edges (VPC, subnet,
+// security groups, EKS cluster) are rebuilt on update. A new instance still
+// rebuilds the account: load balancer targets, EBS attachments, ENIs, K8s nodes
+// and instance-profile roles all point at it from other resources.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EC2Instance", "SSMManagedInstance"},
+		Context:       []core.NodeType{core.NodeTypeVPC, core.NodeTypeSubnet, core.NodeTypeSecurityGroup, core.NodeTypeManagedCluster},
+		Signature: signature(
+			edgeKind(core.RelationshipHostedOn, "vpc"),
+			edgeKind(core.RelationshipHostedOn, "subnet"),
+			edgeKind(core.RelationshipHostedOn, "security_group"),
+			edgeKind(core.RelationshipRunsOn, "eks_node"),
+		),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createEC2EdgesViaEngine([]*core.DbNode{node}, lookup, req), nil
+	})
 }

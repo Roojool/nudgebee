@@ -43,6 +43,23 @@ func collectImageRefs(node *core.DbNode) []string {
 	return refs
 }
 
+// imageUsers are the nodes that name the images they run, which is what the
+// container-image synthesis reads. Workloads and pods carry either the full
+// list or just the primary one.
+func imageUsers(nodes []*core.DbNode) []*core.DbNode {
+	users := make([]*core.DbNode, 0)
+	for _, n := range nodes {
+		if _, ok := n.Properties["container_images"]; ok {
+			users = append(users, n)
+			continue
+		}
+		if _, ok := n.Properties["primary_image"]; ok {
+			users = append(users, n)
+		}
+	}
+	return users
+}
+
 // createContainerImageNodesAndEdges synthesizes deduplicated ContainerImage nodes +
 // Workload/Pod → ContainerImage (USES_IMAGE) edges from the image refs on those nodes,
 // via the shared core helper.

@@ -448,3 +448,46 @@ func (s *AWSSource) updateVPCFlowLogNodeMetadata(node *core.DbNode, flowLogInfo 
 		node.Properties["tags"] = tags
 	}
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	cloudWatchRows := resourceKind{
+		Service:      "AmazonCloudWatch",
+		NodeType:     core.NodeTypeLogAggregator,
+		SpecificType: "CloudWatchLogGroup",
+	}
+	registerKind(cloudWatchRows)
+	registerKind(cloudWatchRows.withTypes("log-group"))
+	registerKind(resourceKind{
+		Service:      "AmazonCloudWatch",
+		Types:        []string{"vpc-flow-log"},
+		NodeType:     core.NodeTypeLogAggregator,
+		SpecificType: "VPCFlowLog",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Log groups and VPC flow logs receive their sources' logs.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeLogAggregator, Name: "cloudwatch",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createCloudWatchEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}
+
+// Log-group and flow-log edges are emitted out of the resources that log, not
+// out of the log group itself.
+func init() {
+	registerEdgesBuiltElsewhere(core.EdgeKind{Relationship: core.RelationshipEmitsLogsTo})
+}
+
+// Per-resource updates (see patch.go). Log groups can be created from their row;
+// the EMITS_LOGS_TO edges createLogGroupEdges emits start at the monitored
+// resources. Flow logs are built from the row cache for the whole account.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"CloudWatchLogGroup"},
+		Creatable:     true,
+	}, nil)
+}

@@ -31,14 +31,6 @@ func (h *AWSSourceTestHelper) ConvertResourcesToGraph(reqCtx *security.RequestCo
 // elastic-ip, route-table, vpc-flow-log) are dead when the cache is empty, so
 // the bare ConvertResourcesToGraph cannot exercise them; this helper can.
 func (h *AWSSourceTestHelper) ConvertResourcesToGraphWithCache(reqCtx *security.RequestContext, resources []sources.CloudResourceRow, req *core.SourceBuildRequest) ([]*core.DbNode, []*core.DbEdge) {
-	h.source.metaByType = make(map[string][]sources.CloudResourceRow)
-	h.source.metaByTypeAndID = make(map[string]map[string]sources.CloudResourceRow)
-	for _, row := range resources {
-		h.source.metaByType[row.Type] = append(h.source.metaByType[row.Type], row)
-		if _, ok := h.source.metaByTypeAndID[row.Type]; !ok {
-			h.source.metaByTypeAndID[row.Type] = make(map[string]sources.CloudResourceRow)
-		}
-		h.source.metaByTypeAndID[row.Type][row.ResourceID] = row
-	}
+	h.source.fillRowCache(resources)
 	return h.source.convertResourcesToGraph(reqCtx, resources, req)
 }

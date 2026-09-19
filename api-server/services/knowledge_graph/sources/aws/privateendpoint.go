@@ -257,3 +257,23 @@ func (s *AWSSource) fetchPrivateEndpointDataFromAWS(_ *security.RequestContext, 
 		"state", ep.State)
 	return &ep, nil
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"vpc-endpoint"},
+		NodeType:     core.NodeTypePrivateEndpoint,
+		SpecificType: "VPCEndpoint",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// VPC endpoints connect their VPC to the service they front.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypePrivateEndpoint, Name: "vpc_endpoint",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createPrivateEndpointEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}

@@ -7,6 +7,22 @@ import (
 	"nudgebee/services/knowledge_graph/sources"
 )
 
+// fillRowCache loads the per-build meta cache the edge builders read through
+// metaFromCache. BuildGraph fills it from the whole account, the patch policy
+// from one resource's rows, and the test helper from a fixture; all three must
+// key it the same way, so they share this.
+func (s *AWSSource) fillRowCache(rows []sources.CloudResourceRow) {
+	s.metaByType = make(map[string][]sources.CloudResourceRow)
+	s.metaByTypeAndID = make(map[string]map[string]sources.CloudResourceRow)
+	for _, row := range rows {
+		s.metaByType[row.Type] = append(s.metaByType[row.Type], row)
+		if _, ok := s.metaByTypeAndID[row.Type]; !ok {
+			s.metaByTypeAndID[row.Type] = make(map[string]sources.CloudResourceRow)
+		}
+		s.metaByTypeAndID[row.Type][row.ResourceID] = row
+	}
+}
+
 // metaFromCache reads the raw `cloud_resourses.meta` JSON for a node from
 // the per-build cache (s.metaByTypeAndID). createNodeFromResource
 // intentionally drops raw meta to keep node payloads small (see comment

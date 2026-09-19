@@ -510,3 +510,30 @@ func extractCSIVolumeName(volumeHandle string) string {
 	}
 	return volumeHandle
 }
+
+// extractPVCFields keeps a claim's requested size and storage class.
+func (s *K8sSource) extractPVCFields(properties, spec, metaMap map[string]interface{}) {
+	// Storage request (important for capacity)
+	if resources, ok := spec["resources"].(map[string]interface{}); ok {
+		if requests, ok := resources["requests"].(map[string]interface{}); ok {
+			if storage, ok := requests["storage"].(string); ok {
+				properties["storage_request"] = storage
+			}
+		}
+	}
+	// Storage class (important for provisioning)
+	if storageClass, ok := spec["storageClassName"].(string); ok {
+		properties["storage_class"] = storageClass
+	}
+}
+
+// The workload kind a claim's row builds (see kinds.go). Claims reach the graph
+// through the relay; a row is only seen when a caller widens the queried kinds,
+// and then it keeps its size and storage class.
+func init() {
+	registerWorkloadKind(workloadKind{
+		Kind:     "PersistentVolumeClaim",
+		NodeType: core.NodeTypeWorkload,
+		Extract:  (*K8sSource).extractPVCFields,
+	})
+}

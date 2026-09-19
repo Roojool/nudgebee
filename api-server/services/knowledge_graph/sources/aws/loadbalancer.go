@@ -139,9 +139,8 @@ func (s *AWSSource) extractLoadBalancerMetadata(properties map[string]interface{
 
 // createLoadBalancerEdges creates edges for Load Balancers (ALB/NLB/CLB)
 // Uses metadata stored in cloud_resourses table (meta + tags columns) for edge creation.
-// All input nodes are returned unchanged — no filtering occurs.
-// Returns all LB nodes (identical to input), BackendPool nodes (for Target Groups), and edges.
-func (s *AWSSource) createLoadBalancerEdges(reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbNode, []*core.DbNode, []*core.DbEdge) {
+// Returns the BackendPool nodes it synthesizes (for Target Groups) and the edges.
+func (s *AWSSource) createLoadBalancerEdges(reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbNode, []*core.DbEdge) {
 	edges := make([]*core.DbEdge, 0)
 	backendPoolNodes := make([]*core.DbNode, 0)
 
@@ -218,7 +217,7 @@ func (s *AWSSource) createLoadBalancerEdges(reqCtx *security.RequestContext, nod
 		"backend_pool_count", len(backendPoolNodes),
 		"edges_created", len(edges))
 
-	return nodes, backendPoolNodes, edges
+	return backendPoolNodes, edges
 }
 
 // createLoadBalancerV2TargetEdges builds ALB/NLB → EC2 instance (ROUTES_TO,
@@ -567,4 +566,59 @@ func (s *AWSSource) extractK8sServiceFromLBTags(node *core.DbNode, meta map[stri
 			"k8s_namespace", k8sNamespace,
 			"k8s_cluster_name", k8sClusterName)
 	}
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eLBRows := resourceKind{
+		Service:      "AWSELB",
+		NodeType:     core.NodeTypeLoadBalancer,
+		SpecificType: "ELBLoadBalancer",
+		Extract:      (*AWSSource).extractLoadBalancerMetadata,
+	}
+	registerKind(resourceKind{
+		Service:      "AWSELB",
+		Types:        []string{"application_loadbalancer"},
+		NodeType:     core.NodeTypeLoadBalancer,
+		SpecificType: "ALBLoadBalancer",
+		Extract:      (*AWSSource).extractLoadBalancerMetadata,
+	})
+	registerKind(eLBRows)
+	registerKind(eLBRows.withTypes("loadbalancer"))
+	registerKind(resourceKind{
+		Service:      "AWSELB",
+		Types:        []string{"targetgroup"},
+		NodeType:     core.NodeTypeBackendPool,
+		SpecificType: "ELBTargetGroup",
+	})
+	registerKind(resourceKind{
+		Service:      "AWSELB",
+		Types:        []string{"network_loadbalancer"},
+		NodeType:     core.NodeTypeLoadBalancer,
+		SpecificType: "NLBLoadBalancer",
+		Extract:      (*AWSSource).extractLoadBalancerMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Load balancers attach to their network and route to their targets; target
+	// groups become the BackendPool nodes those routes land on.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeLoadBalancer, Name: "lb",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			backendPools, edges := s.createLoadBalancerEdges(reqCtx, nodes, lookup, req)
+			return edges, backendPools
+		}})
+}
+
+// Per-resource updates (see patch.go). createLoadBalancerEdges rebuilds the
+// load balancer slice and its target groups from live target-group calls, so any
+// change to either rebuilds the account.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"ALBLoadBalancer", "ELBLoadBalancer", "NLBLoadBalancer", string(core.NodeTypeLoadBalancer),
+			"ELBTargetGroup", string(core.NodeTypeBackendPool)},
+		AccountLevel: true,
+	}, nil)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"nudgebee/services/internal/database"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +51,18 @@ var supportedManagesKinds = map[string]bool{
 	"DaemonSet":   true,
 	"Job":         true,
 	"CronJob":     true,
+}
+
+// SupportedManagesKinds returns the workload kinds a synthesized Pod can name
+// as its parent. sources/k8s checks it against the kinds it declares: a kind
+// here that k8s does not emit a Workload for could never resolve.
+func SupportedManagesKinds() []string {
+	out := make([]string, 0, len(supportedManagesKinds))
+	for kind := range supportedManagesKinds {
+		out = append(out, kind)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // podRow is the projection of public.k8s_pods columns the synthesizer needs.

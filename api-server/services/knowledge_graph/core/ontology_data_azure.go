@@ -5,7 +5,7 @@ package core
 // ontology_data_aws.go (the aws entries).
 //
 // Keys are the Azure specific_type labels emitted by
-// sources/azure/specific_type.go (determineSpecificType). NodeField names are the
+// sources/azure/kinds.go (the label each resource kind declares). NodeField names are the
 // property keys present at NewNode time — i.e. the base keys set in
 // sources/azure/classify.go (name, region, type/subtype, status, arn,
 // resource_id, service_name, resource_group) plus the meta-derived keys the
@@ -57,7 +57,7 @@ var azureOntology = map[string]OntologyNodeSpec{
 		{OntologyField: "state", NodeField: "status"},
 	}},
 
-	// ---- Storage (no extractStorageMetadata; minimal) ----
+	// ---- Storage (no dedicated extractor; minimal) ----
 	"AzureStorageAccount": {NodeType: NodeTypeStorage, Fields: []OntologyField{
 		{OntologyField: "name", NodeField: "name", Required: true},
 		{OntologyField: "location", NodeField: "region"},

@@ -154,3 +154,35 @@ func (s *AzureSource) createVMEdges(vmNodes []*core.DbNode, lookup *sources.Node
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"virtualmachine", "virtualmachines", "virtualmachinescalesets"},
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "AzureVirtualMachine",
+		Extract:      (*AzureSource).extractVMMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.compute",
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "AzureVirtualMachine",
+		Extract:      (*AzureSource).extractVMMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.hybridcompute",
+		NodeType:     core.NodeTypeComputeInstance,
+		SpecificType: "AzureVirtualMachine",
+		Extract:      (*AzureSource).extractVMMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// VMs attach to the network their NICs resolve to.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeComputeInstance, Name: "vm",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createVMEdges(nodes, lookup, req)
+		}})
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -259,4 +260,83 @@ func extractLambdaArnFromIntegration(uri string) string {
 		}
 	}
 	return ""
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	lambdaRows := resourceKind{
+		Service:      "AWSLambda",
+		NodeType:     core.NodeTypeServerlessFunction,
+		SpecificType: "LambdaFunction",
+		Extract:      (*AWSSource).extractLambdaMetadata,
+	}
+	registerKind(lambdaRows)
+	registerKind(lambdaRows.withTypes("function"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Lambda functions attach to their VPC and to the event sources that
+	// invoke them.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeServerlessFunction, Name: "lambda",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createLambdaEdges(nodes, lookup, req), nil
+		}})
+	// Container-package Lambdas → ContainerImage nodes + USES_IMAGE edges.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeServerlessFunction, Name: "image",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			imageNodes, imageEdges := s.createLambdaImageNodesAndEdges(nodes, req)
+			return imageEdges, imageNodes
+		}})
+}
+
+// A Lambda's event-source mapping edge starts at the queue or table that
+// triggers it, so it leaves a node this resource does not own.
+func init() {
+	registerEdgesBuiltElsewhere(core.EdgeKind{
+		Relationship:   core.RelationshipPublishesTo,
+		ConnectionType: "event_source_mapping",
+	})
+}
+
+// Per-resource updates (see patch.go). A function owns its network edges, its
+// execution role and its container image, all read from its own row, and can be
+// created from it. Its event-source mappings are saved too but belong to the
+// source queue (they start there), so a patch never retires them. Container
+// image nodes are synthesized and never patched on their own.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"LambdaFunction"},
+		Creatable:     true,
+		Context: []core.NodeType{
+			core.NodeTypeVPC, core.NodeTypeSubnet, core.NodeTypeSecurityGroup,
+			core.NodeTypeServiceIdentity, core.NodeTypeMessageQueue, core.NodeTypeDatabase,
+		},
+		Signature: signature(
+			edgeKind(core.RelationshipHostedOn, "vpc"),
+			edgeKind(core.RelationshipHostedOn, "subnet"),
+			edgeKind(core.RelationshipHostedOn, "security_group"),
+			edgeKind(core.RelationshipRunsAs, ""),
+			edgeKind(core.RelationshipUsesImage, ""),
+		),
+	}, buildLambdaPatchEdges)
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{string(core.NodeTypeContainerImage)},
+		AccountLevel:  true,
+	}, nil)
+}
+
+// buildLambdaPatchEdges is the ServerlessFunction dispatch of
+// convertResourcesToGraph for one function, plus its RUNS_AS edge from
+// buildServiceIdentityEdges (whose EC2 half needs a live IAM call and is not used).
+func buildLambdaPatchEdges(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+	self := []*core.DbNode{node}
+	edges := s.createLambdaEdges(self, lookup, req)
+	imageNodes, imageEdges := s.createLambdaImageNodesAndEdges(self, req)
+	edges = append(edges, imageEdges...)
+	identities := lookup.ByNodeType[core.NodeTypeServiceIdentity]
+	edges = append(edges, edgesFrom(node, s.buildServiceIdentityEdges(identities, lookup, nil, req))...)
+	return edges, imageNodes
 }

@@ -40,6 +40,16 @@ var efsFileSystemSchema = core.SpecificTypeSchema{
 
 func init() { core.RegisterSpecificTypeSchema(efsFileSystemSchema) }
 
+// extractEFSFileSystemMetadata is what an EFS row's metadata extraction is:
+// the S3 extractor and then the EFS one. EFS file systems shared the Storage
+// arm of the old central dispatch with S3 buckets, so a row whose meta carries
+// a Name still gets bucket_name; that is kept here deliberately rather than
+// silently dropped.
+func (s *AWSSource) extractEFSFileSystemMetadata(properties map[string]interface{}, metaMap map[string]interface{}) {
+	s.extractS3Metadata(properties, metaMap)
+	s.extractEFSMetadata(properties, metaMap)
+}
+
 // extractEFSMetadata extracts essential fields for EFS file systems
 func (s *AWSSource) extractEFSMetadata(properties map[string]interface{}, metaMap map[string]interface{}) {
 	// File system ID (fs-xxxxx)
@@ -280,4 +290,26 @@ func (s *AWSSource) createEFSEdges(reqCtx *security.RequestContext, nodes []*cor
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eFSRows := resourceKind{
+		Service:      "AmazonEFS",
+		NodeType:     core.NodeTypeStorage,
+		SpecificType: "EFSFileSystem",
+		Extract:      (*AWSSource).extractEFSFileSystemMetadata,
+	}
+	registerKind(eFSRows)
+	registerKind(eFSRows.withTypes("filesystem", "file-system"))
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// EFS file systems connect to VPCs, subnets and ENIs via mount targets.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeStorage, Name: "efs",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEFSEdges(reqCtx, nodes, lookup, req), nil
+		}})
 }

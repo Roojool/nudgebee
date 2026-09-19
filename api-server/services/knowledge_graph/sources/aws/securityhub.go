@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // securityHubSchema / securityHubStandardSchema / guardDutyDetectorSchema — concrete
@@ -77,4 +78,53 @@ func (s *AWSSource) createSecurityHubEdges(nodes []*core.DbNode, lookup *sources
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AWSSecurityHub",
+		NodeType: core.NodeTypeSecurityService,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonGuardDuty",
+		NodeType:     core.NodeTypeSecurityService,
+		SpecificType: "GuardDutyDetector",
+	})
+	registerKind(resourceKind{
+		Service:      "AWSSecurityHub",
+		Types:        []string{"hub"},
+		NodeType:     core.NodeTypeSecurityService,
+		SpecificType: "SecurityHub",
+	})
+	registerKind(resourceKind{
+		Service:      "AWSSecurityHub",
+		Types:        []string{"standard"},
+		NodeType:     core.NodeTypeSecurityService,
+		SpecificType: "SecurityHubStandard",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// SecurityHub standards belong to the hub.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeSecurityService, Name: "securityhub",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createSecurityHubEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Security Hub standards own their
+// BELONGS_TO edge to the hub, resolved against the account's other security
+// services.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"SecurityHub", "SecurityHubStandard", "GuardDutyDetector"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeSecurityService},
+		Signature:     signature(edgeKind(core.RelationshipBelongsTo, "security_standard")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createSecurityHubEdges([]*core.DbNode{node}, lookup, req), nil
+	})
 }

@@ -77,15 +77,17 @@ func TestE2E_AzureAllTypesNodeCoverage(t *testing.T) {
 	var rows []sources.CloudResourceRow
 	expected := map[core.NodeType]bool{}
 	i := 0
-	for rt, nt := range azureTypeToNodeType {
-		rows = append(rows, allTypesRow(i, rt, "microsoft.compute/"+rt, "Azure"))
-		expected[nt] = true
-		i++
-	}
-	for prefix, nt := range azureServicePrefixToNodeType {
-		rows = append(rows, allTypesRow(i, "__fallback_type__", prefix, "Azure"))
-		expected[nt] = true
-		i++
+	for _, kind := range kinds.Kinds() {
+		key := kind.KindKey()
+		if len(key.Types) == 0 {
+			rows = append(rows, allTypesRow(i, "__fallback_type__", key.Service+"/somekind", "Azure"))
+			i++
+		}
+		for _, rt := range key.Types {
+			rows = append(rows, allTypesRow(i, rt, "microsoft.notaprovider", "Azure"))
+			i++
+		}
+		expected[kind.NodeType] = true
 	}
 
 	req := &core.SourceBuildRequest{TenantID: "all-types-tenant", CloudAccountID: "all-types-account"}

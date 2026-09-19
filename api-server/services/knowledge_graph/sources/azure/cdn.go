@@ -85,3 +85,20 @@ func (s *AzureSource) extractAzureFrontDoorBackends(properties map[string]interf
 		properties["backend_addresses"] = backendAddrs
 	}
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"cdnprofile", "frontdoor", "frontdoors", "profiles"},
+		NodeType:     core.NodeTypeCDN,
+		SpecificType: "AzureCDNProfile",
+		Extract:      (*AzureSource).extractCDNMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.cdn",
+		NodeType:     core.NodeTypeCDN,
+		SpecificType: "AzureCDNProfile",
+		Extract:      (*AzureSource).extractCDNMetadata,
+	})
+}

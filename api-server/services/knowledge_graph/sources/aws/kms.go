@@ -199,3 +199,33 @@ func (s *AWSSource) createKMSEdgesGeneric(nodes []*core.DbNode, kmsLookup map[st
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:  "AWSKMS",
+		NodeType: core.NodeTypeEncryptionKey,
+	})
+	registerKind(resourceKind{
+		Service:      "AWSKMS",
+		Types:        []string{"key"},
+		NodeType:     core.NodeTypeEncryptionKey,
+		SpecificType: "KMSKey",
+	})
+}
+
+// createKMSEdges runs over the whole account after the per-resource steps, so
+// the IS_ENCRYPTED_BY edges it emits leave other resources' nodes.
+func init() {
+	registerEdgesBuiltElsewhere(core.EdgeKind{Relationship: core.RelationshipIsEncryptedBy})
+}
+
+// Per-resource updates (see patch.go). Keys only own a HOSTED_ON VPC edge; the
+// IS_ENCRYPTED_BY edges createKMSEdges emits start at the encrypted resources.
+func init() {
+	registerPatchSpec(defaultVPCEdgeSpec(sources.PatchSpec{
+		SpecificTypes: []string{"KMSKey"},
+		Creatable:     true,
+	}))
+}

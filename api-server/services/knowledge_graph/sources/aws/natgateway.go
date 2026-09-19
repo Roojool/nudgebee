@@ -354,3 +354,38 @@ func (s *AWSSource) fetchNATGatewayDataFromAWS(reqCtx *security.RequestContext, 
 
 	return &result.NatGateways[0], nil
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"internet-gateway"},
+		NodeType:     core.NodeTypeNetworkGateway,
+		SpecificType: "InternetGateway",
+		Extract:      (*AWSSource).extractNetworkGatewayMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonEC2",
+		Types:        []string{"natgateway"},
+		NodeType:     core.NodeTypeNetworkGateway,
+		SpecificType: "NATGateway",
+		Extract:      (*AWSSource).extractNetworkGatewayMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"natgateway"},
+		NodeType:     core.NodeTypeNetworkGateway,
+		SpecificType: "NATGateway",
+		Extract:      (*AWSSource).extractNetworkGatewayMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// NAT and internet gateways route their subnets' traffic.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeNetworkGateway, Name: "gateway",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createNATGatewayEdges(reqCtx, nodes, lookup, req), nil
+		}})
+}

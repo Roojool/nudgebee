@@ -500,3 +500,26 @@ func (s *GCPSource) createGKEInstanceEdges(_ *security.RequestContext, lookup *s
 	s.logger.Info("created GKE instance edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	kubernetesEngineRows := resourceKind{
+		Service:      "Kubernetes Engine",
+		NodeType:     core.NodeTypeManagedCluster,
+		SpecificType: "GKECluster",
+		Subtype:      "GKE",
+		Extract:      (*GCPSource).extractGCPGKEMetadata,
+	}
+	registerKind(kubernetesEngineRows)
+	registerKind(kubernetesEngineRows.withTypes("kubernetes-engine", "container.googleapis.com/cluster"))
+}
+
+// Per-resource updates (see patch.go). Node pools are created from gcloud by
+// ensureGCPNodePoolNodes; clusters are enriched from it by enrichNodesFromCLIData.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{string(core.NodeTypeComputeInstancePool)},
+		AccountLevel:  true,
+	}, nil)
+}

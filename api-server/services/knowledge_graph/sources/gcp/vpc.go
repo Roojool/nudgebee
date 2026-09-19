@@ -293,3 +293,31 @@ func (s *GCPSource) createSubnetToVPCEdges(nodes []*core.DbNode, lookup *sources
 	s.logger.Info("created GCP subnet → VPC edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	networkingRows := resourceKind{
+		Service:      "Networking",
+		NodeType:     core.NodeTypeVPC,
+		SpecificType: "GCPVpc",
+	}
+	registerKind(resourceKind{
+		Service:      "Networking",
+		Types:        []string{"subnet"},
+		NodeType:     core.NodeTypeSubnet,
+		SpecificType: "GCPSubnet",
+		Extract:      (*GCPSource).extractGCPSubnetMetadata,
+	})
+	registerKind(networkingRows)
+	registerKind(networkingRows.withTypes("networking", "vpc-network"))
+}
+
+// Per-resource updates (see patch.go). Networks and subnets are created and
+// enriched from gcloud by ensureGCPVPCNodes and ensureGCPSubnetNodes.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"GCPVpc", string(core.NodeTypeVPC), "GCPSubnet", string(core.NodeTypeSubnet)},
+		AccountLevel:  true,
+	}, nil)
+}

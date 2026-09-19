@@ -321,6 +321,12 @@ type appConfig struct {
 	RabbitMqKGUpdateConcurrency      int    `mapstructure:"rabbit_mq_kg_update_concurrency"`
 	KGUpdateDeduplicationMinutes     int    `mapstructure:"kg_update_deduplication_minutes"`
 	KGUpdateProcessingTimeoutMinutes int    `mapstructure:"kg_update_processing_timeout_minutes"`
+	// Inventory change detector (knowledge_graph/changedetect), run by the
+	// kg_detect_inventory_changes cron.
+	KGInventoryChangeDetectionEnabled bool `mapstructure:"kg_inventory_change_detection_enabled"`
+	KGInventoryChangeCandidateCap     int  `mapstructure:"kg_inventory_change_candidate_cap"`
+	KGInventoryChangeCreatesEnabled   bool `mapstructure:"kg_inventory_change_creates_enabled"`
+	KGResourcePatchEnabled            bool `mapstructure:"kg_resource_patch_enabled"`
 
 	// Event post-process queue configuration
 	RabbitMqEventPostProcessExchange    string `mapstructure:"rabbit_mq_event_post_process_exchange"`
@@ -569,6 +575,21 @@ func init() {
 	// not deferred. 0 disables.
 	viper.SetDefault("kg_update_deduplication_minutes", 45)
 	viper.SetDefault("kg_update_processing_timeout_minutes", 30)
+	// Every 10 minutes the detector compares each account's inventory with the
+	// marks it saved and requests account rebuilds / per-resource updates. The cap
+	// bounds how many new rows or rolled-out workloads one account may produce in
+	// a run before the detector stops inspecting them and rebuilds the account.
+	viper.SetDefault("kg_inventory_change_detection_enabled", true)
+	viper.SetDefault("kg_inventory_change_candidate_cap", 5000)
+	// When false, a new resource of a creatable type rebuilds its account like
+	// any other new resource instead of being added on its own.
+	viper.SetDefault("kg_inventory_change_creates_enabled", true)
+	// The rollback switch for per-resource graph updates. When false, every
+	// resource ref — from the detector, EventBridge/EventGrid or the Kubernetes
+	// collector — rebuilds its account instead of being patched, which is how the
+	// graph behaved before per-resource updates existed. Off until per-resource
+	// output has been compared with account rebuilds on a live environment.
+	viper.SetDefault("kg_resource_patch_enabled", false)
 
 	// Event post-process queue configuration
 	viper.SetDefault("rabbit_mq_event_post_process_exchange", "event_post_process_exchange")

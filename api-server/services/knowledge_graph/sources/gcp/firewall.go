@@ -141,3 +141,15 @@ func (s *GCPSource) createFirewallRuleEdges(nodes []*core.DbNode, lookup *source
 	s.logger.Info("created GCP firewall rule edges", "edge_count", len(edges))
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "Networking",
+		Types:        []string{"firewall-rule"},
+		NodeType:     core.NodeTypeSecurityGroup,
+		SpecificType: "GCPFirewall",
+		Subtype:      "FirewallRule",
+	})
+}

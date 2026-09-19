@@ -446,3 +446,30 @@ func (s *K8sSource) matchServiceToWorkloads(service *K8sServiceFromRelay, worklo
 
 	return matched
 }
+
+// extractServiceFields keeps a service's type, cluster IP and ports.
+func (s *K8sSource) extractServiceFields(properties, spec, metaMap map[string]interface{}) {
+	// Service type and IPs (critical for networking)
+	if clusterIP, ok := spec["clusterIP"].(string); ok {
+		properties["cluster_ip"] = clusterIP
+	}
+	if serviceType, ok := spec["type"].(string); ok {
+		properties["service_type"] = serviceType
+	}
+	// Ports (important for connectivity)
+	if ports, ok := spec["ports"].([]interface{}); ok && len(ports) > 0 {
+		properties["service_ports"] = ports
+	}
+}
+
+// The workload kind this file builds (see kinds.go). A service's node is also
+// shaped by the relay's own view of it and by the workloads it selects, so a
+// change to one row cannot be applied on its own.
+func init() {
+	registerWorkloadKind(workloadKind{
+		Kind:      "Service",
+		NodeType:  core.NodeTypeK8sService,
+		Inventory: true,
+		Extract:   (*K8sSource).extractServiceFields,
+	})
+}

@@ -246,6 +246,21 @@
     num_retries: 0
     timeout_seconds: 600
   comment: Build knowledge graph from filters daily at 23:30 UTC
+- name: kg_detect_inventory_changes
+  webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
+  schedule: '5-59/10 * * * *'
+  payload:
+    action:
+      name: kg_detect_inventory_changes
+    input:
+      request: {}
+  headers:
+    - name: X-ACTION-TOKEN
+      value_from_env: ACTION_API_SERVER_TOKEN
+  retry_conf:
+    num_retries: 0
+    timeout_seconds: 60
+  comment: Every 10 minutes (5 minutes after the cloud events job), find accounts whose inventory changed and queue knowledge-graph updates for them
 - name: Workload Criticality Discovery
   webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
   schedule: '0 1 * * *'

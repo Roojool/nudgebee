@@ -17,8 +17,8 @@ import (
 // strings — preventing the in-graph and DB-derived index entries from drifting.
 //
 // Inputs are read from `properties` rather than passed explicitly so the
-// function can be called from the generic `extractEssentialMetadataByNodeType`
-// dispatch site without each caller having to assemble a struct.
+// function can be called from the generic metadata-extraction step without each
+// caller having to assemble a struct.
 func synthesizeAWSEndpointDNS(properties map[string]interface{}) {
 	if existing, _ := properties["dns_name"].(string); existing != "" {
 		// Some extractor already wrote a dns_name — trust it (RDS/EFS/EC/LB).
@@ -41,7 +41,7 @@ func synthesizeAWSEndpointDNS(properties map[string]interface{}) {
 			resourceID, _ = properties["name"].(string)
 		}
 		// For S3 the regional placement lives in `bucket_region` (set by
-		// extractStorageMetadata); fall back to the row-level `region` so we
+		// extractS3Metadata); fall back to the row-level `region` so we
 		// still synthesize a hostname for buckets where the meta blob lacked
 		// a Region key.
 		if br, _ := properties["bucket_region"].(string); br != "" {

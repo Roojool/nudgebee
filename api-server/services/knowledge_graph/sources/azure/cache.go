@@ -29,3 +29,20 @@ func (s *AzureSource) extractCacheMetadata(properties map[string]interface{}, me
 	}
 	properties["cache_type"] = "redis"
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"redis", "rediscache"},
+		NodeType:     core.NodeTypeCache,
+		SpecificType: "AzureCacheForRedis",
+		Extract:      (*AzureSource).extractCacheMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.cache",
+		NodeType:     core.NodeTypeCache,
+		SpecificType: "AzureCacheForRedis",
+		Extract:      (*AzureSource).extractCacheMetadata,
+	})
+}

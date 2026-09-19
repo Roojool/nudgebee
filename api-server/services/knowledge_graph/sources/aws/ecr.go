@@ -1,6 +1,9 @@
 package aws
 
-import "nudgebee/services/knowledge_graph/core"
+import (
+	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/knowledge_graph/sources"
+)
 
 // ecrRepositorySchema / ecrPublicRepositorySchema — concrete schemas for ECR
 // repositories. Fields written by
@@ -57,4 +60,33 @@ func (s *AWSSource) extractContainerRegistryMetadata(properties map[string]inter
 	if mutability, ok := metaMap["ImageTagMutability"].(string); ok && mutability != "" {
 		properties["image_tag_mutability"] = mutability
 	}
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eCRPublicRows := resourceKind{
+		Service:      "AmazonECRPublic",
+		NodeType:     core.NodeTypeContainerRegistry,
+		SpecificType: "ECRPublicRepository",
+		Extract:      (*AWSSource).extractContainerRegistryMetadata,
+	}
+	eCRRows := resourceKind{
+		Service:      "AmazonECR",
+		NodeType:     core.NodeTypeContainerRegistry,
+		SpecificType: "ECRRepository",
+		Extract:      (*AWSSource).extractContainerRegistryMetadata,
+	}
+	registerKind(eCRPublicRows)
+	registerKind(eCRPublicRows.withTypes("repository"))
+	registerKind(eCRRows)
+	registerKind(eCRRows.withTypes("repository"))
+}
+
+// Per-resource updates (see patch.go). Repositories only own a HOSTED_ON VPC edge.
+func init() {
+	registerPatchSpec(defaultVPCEdgeSpec(sources.PatchSpec{
+		SpecificTypes: []string{"ECRRepository", "ECRPublicRepository"},
+		Creatable:     true,
+	}))
 }

@@ -114,7 +114,7 @@ class TestDiscoveryShape(unittest.TestCase):
 
         with mock.patch.object(dh.database, "insert_data", side_effect=fake_insert), mock.patch.object(
             dh.database, "run_query", return_value=[]
-        ), mock.patch.object(dh, "acquire_discovery_lock", fake_lock), mock.patch.object(dh, "publish_kg_update"):
+        ), mock.patch.object(dh, "acquire_discovery_lock", fake_lock), mock.patch("handlers.kg_update.publish_message"):
             dh.run_async_discovery_handler(message)
 
         return captured

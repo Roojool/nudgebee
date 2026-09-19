@@ -23,20 +23,27 @@ type KGUpdateMessage struct {
 	// filter's for a tenant-wide build, and none at all for an account-scoped one.
 	FlowSources []string `json:"flow_sources,omitempty"`
 
-	// Resources names individual resources that changed. Reserved for the
-	// resource-level fast path; ignored today, but declared now so collectors can
-	// start populating it without a second message-shape migration.
+	// Resources names individual resources that changed. The consumer applies
+	// each one to the graph directly (resourcepatch) and queues an account build
+	// only for the accounts where that is not possible. A message that carries
+	// only Resources and applies fully queues no build.
 	Resources []KGResourceRef `json:"resources,omitempty"`
 }
 
 // KGResourceRef identifies one changed resource within an account.
-// Reserved: no consumer acts on it yet.
 type KGResourceRef struct {
-	// ProviderResourceID is the collector's own identifier for the resource —
-	// cloud_resourses.resourse_id / an ARN / a k8s cloud_resource_id.
+	// AccountID is the cloud_accounts.id the resource belongs to. When empty the
+	// message's AccountIDs must name exactly one account.
+	AccountID string `json:"account_id,omitempty"`
+	// ProviderResourceID identifies the resource: cloud_resourses.resourse_id,
+	// its ARN or cloud_resourses.id; a k8s workload's cloud_resource_id; or, for
+	// a "Node" ref, the Kubernetes node name.
 	ProviderResourceID string `json:"provider_resource_id"`
-	// NodeType optionally narrows the reverse lookup to one KG node type.
+	// NodeType selects how the resource is found. "Node" refs are resolved by
+	// Kubernetes node name (node graph nodes carry no provider id); for every
+	// other value the node is found by provider id and NodeType is only logged.
 	NodeType string `json:"node_type,omitempty"`
-	// Op is "upsert" or "delete".
+	// Op is "upsert" or "delete". It is a hint: the applier re-reads the
+	// inventory and writes what it finds.
 	Op string `json:"op"`
 }

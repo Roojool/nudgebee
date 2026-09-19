@@ -18,8 +18,8 @@ import (
 const ServiceNameArtifactRegistry = "Artifact Registry"
 
 // ArtifactRegistryRepoType is the cloud_resourses.type value the gcp_source
-// classifier already maps to NodeTypeContainerRegistry (see gcpResourceTypeMap
-// entry "artifact-registry").
+// classifier already maps to NodeTypeContainerRegistry (the kind Artifact
+// Registry declares in knowledge_graph/sources/gcp/catalog.go).
 const ArtifactRegistryRepoType = "artifact-registry"
 
 // arAnchorTTL gates the per-project "we've already scanned this cycle" check.

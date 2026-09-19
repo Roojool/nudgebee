@@ -199,3 +199,21 @@ func (s *K8sSource) createNamespaceNode(namespace, clusterName string, req *core
 
 	return core.NewNode(core.NodeTypeNamespace, uniqueKey, properties, req.TenantID, req.CloudAccountID, "k8s")
 }
+
+// Clusters and namespaces are scoped to the cluster, not to a namespace, and
+// each takes its name from what it describes when the row does not carry one
+// (see kinds.go).
+func init() {
+	registerClusterScopedKind(core.NodeTypeCluster, clusterScopedKeyRule{
+		NameFallback: func(node *core.DbNode) string {
+			cluster, _ := core.GetNodePropertyString(node, "cluster")
+			return cluster
+		},
+	})
+	registerClusterScopedKind(core.NodeTypeNamespace, clusterScopedKeyRule{
+		NameFallback: func(node *core.DbNode) string {
+			namespace, _ := core.GetNodePropertyString(node, "namespace")
+			return namespace
+		},
+	})
+}

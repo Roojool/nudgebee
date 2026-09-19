@@ -66,3 +66,29 @@ func (s *AzureSource) createAKSEdges(aksNodes []*core.DbNode, lookup *sources.No
 
 	return edges
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:        []string{"managedcluster", "managedclusters"},
+		NodeType:     core.NodeTypeManagedCluster,
+		SpecificType: "AKSCluster",
+		Extract:      (*AzureSource).extractAKSMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "microsoft.containerservice",
+		NodeType:     core.NodeTypeManagedCluster,
+		SpecificType: "AKSCluster",
+		Extract:      (*AzureSource).extractAKSMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// AKS clusters attach to their node resource group's network.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeManagedCluster, Name: "aks",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createAKSEdges(nodes, lookup, req)
+		}})
+}

@@ -14,7 +14,7 @@ from db import database, clickhouse
 from db.redis_client import acquire_discovery_lock, record_cleanup_done, should_skip_cleanup
 from handlers.batch_reconcile import claim_reconcile, gc_superseded_active_resources, record_batch_progress
 from handlers.alert_rules_handler import handle_alert_rules
-from handlers.kg_update import publish_kg_update
+from handlers.kg_update import deletion_scope, record_deleted_nodes, record_deleted_workloads
 from psycopg2 import extras
 from utils.datetime_utils import utc_from_epoch_millis
 
@@ -271,7 +271,8 @@ def run_async_discovery_handler(content) -> None:
     # on concurrent INSERT ... ON CONFLICT into cloud_resourses for the same account.
     # Uses Redis distributed lock (works across pods); falls back to threading.Lock.
     with acquire_discovery_lock(data["cloud_account_id"], Configs):
-        _process_discovery(data)
+        with deletion_scope(data["tenant"], data["cloud_account_id"]):
+            _process_discovery(data)
 
 
 def _process_discovery(data) -> None:
@@ -377,9 +378,6 @@ def _process_discovery(data) -> None:
         )
     elif data_type == "alert_rules":
         handle_alert_rules(data["data"], data["tenant"], data["cloud_account_id"])
-
-    # Notify KG system that discovery data has been updated for this tenant
-    publish_kg_update(data["tenant"])
 
 
 def run_service_discovery(
@@ -839,12 +837,15 @@ def handle_active_resources_deletion(  # noqa: C901
                         [cloud_account_id, external_ids],
                     )
                 ]
-                database.run_query(
-                    "UPDATE k8s_workloads "
-                    "SET is_active = false "
-                    "WHERE cloud_account_id = %s AND tenant_id = %s "
-                    "AND cloud_resource_id != ALL(%s::uuid[]) AND is_active = true",
-                    [cloud_account_id, tenant, external_ids],
+                record_deleted_workloads(
+                    database.run_query(
+                        "UPDATE k8s_workloads "
+                        "SET is_active = false "
+                        "WHERE cloud_account_id = %s AND tenant_id = %s "
+                        "AND cloud_resource_id != ALL(%s::uuid[]) AND is_active = true "
+                        "RETURNING cloud_resource_id, kind",
+                        [cloud_account_id, tenant, external_ids],
+                    )
                 )
             elif resource_type == "Job":
                 deactivated_resource_ids = [
@@ -885,12 +886,15 @@ def handle_active_resources_deletion(  # noqa: C901
                         [cloud_account_id, external_ids],
                     )
                 ]
-                database.run_query(
-                    "UPDATE k8s_nodes "
-                    "SET is_active = false "
-                    "WHERE cloud_account_id = %s AND tenant_id = %s "
-                    "AND cloud_resource_id != ALL(%s::uuid[]) AND is_active = true",
-                    [cloud_account_id, tenant, external_ids],
+                record_deleted_nodes(
+                    database.run_query(
+                        "UPDATE k8s_nodes "
+                        "SET is_active = false "
+                        "WHERE cloud_account_id = %s AND tenant_id = %s "
+                        "AND cloud_resource_id != ALL(%s::uuid[]) AND is_active = true "
+                        "RETURNING name",
+                        [cloud_account_id, tenant, external_ids],
+                    )
                 )
             else:  # service or other types
                 deactivated_resource_ids = [
@@ -999,11 +1003,14 @@ def handle_active_resources_deletion(  # noqa: C901
                         [cloud_account_id],
                     )
                 ]
-                database.run_query(
-                    "UPDATE k8s_workloads "
-                    "SET is_active = false "
-                    "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active = true",
-                    [cloud_account_id, tenant],
+                record_deleted_workloads(
+                    database.run_query(
+                        "UPDATE k8s_workloads "
+                        "SET is_active = false "
+                        "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active = true "
+                        "RETURNING cloud_resource_id, kind",
+                        [cloud_account_id, tenant],
+                    )
                 )
             elif resource_type == "Job":
                 deactivated_resource_ids = [
@@ -1033,11 +1040,14 @@ def handle_active_resources_deletion(  # noqa: C901
                         [cloud_account_id],
                     )
                 ]
-                database.run_query(
-                    "UPDATE k8s_nodes "
-                    "SET is_active = false "
-                    "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active = true",
-                    [cloud_account_id, tenant],
+                record_deleted_nodes(
+                    database.run_query(
+                        "UPDATE k8s_nodes "
+                        "SET is_active = false "
+                        "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active = true "
+                        "RETURNING name",
+                        [cloud_account_id, tenant],
+                    )
                 )
             elif resource_type == "Namespace":
                 database.run_query(
@@ -1351,10 +1361,14 @@ def process_deleted_resources(cloud_account_id, deleted_resources, tenant):
             [cloud_account_id, tenant, resource_ids],
         )
 
-        database.run_query(
-            "UPDATE k8s_workloads SET is_active = false "
-            "WHERE cloud_account_id = %s AND tenant_id = %s AND cloud_resource_id = ANY(%s::uuid[])",
-            [cloud_account_id, tenant, resource_ids],
+        record_deleted_workloads(
+            database.run_query(
+                "UPDATE k8s_workloads SET is_active = false "
+                "WHERE cloud_account_id = %s AND tenant_id = %s AND cloud_resource_id = ANY(%s::uuid[]) "
+                "AND is_active = true "
+                "RETURNING cloud_resource_id, kind",
+                [cloud_account_id, tenant, resource_ids],
+            )
         )
 
 
@@ -1582,20 +1596,27 @@ def extract_disabled_nodes(cloud_account_id, deleted_resources, tenant):
     delete_resources(cloud_account_id, deleted_resources)
     if len(deleted_resources) > 0:
         resource_ids = list(deleted_resources)
-        database.run_query(
-            "UPDATE k8s_nodes SET is_active = false "
-            "WHERE cloud_account_id = %s AND tenant_id = %s AND cloud_resource_id = ANY(%s::uuid[])",
-            [cloud_account_id, tenant, resource_ids],
+        record_deleted_nodes(
+            database.run_query(
+                "UPDATE k8s_nodes SET is_active = false "
+                "WHERE cloud_account_id = %s AND tenant_id = %s AND cloud_resource_id = ANY(%s::uuid[]) "
+                "AND is_active = true "
+                "RETURNING name",
+                [cloud_account_id, tenant, resource_ids],
+            )
         )
 
 
 def handle_full_load_node_updates(tenant, cloud_account_id, nodes_data):
     node_ids = list(nodes_data)
-    database.run_query(
-        "UPDATE k8s_nodes SET is_active = false "
-        "WHERE cloud_account_id = %s AND tenant_id = %s "
-        "AND cloud_resource_id != ALL(%s) AND is_active = true",
-        [cloud_account_id, tenant, node_ids],
+    record_deleted_nodes(
+        database.run_query(
+            "UPDATE k8s_nodes SET is_active = false "
+            "WHERE cloud_account_id = %s AND tenant_id = %s "
+            "AND cloud_resource_id != ALL(%s) AND is_active = true "
+            "RETURNING name",
+            [cloud_account_id, tenant, node_ids],
+        )
     )
 
     database.run_query(

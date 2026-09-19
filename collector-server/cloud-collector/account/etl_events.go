@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"nudgebee/collector/cloud/common"
 	"nudgebee/collector/cloud/config"
+	"nudgebee/collector/cloud/kgnotify"
 	"nudgebee/collector/cloud/providers"
 	"nudgebee/collector/cloud/security"
 	"nudgebee/collector/cloud/services"
@@ -489,6 +490,7 @@ func StoreEvents(ctx *security.RequestContext, accountId string) (StoreEventResp
 	// Full account-wide resource discovery is handled by the post-report consumer.
 	if len(events.Summary) > 0 {
 		ctx.GetLogger().Info("discovering resources post events sync", "count", slog.AnyValue(events.Summary))
+		relisted := false
 		for _, summary := range events.Summary {
 			if summary.ServiceName != "" && summary.Region != "" && (summary.ResourcesCreated > 0 || summary.ResourceDeleted > 0) {
 				ctx.GetLogger().Info("discovering resources post events sync", "serviceName", summary.ServiceName, "region", summary.Region)
@@ -496,7 +498,13 @@ func StoreEvents(ctx *security.RequestContext, accountId string) (StoreEventResp
 				if err != nil {
 					ctx.GetLogger().Error("unable to discover resources for service post events sync", "error", err, "serviceName", summary.ServiceName, "region", summary.Region)
 				}
+				relisted = true
 			}
+		}
+		// Resources were created or deleted: ask for this account's graph to be
+		// rebuilt once, however many services were re-listed.
+		if relisted {
+			kgnotify.PublishAccountUpdate(ctx.GetContext(), ctx.GetSecurityContext().GetTenantId(), accountId)
 		}
 	}
 

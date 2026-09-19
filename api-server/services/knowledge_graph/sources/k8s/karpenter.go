@@ -505,3 +505,40 @@ func (s *K8sSource) convertKarpenterNodeClaimsToGraph(ncs []K8sCRDFromRelay, nod
 
 	return nodes, edges
 }
+
+// karpenterContext works out what the Karpenter builders need from the rest of
+// the account: the cluster its CRDs belong to, and a name-keyed view of the
+// worker nodes it manages.
+//
+// Karpenter CRDs live in the same K8s account so they share the cluster of the
+// workloads; nodePool.Labels has no cluster name.
+func karpenterContext(workloads []K8sWorkloadRow, k8sNodes []K8sNodeRow, k8sNodeGraphNodes []*core.DbNode) (clusterName string, nodesByName map[string]*core.DbNode) {
+	for _, w := range workloads {
+		if w.ClusterName != "" {
+			clusterName = w.ClusterName
+			break
+		}
+	}
+	// Clusters with no workload rows yet still have nodes, which carry the same
+	// cluster name. Without this, Karpenter CRDs would not resolve their cluster.
+	if clusterName == "" {
+		for _, n := range k8sNodes {
+			if n.ClusterName != "" {
+				clusterName = n.ClusterName
+				break
+			}
+		}
+	}
+
+	// A name-keyed lookup over the K8s Node graph nodes already emitted, used by
+	// the NodeClaim → RUNS_ON → Node intra-source edge. This reads the original
+	// list rather than the mutated node map, which convertWorkloadsToGraph may
+	// have removed entries from while reconciling cluster identities.
+	nodesByName = make(map[string]*core.DbNode, len(k8sNodeGraphNodes))
+	for _, n := range k8sNodeGraphNodes {
+		if name, ok := core.GetNodePropertyString(n, "name"); ok {
+			nodesByName[name] = n
+		}
+	}
+	return clusterName, nodesByName
+}

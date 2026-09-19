@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 	"strings"
 )
 
@@ -238,4 +239,67 @@ func (s *AWSSource) createEKSNodeGroupEdges(nodes []*core.DbNode, lookup *source
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	eKSRows := resourceKind{
+		Service:      "AmazonEKS",
+		NodeType:     core.NodeTypeManagedCluster,
+		SpecificType: "EKSCluster",
+		Extract:      (*AWSSource).extractClusterMetadata,
+	}
+	registerKind(eKSRows)
+	registerKind(eKSRows.withTypes("cluster"))
+	registerKind(resourceKind{
+		Service:      "AmazonEKS",
+		Types:        []string{"nodegroup"},
+		NodeType:     core.NodeTypeComputeInstancePool,
+		SpecificType: "EKSNodeGroup",
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonEKS",
+		Types:        []string{"pod"},
+		NodeType:     core.NodeTypePod,
+		SpecificType: "EKSPod",
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// EKS clusters attach to their network and assume their cluster role.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeManagedCluster, Name: "eks",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEKSEdges(nodes, lookup, req), nil
+		}})
+	// Node groups belong to their cluster and run in its subnets.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeComputeInstancePool, Name: "nodegroup",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEKSNodeGroupEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). A cluster owns its role and network
+// edges, read from its own row, and can be created from it. Node groups share
+// a node type with live-fetched Auto Scaling groups and stay account-level.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EKSCluster"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeVPC, core.NodeTypeSubnet, core.NodeTypeSecurityGroup, core.NodeTypeServiceIdentity},
+		Signature: signature(
+			edgeKind(core.RelationshipRunsAs, "cluster_role"),
+			edgeKind(core.RelationshipHostedOn, "vpc"),
+			edgeKind(core.RelationshipHostedOn, "subnet"),
+			edgeKind(core.RelationshipHostedOn, "security_group"),
+		),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createEKSEdges([]*core.DbNode{node}, lookup, req), nil
+	})
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EKSNodeGroup"},
+		AccountLevel:  true,
+	}, nil)
 }

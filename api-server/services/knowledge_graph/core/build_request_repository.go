@@ -417,6 +417,51 @@ func (r *BuildRequestRepository) Finish(claim *BuildClaim, buildErr error) (*Bui
 	return next, nil
 }
 
+// ExcludeBuilds runs fn while holding this tenant's build lock — the lock every
+// claim takes — so no build of the tenant can be claimed until fn returns. fn
+// gets runningCovers, answered inside the same lock, to see builds that were
+// already running when it started.
+//
+// Per-resource updates run inside it, which makes a patch and a build of the
+// same account mutually exclusive: either a build is running and the patch
+// stands aside, or none can start until the patch has written. Without it a
+// build claimed between a patch's check and its write could read the account's
+// inventory before the patch and save that older state over it, since node and
+// edge upserts do not compare versions.
+//
+// The lock is held for fn's whole duration, so fn must be short and must not
+// claim, enqueue or finish a build itself (those take the same lock).
+func (r *BuildRequestRepository) ExcludeBuilds(tenantID string, fn func(runningCovers func(accountID string) (bool, error)) error) error {
+	if tenantID == "" {
+		return fmt.Errorf("tenant id is required to exclude builds")
+	}
+	return r.withTenantLock(tenantID, func(tx *sqlx.Tx) error {
+		return fn(func(accountID string) (bool, error) {
+			return r.runningClaimCovers(tx, tenantID, accountID)
+		})
+	})
+}
+
+// runningClaimCovers reports whether a live build is currently running for the
+// tenant with a scope that includes the account: a tenant-wide build, or an
+// account-scoped build whose account list contains it. A running row older than
+// StaleAfter is abandoned and does not count.
+func (r *BuildRequestRepository) runningClaimCovers(q sqlx.Queryer, tenantID, accountID string) (bool, error) {
+	var covered bool
+	if err := sqlx.Get(q, &covered, `
+		SELECT EXISTS (
+			SELECT 1 FROM knowledge_graph_build_requests
+			WHERE tenant_id = $1::uuid
+			  AND status = 'running'
+			  AND started_at > NOW() - $2::interval
+			  AND (account_ids = '[]'::jsonb OR account_ids ? $3)
+		)
+	`, tenantID, intervalString(r.policy.StaleAfter), accountID); err != nil {
+		return false, fmt.Errorf("failed to check running builds: %w", err)
+	}
+	return covered, nil
+}
+
 // Release hands a claim back without marking its rows terminal — used when the
 // caller decides not to run the build after all (e.g. shutdown). The rows go back
 // to pending so the next message picks them up.

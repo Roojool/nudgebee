@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/knowledge_graph/sources"
 )
 
 // databaseProperties is the shared concrete-property set for Azure managed
@@ -20,8 +21,8 @@ var databaseProperties = []core.PropertyDef{
 }
 
 // azureSQLDatabaseSchema / azureCosmosDBSchema are the concrete per-specific_type
-// property schemas for the two Azure database specific_types resolved in
-// sources/azure/specific_type.go. azureSQLDatabaseParityProps /
+// property schemas for the two Azure database specific_types azureDatabaseLabel
+// resolves (below). azureSQLDatabaseParityProps /
 // azureCosmosDBParityProps document the remaining provider fields not yet emitted
 // by our extractor. They are appended per-specific_type because the two database
 // models diverge — kept out of the shared databaseProperties for that reason.
@@ -131,4 +132,70 @@ func (s *AzureSource) extractDatabaseMetadata(properties map[string]interface{},
 	if port, ok := metaMap["port"]; ok {
 		properties["port"] = port
 	}
+}
+
+// azureDatabaseLabel tells a Cosmos DB account from a SQL one. Both arrive as
+// Database rows and only the provider that reported them says which engine it
+// is, so this reads the row rather than the kind.
+func azureDatabaseLabel(resource *sources.CloudResourceRow) string {
+	service := strings.ToLower(resource.ServiceName)
+	if strings.Contains(service, "cosmos") || strings.Contains(service, "documentdb") {
+		return "AzureCosmosDB"
+	}
+	return "AzureSQLDatabase"
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Types:    []string{"cosmosdbaccount", "databaseaccounts", "databases", "flexibleservers", "servers", "sqldatabase", "sqlserver"},
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:  "microsoft.dbformariadb",
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:  "microsoft.dbformysql",
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:  "microsoft.dbforpostgresql",
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:  "microsoft.documentdb",
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+	registerKind(resourceKind{
+		Service:  "microsoft.sql",
+		NodeType: core.NodeTypeDatabase,
+		Label:    azureDatabaseLabel,
+		Extract:  (*AzureSource).extractDatabaseMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// Databases get the default VNet attachment, plus the containment edge from
+	// the SQL server that holds them.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeDatabase, Name: "default_vnet",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createDefaultVNetEdges(nodes, lookup, req)
+		}})
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeDatabase, Name: "sql_server_database",
+		Build: func(s *AzureSource, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
+			return s.createSQLServerDatabaseEdges(nodes, req)
+		}})
 }

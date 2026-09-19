@@ -425,3 +425,37 @@ func (s *AWSSource) matchENIToRDS(eniInfo *ENINetworkInterface, rdsNode *core.Db
 
 	return false
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonVPC",
+		Types:        []string{"network-interface"},
+		NodeType:     core.NodeTypeNetworkInterface,
+		SpecificType: "NetworkInterface",
+		Extract:      (*AWSSource).extractENIMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// The DB rows are a stale superset of the account's network interfaces, and
+	// the service filter drops some the resolver still needs, so the ENI
+	// resolver decides which ENI nodes the graph keeps. Everything that
+	// resolves an ENI through the lookup (elastic IPs, VPC endpoints, EFS
+	// mount targets, NAT gateways) therefore sees the same set.
+	registerNodeSetRebuild(nodeSetRebuild{NodeType: core.NodeTypeNetworkInterface, Name: "eni",
+		Rebuild: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbNode, []*core.DbEdge) {
+			return s.createENIEdges(reqCtx, nodes, lookup, req)
+		}})
+}
+
+// Per-resource updates (see patch.go). createENIEdges creates and replaces
+// network interface nodes from the row cache in an account-wide pass.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"NetworkInterface"},
+		AccountLevel:  true,
+	}, nil)
+}

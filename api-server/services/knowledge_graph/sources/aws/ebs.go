@@ -3,6 +3,7 @@ package aws
 import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/sources"
+	"nudgebee/services/security"
 )
 
 // ebsVolumeSchema — concrete schema for EBS volumes. Fields written by
@@ -233,4 +234,50 @@ func (s *AWSSource) createEBSEdges(nodes []*core.DbNode, lookup *sources.NodeLoo
 	}
 
 	return edges
+}
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	registerKind(resourceKind{
+		Service:      "AmazonEC2",
+		Types:        []string{"snapshot"},
+		NodeType:     core.NodeTypeStorage,
+		SpecificType: "EBSSnapshot",
+		Extract:      (*AWSSource).extractSnapshotMetadata,
+	})
+	registerKind(resourceKind{
+		Service:      "AmazonEC2",
+		Types:        []string{"storage"},
+		NodeType:     core.NodeTypeStorage,
+		SpecificType: "EBSVolume",
+		Extract:      (*AWSSource).extractEBSMetadata,
+	})
+}
+
+// The edges the account build asks this file's resources for (see dispatch.go).
+func init() {
+	// EBS volumes are attached to EC2 instances.
+	registerEdgeStep(edgeStep{NodeType: core.NodeTypeStorage, Name: "ebs",
+		Build: func(s *AWSSource, reqCtx *security.RequestContext, nodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+			return s.createEBSEdges(nodes, lookup, req), nil
+		}})
+}
+
+// Per-resource updates (see patch.go). Volumes own their attachment edge to the
+// instance and can be created from their row; snapshots have no edges.
+func init() {
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EBSVolume"},
+		Creatable:     true,
+		Context:       []core.NodeType{core.NodeTypeComputeInstance},
+		Signature:     signature(edgeKind(core.RelationshipHostedOn, "ebs_attachment")),
+	}, func(s *AWSSource, node *core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) ([]*core.DbEdge, []*core.DbNode) {
+		return s.createEBSEdges([]*core.DbNode{node}, lookup, req), nil
+	})
+
+	registerPatchSpec(sources.PatchSpec{
+		SpecificTypes: []string{"EBSSnapshot"},
+		Creatable:     true,
+	}, nil)
 }

@@ -99,3 +99,30 @@ func extractBigQueryDatasetName(fullID string) string {
 	}
 	return datasetAndTable[:dotIdx]
 }
+
+// The inventory rows this file's resources claim: what each row's node
+// type, concrete label and metadata extraction are (see kinds.go).
+func init() {
+	bigqueryRows := resourceKind{
+		Service:      "BigQuery",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "BigQueryDataset",
+		Subtype:      "BigQuery",
+	}
+	bigqueryGoogleapisComRows := resourceKind{
+		Service:      "bigquery.googleapis.com",
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "BigQueryDataset",
+		Subtype:      "BigQuery",
+	}
+	registerKind(bigqueryRows)
+	registerKind(bigqueryGoogleapisComRows)
+	registerKind(bigqueryRows.withTypes("bigquery", "bigquery.googleapis.com/dataset", "bigquery.googleapis.com/table", "bigquery.googleapis.com/view"))
+	registerKind(resourceKind{
+		Service:      "bigquery.googleapis.com",
+		Types:        []string{"bigquery.googleapis.com/dataset", "bigquery.googleapis.com/table"},
+		NodeType:     core.NodeTypeDatabase,
+		SpecificType: "BigQueryDataset",
+		Subtype:      "BigQuery",
+	})
+}

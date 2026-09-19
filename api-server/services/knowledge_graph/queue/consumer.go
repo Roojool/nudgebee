@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/knowledge_graph/flow_sources"
 	kgmodels "nudgebee/services/knowledge_graph/models"
+	"nudgebee/services/knowledge_graph/resourcepatch"
 	"nudgebee/services/knowledge_graph/sources"
 	_ "nudgebee/services/knowledge_graph/sources/aws"       // register AWS source factory (init side-effect)
 	_ "nudgebee/services/knowledge_graph/sources/azure"     // register Azure source factory (init side-effect)
@@ -82,13 +83,21 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 		MinTenantWideInterval: time.Duration(config.Config.KGUpdateDeduplicationMinutes) * time.Minute,
 	})
 
-	// 2. Record the request durably before competing for the tenant. If another
+	// 2. Apply individually named resources directly; only the accounts where
+	// that is not possible become build requests.
+	accountIDs := message.AccountIDs
+	if len(message.Resources) > 0 {
+		rebuildAccounts := applyResourceRefs(msgCtx, dbms, message, logger)
+		accountIDs = unionAccounts(message.AccountIDs, rebuildAccounts)
+	}
+
+	// 3. Record the request durably before competing for the tenant. If another
 	// worker is mid-build it will drain this row when it finishes, so no request
 	// is ever silently dropped (which the old time-window claim did).
-	if shouldEnqueue(message) {
+	if shouldEnqueueScope(message, accountIDs) {
 		if err := requestRepo.Enqueue(core.BuildRequestSpec{
 			TenantID:      message.TenantID,
-			AccountIDs:    message.AccountIDs,
+			AccountIDs:    accountIDs,
 			Sources:       message.Sources,
 			FlowSources:   message.FlowSources,
 			Trigger:       message.Source,
@@ -99,7 +108,7 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 		}
 	}
 
-	// 3. Try to become the tenant's builder. Losing the race is the normal case
+	// 4. Try to become the tenant's builder. Losing the race is the normal case
 	// under a burst and needs no retry — the winner drains what we just enqueued.
 	claim, claimed, err := requestRepo.TryClaim(message.TenantID)
 	if err != nil {
@@ -111,7 +120,7 @@ func processKGUpdateMessage(msgCtx context.Context, data []byte) error {
 		return nil
 	}
 
-	// 4. Build, then drain anything queued while we were building.
+	// 5. Build, then drain anything queued while we were building.
 	for drains := 0; claim != nil; drains++ {
 		logger.Info("kg_queue: starting KG update for tenant",
 			"account_ids", claim.AccountIDs,
@@ -261,6 +270,109 @@ func aggregateFilterErrors(errs []error, totalFilters int) error {
 // A drain continuation does not: its work is already pending in the queue table.
 func shouldEnqueue(message KGUpdateMessage) bool {
 	return message.Source != drainContinuationSource
+}
+
+// shouldEnqueueScope reports whether the message, after its resource refs were
+// applied, still asks for a build. A message that named only resources and had
+// every one applied needs none; enqueueing its empty account list would turn it
+// into a tenant-wide rebuild.
+func shouldEnqueueScope(message KGUpdateMessage, accountIDs []string) bool {
+	if !shouldEnqueue(message) {
+		return false
+	}
+	if len(message.Resources) > 0 && len(message.AccountIDs) == 0 {
+		return len(accountIDs) > 0
+	}
+	return true
+}
+
+// applyResourceRefs applies the message's resource refs and returns the accounts
+// that need an account-scoped build instead. If the applier cannot be created,
+// every referenced account is returned so nothing is lost.
+//
+// Refs for an account the message already asks to rebuild are skipped: that
+// build rewrites them anyway.
+func applyResourceRefs(ctx context.Context, dbms *database.DatabaseManager, message KGUpdateMessage, logger *slog.Logger) []string {
+	rebuilding := make(map[string]struct{}, len(message.AccountIDs))
+	for _, id := range message.AccountIDs {
+		rebuilding[id] = struct{}{}
+	}
+	refs := make([]resourcepatch.Ref, 0, len(message.Resources))
+	for _, r := range message.Resources {
+		accountID := r.AccountID
+		if accountID == "" && len(message.AccountIDs) == 1 {
+			// A publisher that named one account may leave it off its refs.
+			accountID = message.AccountIDs[0]
+		}
+		if _, skip := rebuilding[accountID]; skip {
+			continue
+		}
+		refs = append(refs, resourcepatch.Ref{
+			AccountID:          accountID,
+			ProviderResourceID: r.ProviderResourceID,
+			NodeType:           r.NodeType,
+			Op:                 r.Op,
+		})
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	if !config.Config.KGResourcePatchEnabled {
+		// Per-resource updates are switched off: rebuild each referenced account,
+		// exactly as before they existed.
+		return refAccounts(refs)
+	}
+	applier, err := resourcepatch.NewApplier(dbms, logger)
+	if err != nil {
+		logger.Error("kg_queue: failed to create resource applier, rebuilding referenced accounts", "error", err)
+		return referencedAccounts(message)
+	}
+	return applier.ApplyAll(ctx, message.TenantID, refs)
+}
+
+// refAccounts lists the distinct accounts of refs, in first-seen order.
+func refAccounts(refs []resourcepatch.Ref) []string {
+	out := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, r := range refs {
+		if r.AccountID == "" || seen[r.AccountID] {
+			continue
+		}
+		seen[r.AccountID] = true
+		out = append(out, r.AccountID)
+	}
+	return out
+}
+
+// referencedAccounts lists the distinct accounts a message's refs belong to.
+func referencedAccounts(message KGUpdateMessage) []string {
+	out := make([]string, 0)
+	for _, r := range message.Resources {
+		accountID := r.AccountID
+		if accountID == "" && len(message.AccountIDs) == 1 {
+			accountID = message.AccountIDs[0]
+		}
+		if accountID != "" {
+			out = append(out, accountID)
+		}
+	}
+	return unionAccounts(nil, out)
+}
+
+// unionAccounts returns the distinct account ids of a and b, a's order first.
+func unionAccounts(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, id := range list {
+			if _, dup := seen[id]; dup || id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // buildRequestForFilter turns a tenant filter plus the claim's scope into the
