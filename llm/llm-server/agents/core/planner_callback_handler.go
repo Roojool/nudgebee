@@ -253,6 +253,30 @@ func (h *plannerExecutorCallbackHandler) BeforeToolCall(toolcall NBAgentPlannerT
 	}
 }
 
+// skillReferenceMetadata builds the Additional Contexts row for one skill or
+// knowledge-base reference produced by load_skills / search_skills.
+//
+// Description carries the purpose guidance, which is the same sentence for every
+// knowledge base of a category. That is enough for a whole-document knowledge
+// base, whose body the panel reads from the KB row itself — but not for a
+// chunked one (a PDF's pages and figures), where the row would say nothing about
+// WHICH chunk was read. Stamping the retrieved text as "content" mirrors what
+// the pre-step already does, and the panel prefers it over the description.
+func skillReferenceMetadata(kind, tool string, ref toolcore.NBToolResponseReference) map[string]any {
+	metadata := map[string]any{
+		// Skills share reference_type "knowledge_base" with pre-step documents;
+		// kind is what tells them apart.
+		"kind":        kind,
+		"via":         tool,
+		"name":        ref.Text,
+		"description": ref.Description,
+	}
+	if snippet := strings.TrimSpace(ref.Snippet); snippet != "" {
+		metadata["content"] = TruncateHead(snippet, kbRefSnippetMaxChars)
+	}
+	return metadata
+}
+
 func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlannerToolAction, response toolcore.NBToolResponse) {
 	tool, ok := h.findTool(tcr.Tool)
 
@@ -316,14 +340,7 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 				kbRefs = append(kbRefs, AgentReference{
 					Type:        AgentReferenceTypeKB,
 					ReferenceID: ref.Url,
-					Metadata: map[string]any{
-						// Skills share reference_type "knowledge_base" with
-						// pre-step documents; kind is what tells them apart.
-						"kind":        kind,
-						"via":         tcr.Tool,
-						"name":        ref.Text,
-						"description": ref.Description,
-					},
+					Metadata:    skillReferenceMetadata(kind, tcr.Tool, ref),
 				})
 			}
 		}

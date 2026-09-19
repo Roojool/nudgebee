@@ -36,6 +36,7 @@ import ScopeChip from '@components/llm/ScopeChip';
 import KnowledgePolicySettings from '@components/llm/KnowledgePolicySettings';
 import { formatTrigger, formatDuration, formatDocuments } from '@components/llm/kbLoadHistoryFormat';
 import { isKbRetriggerDisabled } from '@components/llm/kbRetrigger';
+import { KB_FORMAT_PDF, KB_FORMAT_TEXT, MAX_UPLOAD_BYTES, arrayBufferToBase64, isPdfFile, isTextFile } from '@components/llm/kbUploadFormat';
 import KBDocumentsModal from '@components/llm/KBDocumentsModal';
 
 const MAX_CONTENT_LENGTH = 5000;
@@ -152,21 +153,30 @@ const getKbMenuItems = (knowledgeBase, hasAccess) => [
 
 // Source lifecycle is separate from the user's permission to retrieve this KB.
 const KbStatusLabel = ({ knowledgeBase }) => {
+  // error_message on an *active* KB is not a failure: the load succeeded but
+  // left something out (pages or figures over the ingest caps, figures no
+  // vision model could read). Saying "Ready" there would hide a partial index,
+  // so it gets its own label. The backend clears the column on a clean load.
+  const indexedWithGaps = knowledgeBase.status === 'active' && !!knowledgeBase.error_message;
   const labels = { active: 'Ready', processing: 'Syncing', error: 'Sync failed', archived: 'Source unavailable' };
-  const explanation =
-    knowledgeBase.status === 'archived'
-      ? 'This source is no longer eligible for knowledge sync. Check the integration, account connection, and knowledge sync settings. Stored content is retained but cannot be retrieved, even when Use in answers is on.'
-      : knowledgeBase.status === 'error'
-      ? `${
-          knowledgeBase.error_message || 'The latest sync failed.'
-        } Previously indexed content may still appear in search; direct skill loading requires Ready.`
-      : knowledgeBase.status === 'processing'
-      ? 'Sync is in progress. Previously indexed content may still appear in search; direct skill loading requires Ready.'
-      : 'Content is ready. Use in answers, retrieval mode, and agent access determine whether it is retrieved.';
+  const explanation = indexedWithGaps
+    ? `${knowledgeBase.error_message} Everything that was indexed is retrievable.`
+    : knowledgeBase.status === 'archived'
+    ? 'This source is no longer eligible for knowledge sync. Check the integration, account connection, and knowledge sync settings. Stored content is retained but cannot be retrieved, even when Use in answers is on.'
+    : knowledgeBase.status === 'error'
+    ? `${
+        knowledgeBase.error_message || 'The latest sync failed.'
+      } Previously indexed content may still appear in search; direct skill loading requires Ready.`
+    : knowledgeBase.status === 'processing'
+    ? 'Sync is in progress. Previously indexed content may still appear in search; direct skill loading requires Ready.'
+    : 'Content is ready. Use in answers, retrieval mode, and agent access determine whether it is retrieved.';
   return (
     <Tooltip title={explanation} placement='top'>
       <Box component='span' sx={{ display: 'inline-flex', cursor: 'help' }}>
-        <Label text={labels[knowledgeBase.status] || knowledgeBase.status} tone={getKbStatusTone(knowledgeBase.status)} />
+        <Label
+          text={indexedWithGaps ? 'Ready with gaps' : labels[knowledgeBase.status] || knowledgeBase.status}
+          tone={indexedWithGaps ? 'warning' : getKbStatusTone(knowledgeBase.status)}
+        />
       </Box>
     </Tooltip>
   );
@@ -244,6 +254,9 @@ const KnowledgeBaseFormModal = ({
   const [selectedAgentIds, setSelectedAgentIds] = useState([]);
   const [noteCategory, setNoteCategory] = useState(DEFAULT_NOTE_CATEGORY);
   const [contextTags, setContextTags] = useState([]);
+  // 'text' or 'pdf' — decides how the selected file was read, and what format
+  // the backend is told to parse it as.
+  const [fileFormat, setFileFormat] = useState(KB_FORMAT_TEXT);
   const fileInputRef = useRef(null);
   const dropZoneRef = useRef(null);
 
@@ -251,7 +264,11 @@ const KnowledgeBaseFormModal = ({
     if (editKnowledgeBase) {
       setName(editKnowledgeBase.name || '');
       setDescription(editKnowledgeBase.description || '');
-      setContent(editKnowledgeBase.content || '');
+      // A PDF's stored content is base64, so it must never be loaded into the
+      // editor: it is not readable, and re-submitting it would re-index the
+      // encoding as if it were prose. Leaving it empty also means the backend
+      // keeps the existing document unless a new file is actually chosen.
+      setContent(editKnowledgeBase.format === KB_FORMAT_PDF ? '' : editKnowledgeBase.content || '');
       setNoteCategory(editKnowledgeBase.note_category || DEFAULT_NOTE_CATEGORY);
       setContextTags(editKnowledgeBase.context_tags || []);
     } else {
@@ -263,6 +280,7 @@ const KnowledgeBaseFormModal = ({
     }
     setSelectedFile(null);
     setFileContent('');
+    setFileFormat(KB_FORMAT_TEXT);
   }, [editKnowledgeBase, open]);
 
   // Carry the KB's existing mappings through the form untouched. Routing is
@@ -288,11 +306,10 @@ const KnowledgeBaseFormModal = ({
   }, [editKnowledgeBase, open, initialAgentIds]);
 
   const validateFile = (file) => {
-    const validTypes = ['text/plain'];
-    const maxSize = 5 * 1024 * 1024; // 5MB limit
+    const maxSize = MAX_UPLOAD_BYTES;
 
-    if (!validTypes.includes(file.type) && !file.name.endsWith('.txt')) {
-      snackbar.error('Please select only .txt files');
+    if (!isTextFile(file) && !isPdfFile(file)) {
+      snackbar.error('Please select a .txt or .pdf file');
       return false;
     }
 
@@ -305,6 +322,10 @@ const KnowledgeBaseFormModal = ({
   };
 
   const readAndSetFile = (file) => {
+    if (isPdfFile(file)) {
+      readAndSetPdf(file);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target.result;
@@ -320,8 +341,29 @@ const KnowledgeBaseFormModal = ({
       }
       setSelectedFile(file);
       setFileContent(text);
+      setFileFormat(KB_FORMAT_TEXT);
     };
     reader.readAsText(file);
+  };
+
+  // A PDF travels as base64: its figures have to reach the server intact so a
+  // vision model can read them, and the character limit that guards typed notes
+  // has no meaning for a binary document.
+  const readAndSetPdf = (file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        setFileContent(arrayBufferToBase64(e.target.result));
+        setSelectedFile(file);
+        setFileFormat(KB_FORMAT_PDF);
+      } catch {
+        snackbar.error('That PDF could not be read. Please try another file.');
+        setSelectedFile(null);
+        setFileContent('');
+      }
+    };
+    reader.onerror = () => snackbar.error('That PDF could not be read. Please try another file.');
+    reader.readAsArrayBuffer(file);
   };
 
   const handleFileSelect = (event) => {
@@ -366,6 +408,9 @@ const KnowledgeBaseFormModal = ({
   };
 
   const isEditWithOverflow = !!(editKnowledgeBase && (editKnowledgeBase.content?.length || 0) > MAX_CONTENT_LENGTH);
+  // Editing a PDF-backed KB with no replacement file: name, description and
+  // tags are editable, the document itself stays as it is.
+  const isPdfEdit = editKnowledgeBase?.format === KB_FORMAT_PDF;
 
   const handleSubmit = () => {
     const trimmedName = name?.trim() || '';
@@ -386,7 +431,7 @@ const KnowledgeBaseFormModal = ({
       snackbar.error('Name must be between 3 and 50 characters');
       return;
     }
-    if (!selectedFile) {
+    if (!selectedFile && !(isPdfEdit && content.trim().length === 0)) {
       if (content.trim().length === 0) {
         snackbar.error('Provide valid content or upload file for knowledge base');
         return;
@@ -401,6 +446,8 @@ const KnowledgeBaseFormModal = ({
       name: trimmedName,
       description: description.trim(),
       content: selectedFile ? fileContent.trim() : content.trim(),
+      format: selectedFile ? fileFormat : KB_FORMAT_TEXT,
+      fileName: selectedFile ? selectedFile.name : editKnowledgeBase?.fileName || `${trimmedName}.txt`,
       noteCategory,
       contextTags,
       agentIds: agentMode === 'all' ? [KB_AGENT_WILDCARD] : selectedAgentIds,
@@ -653,7 +700,7 @@ const KnowledgeBaseFormModal = ({
               marginBottom: ds.space.mul(0, 3),
             }}
           >
-            Upload Text File
+            Upload File
           </Typography>
           <Box
             ref={dropZoneRef}
@@ -679,7 +726,7 @@ const KnowledgeBaseFormModal = ({
               gap: ds.space[2],
             }}
           >
-            <input ref={fileInputRef} type='file' accept='.txt' onChange={handleFileSelect} style={{ display: 'none' }} />
+            <input ref={fileInputRef} type='file' accept='.txt,.pdf' onChange={handleFileSelect} style={{ display: 'none' }} />
             <Box
               sx={{
                 width: ds.space.mul(1, 10),
@@ -694,7 +741,7 @@ const KnowledgeBaseFormModal = ({
               <SafeIcon src={UploadIcon} alt='Upload' width={20} height={20} />
             </Box>
             <Text
-              value={selectedFile ? selectedFile.name : 'Click or drag a .txt file to upload'}
+              value={selectedFile ? selectedFile.name : 'Click or drag a .txt or .pdf file to upload'}
               sx={{
                 fontSize: 'var(--ds-text-body)',
                 fontWeight: 'var(--ds-font-weight-medium)',
@@ -708,6 +755,7 @@ const KnowledgeBaseFormModal = ({
                   e.stopPropagation();
                   setSelectedFile(null);
                   setFileContent('');
+                  setFileFormat(KB_FORMAT_TEXT);
                 }}
                 sx={{
                   fontSize: 'var(--ds-text-caption)',
@@ -721,7 +769,7 @@ const KnowledgeBaseFormModal = ({
               </Typography>
             ) : (
               <Text
-                value={`Max ${MAX_CONTENT_LENGTH.toLocaleString()} characters · up to 5MB`}
+                value={`.txt up to ${MAX_CONTENT_LENGTH.toLocaleString()} characters · .pdf up to 5MB`}
                 sx={{
                   fontSize: 'var(--ds-text-caption)',
                   color: 'var(--ds-gray-500)',
@@ -731,6 +779,18 @@ const KnowledgeBaseFormModal = ({
             )}
           </Box>
         </Box>
+
+        {/* A PDF is not just parsed locally the way a .txt is — its figures are
+            sent to the account's configured model to be read. Say so at the
+            point of upload, where the decision is actually being made. */}
+        {fileFormat === KB_FORMAT_PDF && selectedFile ? (
+          <Box sx={{ display: 'flex', gap: ds.space[2], marginBottom: ds.space[4], alignItems: 'flex-start' }}>
+            <InfoOutlinedIcon sx={{ fontSize: 'var(--ds-text-body-lg)', color: 'var(--ds-blue-500)', flexShrink: 0 }} />
+            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-700)' }}>
+              Diagrams and screenshots in this PDF are sent to your configured AI provider so their contents can be read and indexed.
+            </Typography>
+          </Box>
+        ) : null}
 
         {/* OR Divider */}
         <Box
@@ -770,7 +830,13 @@ const KnowledgeBaseFormModal = ({
           <MentionContentInput
             minRows={8}
             maxRows={15}
-            placeholder={fileContent ? 'File content will be used — remove the file to type manually' : CONTENT_PLACEHOLDER}
+            placeholder={
+              fileContent
+                ? 'File content will be used — remove the file to type manually'
+                : isPdfEdit
+                ? 'This knowledge base holds a PDF. Upload a new file to replace it, or type here to replace it with text.'
+                : CONTENT_PLACEHOLDER
+            }
             value={fileContent ? '' : content}
             onChange={(next) => !fileContent && setContent(next)}
             disabled={!!fileContent}

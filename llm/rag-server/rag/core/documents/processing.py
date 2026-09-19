@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import time
+import uuid
 from typing import List, Optional
 
 from botocore.exceptions import ClientError
@@ -48,6 +49,7 @@ def update_kb_load_result(
     status: str,
     document_count: Optional[int] = None,
     error_message: Optional[str] = None,
+    warning: Optional[str] = None,
 ) -> None:
     """Record a load's outcome on a single llm_knowledgebases row (by id).
 
@@ -61,13 +63,22 @@ def update_kb_load_result(
         with engine.connect() as connection:
             with connection.begin():
                 if document_count is not None:
+                    # The warning rides in the same statement as the status flip.
+                    # Written separately afterwards it would be erased by this
+                    # very UPDATE, and a gap nobody is shown is a silently
+                    # partial index.
                     connection.execute(
                         sql_text(
                             "UPDATE llm_knowledgebases SET status = :status, "
                             "document_count = :doc_count, last_loaded_at = NOW(), "
-                            "error_message = NULL, updated_at = NOW() WHERE id = :kb_id"
+                            "error_message = :warning, updated_at = NOW() WHERE id = :kb_id"
                         ),
-                        {"status": status, "doc_count": document_count, "kb_id": knowledgebase_id},
+                        {
+                            "status": status,
+                            "doc_count": document_count,
+                            "warning": warning or None,
+                            "kb_id": knowledgebase_id,
+                        },
                     )
                 else:
                     connection.execute(
@@ -402,7 +413,13 @@ def _build_collection_meta(account_id, module, tenant_id=None, source=None):
 
 def _stamp_provenance(documents, source=None, tenant_id=None):
     """Stamp provenance tags onto each document's metadata so per-source and
-    per-tenant filters work at query time. Respects caller overrides."""
+    per-tenant filters work at query time. Respects caller overrides.
+
+    Deliberately no run id: an unchanged document is skipped before upsert, so the marker
+    would only ever land on documents that changed — present on some points, absent on
+    others, for reasons a reader cannot see. Which documents a load captured is answered
+    from the source store, which writes every document it was given.
+    """
     if not (source or tenant_id):
         return
     for doc in documents:
@@ -503,6 +520,8 @@ def process_documents(
     trigger_type="system_sync",
     source=None,
     tenant_id=None,
+    warning=None,
+    run_id=None,
 ):
     """
     Process multiple documents asynchronously with batch embedding.
@@ -550,6 +569,7 @@ def process_documents(
             return None, None
         collection_name, collection_meta, verify_doc = result
 
+    run_id = run_id or str(uuid.uuid4())
     _stamp_provenance(documents, source=source, tenant_id=tenant_id)
 
     # Initialize tracker with load metadata
@@ -561,6 +581,7 @@ def process_documents(
         trigger_type=trigger_type,
         module=module,
         expected_document_count=len(documents),
+        run_id=run_id,
     )
     tracker.start_timer()
 
@@ -612,7 +633,12 @@ def process_documents(
     # knowledgebase_id here; integration scrapes pass none and update every
     # integration KB row by integration_id at scrape completion instead.
     if knowledgebase_id:
-        update_kb_load_result(knowledgebase_id, "active", tracker.expected_document_count or total_documents)
+        update_kb_load_result(
+            knowledgebase_id,
+            "active",
+            tracker.expected_document_count or total_documents,
+            warning=warning,
+        )
 
     logger.info(
         f"Embeddings generated for account id {account_id}, module {module}, "

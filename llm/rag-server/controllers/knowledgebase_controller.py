@@ -22,6 +22,7 @@ from rag.core.embeddings.generator import get_embeddings
 from rag.core.llm.rag import get_matching_documents
 from rag.core.types import Document
 from rag.core.documents.knowledge_tags import add_knowledge_context_tags
+from rag.core.documents import figure_cache, pdf_ingest, source_store
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ class KBCreateRequest(BaseModel):
     kb_id: str
     data: str
     format: str = "text"
+    # Only a PDF needs it: it heads every chunk, so a retrieved passage says
+    # which document it came from.
+    filename: str = ""
     triggered_by: str = "system"
     trigger_type: str = "user_create"
     context_tags: list[str] = Field(default_factory=list)
@@ -76,7 +80,9 @@ def _create_kb_document_loader(file_path: str, data_format: str) -> DocumentLoad
     elif data_format == "text":
         return TextLoader(file_path)
     else:
-        # Default to text format
+        # Default to text format. Note "pdf" never reaches here: create_kb routes a PDF to
+        # _create_pdf_kb, which reads the document and describes its figures before there
+        # is anything to index.
         return TextLoader(file_path)
 
 
@@ -117,6 +123,58 @@ class KBLineByLineLoader:
             return documents
 
 
+async def _create_pdf_kb(request: KBCreateRequest, collection_name: str) -> dict:
+    """Index a PDF: page text plus a description of every figure.
+
+    Kept apart from the text path because a PDF arrives as base64 and its
+    figures have to be read by a vision model before there is anything to
+    index — none of which survives being written to a text temp file.
+    """
+    try:
+        documents, warning = await asyncio.to_thread(
+            pdf_ingest.build_pdf_documents,
+            request.data,
+            request.account_id,
+            request.filename,
+            None,
+            collection_name,
+        )
+    except ValueError as exc:
+        # Corrupt, password-protected, not a PDF, or nothing readable in it: all of them
+        # are the uploader's to fix, and all of them carry a reason worth showing.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    documents = add_knowledge_context_tags(documents, request.context_tags)
+    embeddings = await asyncio.to_thread(get_embeddings, request.account_id)
+
+    _, document_ids = await asyncio.to_thread(
+        process_documents,
+        documents=documents,
+        embeddings=embeddings,
+        account_id=request.account_id,
+        module="knowledge_base",
+        collection_name=collection_name,
+        knowledgebase_id=request.kb_id,
+        triggered_by=request.triggered_by,
+        trigger_type=request.trigger_type,
+        source="user_kb",
+        warning=warning,
+    )
+    if not document_ids:
+        # process_documents swallows embedding and storage failures and returns no ids.
+        # Reporting the chunks we built as the document count would turn a load that
+        # indexed nothing into a successful one — the silent partial index this whole
+        # path exists to prevent.
+        raise HTTPException(status_code=500, detail="The PDF was read, but none of its content could be indexed")
+
+    logger.info("Created PDF KB collection %s with %d documents", collection_name, len(document_ids))
+    return {
+        "status": "success",
+        "collection": collection_name,
+        "document_count": len(document_ids),
+        "warning": warning,
+    }
+
+
 @router.post("/kb/create")
 async def create_kb(request: KBCreateRequest):
     """
@@ -133,6 +191,9 @@ async def create_kb(request: KBCreateRequest):
 
         # Generate collection name
         collection_name = f"kb_{request.kb_id}"
+
+        if request.format == "pdf":
+            return await _create_pdf_kb(request, collection_name)
 
         # Write data to temporary file asynchronously
         tmp_fd, tmp_path = await asyncio.to_thread(tempfile.mkstemp, suffix=f".{request.format}", text=True)
@@ -202,6 +263,11 @@ async def delete_kb(account_id: str, kb_id: str):
 
         # Delete the collection (blocking - run in thread pool)
         await asyncio.to_thread(document_collection.delete_collection, collection_name)
+        # Derived stores go with it: source kept for the "view as indexed" screen, and the
+        # figure descriptions cached against this knowledge base. Nothing derived from a
+        # deleted knowledge base should outlive it.
+        await asyncio.to_thread(source_store.drop, collection_name)
+        await asyncio.to_thread(figure_cache.forget_collection, collection_name)
 
         logger.info(f"Successfully deleted KB collection: {collection_name}")
 

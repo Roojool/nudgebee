@@ -528,8 +528,9 @@ func (chat *ConversationDao) ListAgentReferences(accountId, conversationId strin
 					-- empty, and runbook references ('runbook:<hash>' ids) have no KB
 					-- row at all — without the fallback both were silently dropped by
 					-- the empty-content skip below and never reached the Additional
-					-- Contexts panel (#34779).
-					WHEN r.reference_type = 'knowledge_base' THEN COALESCE(NULLIF(k.data,''), NULLIF(r.metadata->>'content',''), NULLIF(r.metadata->>'description',''), r.metadata->>'name')
+					-- Contexts panel (#34779). A PDF KB's data is base64 of the
+					-- document, never a displayable body, so it takes the fallback too.
+					WHEN r.reference_type = 'knowledge_base' THEN COALESCE(NULLIF(CASE WHEN k.data_format = 'pdf' THEN '' ELSE k.data END,''), NULLIF(r.metadata->>'content',''), NULLIF(r.metadata->>'description',''), r.metadata->>'name')
 					-- COALESCE(joined-projection, metadata->>'subject', '') so a
 					-- memory row deleted/decayed between injection and read still
 					-- surfaces its historical subject (from the metadata stamped

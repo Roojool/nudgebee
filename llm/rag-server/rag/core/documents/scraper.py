@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from typing import List
 from urllib.parse import urlparse
@@ -12,6 +13,7 @@ from atlassian import Confluence
 from bs4 import BeautifulSoup, NavigableString
 from filelock import FileLock, Timeout
 from markdownify import MarkdownConverter  # type: ignore[import-untyped]
+from rag.core.documents import source_store
 from rag.core.documents.processing import (
     handle_updated_documents,
     process_documents,
@@ -226,7 +228,7 @@ def confluence_page_url(confluence, page):
     return f"{base}{webui}"
 
 
-def process_page_batch(page_queue, visited_pages, confluence, space_key, stats, tree_root=None):
+def process_page_batch(page_queue, visited_pages, confluence, space_key, stats, tree_root=None, sources=None):
     batch = []
 
     for _ in range(min(Config.embedding_batch_size, len(page_queue))):
@@ -287,11 +289,24 @@ def process_page_batch(page_queue, visited_pages, confluence, space_key, stats, 
             if tree_root:
                 metadata["tree_root"] = tree_root
             batch.append(Document(page_content=content, metadata=metadata))
+            if sources is not None:
+                # The body exactly as Confluence rendered it. What we index is
+                # converted and will be chunked; this is what "show me the page"
+                # means, and it is the only copy — the scrape does not keep one.
+                sources.append(
+                    {
+                        "source_id": str(page_id),
+                        "title": title,
+                        "url": page_url,
+                        "content": html_content,
+                        "content_type": "text/html",
+                    }
+                )
 
     return batch
 
 
-def collect_confluence_tree_documents(confluence, root_id, stats):
+def collect_confluence_tree_documents(confluence, root_id, stats, sources=None):
     """Walk one page tree — the root page and every page beneath it."""
     if not fetch_page(confluence, root_id):
         # A root that cannot be read is a permissions or configuration problem,
@@ -302,7 +317,9 @@ def collect_confluence_tree_documents(confluence, root_id, stats):
     page_queue = [root_id]
     documents: List[Document] = []
     while page_queue:
-        documents.extend(process_page_batch(page_queue, visited_pages, confluence, None, stats, tree_root=root_id))
+        documents.extend(
+            process_page_batch(page_queue, visited_pages, confluence, None, stats, tree_root=root_id, sources=sources)
+        )
     logger.info(f"Collected {len(documents)} Confluence page documents under page {root_id}")
     return documents
 
@@ -315,7 +332,7 @@ def configured_page_trees(config):
     return [p.strip() for p in (config.get("page_trees") or "").split(",") if p.strip()]
 
 
-def collect_confluence_space_documents(confluence, space_key, stats):
+def collect_confluence_space_documents(confluence, space_key, stats, sources=None):
     """Walk a Confluence space and return all page documents (no embedding).
 
     Embedding is done in a single process_documents call per integration so
@@ -331,7 +348,7 @@ def collect_confluence_space_documents(confluence, space_key, stats):
     page_queue = [page["id"] for page in all_pages]
     documents: List[Document] = []
     while page_queue:
-        documents.extend(process_page_batch(page_queue, visited_pages, confluence, space_key, stats))
+        documents.extend(process_page_batch(page_queue, visited_pages, confluence, space_key, stats, sources=sources))
     logging.info(f"Collected {len(documents)} Confluence page documents for space {space_key}")
     return documents
 
@@ -378,16 +395,21 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
 
         stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
         documents: List[Document] = []
+        # The pages exactly as fetched, kept so a user can see what was indexed rather
+        # than a reconstruction of it. Stamped with the same run id as the points, so
+        # "what did this load capture" is a query rather than a stored manifest.
+        sources: List[dict] = []
+        run_id = str(uuid.uuid4())
         space_keys: List[str] = []
         if tree_roots:
             # Page trees replace the space walk: the space (if any) only scoped
             # validation, and the trees are the whole of what gets indexed.
             for root_id in tree_roots:
-                documents.extend(collect_confluence_tree_documents(confluence, root_id, stats))
+                documents.extend(collect_confluence_tree_documents(confluence, root_id, stats, sources=sources))
         else:
             space_keys = [space_key] if space_key else fetch_all_spaces(confluence)
             for sk in space_keys:
-                documents.extend(collect_confluence_space_documents(confluence, sk, stats))
+                documents.extend(collect_confluence_space_documents(confluence, sk, stats, sources=sources))
         if stats["failed_pages"] or stats["empty_spaces"] or stats["failed_roots"]:
             logger.warning(
                 "Confluence integration %s scraped with gaps: %s unreadable pages, "
@@ -435,6 +457,7 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
                 tenant_id=tenant_id,
                 trigger_type=trigger_type,
                 triggered_by=triggered_by,
+                run_id=run_id,
             )
             if not document_ids:
                 # process_documents swallows embedding failures and returns no
@@ -445,6 +468,9 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
                     integration_id, "error", error_message="Embedding produced no documents from the Confluence scrape"
                 )
                 return []
+            # Only once the embed is known to have produced documents: source for a load
+            # that never happened would show a reader pages that are not in the index.
+            source_store.store(collection_name, sources, run_id)
         update_integration_kb_load_result(integration_id, "active", len(document_ids))
         return document_ids
     except Exception as e:

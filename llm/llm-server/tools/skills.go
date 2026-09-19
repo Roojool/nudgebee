@@ -371,8 +371,9 @@ func (m LoadSkillsTool) fetchSkillsBatch(ctx core.NbToolContext, dbms *common.Da
 
 	// Resolve the requested names in one account-scoped batch query.
 	query := `
-		SELECT kb.id, kb.name, LEFT(kb.data, 4097), COALESCE(kb.description, ''),
-		       COALESCE(kb.kb_type, 'manual'), kb.kb_source, kb.integration_id, COALESCE(kb.note_category, '')
+		SELECT kb.id, kb.name, CASE WHEN kb.data_format = 'pdf' THEN '' ELSE LEFT(kb.data, 4097) END, COALESCE(kb.description, ''),
+		       COALESCE(kb.kb_type, 'manual'), kb.kb_source, kb.integration_id, COALESCE(kb.note_category, ''),
+		       COALESCE(kb.data_format, '')
 		FROM llm_knowledgebases kb
 		WHERE kb.account_id = $1
 		  AND LOWER(BTRIM(kb.name)) = ANY($2::text[])
@@ -392,10 +393,15 @@ func (m LoadSkillsTool) fetchSkillsBatch(ctx core.NbToolContext, dbms *common.Da
 
 	foundInDB := make(map[string]bool)
 	for rows.Next() {
-		var id, name, data, description, kbType, category string
+		var id, name, data, description, kbType, category, format string
 		var kbSource, integrationID *string
-		if err := rows.Scan(&id, &name, &data, &description, &kbType, &kbSource, &integrationID, &category); err != nil {
+		if err := rows.Scan(&id, &name, &data, &description, &kbType, &kbSource, &integrationID, &category, &format); err != nil {
 			continue
+		}
+		if format == string(core.KBFormatPDF) {
+			// A PDF's data column is base64 of the document; its content is only
+			// reachable through the indexed page and figure chunks.
+			data = core.PDFKnowledgePointer
 		}
 		lower := strings.ToLower(strings.TrimSpace(name))
 		sd := skillData{Purpose: core.KnowledgePurpose(kbType, category), ID: id, ExcerptOnly: len(data) > core.KnowledgeExcerptBytes, Data: common.TruncateHead(data, core.KnowledgeExcerptBytes), Description: description, KBType: kbType, KBSource: kbSource, IntegrationID: integrationID}
@@ -719,7 +725,7 @@ func (s SearchSkillsTool) searchManualKBs(ctx core.NbToolContext, dbms *common.D
 
 	sqlQuery := fmt.Sprintf(`
 		SELECT kb.id, kb.name, COALESCE(kb.description, ''),
-		       LEFT(kb.data, 500), COALESCE(kb.note_category, '')
+		       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE LEFT(kb.data, 500) END, COALESCE(kb.note_category, '')
 		FROM llm_knowledgebases kb
 		WHERE kb.account_id = $1
 		  AND kb.status = 'active'

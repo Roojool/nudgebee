@@ -91,7 +91,7 @@ func TestKnowledgeIndexRequestCarriesTagsWithoutChangingSource(t *testing.T) {
 	}))
 	defer server.Close()
 	config.Config.RAGServerUrl = server.URL
-	n, err := createKBVectorCollection("account", "kb", "unaltered source", "text", "tester", "user_update", []string{"service: checkout", "payments"})
+	n, err := createKBVectorCollection("account", "kb", "unaltered source", "text", "", "tester", "user_update", []string{"service: checkout", "payments"})
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 }

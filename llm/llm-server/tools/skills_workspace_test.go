@@ -157,7 +157,7 @@ func TestKnowledgeSmallManualHandleRejectsChangedVersion(t *testing.T) {
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name(), ConversationId: "conv", MessageId: "msg"}
 	c := core.KnowledgeCandidate{ID: "knowledge:manual", KBID: "manual", Version: "old", FileSHA256: strings.Repeat("a", 64), Content: "old body"}
 	require.NoError(t, core.StoreKnowledgeCandidate(ctx.AccountId, ctx.ConversationId, ctx.MessageId, c))
-	mock.ExpectQuery(`SELECT id, name, COALESCE`).WithArgs(ctx.AccountId, "manual", c.ID).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kb_type", "integration_id", "md5", "bytes", "note_category"}).AddRow("manual", "Manual", "manual", nil, "new", 8, "sop"))
+	mock.ExpectQuery(`SELECT id, name, COALESCE`).WithArgs(ctx.AccountId, "manual", c.ID).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kb_type", "integration_id", "md5", "bytes", "note_category", "data_format"}).AddRow("manual", "Manual", "manual", nil, "new", 8, "sop", ""))
 	resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": c.ID}})
 	require.NoError(t, err)
 	require.Equal(t, core.NBToolResponseStatusError, resp.Status)
@@ -297,7 +297,7 @@ func TestKnowledgeWorkspaceRefreshesManualPurpose(t *testing.T) {
 	c := core.KnowledgeCandidate{ID: "knowledge:purpose", KBID: "manual", Version: "same-body", Path: "knowledge/existing.txt", FileSHA256: digest, Purpose: core.KnowledgePurposeReference}
 	require.NoError(t, core.StoreKnowledgeCandidate(ctx.AccountId, ctx.ConversationId, ctx.MessageId, c))
 	for _, category := range []string{"sop", "fact"} {
-		mock.ExpectQuery(`SELECT id, name, COALESCE`).WithArgs(ctx.AccountId, "manual", c.ID).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kb_type", "integration_id", "md5", "bytes", "note_category"}).AddRow("manual", "Manual", "manual", nil, "same-body", len(body), category))
+		mock.ExpectQuery(`SELECT id, name, COALESCE`).WithArgs(ctx.AccountId, "manual", c.ID).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kb_type", "integration_id", "md5", "bytes", "note_category", "data_format"}).AddRow("manual", "Manual", "manual", nil, "same-body", len(body), category, ""))
 		resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": c.ID}})
 		require.NoError(t, err)
 		require.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)

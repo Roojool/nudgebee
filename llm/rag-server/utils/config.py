@@ -65,6 +65,17 @@ class Config:
     )  # thread pool size for parallel collection search
     reranking_enabled = os.environ.get("RAG_RERANKING_ENABLED", "false").lower() == "true"  # LLM reranking default
 
+    # Figures described in parallel during a knowledge-base load. Bounded because
+    # the load holds a worker while it runs.
+    kb_vision_concurrency = int(os.environ.get("RAG_KB_VISION_CONCURRENCY", 4))
+
+    # Page and figure caps for a PDF load. These were operator-tunable while
+    # extraction lived in llm-server (llm_server_kb_pdf_max_pages /
+    # _max_images); they stay tunable here so a large-document account can be
+    # raised without a release.
+    kb_pdf_max_pages = int(os.environ.get("RAG_KB_PDF_MAX_PAGES", 200))
+    kb_pdf_max_images = int(os.environ.get("RAG_KB_PDF_MAX_IMAGES", 25))
+
     # Cross-encoder reranker. Runs in-process, so it needs no per-account LLM
     # credential — the LLM reranker it replaces failed 100% of calls on a stale
     # key and silently returned documents unranked.

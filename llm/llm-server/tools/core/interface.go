@@ -143,6 +143,11 @@ type NBToolResponseReference struct {
 	Type        string `json:"type"` // "link", "file", "k8s_resource", "citation"
 	Query       string `json:"query"`
 	Description string `json:"description"`
+	// Snippet is the retrieved text this reference stands for. Description
+	// carries the purpose guidance, which is identical for every knowledge base
+	// of a category, so it cannot tell a reader WHICH page or figure was used —
+	// the Additional Contexts panel renders this instead when it is set.
+	Snippet string `json:"snippet,omitempty"`
 }
 
 type NBToolResponse struct {

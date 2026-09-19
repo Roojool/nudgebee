@@ -178,12 +178,29 @@ The server runs as a **single Uvicorn worker** to avoid file locking issues with
 - `GET /get_matching_doc` - Search documents across collections
 - `POST /api/rag/query` - Advanced RAG query with reranking
 
+### Knowledge Bases
+
+- `POST /api/v1/kb/create` - Embed a knowledge base's content into `kb_{kb_id}`
+- `POST /api/v1/kb/search` - Semantic search within one knowledge base
+- `POST /api/v1/kb/retrigger_integration` - Re-scrape a Confluence/ServiceNow integration
+- `DELETE /api/v1/kb/{account_id}/{kb_id}` - Delete a knowledge base collection
+
+A PDF knowledge base is read here end to end: pages are split, each figure is described by
+a vision model, and the resulting chunks are indexed — llm-server hands over the document
+and receives a document count and any shortfall. Figures come from two sources: rasters
+embedded in the page, and — for pages that carry vector drawings but almost no text — the
+rendered page itself, which is the only way a diagram exported from Visio or draw.io is
+visible at all. Descriptions are cached on the image's bytes, so re-indexing an unchanged
+document costs nothing.
+
 ### Collection Management
 
 - `GET /collections` - List all collections
 - `GET /collections/{collection_name}` - Get collection details
 - `GET /collections/{collection_name}/query` - Query a specific collection
 - `GET /collections/{collection_name}/download` - Download collection data
+- `GET /collections/{collection_name}/source/{content_hash}` - One document's source as fetched
+- `GET /collections/{collection_name}/runs/{run_id}/documents` - What one load captured
 - `DELETE /collections` - Delete all collections
 - `DELETE /collections/{collection_name}` - Delete a specific collection
 - `DELETE /collections/module/{module_name}` - Delete collections for a module

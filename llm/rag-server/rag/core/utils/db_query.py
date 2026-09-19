@@ -219,6 +219,55 @@ def get_llm_integrations(cloud_account_id):
     return _get_integrations_cached(_llm_integrations_cache, _llm_integrations_cache_lock, cloud_account_id, "llm")
 
 
+def get_default_llm_integration(cloud_account_id):
+    """The one LLM integration this account resolves against, or None.
+
+    Mirrors llm-server's ``selectAccountLLMIntegration``
+    (agents/core/llm_common.go) so both services pick the same credential for
+    the same account: the integration flagged ``default_llm_provider`` on its
+    account link; failing that, the account's only enabled LLM integration,
+    since linking exactly one is itself the operator's choice.
+
+    Every ambiguous shape — several flagged, or several linked with none
+    flagged — returns None and falls through to the environment defaults,
+    exactly as llm-server does. Picking one anyway would silently bind an
+    account to a credential nobody chose, and for figure description that shows
+    up as "no vision-capable model" on an account that has one.
+    """
+    query = text("""
+        SELECT i.id, ia.default_llm_provider
+        FROM integrations i
+        JOIN integrations_cloud_accounts ia ON i.id = ia.integration_id
+        WHERE i.type = 'llm' AND i.status = 'enabled' AND ia.cloud_account_id = :ac_id
+        """)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(query, {"ac_id": cloud_account_id}).fetchall()
+    except Exception as exc:
+        logger.error(f"Failed to select default LLM integration for {cloud_account_id}: {exc}")
+        return None
+
+    all_ids = [row[0] for row in rows]
+    defaults = [row[0] for row in rows if row[1]]
+
+    if len(defaults) == 1:
+        return defaults[0]
+    if len(defaults) > 1:
+        logger.error(
+            f"LLM config: account {cloud_account_id} has {len(defaults)} integrations flagged default; "
+            "falling back to environment defaults"
+        )
+        return None
+    if len(all_ids) == 1:
+        return all_ids[0]
+    if len(all_ids) > 1:
+        logger.warning(
+            f"LLM config: account {cloud_account_id} has {len(all_ids)} enabled LLM integrations and none "
+            "flagged default; falling back to environment defaults"
+        )
+    return None
+
+
 def get_embeddings_integrations(cloud_account_id):
     return _get_integrations_cached(
         _embeddings_integrations_cache, _embeddings_integrations_cache_lock, cloud_account_id, "embeddings"

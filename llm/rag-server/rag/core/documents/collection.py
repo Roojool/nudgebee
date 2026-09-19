@@ -479,13 +479,20 @@ _DOCUMENT_SCAN_LIMIT = 5000
 
 
 def _is_listed_point(payload: dict) -> bool:
-    """One entry per source document. Unchunked points are documents. A chunked
-    document (points sharing ``metadata.parent_id``) is listed through its first
-    chunk only: the one whose text opens ``metadata.parent_content``. This keeps
-    each document to a single entry across pages, not just within one page."""
+    """One entry per source document. Unchunked points are documents.
+
+    A chunked document (points sharing ``metadata.parent_id``) is listed through its first
+    chunk only, identified by ``metadata.chunk_index`` == 0. That is a plain marker written
+    at ingest; the older rule below — the chunk whose text opens ``metadata.parent_content``
+    — is kept for points indexed before it existed, and because it needs a full copy of the
+    document on every chunk, which is why new ingests do not write it.
+    """
     metadata = _point_metadata(payload)
     if not metadata.get("parent_id"):
         return True
+    chunk_index = metadata.get("chunk_index")
+    if chunk_index is not None:
+        return bool(chunk_index == 0)
     parent_content = metadata.get("parent_content")
     chunk = payload.get("page_content")
     if not isinstance(parent_content, str) or not isinstance(chunk, str):

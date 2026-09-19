@@ -58,7 +58,7 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 		if err != nil {
 			return knowledgeFailure(err)
 		}
-		if kbType == "integration" {
+		if kbType == "integration" || kbType == core.KnowledgeKindIndexedOnly {
 			searchCtx, traceID := core.WithRetrievalTraceID(deadline)
 			docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, ctx.Query, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
 			docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, ctx.Query, docs, traceID)
@@ -113,7 +113,7 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 	if err != nil {
 		return knowledgeFailure(err)
 	}
-	refs := []core.NBToolResponseReference{{Text: c.Title, Url: c.ReferenceID, Type: "knowledge_base", Description: core.KnowledgePurposeGuidance(c.Purpose)}}
+	refs := []core.NBToolResponseReference{{Text: c.Title, Url: c.ReferenceID, Type: "knowledge_base", Description: core.KnowledgePurposeGuidance(c.Purpose), Snippet: text}}
 	result := fmt.Sprintf("%s\nTitle: %s\nHandle: %s\nSize: %d bytes. Use load_skills with this handle and keyword or start_line for selective reads.\n%s", core.KnowledgePurposeGuidance(c.Purpose), c.Title, c.ID, c.Bytes, text)
 	if c.Path != "" {
 		refs = append(refs, core.NBToolResponseReference{Text: c.Title, Url: c.Path, Type: "file", Query: c.ID, Description: core.KnowledgePurposeGuidance(c.Purpose) + " Read through load_skills using " + c.ID})

@@ -116,3 +116,19 @@ func ManualKnowledgeID(doc RAGSearchResult) string {
 	}
 	return ""
 }
+
+// pdfKnowledgeIDKey marks a resolved page or figure chunk of a PDF knowledge
+// base. It is kept apart from kb_id on purpose: kb_id routes a hit into the
+// manual path, which serves the data column, and a PDF's data column is base64.
+const pdfKnowledgeIDKey = "pdf_kb_id"
+
+// pdfKnowledgeID is ManualKnowledgeID for PDF chunks: the marker counts only on
+// a document from that knowledge base's own collection.
+func pdfKnowledgeID(doc RAGSearchResult) string {
+	collection, _ := doc.Metadata["collection"].(string)
+	id, _ := doc.Metadata[pdfKnowledgeIDKey].(string)
+	if id != "" && collection == "kb_"+id {
+		return id
+	}
+	return ""
+}

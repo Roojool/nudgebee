@@ -188,6 +188,155 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 	return page, nil
 }
 
+// KBDocumentSource is a document as it was fetched, before conversion and chunking.
+type KBDocumentSource struct {
+	SourceId    string `json:"source_id"`
+	Title       string `json:"title"`
+	Url         string `json:"url"`
+	Content     string `json:"content"`
+	ContentType string `json:"content_type"`
+	ContentHash string `json:"content_hash"`
+	FetchedAt   string `json:"fetched_at"`
+}
+
+// KBRunDocument is one document a load captured.
+type KBRunDocument struct {
+	SourceId    string `json:"source_id"`
+	Title       string `json:"title"`
+	Url         string `json:"url"`
+	ContentHash string `json:"content_hash"`
+	FetchedAt   string `json:"fetched_at"`
+}
+
+// KBRunDocumentsPage is one page of what a load captured.
+type KBRunDocumentsPage struct {
+	Items      []KBRunDocument `json:"items"`
+	NextOffset *string         `json:"next_offset"`
+}
+
+// GetKBDocumentSource returns a document's source exactly as it was fetched.
+//
+// Addressed by content hash rather than by document, so a caller can ask for the version a
+// particular load indexed. Old versions are pruned, so a hash from an older run legitimately
+// returns not-found — callers render "source unavailable", not a broken link.
+func GetKBDocumentSource(sc *security.RequestContext, accountId, kbId, contentHash string) (*KBDocumentSource, error) {
+	// An uploaded document is its own source, and llm-server already holds it: it was
+	// stored here before rag-server ever saw it. Serving the stored file is both the
+	// truthful answer and the one that needs no second copy — unlike a scraped page,
+	// which exists nowhere else once it has been converted.
+	if uploaded, err := uploadedKBSource(sc, accountId, kbId); err != nil || uploaded != nil {
+		return uploaded, err
+	}
+	if contentHash == "" {
+		return nil, errors.New("kb: content_hash is required")
+	}
+	_, collection, err := kbDocumentsCollection(sc, accountId, kbId)
+	if err != nil {
+		return nil, err
+	}
+	var source KBDocumentSource
+	found, err := getRAG(
+		fmt.Sprintf("/collections/%s/source/%s", url.PathEscape(collection), url.PathEscape(contentHash)), &source)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New(errKBDocumentNotFound)
+	}
+	return &source, nil
+}
+
+// uploadedKBSource returns the stored file for a knowledge base that was uploaded as a
+// document, or nil when the knowledge base has none — a scraped integration, whose source
+// is served from rag-server instead.
+//
+// Content carries the bytes as llm_knowledgebases.data holds them: base64 for a PDF, the
+// text itself otherwise. ContentType is what tells the two apart.
+func uploadedKBSource(sc *security.RequestContext, accountId, kbId string) (*KBDocumentSource, error) {
+	dbms, err := knowledgeDatabase(common.Metastore)
+	if err != nil {
+		return nil, fmt.Errorf("kb: failed to get database manager: %w", err)
+	}
+	var row struct {
+		Name      string `db:"name"`
+		Filename  string `db:"data_filename"`
+		Format    string `db:"data_format"`
+		Data      string `db:"data"`
+		UpdatedAt string `db:"updated_at"`
+	}
+	err = dbms.Db.Get(&row, `SELECT name, COALESCE(data_filename, '') AS data_filename,
+	                                COALESCE(data_format, '') AS data_format, COALESCE(data, '') AS data,
+	                                COALESCE(updated_at::text, '') AS updated_at
+	                         FROM llm_knowledgebases
+	                         WHERE id = $1 AND account_id = $2 AND enabled`, kbId, accountId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New(errKBDocumentNotFound)
+		}
+		return nil, fmt.Errorf("kb: failed to read knowledge base: %w", err)
+	}
+	if row.Data == "" {
+		return nil, nil
+	}
+	contentType := "text/plain"
+	if row.Format == string(KBFormatPDF) {
+		contentType = "application/pdf"
+	}
+	title := row.Filename
+	if title == "" {
+		title = row.Name
+	}
+	return &KBDocumentSource{
+		SourceId:    kbId,
+		Title:       title,
+		Content:     row.Data,
+		ContentType: contentType,
+		ContentHash: "",
+		FetchedAt:   row.UpdatedAt,
+	}, nil
+}
+
+// ListKBRunDocuments returns what one load captured.
+//
+// Failures are not here: a document that failed to load produced no record. Those are on
+// the load-history entry for the same run.
+func ListKBRunDocuments(
+	sc *security.RequestContext, accountId, kbId, runId string, limit int, offset string,
+) (*KBRunDocumentsPage, error) {
+	if runId == "" {
+		return nil, errors.New("kb: run_id is required")
+	}
+	_, collection, err := kbDocumentsCollection(sc, accountId, kbId)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = kbDocumentsDefaultLimit
+	}
+	limit = min(limit, kbDocumentsMaxLimit)
+
+	query := url.Values{"limit": {strconv.Itoa(limit)}}
+	if offset != "" {
+		query.Set("offset", offset)
+	}
+	var ragPage struct {
+		Documents  []KBRunDocument `json:"documents"`
+		NextOffset *string         `json:"next_offset"`
+	}
+	found, err := getRAG(fmt.Sprintf("/collections/%s/runs/%s/documents?%s",
+		url.PathEscape(collection), url.PathEscape(runId), query.Encode()), &ragPage)
+	if err != nil {
+		return nil, err
+	}
+	page := &KBRunDocumentsPage{Items: []KBRunDocument{}}
+	if !found {
+		return page, nil
+	}
+	page.Items = append(page.Items, ragPage.Documents...)
+	page.NextOffset = ragPage.NextOffset
+	return page, nil
+}
+
 // GetKBDocument returns one stored document of a knowledge base with its content.
 func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId string) (*KBDocument, error) {
 	if documentId == "" {

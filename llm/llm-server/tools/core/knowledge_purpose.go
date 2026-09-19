@@ -44,7 +44,7 @@ func KnowledgeDocumentPurpose(doc RAGSearchResult) KnowledgeContentPurpose {
 	case KBNoteCategoryFact:
 		return KnowledgePurposeReference
 	}
-	if ManualKnowledgeID(doc) != "" {
+	if ManualKnowledgeID(doc) != "" || pdfKnowledgeID(doc) != "" {
 		category, _ := doc.Metadata["note_category"].(string)
 		return KnowledgePurpose("manual", category)
 	}

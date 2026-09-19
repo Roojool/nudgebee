@@ -3,9 +3,13 @@ package core
 import (
 	"net/http"
 	"net/http/httptest"
+	"nudgebee/llm/common"
 	"nudgebee/llm/config"
+	"nudgebee/llm/security"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,4 +65,80 @@ func TestDocumentTitlePrefersStoredTitle(t *testing.T) {
 	assert.Equal(t, "Reset VPN", documentTitle(ragKBDocument{Title: &title}, "ServiceNow KB"))
 	empty := ""
 	assert.Equal(t, "ServiceNow KB", documentTitle(ragKBDocument{Title: &empty}, "ServiceNow KB"))
+}
+
+func TestGetKBDocumentSourceServesTheUploadedFile(t *testing.T) {
+	// An uploaded document is its own source, and llm-server already holds it — asking
+	// rag-server for it would mean a second copy of a file we stored ourselves.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	oldDatabase := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+	mock.ExpectQuery(`SELECT name, .*FROM llm_knowledgebases`).
+		WithArgs("kb-1", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data_filename", "data_format", "data", "updated_at"}).
+			AddRow("Disk runbook", "disk.pdf", "pdf", "JVBERi0xLjcK", "2026-09-19 10:00:00"))
+
+	// No content hash: an uploaded document has one source, not versions.
+	got, err := GetKBDocumentSource(security.NewRequestContextForSuperAdmin(), "account-a", "kb-1", "")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "disk.pdf", got.Title)
+	assert.Equal(t, "application/pdf", got.ContentType)
+	assert.Equal(t, "JVBERi0xLjcK", got.Content)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetKBDocumentSourceFallsThroughForAScrapedPage(t *testing.T) {
+	// A scraped page exists nowhere else once converted, so its source comes from
+	// rag-server — and identifying which version needs the content hash.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	oldDatabase := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+	mock.ExpectQuery(`SELECT name, .*FROM llm_knowledgebases`).
+		WithArgs("kb-2", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data_filename", "data_format", "data", "updated_at"}).
+			AddRow("Confluence", "", "text", "", "2026-09-19 10:00:00"))
+
+	_, err = GetKBDocumentSource(security.NewRequestContextForSuperAdmin(), "account-a", "kb-2", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "content_hash is required")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetKBDocumentSourceServesAnUploadedTextFile(t *testing.T) {
+	// rag-server keeps the source of scraped pages only, so a text upload has to be
+	// served from here too — falling through would 404 a file we are holding.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	oldDatabase := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+	mock.ExpectQuery(`SELECT name, .*FROM llm_knowledgebases`).
+		WithArgs("kb-3", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data_filename", "data_format", "data", "updated_at"}).
+			AddRow("Escalation policy", "escalation.txt", "text", "Page the on-call SRE.", "2026-09-19 10:00:00"))
+
+	got, err := GetKBDocumentSource(security.NewRequestContextForSuperAdmin(), "account-a", "kb-3", "")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "escalation.txt", got.Title)
+	assert.Equal(t, "text/plain", got.ContentType)
+	assert.Equal(t, "Page the on-call SRE.", got.Content)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

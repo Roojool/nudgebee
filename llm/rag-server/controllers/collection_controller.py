@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 
 from rag.core.documents import collection as document_collection
+from rag.core.documents import source_store
 from rag.exceptions import is_not_found_error
 
 router = APIRouter()
@@ -87,6 +88,37 @@ async def get_collection_document(collection_name: str, document_id: str):
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"data": document}
+
+
+@router.get("/collections/{collection_name}/source/{content_hash}")
+async def get_document_source(collection_name: str, content_hash: str):
+    """One document's source, exactly as it was fetched.
+
+    What the collection holds is converted and chunked; this is the original. Served by
+    content hash so a caller can ask for the version a particular load indexed, not just
+    the current one.
+    """
+    stored = source_store.get(collection_name, content_hash)
+    if stored is None:
+        # Versions are pruned, so a hash from an older run legitimately disappears. The
+        # caller is expected to render "source unavailable", not a broken link.
+        raise HTTPException(status_code=404, detail="Source version not found")
+    return {"data": stored}
+
+
+@router.get("/collections/{collection_name}/runs/{run_id}/documents")
+async def list_run_documents(
+    collection_name: str,
+    run_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    offset: Optional[str] = Query(None),
+):
+    """What one load captured — the documents it indexed, paginated.
+
+    Failures are not here: a page that failed produces no point. They are recorded on the
+    load-history row instead.
+    """
+    return {"data": source_store.documents_for_run(collection_name, run_id, limit=limit, offset=offset)}
 
 
 # Generic route - MUST come after specific routes

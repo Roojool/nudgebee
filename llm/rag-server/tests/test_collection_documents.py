@@ -116,3 +116,28 @@ def test_title_falls_back_to_confluence_url_slug():
 
 def test_non_http_url_is_dropped():
     assert collection._document_url({"url": "javascript:alert(1)"}) is None
+
+
+def test_chunk_index_marks_the_listed_chunk():
+    from rag.core.documents.collection import _is_listed_point
+
+    # One row per document, without a full copy of the document on every chunk.
+    first = {"page_content": "part 1", "metadata": {"parent_id": "doc-a", "chunk_index": 0}}
+    second = {"page_content": "part 2", "metadata": {"parent_id": "doc-a", "chunk_index": 1}}
+
+    assert _is_listed_point(first) is True
+    assert _is_listed_point(second) is False
+
+
+def test_points_indexed_before_chunk_index_still_list():
+    from rag.core.documents.collection import _is_listed_point
+
+    # The parent_content rule stays for points written before the marker existed.
+    legacy = {
+        "page_content": "runbook part 1",
+        "metadata": {"parent_id": "doc-r", "parent_content": "runbook part 1 runbook part 2"},
+    }
+    unchunked = {"page_content": "whole page", "metadata": {"url": "https://wiki/a"}}
+
+    assert _is_listed_point(legacy) is True
+    assert _is_listed_point(unchunked) is True

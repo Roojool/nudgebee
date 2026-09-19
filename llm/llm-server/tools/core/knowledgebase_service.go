@@ -343,10 +343,11 @@ func CreateKnowledgebase(sc *security.RequestContext, accountId string, kb Knowl
 		return Knowledgebase{}, errors.New(errKBFilenameRequired)
 	}
 
-	kb.DataSizeBytes = int64(len(kb.Data))
-	if kb.DataSizeBytes > maxKBSizeBytes {
-		return Knowledgebase{}, fmt.Errorf("%s: %d bytes", errKBSizeTooLarge, kb.DataSizeBytes)
+	dataSize, err := resolveKBDataSize(kb.Data, kb.DataFormat)
+	if err != nil {
+		return Knowledgebase{}, err
 	}
+	kb.DataSizeBytes = dataSize
 
 	tenantId := sc.GetSecurityContext().GetTenantId()
 	if tenantId == "" {
@@ -386,11 +387,18 @@ func CreateKnowledgebase(sc *security.RequestContext, accountId string, kb Knowl
 
 	kb.Description = strings.TrimSpace(kb.Description)
 	if kb.Description == "" && kb.Data != "" {
-		for _, line := range strings.Split(kb.Data, "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				kb.Description = common.TruncateHead(line, 200)
-				break
+		// A PDF's data is base64, so the first line of it is not a description
+		// of anything — the filename is the only human-readable handle there is
+		// until the document has been extracted.
+		if kb.DataFormat == string(KBFormatPDF) {
+			kb.Description = common.TruncateHead(kb.DataFilename, 200)
+		} else {
+			for _, line := range strings.Split(kb.Data, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					kb.Description = common.TruncateHead(line, 200)
+					break
+				}
 			}
 		}
 	}
@@ -534,6 +542,14 @@ func GetKnowledgebase(sc *security.RequestContext, accountId, kbId string) (Know
 		}
 		slog.Error(logKBFailedQuery, "error", err, "kb_id", kbId)
 		return Knowledgebase{}, err
+	}
+
+	// A PDF's data column holds base64 of the original document — megabytes no
+	// consumer can render or edit. The editor identifies the document by
+	// data_filename and data_size_bytes instead, and re-indexing reads the
+	// column straight from the database, so nothing needs it over the wire.
+	if kb.DataFormat == string(KBFormatPDF) {
+		kb.Data = ""
 	}
 
 	return kb, nil
@@ -731,10 +747,11 @@ func UpdateKnowledgebase(sc *security.RequestContext, accountId, kbId string, up
 			updates.DataFormat = existingKB.DataFormat
 		}
 
-		updates.DataSizeBytes = int64(len(updates.Data))
-		if updates.DataSizeBytes > maxKBSizeBytes {
-			return fmt.Errorf("%s: %d bytes", errKBSizeTooLarge, updates.DataSizeBytes)
+		dataSize, sizeErr := resolveKBDataSize(updates.Data, updates.DataFormat)
+		if sizeErr != nil {
+			return sizeErr
 		}
+		updates.DataSizeBytes = dataSize
 	} else {
 		// Keep existing data fields
 		updates.Data = existingKB.Data
@@ -1282,9 +1299,19 @@ func processKBEmbeddingsAsync(sc *security.RequestContext, accountId, kbId, data
 		return
 	}
 
+	// Convert the stored payload into what the rag-server should index. For a
+	// PDF this is where the document is read and its figures are described;
+	// every other format passes straight through.
+	ragData, ragFormat, filename, err := resolveKBIngestPayload(sc, accountId, kbId, data, format)
+	if err != nil {
+		slog.Error("kb: async - failed to prepare content for indexing", "error", err, "kb_id", kbId)
+		recordKBIngestFailure(sc, dbms, accountId, kbId, "KB_EMBEDDING_ERROR", err)
+		return
+	}
+
 	// Call RAG server to create vector embeddings
 	triggeredBy := sc.GetSecurityContext().GetUserId()
-	docCount, err := createKBVectorCollection(accountId, kbId, data, format, triggeredBy, "user_create", contextTags)
+	docCount, err := createKBVectorCollection(accountId, kbId, ragData, ragFormat, filename, triggeredBy, "user_create", contextTags)
 	if err != nil {
 		slog.Error("kb: async - failed to create vector collection", "error", err, "kb_id", kbId)
 		// Update status to error, capturing the reason for the UI.
@@ -1350,6 +1377,13 @@ func processKBUpdateEmbeddingsAsync(sc *security.RequestContext, accountId, kbId
 		return
 	}
 
+	ragData, ragFormat, filename, err := resolveKBIngestPayload(sc, accountId, kbId, data, format)
+	if err != nil {
+		slog.Error("kb: async update - failed to prepare content for indexing", "error", err, "kb_id", kbId)
+		recordKBIngestFailure(sc, dbms, accountId, kbId, "KB_EMBEDDING_UPDATE_ERROR", err)
+		return
+	}
+
 	// Delete old vector collection first
 	err = deleteKBVectorCollection(accountId, kbId)
 	if err != nil {
@@ -1359,7 +1393,7 @@ func processKBUpdateEmbeddingsAsync(sc *security.RequestContext, accountId, kbId
 
 	// Create new vector collection
 	triggeredBy := sc.GetSecurityContext().GetUserId()
-	docCount, err := createKBVectorCollection(accountId, kbId, data, format, triggeredBy, triggerType, contextTags)
+	docCount, err := createKBVectorCollection(accountId, kbId, ragData, ragFormat, filename, triggeredBy, triggerType, contextTags)
 	if err != nil {
 		slog.Error("kb: async update - failed to create vector collection", "error", err, "kb_id", kbId)
 		_ = updateKBStatusError(dbms, kbId, fmt.Sprintf("failed to create embeddings: %v", err))
@@ -1412,7 +1446,7 @@ func processKBUpdateEmbeddingsAsync(sc *security.RequestContext, accountId, kbId
 }
 
 // Helper function to create vector collection via RAG server
-func createKBVectorCollection(accountId, kbId, data, format, triggeredBy, triggerType string, contextTags []string) (int, error) {
+func createKBVectorCollection(accountId, kbId, data, format, filename, triggeredBy, triggerType string, contextTags []string) (int, error) {
 	if contextTags == nil {
 		contextTags = []string{}
 	}
@@ -1449,6 +1483,7 @@ func createKBVectorCollection(accountId, kbId, data, format, triggeredBy, trigge
 		"kb_id":        kbId,
 		"data":         ragData,
 		"format":       ragFormat,
+		"filename":     filename,
 		"triggered_by": triggeredBy,
 		"trigger_type": triggerType,
 		"context_tags": contextTags,
@@ -1467,6 +1502,11 @@ func createKBVectorCollection(accountId, kbId, data, format, triggeredBy, trigge
 	addRAGAuth(req)
 
 	client := ragClient
+	if ragFormat == string(KBFormatPDF) {
+		// Reading a PDF and describing its figures legitimately takes minutes;
+		// the shared client's 120s header budget is sized for JSON responses.
+		client = kbPDFExtractClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to process knowledgebase for semantic search: %w", err)
@@ -1760,6 +1800,7 @@ type agentSkillRow struct {
 	Name         string `db:"name"`
 	Description  string `db:"description"`
 	Data         string `db:"data"`
+	DataFormat   string `db:"data_format"`
 }
 
 // renderSkillsBlock renders skill rows into the canonical `<skills>...</skills>`
@@ -1787,8 +1828,13 @@ func renderSkillsBlock(rows []agentSkillRow) (string, []NBToolResponseReference)
 		// CDATA examples) which would prematurely close the section — escapeCDATA
 		// handles that via the standard split-the-marker trick.
 		sb.WriteString("<guidance>" + KnowledgePurposeGuidance(KnowledgePurpose(r.KBType, r.NoteCategory)) + "</guidance>\n")
+		body := r.Data
+		if r.DataFormat == string(KBFormatPDF) {
+			// The loaders never select a PDF's base64 data; point at retrieval instead.
+			body = PDFKnowledgePointer
+		}
 		sb.WriteString("<![CDATA[\n")
-		sb.WriteString(escapeCDATA(r.Data))
+		sb.WriteString(escapeCDATA(body))
 		sb.WriteString("\n]]>\n</skill>\n")
 
 		references = append(references, NBToolResponseReference{
@@ -1831,7 +1877,8 @@ func LoadAgentSkillContentsByIDs(sc *security.RequestContext, accountId string, 
 		       kb.id,
 		       kb.name,
 		       COALESCE(kb.description, '') as description,
-		       COALESCE(kb.data, '')        as data,
+		       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE COALESCE(kb.data, '') END as data,
+		       COALESCE(kb.data_format, '') as data_format,
 		       COALESCE(kb.kb_type, 'manual') as kb_type, COALESCE(kb.note_category, '') as note_category
 		FROM llm_knowledgebases kb
 		WHERE kb.account_id = $1
@@ -1878,7 +1925,8 @@ func LoadActiveAgentSkillContents(sc *security.RequestContext, accountId string,
 			       kb.id,
 			       kb.name,
 			       COALESCE(kb.description, '') as description,
-			       COALESCE(kb.data, '')        as data,
+			       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE COALESCE(kb.data, '') END as data,
+		       COALESCE(kb.data_format, '') as data_format,
 			       COALESCE(kb.kb_type, 'manual') as kb_type, COALESCE(kb.note_category, '') as note_category
 			FROM llm_knowledgebases kb
 			INNER JOIN llm_kb_agent_mappings m ON kb.id = m.kb_id
@@ -1898,7 +1946,8 @@ func LoadActiveAgentSkillContents(sc *security.RequestContext, accountId string,
 			       kb.id,
 			       kb.name,
 			       COALESCE(kb.description, '') as description,
-			       COALESCE(kb.data, '')        as data,
+			       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE COALESCE(kb.data, '') END as data,
+		       COALESCE(kb.data_format, '') as data_format,
 			       COALESCE(kb.kb_type, 'manual') as kb_type, COALESCE(kb.note_category, '') as note_category
 			FROM llm_knowledgebases kb
 			INNER JOIN llm_kb_agent_mappings m ON kb.id = m.kb_id
@@ -1916,7 +1965,8 @@ func LoadActiveAgentSkillContents(sc *security.RequestContext, accountId string,
 			       kb.id,
 			       kb.name,
 			       COALESCE(kb.description, '') as description,
-			       COALESCE(kb.data, '')        as data,
+			       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE COALESCE(kb.data, '') END as data,
+		       COALESCE(kb.data_format, '') as data_format,
 			       COALESCE(kb.kb_type, 'manual') as kb_type, COALESCE(kb.note_category, '') as note_category
 			FROM llm_knowledgebases kb
 			INNER JOIN llm_kb_agent_mappings m ON kb.id = m.kb_id
@@ -1935,7 +1985,8 @@ func LoadActiveAgentSkillContents(sc *security.RequestContext, accountId string,
 			       kb.id,
 			       kb.name,
 			       COALESCE(kb.description, '') as description,
-			       COALESCE(kb.data, '')        as data,
+			       CASE WHEN kb.data_format = 'pdf' THEN '' ELSE COALESCE(kb.data, '') END as data,
+		       COALESCE(kb.data_format, '') as data_format,
 			       COALESCE(kb.kb_type, 'manual') as kb_type, COALESCE(kb.note_category, '') as note_category
 			FROM llm_knowledgebases kb
 			INNER JOIN llm_kb_agent_mappings m ON kb.id = m.kb_id
