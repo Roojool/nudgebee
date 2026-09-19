@@ -65,6 +65,16 @@ describe('applyReadiness', () => {
     expect(risky).toMatchObject({ tone: 'critical', title: 'Irreversible change', needsAck: true });
   });
 
+  it('words a scale-down as a stop with the way back, not as a removal', () => {
+    const r = applyReadiness(
+      { rule_name: 'abandoned_resource', ...rec('review', { dependent_count: 0, safety_reason: 'nothing depends on this workload' }, 'destructive') },
+      false
+    );
+    expect(r).toMatchObject({ tone: 'warning', title: 'Stops the workload', needsAck: true });
+    expect(r?.message).toContain('manifest stays');
+    expect(r?.message).not.toContain("Removal can't be undone");
+  });
+
   it('reads an unassessed verdict as not-yet-in-graph, never as risky', () => {
     const r = applyReadiness(rec(null, {}), true);
     expect(r).toMatchObject({ tone: 'info', title: 'Not in the dependency graph yet', needsAck: false });

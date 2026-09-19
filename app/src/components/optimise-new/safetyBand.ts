@@ -100,15 +100,27 @@ export const getChangeClass = (rec: any): ChangeClass | null => {
 // (the backend never grades a removal safe, but the chip follows the banner
 // even if one arrived that way).
 export interface SafetyPresentation {
-  key: 'safe' | 'quick_check' | 'plan' | 'irreversible' | 'not_assessed';
+  key: 'safe' | 'quick_check' | 'plan' | 'irreversible' | 'stops' | 'not_assessed';
   label: string;
   tone: LabelTone;
 }
 
-export const presentBand = (band: string | null | undefined, changeClass: ChangeClass | null): SafetyPresentation => {
+// Rules graded destructive whose action stops the resource and keeps its
+// definition, rather than removing it: a scale-down to zero replicas. The band
+// treats both the same; the words should not.
+export type DestructiveKind = 'removal' | 'stop';
+const STOP_RULES = new Set(['abandoned_resource']);
+export const destructiveKindOf = (rec: any): DestructiveKind => (STOP_RULES.has(rec?.rule_name) ? 'stop' : 'removal');
+
+export const presentBand = (
+  band: string | null | undefined,
+  changeClass: ChangeClass | null,
+  kind: DestructiveKind = 'removal'
+): SafetyPresentation => {
   const b = (band || '').trim().toLowerCase();
   if (changeClass === 'destructive' && (b === 'safe' || b === 'review' || b === 'risky')) {
-    return { key: 'irreversible', label: 'Irreversible', tone: b === 'risky' ? 'critical' : 'warning' };
+    const tone: LabelTone = b === 'risky' ? 'critical' : 'warning';
+    return kind === 'stop' ? { key: 'stops', label: 'Stops workload', tone } : { key: 'irreversible', label: 'Irreversible', tone };
   }
   switch (b) {
     case 'safe':
@@ -125,7 +137,7 @@ export const presentBand = (band: string | null | undefined, changeClass: Change
 // presentRecommendation is the one place a row's presentation is computed:
 // band and change class together, so an irreversible change can never render
 // as "Plan it" because a caller forgot the second half.
-export const presentRecommendation = (rec: any): SafetyPresentation => presentBand(rec?.safety_band, getChangeClass(rec));
+export const presentRecommendation = (rec: any): SafetyPresentation => presentBand(rec?.safety_band, getChangeClass(rec), destructiveKindOf(rec));
 
 // presentBandOnly is for surfaces that have a band but no recommendation —
 // filter chips and the legend. An irreversible change is counted under the
@@ -168,14 +180,16 @@ export const deriveVerdict = (
   prod?: number,
   depCount?: number,
   truncated?: boolean,
-  changeClass?: ChangeClass | null
+  changeClass?: ChangeClass | null,
+  kind: DestructiveKind = 'removal'
 ): { tone: 'success' | 'warning' | 'critical'; title: string } => {
   const prodCount = prod ?? 0;
+  const destructiveTitle = kind === 'stop' ? 'Stops the workload' : 'Irreversible change';
   // Risky reads as a fact to plan around, not an alarm: amber, and "in the
   // blast radius" rather than "affected". Red is reserved for the one case
   // that cannot be planned around — an irreversible change.
   if (band === 'risky') {
-    if (changeClass === 'destructive') return { tone: 'critical', title: 'Irreversible change' };
+    if (changeClass === 'destructive') return { tone: 'critical', title: destructiveTitle };
     if (prodCount > 0) return { tone: 'warning', title: `${prodCount} production dependent${prodCount === 1 ? '' : 's'} in the blast radius` };
     if (truncated) return { tone: 'warning', title: 'Large blast radius' };
     return { tone: 'warning', title: 'Dependents in the blast radius' };
@@ -183,7 +197,7 @@ export const deriveVerdict = (
   if (band === 'unknown') return { tone: 'warning', title: 'Not in the dependency graph yet' };
   // Removal is irreversible even when the neighbourhood looks empty, so it
   // keeps a visible caution rather than a green "no known dependents".
-  if (changeClass === 'destructive') return { tone: 'warning', title: 'Irreversible change' };
+  if (changeClass === 'destructive') return { tone: 'warning', title: destructiveTitle };
   // prodCount is checked alongside depCount because the two arrive from the
   // same persisted summary and a partial one must still name the additive
   // case rather than falling through to a generic headline.
@@ -199,7 +213,7 @@ export const CHANGE_CLASS_HELP: Record<ChangeClass, string> = {
     'This change only adds capacity or commitments — dependents cannot be starved by it, so production callers cap the verdict at Quick check instead of Plan it. The remaining risk is apply mechanics (e.g. a rolling restart).',
   reductive: 'This change shrinks or reshapes something callers rely on. Production dependents mean planning the apply.',
   destructive:
-    'This change removes the resource and cannot be undone. It always reads Irreversible; a well-observed, dependent-free neighbourhood needs one glance, never none.',
+    'This change removes the resource and cannot be undone, or stops a workload outright. It never reads Safe; a well-observed, dependent-free neighbourhood needs one glance, never none.',
 };
 
 // Relationship → short role chip, from the row's point of view. Upstream rows

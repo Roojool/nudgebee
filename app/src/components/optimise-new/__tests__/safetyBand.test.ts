@@ -1,4 +1,5 @@
 import {
+  destructiveKindOf,
   dependentRoleLabel,
   proximityLabel,
   provenanceLabel,
@@ -187,6 +188,11 @@ describe('deriveVerdict', () => {
     expect(deriveVerdict('risky', 0, 0, false, 'destructive')).toEqual({ tone: 'critical', title: 'Irreversible change' });
   });
 
+  it('names a scale-down as a stop, at the same tones a removal gets', () => {
+    expect(deriveVerdict('review', 0, 0, false, 'destructive', 'stop')).toEqual({ tone: 'warning', title: 'Stops the workload' });
+    expect(deriveVerdict('risky', 2, 2, false, 'destructive', 'stop')).toEqual({ tone: 'critical', title: 'Stops the workload' });
+  });
+
   it('keeps the pre-existing verdicts for everything else', () => {
     expect(deriveVerdict('risky', 0, 500, true, 'reductive')).toEqual({ tone: 'warning', title: 'Large blast radius' });
     expect(deriveVerdict('unknown', 0, 0, false, null)).toEqual({ tone: 'warning', title: 'Not in the dependency graph yet' });
@@ -299,6 +305,17 @@ describe('band presentation', () => {
     expect(presentBand('review', 'destructive')).toMatchObject({ key: 'irreversible', label: 'Irreversible', tone: 'warning' });
     expect(presentBand('safe', 'destructive')).toMatchObject({ key: 'irreversible', tone: 'warning' });
     expect(presentBand('unknown', 'destructive').key).toBe('not_assessed');
+  });
+
+  it('reads a scale-down as stopping the workload, from the rule on the row', () => {
+    expect(destructiveKindOf({ rule_name: 'abandoned_resource' })).toBe('stop');
+    expect(destructiveKindOf({ rule_name: 'unused_pvc' })).toBe('removal');
+    expect(destructiveKindOf(undefined)).toBe('removal');
+    expect(presentBand('risky', 'destructive', 'stop')).toMatchObject({ key: 'stops', label: 'Stops workload', tone: 'critical' });
+    expect(presentBand('review', 'destructive', 'stop')).toMatchObject({ key: 'stops', label: 'Stops workload', tone: 'warning' });
+    expect(
+      presentRecommendation({ rule_name: 'abandoned_resource', safety_band: 'review', finops_score_breakdown: { change_class: 'destructive' } }).key
+    ).toBe('stops');
   });
 
   it('never lets the chip argue with the banner beneath it', () => {

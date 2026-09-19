@@ -90,7 +90,6 @@ export const k8sActionFor = (rec: any): K8sAction | null => {
           ...(kind ? [{ label: 'Kind', value: kind }] : []),
           ...(namespace ? [{ label: 'Namespace', value: namespace }] : []),
         ],
-        safeguard: 'The pods stop but the manifest stays — scale it back up if anything turns out to need it.',
         successMessage: `Scale-down of ${name} queued — follow it under Resolutions.`,
       };
     }

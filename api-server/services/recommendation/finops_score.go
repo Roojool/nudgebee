@@ -623,7 +623,7 @@ func scoreAndWritePage(ctx *security.RequestContext, dbms *database.DatabaseMana
 		if r.resourceID != nil {
 			resID = *r.resourceID
 		}
-		annotateBreakdownWithImpact(kg, r.tenantID, accountID, ns, name, resID, r.changeClass, result.Breakdown, cache)
+		annotateBreakdownWithImpact(kg, r.tenantID, accountID, ns, name, resID, r.ruleName, r.changeClass, result.Breakdown, cache)
 
 		breakdownJSON, err := json.Marshal(result.Breakdown)
 		if err != nil {

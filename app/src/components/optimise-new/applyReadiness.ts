@@ -1,4 +1,4 @@
-import { getImpactSummary, getChangeClass, deriveVerdict, businessCriticalCount } from './safetyBand';
+import { getImpactSummary, getChangeClass, deriveVerdict, businessCriticalCount, destructiveKindOf } from './safetyBand';
 
 export interface ApplyReadiness {
   tone: 'success' | 'info' | 'warning' | 'critical';
@@ -21,6 +21,9 @@ export const restartSafeguard = (inPlace: boolean): string =>
 // A removal has no restart to soften; the safeguard is a last look at what
 // still points at the resource.
 const REMOVAL_SAFEGUARD = "Removal can't be undone — confirm nothing still depends on it, and snapshot first where the resource supports it.";
+
+// A scale-down keeps the manifest, so the safeguard is the way back, not a snapshot.
+const STOP_SAFEGUARD = 'The pods stop but the manifest stays — scale it back up if anything turns out to need it.';
 
 // applyReadiness is the safety verdict re-presented at the moment of applying:
 // the same band, reason and tone the details panel shows, plus the safeguard
@@ -45,7 +48,8 @@ export const applyReadiness = (rec: any, inPlace: boolean, safeguard?: string): 
     };
   }
   const changeClass = getChangeClass(rec);
-  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass);
+  const kind = destructiveKindOf(rec);
+  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass, kind);
   const reason = sentence(impact?.safety_reason);
   if (verdict.tone === 'success') {
     return {
@@ -62,7 +66,7 @@ export const applyReadiness = (rec: any, inPlace: boolean, safeguard?: string): 
   return {
     tone: verdict.tone === 'critical' ? 'critical' : 'warning',
     title: verdict.title,
-    message: `${facts} ${safeguard || (destructive ? REMOVAL_SAFEGUARD : restartSafeguard(inPlace))}`.trim(),
+    message: `${facts} ${safeguard || (destructive ? (kind === 'stop' ? STOP_SAFEGUARD : REMOVAL_SAFEGUARD) : restartSafeguard(inPlace))}`.trim(),
     needsAck: band === 'risky' || prod > 0 || destructive,
   };
 };

@@ -45,6 +45,7 @@ import {
   observedAgeLabel,
   OBSERVED_AGE_HELP,
   CHANGE_CLASS_HELP,
+  destructiveKindOf,
   CRITICALITY_HELP,
   coverageTone,
   coverageSubtitle,
@@ -120,6 +121,7 @@ const SAFETY_BAND_HELP: Record<SafetyPresentation['key'], string> = {
   plan: 'Production callers are in the blast radius, or the blast radius is very large. Apply with a safeguard — a no-restart apply, a maintenance window, or a heads-up to the owner.',
   irreversible:
     "This change removes the resource and can't be undone. Take a last look at what still points at it, and snapshot first where the resource supports it.",
+  stops: 'This stops the workload: its pods go, the manifest stays, so it can be scaled back up. Take a last look at what still calls it.',
   not_assessed:
     "This resource isn't in the dependency graph yet, so impact isn't assessed. Apply as you normally would; the reading appears once the graph sees it.",
 };
@@ -291,7 +293,7 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
     (impact.dependent_count != null || impact.production_dependents != null || impact.coverage_confidence || impact.safety_reason)
   );
   if (!band && !hasImpactData) return null;
-  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass);
+  const verdict = deriveVerdict(band, impact?.production_dependents, impact?.dependent_count, impact?.truncated, changeClass, destructiveKindOf(rec));
   return (
     <Card
       elevation='flat'
