@@ -490,16 +490,21 @@ const CloudAccounts = () => {
     }
     const [fragment, subFragment] = hash.split('/');
     const filter = filterOptions.find((option) => option.fragment === fragment);
-    if (filter) {
+    if (filter && !filter.disabled) {
       setSelectedFilter(filter.value);
       const subTab = (filter?.tabOptions || []).find((tab) => tab.fragment === subFragment);
       if (subTab) {
         setSelectedSubTab(subTab.value);
       }
     } else if (selectedCluster?.cloud_provider) {
-      // cloud_provider is known so filterOptions is final — fragment not found means
-      // invalid hash or wrong provider. Fall back to Summary.
+      // cloud_provider is known so filterOptions is final — a fragment that is not
+      // found, or that points to a disabled tab (Security/Tools), means an invalid
+      // deep link. Fall back to Summary instead of rendering the disabled surface,
+      // and rewrite the hash so the tab strip (AnchorComponent derives its highlight
+      // from the URL) and the deep link both settle on Summary rather than leaving
+      // the disabled tab underlined over Summary content.
       setSelectedFilter(0);
+      router.replace(`${router.asPath.split('#')[0]}#summary`, undefined, { shallow: true });
     }
     // If cloud_provider is not yet set, cloud-specific tabs (ec2, rds, etc.)
     // may not be in filterOptions yet. The effect re-runs when filterOptions updates.
