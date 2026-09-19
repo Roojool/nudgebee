@@ -507,3 +507,31 @@ func TestComputeOperations_PromUsesAgentCapabilities(t *testing.T) {
 	assert.True(t, ops.PR.Available)
 	assert.True(t, helm.SendPromLocator)
 }
+
+// A synced rule with no recorded location is not in the agent's own
+// PrometheusRule once the account's sync records locations: writing it there
+// would leave the real rule (e.g. a VMRule) firing while the screen shows it changed.
+func TestPromRuleWriteUnknownLocation(t *testing.T) {
+	synced := AgentCapabilities{LocatorWrites: true, ClusterWrite: true, InstallationNamespace: "nb", RuleLocationsSynced: true}
+	oldSynced := AgentCapabilities{InstallationNamespace: "nb", RuleLocationsSynced: true}
+	notSynced := AgentCapabilities{LocatorWrites: true, ClusterWrite: true, InstallationNamespace: "nb"}
+	rule := func(source string) *RuleTarget {
+		return &RuleTarget{Rule: toggledRule{Source: source}}
+	}
+
+	got := promRuleWrite(rule(agentEventSourceName), synced)
+	assert.False(t, got.Available)
+	assert.Contains(t, got.Reason, "does not know where this rule is defined")
+
+	got = promRuleWrite(rule(agentEventSourceName), oldSynced)
+	assert.False(t, got.Available, "an old agent would write the agent's own PrometheusRule too")
+
+	// Before the account's sync records any location, the old assumption stands.
+	assert.True(t, promRuleWrite(rule(agentEventSourceName), notSynced).Available)
+	// Rules Nudgebee created live in its own PrometheusRule.
+	assert.True(t, promRuleWrite(rule("nudgebee"), synced).Available)
+	// A rule with a recorded location is unaffected.
+	withRef := rule(agentEventSourceName)
+	withRef.PromRule = PromRuleRef{Namespace: "monitoring", Name: "payments", Group: "g", ManagedBy: "unmanaged"}
+	assert.True(t, promRuleWrite(withRef, synced).Available)
+}

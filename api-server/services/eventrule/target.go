@@ -132,6 +132,11 @@ type AgentCapabilities struct {
 	LocatorWrites         bool
 	ClusterWrite          bool
 	InstallationNamespace string
+	// RuleLocationsSynced: the account's rule sync has recorded which
+	// PrometheusRule holds its rules. A synced rule with no location is then not
+	// in any PrometheusRule the agent lists (a VMRule, a rule file) — not in the
+	// agent's own PrometheusRule, which is what an unknown location used to mean.
+	RuleLocationsSynced bool
 }
 
 // Capabilities is the public view of a resolved target.
@@ -560,12 +565,21 @@ func isLegacyNudgebeeRule(ref PromRuleRef, installNS string) bool {
 
 const nudgebeeRulesCR = "nudgebee-prometheus.rules"
 
+const unknownRuleLocationReason = "Nudgebee does not know where this rule is defined (it is not in any PrometheusRule the agent lists — for example a VictoriaMetrics VMRule); change it where it is defined"
+
 // promRuleWrite decides a direct write to a PrometheusRule-backed rule (spec D5,
 // Q1): Argo CD / Flux → PR only; Helm and the agent chart → direct with a
 // warning that an upgrade reverts it; unknown ownership → PR only. It also sets
 // whether the write names the PrometheusRule.
 func promRuleWrite(t *RuleTarget, agent AgentCapabilities) Capability {
 	ref := t.PromRule
+	// A write without a location goes to the agent's own PrometheusRule. For a
+	// synced rule that lives elsewhere the write lands in the wrong place and the
+	// real rule keeps firing, while the screen shows it changed. Rules Nudgebee
+	// created itself do live there.
+	if ref.Name == "" && agent.RuleLocationsSynced && t.Rule.Source == agentEventSourceName {
+		return unavailable(unknownRuleLocationReason)
+	}
 	if !agent.LocatorWrites {
 		// Old agents only write their own PrometheusRule, which is right for
 		// rules that live there and silently wrong for any other.
@@ -634,7 +648,11 @@ func loadAgentCapabilities(ctx stdctx.Context, db *sqlx.DB, accountID string) Ag
 	if json.Unmarshal([]byte(raw.String), &status) != nil {
 		return AgentCapabilities{}
 	}
-	return AgentCapabilities(status)
+	caps := AgentCapabilities{LocatorWrites: status.LocatorWrites, ClusterWrite: status.ClusterWrite, InstallationNamespace: status.InstallationNamespace}
+	_ = db.GetContext(ctx, &caps.RuleLocationsSynced, `
+		SELECT EXISTS (SELECT 1 FROM event_rules
+		               WHERE account_id = $1 AND source = $2 AND COALESCE(name, '') <> '')`, accountID, agentEventSourceName)
+	return caps
 }
 
 // muteState is what is muted for one rule: the whole rule, and/or single workloads.
