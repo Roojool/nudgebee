@@ -20,7 +20,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 
 from apis import register_urls
-from metrics.otel_metrics import metric_views
+from metrics.otel_metrics import metric_views, otlp_insecure
 
 
 class TraceIdFilter(logging.Filter):
@@ -61,7 +61,7 @@ def _build_metric_exporter(exporter_name: str):
                 OTLPMetricExporter as GrpcMetricExporter,
             )
 
-            return GrpcMetricExporter()
+            return GrpcMetricExporter(insecure=otlp_insecure())
         raise ValueError(f"Unsupported OTLP protocol: {protocol}")
     return None
 

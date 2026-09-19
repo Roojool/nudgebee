@@ -14,6 +14,7 @@ dashboards and alerts keep working once the collector re-exports them.
 """
 
 import logging
+import os
 import threading
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -29,6 +30,35 @@ meter = metrics.get_meter("k8s-collector")
 _DURATION_BUCKETS: Sequence[float] = [0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0]
 _DB_DURATION_BUCKETS: Sequence[float] = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
 _SIZE_BUCKETS: Sequence[float] = [1024, 10240, 102400, 1048576, 10485760, 104857600]
+
+
+def otlp_insecure() -> bool:
+    """Whether the gRPC OTLP channel should skip TLS.
+
+    The endpoint we ship is a plaintext in-cluster OTLP receiver, and every chart
+    writes it without a scheme (`otel-...svc:4317`). The Python SDK only applies
+    the http/https convention when a scheme is present and otherwise defaults to
+    TLS, so the exporter opened a TLS channel against a plaintext listener: every
+    export failed with SSL_ERROR_SSL / UNAVAILABLE for the whole life of the
+    process, silently, since export errors are only logged. relay-server
+    hardcodes WithInsecure() against the same endpoint; this keeps the two
+    consistent while still honouring an explicit https://.
+
+    An explicit OTEL_EXPORTER_OTLP{,_METRICS}_INSECURE is the operator's call and
+    wins -- resolving it here rather than deferring to the SDK keeps the
+    precedence in one place, since passing `insecure=` at all overrides it.
+    A var that is *present but empty* is treated as unset rather than as "false":
+    Helm renders an unset value as an empty string, and reading that as "use TLS"
+    would silently reintroduce the very failure this function exists to prevent.
+    """
+    for var in ("OTEL_EXPORTER_OTLP_METRICS_INSECURE", "OTEL_EXPORTER_OTLP_INSECURE"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            return value.lower() in ("true", "1")
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or os.environ.get(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", ""
+    )
+    return not endpoint.strip().lower().startswith("https://")
 
 
 def metric_views() -> List[View]:
