@@ -1270,6 +1270,107 @@ var awsBlockedCommands = []string{
 	"sts",
 }
 
+var awsV2BlockedStsOperations = map[string]bool{
+	"assume-role":                   true,
+	"assume-role-with-saml":         true,
+	"assume-role-with-web-identity": true,
+	"get-federation-token":          true,
+	"get-session-token":             true,
+}
+
+var awsGlobalOptionsWithValue = map[string]bool{
+	"--ca-bundle":           true,
+	"--cli-binary-format":   true,
+	"--cli-connect-timeout": true,
+	"--cli-read-timeout":    true,
+	"--color":               true,
+	"--endpoint-url":        true,
+	"--output":              true,
+	"--profile":             true,
+	"--query":               true,
+	"--region":              true,
+}
+
+func awsCommandPositionals(args []string) ([]string, error) {
+	positionals := make([]string, 0, 2)
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, arg)
+			if len(positionals) == 2 {
+				return positionals, nil
+			}
+			continue
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		if awsGlobalOptionsWithValue[arg] {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("AWS CLI option %s requires a value", arg)
+			}
+			i++
+		}
+	}
+	return positionals, nil
+}
+
+func validateAwsV2Command(command string) error {
+	args, err := shlex.Split(command)
+	if err != nil {
+		return fmt.Errorf("failed to parse AWS CLI command: %w", err)
+	}
+	if len(args) < 2 || args[0] != "aws" {
+		return fmt.Errorf("AWS CLI command must start with aws")
+	}
+	positionals, err := awsCommandPositionals(args)
+	if err != nil {
+		return err
+	}
+	if len(positionals) == 0 {
+		return fmt.Errorf("AWS CLI command must name a service")
+	}
+	service := positionals[0]
+	if service == "configure" || service == "sso" {
+		return fmt.Errorf("command %q is not allowed", service)
+	}
+	if service == "sts" && len(positionals) > 1 && awsV2BlockedStsOperations[positionals[1]] {
+		return fmt.Errorf("command %q is not allowed", "sts "+positionals[1])
+	}
+	return nil
+}
+
+func awsCliEnv(ctx context.Context, account providers.Account, command string) ([]string, error) {
+	var cmdEnv []string
+	region := "us-east-1"
+	if account.Region != nil {
+		region = *account.Region
+	}
+	if !strings.Contains(command, "--region") {
+		cmdEnv = append(cmdEnv, "AWS_REGION="+region)
+	}
+
+	cfg, err := getAwsConfigFromAccount(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	awsCreds, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cmdEnv = append(cmdEnv,
+		"AWS_ACCESS_KEY_ID="+awsCreds.AccessKeyID,
+		"AWS_SECRET_ACCESS_KEY="+awsCreds.SecretAccessKey,
+	)
+	if awsCreds.SessionToken != "" {
+		cmdEnv = append(cmdEnv, "AWS_SESSION_TOKEN="+awsCreds.SessionToken)
+	}
+	if os.Getenv("AWS_PROFILE") != "" {
+		cmdEnv = append(cmdEnv, "AWS_PROFILE="+os.Getenv("AWS_PROFILE"))
+	}
+	return cmdEnv, nil
+}
+
 func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, account providers.Account, command string) (string, error) {
 	command = strings.TrimSpace(command)
 	if !strings.HasPrefix(command, "aws ") {
@@ -1280,32 +1381,9 @@ func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, acco
 		return "", err
 	}
 
-	// Set AWS credentials and region for the CLI command
-	var cmdEnv []string
-	region := "us-east-1"
-	if account.Region != nil {
-		region = *account.Region
-	}
-	// Only add AWS_REGION if the command itself doesn't specify --region
-	if !strings.Contains(command, "--region") {
-		cmdEnv = append(cmdEnv, "AWS_REGION="+region)
-	}
-
-	cfg, err := getAwsConfigFromAccount(ctx.GetContext(), account)
+	cmdEnv, err := awsCliEnv(ctx.GetContext(), account, command)
 	if err != nil {
 		return "", err
-	}
-	awsCreds, err := cfg.Credentials.Retrieve(context.TODO())
-	if err != nil {
-		return "", err
-	}
-	cmdEnv = append(cmdEnv, "AWS_ACCESS_KEY_ID="+awsCreds.AccessKeyID)
-	cmdEnv = append(cmdEnv, "AWS_SECRET_ACCESS_KEY="+awsCreds.SecretAccessKey)
-	if awsCreds.SessionToken != "" {
-		cmdEnv = append(cmdEnv, "AWS_SESSION_TOKEN="+awsCreds.SessionToken)
-	}
-	if os.Getenv("AWS_PROFILE") != "" {
-		cmdEnv = append(cmdEnv, "AWS_PROFILE="+os.Getenv("AWS_PROFILE"))
 	}
 
 	// Handle backslash line continuations before parsing
@@ -1349,6 +1427,52 @@ func (a *awsProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, acco
 	}
 
 	return stdout, nil
+}
+
+// ExecuteCliCommandV2 executes exactly one AWS CLI process for workspace
+// shims. Shell pipelines and local processing remain in the workspace; command
+// exits are returned as data so the shim can preserve ordinary shell behavior.
+func (a *awsProvider) ExecuteCliCommandV2(ctx providers.CloudProviderContext, account providers.Account, command string) (providers.CliExecutionResult, error) {
+	command = strings.TrimSpace(command)
+	if err := validateAwsV2Command(command); err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+	cmdEnv, err := awsCliEnv(ctx.GetContext(), account, command)
+	if err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+	timeout := time.Duration(config.Config.CloudCollectorCliTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	maxOutput := config.Config.CloudCollectorCliMaxOutputBytes
+	if maxOutput <= 0 {
+		maxOutput = 1024 * 1024
+	}
+	outputTruncated := false
+	stdout, stderr, execErr := common.SecureExecute(ctx.GetContext(), common.SecureCommandOptions{
+		Command:         command,
+		Env:             cmdEnv,
+		Timeout:         timeout,
+		MaxOutputBytes:  maxOutput,
+		OutputTruncated: &outputTruncated,
+	})
+	result := providers.CliExecutionResult{Stdout: stdout, Stderr: stderr, OutputTruncated: outputTruncated}
+	if execErr == nil {
+		return result, nil
+	}
+	var exitErr *common.CommandExitError
+	if errors.As(execErr, &exitErr) {
+		result.ExitCode = exitErr.ExitCode
+		return result, nil
+	}
+	var timeoutErr *common.CommandTimeoutError
+	if errors.As(execErr, &timeoutErr) {
+		result.ExitCode = 124
+		result.TimedOut = true
+		return result, nil
+	}
+	return result, execErr
 }
 
 func (a *awsProvider) QueryServiceMap(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryServiceMapRequest) (providers.QueryServiceMapResponse, error) {

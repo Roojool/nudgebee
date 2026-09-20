@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -23,7 +22,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/shlex"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -405,50 +403,45 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 	var relayJob tools.RelayJob
 	var registeredToolName string
 	toolName := strings.ToLower(req.Tool)
-	if toolName == "kubectl" {
-		if normalizeErr := normalizeKubectlProxyRequest(&req); normalizeErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": normalizeErr.Error()})
+	handler, specialized := workspaceCommandHandlers[toolName]
+	if specialized {
+		registeredToolName = handler.RegisteredToolName()
+	} else {
+		switch toolName {
+		case "helm":
+			relayJob = tools.RelayJobHelm
+			registeredToolName = tools.ToolExecuteHelmCommand
+		case "psql", "postgres":
+			relayJob = tools.RelayJobPostgres
+			registeredToolName = tools.ToolExecutePostgresQuery
+		case "mysql":
+			relayJob = tools.RelayJobMysql
+			registeredToolName = tools.ToolExecuteMySQLQuery
+		case "redis", "redis-cli":
+			relayJob = tools.RelayJobRedis
+			registeredToolName = tools.ToolExecuteRedisCommand
+		case "argocd":
+			relayJob = tools.RelayJobArgoCD
+			registeredToolName = tools.ToolExecuteArgoCDCommand
+		case "clickhouse", "clickhouse-client":
+			relayJob = tools.RelayJobClickhouse
+			registeredToolName = tools.ToolExecuteClickhouseQuery
+		case "rabbitmq", "rabbitmqadmin", "rabbitmq-api":
+			relayJob = tools.RelayJobRabbitmq
+			registeredToolName = tools.ToolExecuteRabbitCommand
+		case "mssql", "sqlcmd":
+			relayJob = tools.RelayJobMssql
+			registeredToolName = tools.ToolExecuteMSSQLQuery
+		case "oracle", "sqlplus":
+			relayJob = tools.RelayJobOracle
+			registeredToolName = tools.ToolExecuteOracleQuery
+		case "ssh":
+			relayJob = tools.RelayJobSSH
+			registeredToolName = tools.ToolExecuteServerCommand
+		default:
+			c.JSON(http.StatusBadRequest, common.ErrorActionBadRequest(fmt.Sprintf("unsupported tool: %s", req.Tool)))
 			return
 		}
-	}
-
-	switch toolName {
-	case "kubectl":
-		relayJob = tools.RelayJobKubectl
-		registeredToolName = tools.ToolExecuteKubectlCommand
-	case "helm":
-		relayJob = tools.RelayJobHelm
-		registeredToolName = tools.ToolExecuteHelmCommand
-	case "psql", "postgres":
-		relayJob = tools.RelayJobPostgres
-		registeredToolName = tools.ToolExecutePostgresQuery
-	case "mysql":
-		relayJob = tools.RelayJobMysql
-		registeredToolName = tools.ToolExecuteMySQLQuery
-	case "redis", "redis-cli":
-		relayJob = tools.RelayJobRedis
-		registeredToolName = tools.ToolExecuteRedisCommand
-	case "argocd":
-		relayJob = tools.RelayJobArgoCD
-		registeredToolName = tools.ToolExecuteArgoCDCommand
-	case "clickhouse", "clickhouse-client":
-		relayJob = tools.RelayJobClickhouse
-		registeredToolName = tools.ToolExecuteClickhouseQuery
-	case "rabbitmq", "rabbitmqadmin", "rabbitmq-api":
-		relayJob = tools.RelayJobRabbitmq
-		registeredToolName = tools.ToolExecuteRabbitCommand
-	case "mssql", "sqlcmd":
-		relayJob = tools.RelayJobMssql
-		registeredToolName = tools.ToolExecuteMSSQLQuery
-	case "oracle", "sqlplus":
-		relayJob = tools.RelayJobOracle
-		registeredToolName = tools.ToolExecuteOracleQuery
-	case "ssh":
-		relayJob = tools.RelayJobSSH
-		registeredToolName = tools.ToolExecuteServerCommand
-	default:
-		c.JSON(http.StatusBadRequest, common.ErrorActionBadRequest(fmt.Sprintf("unsupported tool: %s", req.Tool)))
-		return
 	}
 
 	var nbTool core.NBTool
@@ -475,17 +468,27 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 	}
 
 	toolCtx := core.NewNbToolContext(ctx, nbTool, req.AccountId, "system", "", "", "", req.Command, nil, "", queryConfig, "")
-	if toolName == "kubectl" {
-		if result, handled, configErr := virtualKubectlConfig(ctx, req, toolCtx.ToolConfig.Name); handled {
-			if configErr != nil {
-				writeWorkspaceExecuteAudit(ctx, req, toolName, req.AccountId, false)
-				c.JSON(http.StatusBadRequest, gin.H{"error": configErr.Error()})
-				return
-			}
-			writeWorkspaceExecuteAudit(ctx, req, toolName, req.AccountId, true)
-			c.JSON(http.StatusOK, gin.H{"result": result})
+	if specialized {
+		plan, prepareErr := handler.Prepare(ctx, toolCtx, req)
+		if prepareErr != nil {
+			writeWorkspaceHandlerAudit(ctx, req, toolName, req.AccountId, false)
+			c.JSON(http.StatusBadRequest, gin.H{"error": prepareErr.Error()})
 			return
 		}
+		if plan.Virtual {
+			writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, true)
+			c.JSON(http.StatusOK, gin.H{"result": plan.VirtualResult})
+			return
+		}
+		if allowed, bound := c.Get("workspace_allowed_target"); bound && plan.TargetAccountID != allowed {
+			writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, false)
+			c.JSON(http.StatusForbidden, gin.H{"error": "workspace token does not permit the selected target"})
+			return
+		}
+		result, executeErr := handler.Execute(ctx, toolCtx, plan)
+		writeWorkspaceHandlerAudit(ctx, plan.Request, toolName, plan.TargetAccountID, executeErr == nil)
+		c.JSON(workspaceExecuteReply(result, executeErr))
+		return
 	}
 
 	// The pod/token remains bound to req.AccountId; Kubernetes execution uses
@@ -508,6 +511,15 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 	result, err := tools.ExecuteContainerJob(toolCtx, relayJob, req.Command, targetAccountId, req.Arguments, true)
 	writeWorkspaceExecuteAudit(ctx, req, toolName, targetAccountId, err == nil)
 	c.JSON(workspaceExecuteReply(result, err))
+}
+
+func writeWorkspaceHandlerAudit(ctx *security.RequestContext, req WorkspaceExecuteRequest, toolName, targetAccountId string, success bool) {
+	// Cloud-collector owns cloud-command outcome auditing. Retain the existing
+	// Kubernetes audit exactly once and avoid duplicate records when more cloud
+	// handlers are added.
+	if toolName == "kubectl" {
+		writeWorkspaceExecuteAudit(ctx, req, toolName, targetAccountId, success)
+	}
 }
 
 func writeWorkspaceExecuteAudit(ctx *security.RequestContext, req WorkspaceExecuteRequest, toolName, targetAccountId string, success bool) {
@@ -671,14 +683,7 @@ func normalizeKubectlProxyRequest(req *WorkspaceExecuteRequest) error {
 }
 
 func kubectlCommandArgs(command string) ([]string, error) {
-	parts, err := shlex.Split(strings.TrimSpace(command))
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse kubectl command: %w", err)
-	}
-	if len(parts) == 0 || filepath.Base(parts[0]) != "kubectl" {
-		return nil, fmt.Errorf("kubectl command must start with kubectl")
-	}
-	return parts[1:], nil
+	return commandArgs("kubectl", command)
 }
 
 func extractKubectlContextArgs(argv []string) ([]string, string, error) {

@@ -780,6 +780,24 @@ type CloudProvider interface {
 	QueryDatabasePerformance(ctx CloudProviderContext, account Account, request DatabasePerformanceRequest) (DatabasePerformanceResponse, error)
 }
 
+// CliExecutionResult is the process-level result returned by the v2 cloud
+// CLI invocation. A non-zero exit is a completed execution, not a transport
+// error, so callers can preserve ordinary shell semantics.
+type CliExecutionResult struct {
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	ExitCode        int    `json:"exit_code"`
+	TimedOut        bool   `json:"timed_out"`
+	OutputTruncated bool   `json:"output_truncated"`
+}
+
+// CliV2Executor is an optional provider capability for workspace shims.
+// Implementations execute exactly one provider CLI process: shell pipelines,
+// redirects, loops, and local processing remain inside the workspace.
+type CliV2Executor interface {
+	ExecuteCliCommandV2(ctx CloudProviderContext, account Account, command string) (CliExecutionResult, error)
+}
+
 // CliCredentialsRequest asks for credentials that authenticate a process as the
 // account. Duration is what the caller needs them for; a provider clamps it to
 // what its credential type allows.

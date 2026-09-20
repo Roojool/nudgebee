@@ -160,7 +160,7 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 	// conversation's saved one; its output names the account it came from.
 	crossAccount := target.Name != nbRequestContext.ToolConfig.Name
 
-	accountId := KubernetesTargetAccountID(target)
+	accountId := TargetAccountID(target)
 
 	if accountId == "" {
 		return core.NBToolResponse{}, fmt.Errorf("unable to identify accountId - %s, please configure", t.Name())

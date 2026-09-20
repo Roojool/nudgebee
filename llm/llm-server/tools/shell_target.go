@@ -285,7 +285,7 @@ func AccountTargetByName(ctx *security.RequestContext, accountID, toolName, requ
 	names := make([]string, 0, len(all))
 	var byNumber []core.ToolConfig
 	for _, c := range all {
-		if !ctx.GetSecurityContext().HasAccountAccess(KubernetesTargetAccountID(c), security.SecurityAccessTypeRead) {
+		if !ctx.GetSecurityContext().HasAccountAccess(TargetAccountID(c), security.SecurityAccessTypeRead) {
 			continue
 		}
 		if strings.EqualFold(c.Name, requested) {
@@ -424,9 +424,16 @@ func shellSafeKubernetesContext(name string) string {
 // ListKubernetesTargets returns every connected cluster the current caller may
 // read. It powers the workspace shim's virtual kubeconfig discovery commands.
 func ListKubernetesTargets(ctx *security.RequestContext, accountID string) ([]core.ToolConfig, error) {
-	tool, ok := core.GetNBTool(accountID, ToolExecuteKubectlCommand)
+	return ListAccountTargets(ctx, accountID, ToolExecuteKubectlCommand)
+}
+
+// ListAccountTargets returns every connected account for an account-sourced
+// tool that the current caller may read. Workspace CLI virtual configuration
+// commands use it without exposing credentials.
+func ListAccountTargets(ctx *security.RequestContext, accountID, toolName string) ([]core.ToolConfig, error) {
+	tool, ok := core.GetNBTool(accountID, toolName)
 	if !ok {
-		return nil, fmt.Errorf("kubectl unavailable")
+		return nil, fmt.Errorf("tool %s unavailable", toolName)
 	}
 	all, err := TenantAccountLister(ctx, tool)
 	if err != nil {
@@ -434,7 +441,7 @@ func ListKubernetesTargets(ctx *security.RequestContext, accountID string) ([]co
 	}
 	readable := make([]core.ToolConfig, 0, len(all))
 	for _, candidate := range all {
-		if ctx.GetSecurityContext().HasAccountAccess(KubernetesTargetAccountID(candidate), security.SecurityAccessTypeRead) {
+		if ctx.GetSecurityContext().HasAccountAccess(TargetAccountID(candidate), security.SecurityAccessTypeRead) {
 			readable = append(readable, candidate)
 		}
 	}
@@ -463,8 +470,9 @@ func ResolveKubernetesTarget(ctx core.NbToolContext, current core.ToolConfig, re
 	return KubernetesTargetByName(ctx.Ctx, ctx.AccountId, requested)
 }
 
-// KubernetesTargetAccountID returns the cloud account id behind a config.
-func KubernetesTargetAccountID(selected core.ToolConfig) string {
+// TargetAccountID returns the canonical account id behind an account-sourced
+// tool configuration.
+func TargetAccountID(selected core.ToolConfig) string {
 	for _, v := range selected.Values {
 		if v.Name == "id" {
 			return v.Value
@@ -472,6 +480,9 @@ func KubernetesTargetAccountID(selected core.ToolConfig) string {
 	}
 	return ""
 }
+
+// KubernetesTargetAccountID is retained for existing Kubernetes callers.
+func KubernetesTargetAccountID(selected core.ToolConfig) string { return TargetAccountID(selected) }
 
 // sortNames orders names case-insensitively, as a person would read them.
 func sortNames(names []string) {

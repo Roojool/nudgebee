@@ -25,6 +25,9 @@ type appConfig struct {
 	CloudCollectorServerCostBackfillMonths       int    `mapstructure:"cloud_collector_server_cost_backfill_months"`
 	CloudCollectorServerMetricsWorkersMax        int    `mapstructure:"cloud_collector_server_metrics_workers_max"`
 	CloudCollectorServerEventsWorkersMax         int    `mapstructure:"cloud_collector_server_events_workers_max"`
+	CloudCollectorCliMaxConcurrent               int    `mapstructure:"cloud_collector_cli_max_concurrent"`
+	CloudCollectorCliMaxOutputBytes              int    `mapstructure:"cloud_collector_cli_max_output_bytes"`
+	CloudCollectorCliTimeoutSeconds              int    `mapstructure:"cloud_collector_cli_timeout_seconds"`
 
 	Env     string `mapstructure:"env"`
 	BaseUrl string `mapstructure:"base_url"`
@@ -244,6 +247,9 @@ func init() {
 	viper.SetDefault("cloud_collector_server_cost_backfill_months", 6)
 	viper.SetDefault("cloud_collector_server_metrics_workers_max", 1)
 	viper.SetDefault("cloud_collector_server_events_workers_max", 1)
+	viper.SetDefault("cloud_collector_cli_max_concurrent", 8)
+	viper.SetDefault("cloud_collector_cli_max_output_bytes", 1024*1024)
+	viper.SetDefault("cloud_collector_cli_timeout_seconds", 120)
 
 	viper.SetDefault("cloud_collector_notifications_slack_channel", "")
 
