@@ -9,6 +9,7 @@ import (
 	"nudgebee/runbook/common"
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/internal/tasks/types"
+	"nudgebee/runbook/services/service"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -141,10 +142,16 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 		}
 	}
 
+	// Optional. When set, the finished profile is attached to that event here
+	// rather than returned for an events.add_evidence task to forward — the only
+	// route that works once the artefact is past maxInlineProfileBytes.
+	eventID, _ := params["event_id"].(string)
+
 	if taskCtx.IsDryRun() {
 		return map[string]any{
-			"dry_run": true,
-			"request": request,
+			"dry_run":  true,
+			"event_id": eventID,
+			"request":  request,
 		}, nil
 	}
 
@@ -164,16 +171,18 @@ func (t *ProfileTask) Execute(taskCtx types.TaskContext, params map[string]any) 
 	}
 	taskCtx.GetLogger().Info("Profile queued", "profile_task_id", profileID, "pod", podName, "namespace", namespace)
 
-	return t.awaitProfile(taskCtx, accountID, profileID, duration, request)
+	return t.awaitProfile(taskCtx, accountID, profileID, duration, request, eventID)
 }
 
 // awaitProfile polls until the agent reports a terminal state, then returns the
-// profile itself so the rest of the workflow can use it.
+// profile itself so the rest of the workflow can use it. When eventID is set it
+// also attaches the artefact to that event before returning.
 func (t *ProfileTask) awaitProfile(
 	taskCtx types.TaskContext,
 	accountID, profileID string,
 	duration int,
 	request map[string]any,
+	eventID string,
 ) (any, error) {
 	deadline := time.Now().Add(time.Duration(duration)*time.Second + profileOverhead)
 	ctx := taskCtx.GetContext()
@@ -189,7 +198,20 @@ func (t *ProfileTask) awaitProfile(
 
 		switch state, _ := status["status"].(string); state {
 		case "COMPLETED":
-			return profileResult(profileID, request, status), nil
+			result := profileResult(profileID, request, status)
+			if eventID != "" {
+				// Loud on failure: the caller asked for this profile to land on
+				// an event, and a task reporting COMPLETED with nothing attached
+				// is the silence this parameter exists to end. A workflow that
+				// would rather carry on sets failure_policy: continue.
+				if err := attachProfileEvidence(taskCtx, eventID, status); err != nil {
+					return nil, fmt.Errorf(
+						"the profile was captured but could not be attached to event %s: %w", eventID, err)
+				}
+				result["event_id"] = eventID
+				result["evidence_attached"] = true
+			}
+			return result, nil
 		case "FAILED", "TIMEOUT":
 			message, _ := status["message"].(string)
 			if message == "" {
@@ -238,28 +260,71 @@ func profileResult(profileID string, request map[string]any, status map[string]a
 			}
 			switch {
 			case sized && size <= maxInlineProfileBytes:
-				// Shaped for the Investigate page's profile card, which keys
-				// off the file type and extension rather than an action name
-				// (SVGImageCard). events.add_evidence can pass this straight
-				// through, and anything else downstream gets the bytes.
-				result["file"] = map[string]any{
-					"filename": filename,
-					"type":     profileFileType(filename),
-					"data":     contents,
-					// Without this the logs card claims the profile too: it
-					// takes every .gz evidence and only skips a pprof.gz when
-					// the action name says pod_profiler, so an unlabelled
-					// profile is rendered as if it were a log file.
-					"additional_info": map[string]any{"actual_action_name": profilerActionName},
-				}
+				result["file"] = profileEvidence(filename, contents)
 			default:
 				result["contents_omitted"] = fmt.Sprintf(
-					"the profile is %s, over the %s a task output can carry — fetch it from the pod's Profiler tab, or ask for a shorter profile_duration",
+					"the profile is %s, over the %s a task output can carry — set this task's event_id to attach it to the event anyway, fetch it from the pod's Profiler tab, or ask for a shorter profile_duration",
 					describeSize(size, sized), describeSize(maxInlineProfileBytes, true))
 			}
 		}
 	}
 	return result
+}
+
+// profileEvidence is the one definition of an evidence element carrying a
+// profile. Shaped for the Investigate page's profile card, which keys off the
+// file type and extension rather than an action name (SVGImageCard).
+// events.add_evidence can pass it straight through, and anything else
+// downstream gets the bytes.
+//
+// Both routes out of this task build their element here — the inline `file`
+// output, and attachProfileEvidence — so a profile that is attached directly
+// renders exactly like one that travelled through the workflow.
+func profileEvidence(filename, contents string) map[string]any {
+	return map[string]any{
+		"filename": filename,
+		"type":     profileFileType(filename),
+		"data":     contents,
+		// Without this the logs card claims the profile too: it takes every .gz
+		// evidence and only skips a pprof.gz when the action name says
+		// pod_profiler, so an unlabelled profile is rendered as if it were a
+		// log file.
+		"additional_info": map[string]any{"actual_action_name": profilerActionName},
+	}
+}
+
+// attachProfileEvidence puts the artefact on the event directly, instead of
+// returning it for an events.add_evidence task to forward.
+//
+// This is what makes a large profile usable. The inline `file` output has to
+// respect maxInlineProfileBytes because it rides the Temporal payload, and a
+// real Go heap profile is comfortably past it — the 947KB one that motivated
+// this landed on the event as an empty string. Here the bytes go from the
+// status response straight back out over HTTP, so the cap does not apply and
+// size stops deciding whether the profile is visible.
+func attachProfileEvidence(taskCtx types.TaskContext, eventID string, status map[string]any) error {
+	profile := profileDetails(status)
+	if profile == nil {
+		return errors.New("the profiler reported success but returned no artefact")
+	}
+	filename, _ := profile["filename"].(string)
+	contents, _ := profile["contents_base64"].(string)
+	if filename == "" || contents == "" {
+		return errors.New("the profiler reported success but returned no artefact")
+	}
+
+	return service.AddEventEvidence(
+		taskCtx.GetTenantID(), eventID,
+		[]any{profileEvidence(filename, contents)},
+		service.EvidenceSourceWorkflow{
+			WorkflowID:   taskCtx.GetWorkflowID(),
+			WorkflowName: taskCtx.GetWorkflowName(),
+			ExecutionID:  taskCtx.GetWorkflowRunID(),
+			// Scopes api-server's replace-my-own-output rule to this task. A
+			// workflow that captures two samples runs this task twice, and
+			// without the task id the second attach deletes the first.
+			TaskID: taskCtx.GetTaskID(),
+		})
 }
 
 // profileFileType is the evidence "type" the profile card matches on. The
@@ -468,6 +533,16 @@ func (t *ProfileTask) InputSchema() *types.Schema {
 				Order:       8,
 				Options:     []string{"go", "java", "python", "node", "ruby"},
 			},
+			"event_id": {
+				Type:     types.PropertyTypeString,
+				Required: false,
+				Description: "Attach the finished profile to this event, so the Investigate page shows it as a " +
+					"profile card. For an event-triggered workflow this is {{ Inputs.event.id }}. Prefer this over " +
+					"forwarding the `file` output to events.add_evidence: `file` is dropped when the profile is " +
+					"larger than the task output can carry, and a real heap profile usually is.",
+				Title: "Attach To Event",
+				Order: 9,
+			},
 		},
 	}
 }
@@ -491,6 +566,14 @@ func (t *ProfileTask) OutputSchema() *types.Schema {
 			"contents_omitted": {
 				Type:        types.PropertyTypeString,
 				Description: "Set instead of file when the profile is too large to carry in a task output, explaining where to get it.",
+			},
+			"event_id": {
+				Type:        types.PropertyTypeString,
+				Description: "The event the profile was attached to. Set only when event_id was given.",
+			},
+			"evidence_attached": {
+				Type:        types.PropertyTypeBoolean,
+				Description: "True when the profile was attached to the event, whatever its size. Set only when event_id was given.",
 			},
 		},
 	}

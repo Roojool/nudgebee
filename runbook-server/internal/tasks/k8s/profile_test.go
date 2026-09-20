@@ -256,6 +256,150 @@ func TestProfileResult_OversizedProfileIsNotInlined(t *testing.T) {
 	assert.Equal(t, maxInlineProfileBytes+1, out["size_bytes"])
 }
 
+// profileStub serves the submit/status pair, and records what — if anything —
+// was posted to /rpc/event.
+func profileStub(t *testing.T, contents string) (*httptest.Server, *map[string]any) {
+	t.Helper()
+	var attached map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Path == "/rpc/event" {
+			attached = body
+			_, _ = w.Write([]byte(`{"data":{"event_id":"evt-1","added":1}}`))
+			return
+		}
+		if body["action"].(map[string]any)["name"].(string) == profileSubmitAction {
+			_, _ = w.Write([]byte(`{"data":{"profile_task_id":"prof-att","status":"TODO"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"status":"COMPLETED","base64_profile":{"data":{"data":{` +
+			`"lang":"go","profile_tool":"pprof","filename":"/tmp/agent-heapdump-1-1.pprof.gz",` +
+			`"contents_base64":"` + contents + `"}}}}}`))
+	}))
+	return server, &attached
+}
+
+// TestProfileTask_Execute_AttachesOversizedProfileToEvent is the whole point of
+// event_id: a profile too large to inline still reaches the event. The 947KB Go
+// heap profile that motivated this went over maxInlineProfileBytes, so `file`
+// was dropped and the workflow attached an empty string.
+func TestProfileTask_Execute_AttachesOversizedProfileToEvent(t *testing.T) {
+	huge := base64.StdEncoding.EncodeToString(make([]byte, maxInlineProfileBytes+1))
+	server, attached := profileStub(t, huge)
+	defer server.Close()
+
+	withServiceEndpoint(t, server.URL)
+	withFastPolling(t)
+
+	task := &ProfileTask{}
+	taskCtx := testutils.NewTestTaskContext("tenant", "account", "user", slog.Default())
+	result, err := task.Execute(taskCtx, map[string]any{
+		"namespace": "shop", "pod_name": "web-0",
+		"profile_type": "memory", "event_id": "evt-1",
+	})
+	require.NoError(t, err)
+
+	out := result.(map[string]any)
+	// The inline cap still applies to the task output — that is what rides the
+	// Temporal payload, and it must not grow just because we also attached.
+	assert.NotContains(t, out, "file")
+	assert.Contains(t, out, "contents_omitted")
+	// But the profile is on the event regardless of size.
+	assert.Equal(t, true, out["evidence_attached"])
+	assert.Equal(t, "evt-1", out["event_id"])
+
+	require.NotNil(t, *attached, "an oversized profile must still reach the evidence writer")
+	input := (*attached)["input"].(map[string]any)
+	assert.Equal(t, "evt-1", input["event_id"])
+
+	evidences := input["evidences"].([]any)
+	require.Len(t, evidences, 1)
+	evidence := evidences[0].(map[string]any)
+	// The fields the Investigate page's profile card selects and reads.
+	assert.Equal(t, "gz", evidence["type"])
+	assert.Equal(t, "/tmp/agent-heapdump-1-1.pprof.gz", evidence["filename"])
+	assert.Equal(t, huge, evidence["data"])
+	// Required, or the logs card claims the profile and renders it as a log.
+	assert.Equal(t, profilerActionName,
+		evidence["additional_info"].(map[string]any)["actual_action_name"])
+
+	// Scopes api-server's replace-my-own-output rule to this task, so a second
+	// capture in the same workflow does not delete this one.
+	assert.Equal(t, taskCtx.GetTaskID(),
+		input["source_workflow"].(map[string]any)["task_id"])
+}
+
+// TestProfileTask_Execute_AttachFailureIsLoud — "captured but not attached" is
+// the silent failure event_id exists to end, so it must surface as a task error.
+func TestProfileTask_Execute_AttachFailureIsLoud(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Path == "/rpc/event" {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"message":"event evt-gone not found"}`))
+			return
+		}
+		if body["action"].(map[string]any)["name"].(string) == profileSubmitAction {
+			_, _ = w.Write([]byte(`{"data":{"profile_task_id":"prof-4","status":"TODO"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"status":"COMPLETED","base64_profile":{"data":{"data":{` +
+			`"lang":"go","profile_tool":"pprof","filename":"/tmp/x.pprof.gz","contents_base64":"AAAA"}}}}}`))
+	}))
+	defer server.Close()
+
+	withServiceEndpoint(t, server.URL)
+	withFastPolling(t)
+
+	task := &ProfileTask{}
+	taskCtx := testutils.NewTestTaskContext("tenant", "account", "user", slog.Default())
+	_, err := task.Execute(taskCtx, map[string]any{
+		"namespace": "shop", "pod_name": "web-0", "event_id": "evt-gone",
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not be attached to event evt-gone")
+}
+
+// TestProfileTask_Execute_NoEventIdDoesNotAttach — without event_id the task
+// behaves exactly as it did before: capture, return, attach nothing.
+func TestProfileTask_Execute_NoEventIdDoesNotAttach(t *testing.T) {
+	server, attached := profileStub(t, "AAAA")
+	defer server.Close()
+
+	withServiceEndpoint(t, server.URL)
+	withFastPolling(t)
+
+	task := &ProfileTask{}
+	taskCtx := testutils.NewTestTaskContext("tenant", "account", "user", slog.Default())
+	result, err := task.Execute(taskCtx, map[string]any{"namespace": "shop", "pod_name": "web-0"})
+	require.NoError(t, err)
+
+	out := result.(map[string]any)
+	assert.NotContains(t, out, "evidence_attached")
+	// Small enough to inline, so the existing output path is untouched.
+	assert.Contains(t, out, "file")
+	assert.Nil(t, *attached, "nothing may be attached when no event_id was given")
+}
+
+// Test_profileEvidence — both routes out of this task build the element here, so
+// an attached profile renders identically to a forwarded one.
+func Test_profileEvidence(t *testing.T) {
+	evidence := profileEvidence("/tmp/agent-flamegraph-1.svg", "Zm9v")
+
+	assert.Equal(t, "svg", evidence["type"])
+	assert.Equal(t, "/tmp/agent-flamegraph-1.svg", evidence["filename"])
+	assert.Equal(t, "Zm9v", evidence["data"])
+	assert.Equal(t, profilerActionName,
+		evidence["additional_info"].(map[string]any)["actual_action_name"])
+}
+
 func Test_profileFileType(t *testing.T) {
 	assert.Equal(t, "gz", profileFileType("/tmp/agent-flamegraph-1.html.gz"))
 	assert.Equal(t, "svg", profileFileType("/tmp/agent-flamegraph-1.svg"))
