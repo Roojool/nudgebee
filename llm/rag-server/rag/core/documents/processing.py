@@ -5,6 +5,7 @@ Handles batch processing, embedding generation, and document lifecycle managemen
 """
 
 import asyncio
+import copy
 import gc
 import hashlib
 import logging
@@ -411,6 +412,95 @@ def _build_collection_meta(account_id, module, tenant_id=None, source=None):
     return meta
 
 
+# The reranker hard-slices each document to Config.reranker_max_doc_chars
+# characters BEFORE tokenizing it (local_reranker.py:rerank, applied ahead of
+# the separate Config.reranker_max_length combined-token-budget truncation),
+# so any chunk longer than that has its tail permanently invisible to
+# scoring regardless of tokenizer behavior. The worst-case stored chunk is
+# _CHUNK_CHAR_LIMIT + _CHUNK_OVERLAP_CHARS (see _split_on_paragraphs's final
+# flush), so the overlap must come out of the same budget, not sit on top of
+# it. An earlier fixed 700-char limit was sized against an assumed reranker
+# config, not the one main was running (500 chars / 128 tokens since
+# 604d28a76c), and live-testing showed content past char 500 of such a chunk
+# is never scored. Deriving the limit from the live config instead of a
+# disconnected guess keeps it from drifting out of sync again.
+_CHUNK_OVERLAP_CHARS = 100
+_CHUNK_CHAR_LIMIT = max(200, Config.reranker_max_doc_chars - _CHUNK_OVERLAP_CHARS)
+
+
+def _chunk_long_documents(documents):
+    """Split any document longer than _CHUNK_CHAR_LIMIT into smaller chunks
+    that fit the reranker's effective budget, on paragraph boundaries where
+    possible. Metadata already set on the document (provenance, any classifier
+    output a caller has already run) is copied onto every chunk unchanged —
+    it describes the whole document, not an arbitrary slice of it.
+
+    Documents at or under the limit pass through as a single chunk,
+    unmodified, so this is a no-op for the common case.
+    """
+    chunked = []
+    for doc in documents:
+        content = doc.page_content or ""
+        if len(content) <= _CHUNK_CHAR_LIMIT:
+            chunked.append(doc)
+            continue
+
+        pieces = _split_on_paragraphs(content, _CHUNK_CHAR_LIMIT, _CHUNK_OVERLAP_CHARS)
+        # parent_id + chunk_index is the contract collection._is_listed_point
+        # (lists chunk_index 0 only) and llm/ranking.py (groups chunks by
+        # parent) already read; without parent_id every chunk lists as its own
+        # document and none of them group.
+        parent_id = getattr(doc, "id", None) or hashlib.md5(content.encode()).hexdigest()
+        for i, piece in enumerate(pieces):
+            # Deep copy, not dict(): a shallow copy shares mutable values
+            # (e.g. the `capabilities` list) across every chunk of this
+            # document, so mutating one chunk's metadata would silently
+            # mutate all the others.
+            metadata = copy.deepcopy(doc.metadata) if doc.metadata else {}
+            metadata.setdefault("parent_id", parent_id)
+            metadata["chunk_index"] = i
+            metadata["chunk_count"] = len(pieces)
+            chunked.append(Document(page_content=piece, metadata=metadata))
+    return chunked
+
+
+def _split_on_paragraphs(text, limit, overlap):
+    """Greedily pack paragraphs (blank-line-separated) into chunks up to
+    `limit` chars, carrying the last `overlap` chars of each chunk into the
+    next so a boundary doesn't strand a sentence with no context. A single
+    paragraph longer than `limit` is hard-sliced rather than left oversized,
+    since an oversized chunk defeats the whole point of chunking.
+    """
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    chunks = []
+    current = ""
+    for para in paragraphs:
+        candidate = f"{current}\n\n{para}" if current else para
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            # A flush shorter than the overlap window is fully re-carried
+            # into the next chunk's prefix below (current[-overlap:] is then
+            # the whole string), so appending it here too would emit a
+            # redundant near-duplicate chunk with nothing lost by skipping it.
+            if len(current) > overlap:
+                chunks.append(current)
+            current = current[-overlap:] + "\n\n" + para if overlap else para
+        else:
+            current = para
+        while len(current) > limit:
+            chunks.append(current[:limit])
+            # max(1, ...) rather than max(0, ...): guarantees forward
+            # progress even if a future caller passes overlap >= limit,
+            # where limit - overlap <= 0 would otherwise re-slice from 0
+            # every time and loop forever.
+            current = current[max(1, limit - overlap) :]
+    if current:
+        chunks.append(current)
+    return chunks or [text[:limit]]
+
+
 def _stamp_provenance(documents, source=None, tenant_id=None):
     """Stamp provenance tags onto each document's metadata so per-source and
     per-tenant filters work at query time. Respects caller overrides.
@@ -571,6 +661,7 @@ def process_documents(
 
     run_id = run_id or str(uuid.uuid4())
     _stamp_provenance(documents, source=source, tenant_id=tenant_id)
+    documents = _chunk_long_documents(documents)
 
     # Initialize tracker with load metadata
     tracker = EmbeddingTracker(
