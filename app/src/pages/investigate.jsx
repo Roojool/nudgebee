@@ -52,7 +52,7 @@ import NoisyNeighbourCard from '@components/k8s/investigate/cards/NoisyNeighbour
 import LastDeploymentCard, { foldRepeatedChanges } from '@components/k8s/investigate/cards/LastDeploymentCard';
 import LogsCard from '@components/k8s/investigate/cards/LogsCard';
 import AskAiCard from '@components/k8s/investigate/cards/AskAiCard';
-import TracesCard from '@components/k8s/investigate/cards/TracesCard';
+import TracesCard, { isTracesCardId } from '@components/k8s/investigate/cards/TracesCard';
 import ServiceMapCard from '@components/k8s/investigate/cards/ServiceMapCard';
 import SVGImageCard from '@components/k8s/investigate/cards/SVGImageCard';
 import PrometheusCPUUsageCard from '@components/k8s/investigate/cards/PrometheusCPUUsageCard';
@@ -1492,7 +1492,10 @@ const Investigate = () => {
               if (cardExists) return old;
               return [...old, card];
             });
-            if (card.id === 'TracesCard') {
+            // Dynamic cards are id'd per evidence index ('TracesCard_3'), so the
+            // equality check this replaces never matched and CorrespondingEvents — the
+            // only reader of canTracesRender — could never render.
+            if (isTracesCardId(card.id)) {
               canTracesRender = true;
             }
             // Resume polling if RCA is still in progress (e.g., page refresh during analysis)
