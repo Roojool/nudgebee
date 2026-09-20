@@ -207,15 +207,16 @@ func (s *OpenObserveMetricSource) FetchMetricList(ctx *security.RequestContext, 
 		return nil, fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
 
-	// The regex literal must be quoted: `{__name__=~.*foo.*}` is not valid PromQL and the
-	// server rejects or ignores it, silently returning the unfiltered set.
-	var matchers []string
-	if req.Metric != "" {
-		matchers = append(matchers, fmt.Sprintf(`{__name__=~".*%s.*"}`, escapePromQLLabelValue(req.Metric)))
-	}
-
+	// Filtered client-side, not with a match[] selector. OpenObserve's Prometheus shim
+	// resolves match[] to a metric NAME only: a `{__name__=~".*foo.*"}` selector comes
+	// back as an empty list rather than the matching subset, and a selector that does not
+	// start with a literal name is rejected outright with HTTP 400 ("match[] argument must
+	// start with a metric name"). Verified against OpenObserve v1.0.3. Asking for the
+	// whole catalog — the one form the endpoint answers — and matching here is what makes
+	// keyword discovery return anything at all; the catalog is a single call and the
+	// caller caps the list well below its size.
 	endpoint := fmt.Sprintf("%s/api/%s/prometheus/api/v1/label/__name__/values", cfg.URL, cfg.OrgID) +
-		openObserveMetricMetadataQuery(req.StartTime, req.EndTime, matchers, time.Now())
+		openObserveMetricMetadataQuery(req.StartTime, req.EndTime, nil, time.Now())
 
 	authHeader := openObserveAuthHeader(cfg.Username, cfg.Password)
 
@@ -241,8 +242,15 @@ func (s *OpenObserveMetricSource) FetchMetricList(ctx *security.RequestContext, 
 		return nil, err
 	}
 
+	// Case-insensitive substring, matching what the keyword search advertises: callers
+	// pass a technology keyword ("redis", "jvm") rather than an exact metric name.
+	filter := strings.ToLower(req.Metric)
+
 	var output []OutputMetrics
 	for _, name := range payload.Data {
+		if filter != "" && !strings.Contains(strings.ToLower(name), filter) {
+			continue
+		}
 		output = append(output, OutputMetrics{Metric: name, Attributes: map[string]any{}})
 	}
 
@@ -279,7 +287,7 @@ func (s *OpenObserveMetricSource) FetchMetricLabelValues(ctx *security.RequestCo
 	sql := fmt.Sprintf(`SELECT %s FROM "%s" WHERE %s IS NOT NULL GROUP BY %s ORDER BY %s LIMIT 100`,
 		col, metric, col, col, col)
 
-	values, err := openObserveMetricSearch(cfg, sql, req.StartTime, req.EndTime, col)
+	values, err := openObserveMetricSearch(cfg, sql, req.StartTime, req.EndTime, col, openObserveSearchTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -320,10 +328,15 @@ func isOpenObserveEmptyResultError(body string) bool {
 	return strings.Contains(lower, "stream not found") || strings.Contains(lower, "field not found")
 }
 
+// openObserveSearchTimeout is the default budget for a single /_search call. A sweep
+// that issues several of them shortens it to whatever is left of its own deadline.
+const openObserveSearchTimeout = 15 * time.Second
+
 // openObserveMetricSearch runs a SQL query against a metric stream and returns the distinct
 // values of one column. Metrics live in their own streams, so the /_search API answers
-// metadata questions the Prometheus shim cannot.
-func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, startMs, endMs int64, col string) ([]string, error) {
+// metadata questions the Prometheus shim cannot. The caller supplies the timeout because a
+// sweep of several searches has to divide one action deadline between them.
+func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, startMs, endMs int64, col string, timeout time.Duration) ([]string, error) {
 	startMicros, endMicros := openObserveTimeRangeMicros(startMs, endMs, time.Now())
 
 	searchReq := openObserveSearchRequest{}
@@ -344,7 +357,7 @@ func openObserveMetricSearch(cfg integrations.OpenObserveConfig, sql string, sta
 			"Content-Type":  "application/json",
 		}),
 		common.HttpWithBody(io.NopCloser(bytes.NewReader(payloadBytes))),
-		common.HttpWithTimeout(15*time.Second),
+		common.HttpWithTimeout(timeout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("OpenObserve metric search failed: %w", err)

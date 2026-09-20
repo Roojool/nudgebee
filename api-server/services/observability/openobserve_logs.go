@@ -342,9 +342,20 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		var errorBody map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&errorBody)
-		return nil, fmt.Errorf("OpenObserve query failed with status %d: %v", resp.StatusCode, errorBody)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+
+		// OpenObserve answers a window it holds no data for with "stream not found",
+		// the same body it returns for a stream that genuinely does not exist. That is
+		// an empty result, not a failure: surfacing it as an error makes an idle
+		// fifteen minutes read as a broken integration, and the assistant then reports
+		// the log backend as disconnected. The metric search path already collapses
+		// these — see isOpenObserveEmptyResultError.
+		if isOpenObserveEmptyResultError(text) {
+			return []OutputLog{}, nil
+		}
+
+		return nil, fmt.Errorf("OpenObserve query failed with status %d: %s", resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)
@@ -489,7 +500,13 @@ func (s *OpenObserveLogSource) QueryLabelValues(ctx *security.RequestContext, re
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OpenObserve query failed with status %d", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+		// A label absent from this stream has no values; that is an empty list, not an error.
+		if isOpenObserveEmptyResultError(text) {
+			return []OutputLogLabelValue{}, nil
+		}
+		return nil, fmt.Errorf("OpenObserve query failed with status %d: %s", resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)
@@ -938,6 +955,12 @@ func (s *OpenObserveLogSource) QueryLogGroup(ctx *security.RequestContext, req F
 	// would make OpenObserve reject the whole query with a column-not-found error.
 	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
 	if err != nil {
+		// A stream OpenObserve has not materialised yet reports no schema. That means
+		// there is nothing to group, not that grouping is broken — and it happens
+		// routinely on an account whose log stream has simply been idle.
+		if errors.Is(err, errOpenObserveStreamNotFound) || isOpenObserveEmptyResultError(err.Error()) {
+			return LogGroupOutput{}, nil
+		}
 		ctx.GetLogger().Error("OpenObserveLogSource.QueryLogGroup: failed to read stream schema", "error", err)
 		return LogGroupOutput{}, err
 	}
@@ -995,8 +1018,13 @@ func (s *OpenObserveLogSource) QueryLogGroup(ctx *security.RequestContext, req F
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		text := strings.TrimSpace(string(bodyBytes))
+		// Same empty-window case as QueryLogs: no groups, rather than a failure.
+		if isOpenObserveEmptyResultError(text) {
+			return LogGroupOutput{}, nil
+		}
 		return LogGroupOutput{}, fmt.Errorf("OpenObserve log group query failed with status %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+			resp.StatusCode, text)
 	}
 
 	searchResp, err := decodeOpenObserveSearchResponse(resp.Body)

@@ -17,7 +17,11 @@ const ToolMetricsSeriesMatch = "metrics_series_match"
 
 func init() {
 	core.RegisterNBToolFactory(ToolMetricsSeriesMatch, func(accountId string) (core.NBTool, error) {
-		return MetricsSeriesMatchTool{Provider: "prometheus"}, nil
+		// Same resolution the agents do (MetricsDiscoveryProvider). Agents that take this
+		// tool from the registry rather than through PrometheusAgent.GetSupportedTools —
+		// the k8s orchestrator among them — otherwise send a hardcoded "prometheus",
+		// which api-server honours verbatim and routes to the agent relay.
+		return MetricsSeriesMatchTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 }
 
@@ -120,12 +124,7 @@ func (m MetricsSeriesMatchTool) Call(nbRequestContext core.NbToolContext, input 
 	}
 
 	if len(resp.Matches) == 0 {
-		// Genuinely no series for this workload in the window — a legitimate "no data".
-		return core.NBToolResponse{
-			Data:   fmt.Sprintf("No metric series found for workload %q in namespace %q. The workload may not be emitting metrics, the name/namespace may be wrong, or there is no data in the recent window.", workload, namespace),
-			Type:   core.NBToolResponseTypeText,
-			Status: core.NBToolResponseStatusSuccess,
-		}, nil
+		return seriesMatchEmptyResponse(workload, namespace, resp.Truncated), nil
 	}
 
 	out := map[string]any{
@@ -147,6 +146,22 @@ func (m MetricsSeriesMatchTool) Call(nbRequestContext core.NbToolContext, input 
 	}
 	metricsListCache.Store(cacheKey, metricsListCacheEntry{response: result, expiry: time.Now().Add(seriesMatchCacheTTL())})
 	return result, nil
+}
+
+// seriesMatchEmptyResponse phrases a match-less lookup. Whether the backend finished
+// looking is the whole difference: a completed search that found nothing is evidence the
+// workload is not emitting, whereas one cut short by a limit or a deadline is no evidence
+// at all, and an agent told "no metrics" acts on it either way.
+func seriesMatchEmptyResponse(workload, namespace string, truncated bool) core.NBToolResponse {
+	msg := fmt.Sprintf("No metric series found for workload %q in namespace %q. The workload may not be emitting metrics, the name/namespace may be wrong, or there is no data in the recent window.", workload, namespace)
+	if truncated {
+		msg = fmt.Sprintf("Inconclusive: the metric catalog lookup for workload %q in namespace %q stopped before it had searched everywhere, and nothing matched in the part it did search. Do NOT conclude the workload has no metrics. Narrow the namespace to shrink the search, or fall back to keyword search with metrics_list.", workload, namespace)
+	}
+	return core.NBToolResponse{
+		Data:   msg,
+		Type:   core.NBToolResponseTypeText,
+		Status: core.NBToolResponseStatusSuccess,
+	}
 }
 
 // argString reads a string argument from the tool call, tolerating non-string scalars.

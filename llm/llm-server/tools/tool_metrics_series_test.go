@@ -54,3 +54,17 @@ func TestSeriesMatchCacheTTL_Default(t *testing.T) {
 	// With no override configured, the default is 30m (series change slowly).
 	assert.Equal(t, 30*60, int(seriesMatchCacheTTL().Seconds()))
 }
+
+// A lookup that was cut short and a lookup that finished empty-handed are different
+// findings. Collapsing them is how a large metric catalog gets reported as no metrics.
+func TestSeriesMatchEmptyResponse_TruncatedIsInconclusive(t *testing.T) {
+	complete := seriesMatchEmptyResponse("checkout", "prod", false)
+	assert.Equal(t, core.NBToolResponseStatusSuccess, complete.Status)
+	assert.Contains(t, complete.Data, "No metric series found")
+	assert.NotContains(t, complete.Data, "Inconclusive")
+
+	partial := seriesMatchEmptyResponse("checkout", "prod", true)
+	assert.Equal(t, core.NBToolResponseStatusSuccess, partial.Status)
+	assert.Contains(t, partial.Data, "Inconclusive")
+	assert.Contains(t, partial.Data, "Do NOT conclude the workload has no metrics")
+}

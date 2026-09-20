@@ -76,14 +76,18 @@ func init() {
 	core.RegisterNBToolFactory(ToolQueryPrometheus, func(accountId string) (core.NBTool, error) {
 		return PrometheusExecuteTool{}, nil
 	})
+	// Provider resolved the same way the agents resolve it. An agent that takes these
+	// from the registry rather than through GetSupportedTools would otherwise fall back
+	// to the literal "prometheus" below, which api-server honours verbatim and routes to
+	// the agent relay — discovery then fails on every non-Prometheus backend.
 	core.RegisterNBToolFactory(ToolMetricsList, func(accountId string) (core.NBTool, error) {
-		return MetricsListTool{}, nil
+		return MetricsListTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolMetricsLabelsList, func(accountId string) (core.NBTool, error) {
-		return ListMetricsLabelsTool{}, nil
+		return ListMetricsLabelsTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolMetricsLabelValues, func(accountId string) (core.NBTool, error) {
-		return ListMetricsLabelValuesTool{}, nil
+		return ListMetricsLabelValuesTool{Provider: MetricsDiscoveryProvider(accountId)}, nil
 	})
 	core.RegisterNBToolFactory(ToolSearchMetrics, func(accountId string) (core.NBTool, error) {
 		return SearchMetricsTool{}, nil

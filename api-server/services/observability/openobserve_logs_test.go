@@ -905,3 +905,88 @@ func TestFetchOpenObserveStreamFields_StreamNotFoundIsDistinguishable(t *testing
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errOpenObserveStreamNotFound)
 }
+
+// OpenObserve answers a time window it holds no data for with "stream not found" — the
+// same body it returns for a stream that never existed. Treating that as a failure made
+// an idle fifteen minutes surface to the user as a disconnected log backend, so every
+// read path has to collapse it to an empty result the way the metric search already did.
+func TestOpenObserveLogs_EmptyWindowIsNotAnError(t *testing.T) {
+	const streamNotFound = `{"code":404,"message":"stream not found"}`
+
+	newSource := func(t *testing.T) (*OpenObserveLogSource, func()) {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(streamNotFound))
+		}))
+		patches := gomonkey.NewPatches()
+		patches.ApplyFunc(integrations.GetOpenObserveConfigs,
+			func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+				return integrations.OpenObserveConfig{
+					URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass",
+					LogStream: integrations.OpenObserveDefaultLogStream,
+				}, nil
+			})
+		return &OpenObserveLogSource{}, func() { patches.Reset(); server.Close() }
+	}
+
+	t.Run("QueryLogs returns no lines rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLogs(mockRequestContext(), FetchLogRequest{
+			AccountId: "acct-1", LogProvider: "openobserve",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err, "an empty window must not read as a broken log backend")
+		assert.Empty(t, out)
+	})
+
+	t.Run("QueryLabelValues returns no values rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLabelValues(mockRequestContext(), FetchLogLabelValuesRequest{
+			AccountId: "acct-1", LogProvider: "openobserve", LabelName: "namespace",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, out)
+	})
+
+	t.Run("QueryLogGroup returns no groups rather than failing", func(t *testing.T) {
+		s, done := newSource(t)
+		defer done()
+		out, err := s.QueryLogGroup(mockRequestContext(), FetchLogGroupRequest{
+			AccountId: "acct-1", LogProvider: "openobserve",
+			StartTime: 1699999000000, EndTime: 1700000600000,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, out.Groups)
+	})
+}
+
+// A genuine backend failure must still surface — collapsing every non-200 to "empty"
+// would hide auth and query errors behind a silent no-data answer.
+func TestOpenObserveLogs_RealFailureStillSurfaces(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"Unauthorized"}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs,
+		func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+			return integrations.OpenObserveConfig{
+				URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass",
+				LogStream: integrations.OpenObserveDefaultLogStream,
+			}, nil
+		})
+
+	_, err := (&OpenObserveLogSource{}).QueryLogs(mockRequestContext(), FetchLogRequest{
+		AccountId: "acct-1", LogProvider: "openobserve",
+		StartTime: 1699999000000, EndTime: 1700000600000,
+	})
+	require.Error(t, err, "401 is a real failure and must not be swallowed as empty")
+	assert.Contains(t, err.Error(), "401")
+}

@@ -166,3 +166,64 @@ func TestOpenObserveMetricSourceExpandsClusterPlaceholder(t *testing.T) {
 	assert.NotContains(t, received, "__CLUSTER__", "placeholder must not reach OpenObserve")
 	assert.Contains(t, received, `mode!="idle"`, "the rest of the selector must survive expansion")
 }
+
+// Keyword discovery is filtered in Go, not with a match[] selector, because
+// OpenObserve's shim resolves match[] to a metric NAME only: a `{__name__=~".*x.*"}`
+// selector returns an empty list and a selector with no literal name is a 400. Sending
+// one is what made metrics_list come back empty for every keyword.
+func TestOpenObserveFetchMetricListFiltersClientSide(t *testing.T) {
+	var gotQuery neturl.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/test-org/prometheus/api/v1/label/__name__/values", r.URL.Path)
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":[
+			"container_memory_usage_bytes",
+			"container_cpu_usage_seconds_total",
+			"redis_memory_used_bytes",
+			"Redis_Connected_Clients",
+			"up"
+		]}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	out, err := (&OpenObserveMetricSource{}).FetchMetricList(mockRequestContext(), FetchMetricsListRequest{
+		AccountId: "test",
+		Metric:    "redis",
+	})
+	require.NoError(t, err)
+
+	// The catalog is requested unfiltered — the only form the endpoint answers.
+	assert.Empty(t, gotQuery["match[]"], "no match[] selector may be sent")
+
+	names := make([]string, 0, len(out))
+	for _, m := range out {
+		names = append(names, m.Metric)
+	}
+	// Case-insensitive substring: callers pass a technology keyword, not an exact name.
+	assert.ElementsMatch(t, []string{"redis_memory_used_bytes", "Redis_Connected_Clients"}, names)
+}
+
+func TestOpenObserveFetchMetricListEmptyKeywordReturnsCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":["up","redis_memory_used_bytes"]}`))
+	}))
+	defer server.Close()
+
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+
+	out, err := (&OpenObserveMetricSource{}).FetchMetricList(mockRequestContext(), FetchMetricsListRequest{AccountId: "test"})
+	require.NoError(t, err)
+	assert.Len(t, out, 2)
+}

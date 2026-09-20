@@ -163,20 +163,11 @@ func fetchOpenObserveUtilisation(ctx *security.RequestContext, req GetUtilisatio
 		} else {
 			queries = buildPrometheusWorkloadQueries(meta, passthrough)
 		}
-		res, err := FetchMetricsQuery(ctx, FetchMetricsRequest{
-			AccountId:            req.AccountId,
-			MetricProvider:       "openobserve",
-			MetricProviderSource: integrationSource,
-			Queries:              queries,
-			StartTime:            req.StartTime,
-			EndTime:              req.EndTime,
-			StepInterval:         req.StepInterval,
-			Instant:              instant,
-		})
+		res, err := fetchOpenObserveFallbackRounds(ctx, req, integrationSource, queries, instant)
 		if err != nil {
 			return out, err
 		}
-		out.Results = append(out.Results, res.Results...)
+		out.Results = append(out.Results, res...)
 	}
 
 	if len(clusterKeys) > 0 {
