@@ -481,16 +481,6 @@ query ListK8sWorkloadNames {
 }
 `;
 
-export const K8S_POD_STATUS_TYPE = `
-query ListK8PodStatusType {
-  k8s_pods: k8s_pod_groupings_v2(where:__WHERE__){
-    rows{
-   		status   
-    }
-  }
-}
-`;
-
 export const K8S_WORKLOAD_WORKLOAD_TYPE = `
 query ListK8WorkloadWorkloadType {
   k8s_workloads: k8s_workload_groupings_v2(where:__WHERE__){
@@ -1188,29 +1178,34 @@ const apiKubernetes = {
       return error;
     }
   },
+  // The Status filter's options: every status the cluster's pods are actually in
+  // right now, taken from the same per-cluster counts the Summary donut renders,
+  // plus the four phases so they stay selectable when no pod is in them.
+  //
+  // Sourced from the counts rather than SELECT DISTINCT over the pods: the
+  // distinct has to look at every pod row the account has ever had (one dev
+  // account holds 333k), while the counts are restricted to live pods and are
+  // already computed for the Summary.
   async listK8sPodStatusType({ accountId }: { accountId?: string }) {
+    const phases = ['Failed', 'Pending', 'Running', 'Succeeded'];
     try {
-      if (accountId === 'demo') {
-        return {
-          data: {
-            k8s_pods: [],
-          },
-        };
+      if (accountId === 'demo' || !accountId) {
+        return { data: { k8s_pods: phases.map((status) => ({ status })) } };
       }
-      const where: any = {};
-      if (accountId) {
-        where['account_id'] = { _eq: accountId };
-      }
-      const query = K8S_POD_STATUS_TYPE.replaceAll('__WHERE__', gqlStringify(where));
-      const response = await queryGraphQL(query, 'ListK8PodStatusType', {});
+      const response = await queryGraphQL(GET_k8_CLUSTER_GROUPINGS, 'get_k8_cluster_groupings', {
+        accountId1: accountId,
+      });
+      const counts = response?.data?.data?.k8s_cluster_groupings?.rows?.[0]?.pod_status_counts;
+      const present = Object.entries(typeof counts === 'string' ? JSON.parse(counts || '{}') : counts || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([status]) => status);
       return {
         data: {
-          k8s_pods: response?.data?.data?.k8s_pods?.rows,
+          k8s_pods: Array.from(new Set([...present, ...phases])).map((status) => ({ status })),
         },
       };
-    } catch (error) {
-      console.log('Your Error is', error);
-      return error;
+    } catch {
+      return { data: { k8s_pods: phases.map((status) => ({ status })) } };
     }
   },
   async resolveEventRecord(id: string, accountId?: string) {
@@ -2344,7 +2339,11 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       where.push({ is_active: { _eq: false } });
     }
     if (query.status) {
-      where.push({ status: { _eq: query.status } });
+      // display_status, not status: `status` is the phase, so filtering for
+      // CrashLoopBackOff never matched (the phase is Running) and filtering for
+      // Failed did not return crashlooping pods either. display_status is what
+      // the Status/State column shows.
+      where.push({ display_status: { _eq: query.status } });
     }
     if (query.podName || query.pod_name || query.name) {
       where.push({ name: { _ilike: '%' + (query.podName || query.pod_name || query.name) + '%' } });

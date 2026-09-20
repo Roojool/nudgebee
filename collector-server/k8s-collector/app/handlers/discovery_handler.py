@@ -3,7 +3,7 @@ import logging
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from apis.model.namespace_details import NamespaceDetails
 from apis.model.node_details import NodeDetails
@@ -57,6 +57,7 @@ pods_on_conflict = (
     "workload_type = EXCLUDED.workload_type, "
     "workload_name = EXCLUDED.workload_name, "
     "status = EXCLUDED.status, "
+    "container_status = EXCLUDED.container_status, "
     "namespace = EXCLUDED.namespace "
     f"WHERE {_version_where('k8s_pods')}"
 )
@@ -458,6 +459,64 @@ def run_service_discovery(
     )
 
 
+def pod_container_status(status_info: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The status a human recognises -- what kubectl prints in its STATUS column.
+
+    `status` on the same row is the pod PHASE, and the phase cannot express
+    "running but broken": a pod in CrashLoopBackOff has phase Running and one in
+    ImagePullBackOff has phase Pending. Every surface that counts or filters pods
+    reads a column, so the reason has to be one too -- computing it from
+    meta.status_info at query time costs a jsonb read per pod, which is minutes
+    over the ~330k rows a single account accumulates (#36593).
+
+    Precedence follows kubectl: an init container that is not done blocks the pod,
+    so its reason wins over the app containers'; within each group the current
+    (waiting) state wins over the last (terminated) one.
+
+    A container that exited 0 is not a problem and is skipped, so a pod running
+    alongside a completed sidecar does not read "Completed". A missing exitCode is
+    treated as non-zero -- an unset value is not evidence of a clean exit.
+
+    None when nothing is waiting or terminated -- i.e. a healthy pod -- so readers
+    fall back to the phase. Also None for agents that predate status_dict being
+    sent, which is the same fallback.
+    """
+    if not isinstance(status_info, dict):
+        return None
+
+    def state_of(container_status: Any) -> Dict[str, Any]:
+        # Every level is type-checked rather than assumed: this runs on the agent
+        # payload for every pod in the batch, so one malformed entry raising here
+        # would drop the whole discovery message, not one pod.
+        if not isinstance(container_status, dict):
+            return {}
+        state = container_status.get("state")
+        return state if isinstance(state, dict) else {}
+
+    def waiting_reason(container_status: Any) -> Optional[str]:
+        waiting = state_of(container_status).get("waiting")
+        return waiting.get("reason") if isinstance(waiting, dict) else None
+
+    def terminated_reason(container_status: Any) -> Optional[str]:
+        terminated = state_of(container_status).get("terminated")
+        if not isinstance(terminated, dict) or not terminated.get("reason"):
+            return None
+        if str(terminated.get("exitCode", "")) == "0":
+            return None
+        return terminated.get("reason")
+
+    for key in ("initContainerStatuses", "containerStatuses"):
+        statuses = status_info.get(key)
+        if not isinstance(statuses, list):
+            continue
+        for reason_of in (waiting_reason, terminated_reason):
+            for container_status in statuses:
+                reason = reason_of(container_status)
+                if reason:
+                    return reason
+    return None
+
+
 def process_service_discovery(
     _id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads, rs_owners=None
 ):
@@ -530,6 +589,7 @@ def process_service_discovery(
             "node_name": k8s_data.get("node_name", ""),
             "restart_count": k8s_data.get("restart_count", 0),
             "status": k8s_data.get("status") or "UNKNOWN",
+            "container_status": pod_container_status(k8s_data.get("status_dict")),
         }
         owner_name, owner_kind = _resolve_pod_owner(k8s_data, rs_owners or {})
         if owner_name is not None:

@@ -1030,6 +1030,11 @@ var table_metadata = map[string]TableDefinition{
 			) AS ksw
 			USING (cloud_account_id, tenant_id)
 			JOIN (
+				-- Pods bucketed the way the pods table names them: the container
+				-- reason where there is one, the phase otherwise. Counting the raw
+				-- phase instead -- which this did until #36593 -- files every
+				-- CrashLoopBackOff pod under "Running" and every ImagePullBackOff
+				-- one under "Pending", so a cluster with broken pods reads healthy.
 				SELECT
 					ksp.cloud_account_id,
 					ksp.tenant_id,
@@ -1038,7 +1043,7 @@ var table_metadata = map[string]TableDefinition{
 					SELECT
 						ksp.cloud_account_id,
 						ksp.tenant_id,
-						ksp.status,
+						COALESCE(ksp.container_status, ksp.status) AS status,
 						COUNT(*) AS status_count
 					FROM
 						k8s_pods ksp
@@ -1047,7 +1052,7 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY
 						ksp.cloud_account_id,
 						ksp.tenant_id,
-						ksp.status
+						COALESCE(ksp.container_status, ksp.status)
 				) AS ksp
 				GROUP BY
 					ksp.cloud_account_id,
@@ -4669,7 +4674,19 @@ var table_metadata = map[string]TableDefinition{
 			// transition, and a column would need a migration plus a writer.
 			"container_status": {
 				Type: ColumnDefinitionTypeString,
-				Def:  podContainerStatusExpr,
+				Def:  `COALESCE(container_status, ` + podContainerStatusExpr("meta") + `)`,
+			},
+			// What the Status filter and the Summary counts are keyed on: the
+			// container reason when there is one, the phase otherwise -- the same
+			// value the table renders, so filtering for CrashLoopBackOff returns
+			// exactly the rows that read CrashLoopBackOff.
+			//
+			// The stored column only, with no jsonb fallback: unlike
+			// container_status above this one lands in WHERE and GROUP BY, where it
+			// is evaluated for every row scanned rather than the 25 on screen.
+			"display_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "COALESCE(container_status, status)",
 			},
 			"node_name": {
 				Type: ColumnDefinitionTypeString,
@@ -4985,6 +5002,24 @@ var table_metadata = map[string]TableDefinition{
 			"pod_fqdn": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "concat(namespace, '/', name)",
+			},
+			// The pods list sends one where to both tables -- rows from
+			// k8s_pods_v2, the result count from here -- so a column missing on
+			// this side fails the count with "column not found in table" the
+			// moment the user picks a status.
+			//
+			// container_status is the stored column alone here, without the jsonb
+			// fallback k8s_pods_v2 adds for display: this table only ever groups
+			// and filters, and a jsonb read in a WHERE runs for every row scanned
+			// (minutes over the 333k historical pods one account holds), not for
+			// the page being shown.
+			"container_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "container_status",
+			},
+			"display_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "COALESCE(container_status, status)",
 			},
 			"creation_time": {
 				Type: ColumnDefinitionTypeDatetime,
@@ -10869,6 +10904,12 @@ func init() {
 // kubectl prints in its STATUS column -- from the container statuses the agent
 // ships in meta.status_info.
 //
+// It is now the FALLBACK, not the source: the collector writes the same value to
+// k8s_pods.container_status, which is what filters and counts read (a jsonb read
+// in a WHERE or GROUP BY runs for every row scanned, and is minutes over one
+// account's history). This expression stays for the pods table, where it runs for
+// the page on screen and covers rows last written before that collector shipped.
+//
 // It exists because k8s_pods.status holds the pod PHASE, and the phase cannot
 // express "running but broken": a pod in CrashLoopBackOff has phase Running and
 // one in ImagePullBackOff has phase Pending. Measured on a dev cluster, 402
@@ -10879,8 +10920,18 @@ func init() {
 // an init container is stuck the app containers have not started, and their
 // generic "PodInitializing" would mask the real reason. Within each group a
 // waiting reason wins over a terminated one, since waiting is the current state
-// and terminated is the last one. NULL when nothing is waiting or terminated --
-// i.e. a healthy pod -- so callers fall back to the phase.
+// and terminated is the last one. That is what the ORDER BY spells out: grp
+// (init before app), then waiting before terminated, then position in the array.
+// NULL when nothing is waiting or terminated -- i.e. a healthy pod -- so callers
+// fall back to the phase.
+//
+// One pass, and meta is read once. The obvious shape -- a COALESCE of four
+// scalar subqueries, one per (group, state) combination -- is what this was
+// until the Summary counts started using it, and each of those four subqueries
+// detoasts meta again. Measured on dev, that cost 3.2s over the 1810 pods the
+// Summary has to classify and 9.9s over a single 87k-pod account; folding it
+// into one subquery over a UNION ALL of both arrays took the same work to 277ms.
+// The two forms were verified to agree on all 94,591 active pods on dev.
 //
 // A container that exited 0 is not a problem and is skipped in BOTH groups. A
 // long-running pod alongside a completed sidecar or helper would otherwise read
@@ -10904,31 +10955,30 @@ func init() {
 // return first, and could report a different one on the next refresh. Ordering by
 // position means it always reports the first such container, matching the order the
 // pod spec lists them in.
-const podContainerStatusExpr = `COALESCE(
-	(SELECT cs.value->'state'->'waiting'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'terminated'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
-	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'waiting'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
-	  ORDER BY cs.ord LIMIT 1),
-	(SELECT cs.value->'state'->'terminated'->>'reason'
-	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
-	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
-	        WITH ORDINALITY AS cs(value, ord)
-	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
-	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
-	  ORDER BY cs.ord LIMIT 1)
-)`
+//
+// metaColumn is the meta column to read, qualified when the caller's FROM has an
+// alias (the cluster-summary subquery says ksp.meta).
+func podContainerStatusExpr(metaColumn string) string {
+	return `(SELECT cs.reason
+	   FROM (SELECT ` + metaColumn + `->'status_info' AS si) src
+	   CROSS JOIN LATERAL (
+	     SELECT COALESCE(c.value->'state'->'waiting'->>'reason',
+	                     c.value->'state'->'terminated'->>'reason') AS reason
+	       FROM (
+	         SELECT value, ord, 0 AS grp
+	           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(src.si->'initContainerStatuses') = 'array'
+	                                          THEN src.si->'initContainerStatuses' ELSE '[]'::jsonb END)
+	                WITH ORDINALITY AS t(value, ord)
+	         UNION ALL
+	         SELECT value, ord, 1 AS grp
+	           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(src.si->'containerStatuses') = 'array'
+	                                          THEN src.si->'containerStatuses' ELSE '[]'::jsonb END)
+	                WITH ORDINALITY AS t(value, ord)
+	       ) c
+	      WHERE c.value->'state'->'waiting'->>'reason' IS NOT NULL
+	         OR (c.value->'state'->'terminated'->>'reason' IS NOT NULL
+	             AND COALESCE(c.value->'state'->'terminated'->>'exitCode', '') <> '0')
+	      ORDER BY c.grp, (c.value->'state'->'waiting'->>'reason') IS NULL, c.ord
+	      LIMIT 1
+	   ) cs)`
+}
