@@ -1605,7 +1605,19 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	// After getting the agent response, update the context asynchronously.
 	// Single-shot internal classifiers use a throwaway conversation per call, so
 	// there is nothing to carry forward — skip context_memories_extractions.
-	if len(agentResponse.Response) > 0 && agentResponse.AgentName != RouterAgentName && agentResponse.AgentName != ToolLlm && !isSingleShotClassifier(agent) {
+	// Headless automated pipelines (alert investigations, PR lifecycle bots, workflow
+	// automations, and recommendation generators) also never reuse conversational context.
+	effectiveSource := source
+	if conversation.Source != nil && *conversation.Source != "" {
+		effectiveSource = *conversation.Source
+	} else if effectiveSource == "" {
+		effectiveSource = request.ConversationSource
+	}
+	if len(agentResponse.Response) > 0 &&
+		agentResponse.AgentName != RouterAgentName &&
+		agentResponse.AgentName != ToolLlm &&
+		!isSingleShotClassifier(agent) &&
+		isContextExtractionApplicable(effectiveSource) {
 		updateConversationContextAsync(ctx, request, agentResponseContent, conversation.ID.String(), conversation.Context, agentResponse.AgentName)
 	}
 	conversation, err = GetConversationDao().GetConversation(conversation.ID.String())
@@ -1744,7 +1756,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 	}
 
 	// Generate compact response for InstantNotification source (Slack) and Investigation
-	if config.Config.SlackCompactResponse && (source == ConversationSourceInstantNotification || source == ConversationSourceInvestigation) && status == ConversationStatusCompleted && len(agentResponse.Response) > 0 && agentResponse.Response[0] != "" && agentResponse.AgentName != ToolLlm {
+	if config.Config.SlackCompactResponse && (effectiveSource == ConversationSourceInstantNotification || effectiveSource == ConversationSourceInvestigation) && status == ConversationStatusCompleted && len(agentResponse.Response) > 0 && agentResponse.Response[0] != "" && agentResponse.AgentName != ToolLlm {
 		compactResponse, compactErr := generateCompactResponse(ctx, request.AccountId, request.ConversationId, request.MessageId, request.UserId, request.Query, agentResponse.Response[0])
 
 		if compactErr != nil {
@@ -1753,7 +1765,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			// For Investigation source, preserve the original structured response (used by event_analyzer
 			// for structured field parsing like git_diff, pr_list, etc.) and only save compact to DB.
 			// For Slack/InstantNotification, replace the response with compact version for display.
-			if source != ConversationSourceInvestigation {
+			if effectiveSource != ConversationSourceInvestigation {
 				agentResponse.Response = []string{compactResponse}
 			}
 			// Save compact response to DB asynchronously

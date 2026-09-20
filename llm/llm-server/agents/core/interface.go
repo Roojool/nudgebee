@@ -56,6 +56,8 @@ const (
 	ConversationSourceUserInvestigationCLI ConversationSource = "UserInvestigationCli"
 	ConversationSourceOptimize             ConversationSource = "Optimize"
 	ConversationSourceAutomation           ConversationSource = "Automation"
+	ConversationSourcePRLifecycle          ConversationSource = "pr_lifecycle"
+	ConversationSourceRecommendation       ConversationSource = "recommendation"
 )
 
 // ImageAttachment represents an image attached to an agent request.
@@ -607,6 +609,22 @@ func agentModelCategory(agent NBAgent) ModelTier {
 // Callers use this to skip that enrichment for internal classifier runs.
 func isSingleShotClassifier(agent NBAgent) bool {
 	return agent != nil && agent.GetPlannerType() == AgentPlannerTypeClassification
+}
+
+// isContextExtractionApplicable reports whether a conversation source should run
+// asynchronous conversation context distillation (context_memories_extractions).
+// Headless automated pipelines (alert investigations, PR lifecycle bots, workflow
+// automations, and recommendation generators) never reuse conversational context.
+func isContextExtractionApplicable(source ConversationSource) bool {
+	switch source {
+	case ConversationSourceInvestigation,
+		ConversationSourceAutomation,
+		ConversationSourcePRLifecycle,
+		ConversationSourceRecommendation:
+		return false
+	default:
+		return true
+	}
 }
 
 // NBAgentCacheScopeProvider is an optional interface that allows agents to define
