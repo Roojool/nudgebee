@@ -1599,18 +1599,10 @@ func getESMetricIndexPattern(nbRequestContext core.NbToolContext, defaultIndex s
 	return ""
 }
 
-// metricsProviderNeedsServicesServer reports whether a resolved metrics provider
-// must be queried through the api-server rather than the relay.
-//
-// "agent" is the in-cluster Prometheus (and the cloud-CLI fallbacks, which
-// GetMetricsProvider also labels agent) — those keep the relay path. Anything
-// user-configured is an integration the api-server owns the credentials and the
-// query dialect for; the relay cannot reach it.
-//
-// A user-configured Prometheus is deliberately left on the relay path: it speaks
-// the same PromQL the relay already sends, and moving it would change behaviour
-// for accounts this bug never affected.
-func metricsProviderNeedsServicesServer(provider services_server.ObservabilityProvider) bool {
+// metricsDiscoveryUsesConfiguredProvider selects integration-backed discovery.
+// Agent-backed defaults (including cloud CLI fallbacks) discover Prometheus
+// metrics. EE execution independently uses QueryMetrics for every provider.
+func metricsDiscoveryUsesConfiguredProvider(provider services_server.ObservabilityProvider) bool {
 	if strings.EqualFold(strings.TrimSpace(provider.IntegrationSource), "agent") {
 		return false
 	}
@@ -1634,9 +1626,8 @@ func metricsProviderNeedsServicesServer(provider services_server.ObservabilityPr
 // which match nothing and read as "this service reports no metrics".
 //
 // Returns "prometheus" unchanged for the agent-backed default, the cloud-CLI
-// fallbacks and a user-configured Prometheus — the same boundary
-// metricsProviderNeedsServicesServer draws for execution, so discovery and
-// execution can never disagree about which backend is being talked to.
+// fallbacks and a user-configured Prometheus. This helper only selects discovery;
+// EE execution already resolves the provider through the services-server.
 func MetricsDiscoveryProvider(accountId string) string {
 	provider, err := GetMetricsProvider(accountId)
 	if err != nil {
@@ -1651,7 +1642,7 @@ func MetricsDiscoveryProvider(accountId string) string {
 // the account's provider is known, split out so it can be exercised for backends
 // no test environment has to be wired up to.
 func metricsDiscoveryProviderFor(provider services_server.ObservabilityProvider) string {
-	if metricsProviderNeedsServicesServer(provider) {
+	if metricsDiscoveryUsesConfiguredProvider(provider) {
 		return strings.TrimSpace(provider.Provider)
 	}
 	return "prometheus"

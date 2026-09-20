@@ -558,10 +558,9 @@ func TestESDiscoveryProvenance_SeparatesDataFromSchema(t *testing.T) {
 // metrics provider routing
 // ---------------------------------------------------------------------------
 
-// The relay can only reach the Prometheus behind a connected Kubernetes agent —
-// relay-server pins agentType to "k8s". A user-configured backend has no such
-// agent, so those queries have to go through the api-server instead.
-func TestMetricsProviderNeedsServicesServer(t *testing.T) {
+// Discovery uses the configured integration for external metrics backends.
+// These decisions do not change EE execution through QueryMetrics.
+func TestMetricsDiscoveryUsesConfiguredProvider(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		provider services_server.ObservabilityProvider
@@ -592,10 +591,10 @@ func TestMetricsProviderNeedsServicesServer(t *testing.T) {
 			why:      "GetMetricsProvider labels the cloud fallbacks agent; they are not api-server metric sources",
 		},
 		{
-			name:     "user-configured Prometheus stays on the relay",
+			name:     "user-configured Prometheus discovers prometheus",
 			provider: services_server.ObservabilityProvider{Provider: "prometheus", IntegrationSource: "user"},
 			want:     false,
-			why:      "it speaks the PromQL the relay already sends; moving it would change untouched accounts",
+			why:      "its discovery provider is already prometheus",
 		},
 		{
 			name:     "unresolved provider",
@@ -610,7 +609,7 @@ func TestMetricsProviderNeedsServicesServer(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := metricsProviderNeedsServicesServer(tc.provider)
+			got := metricsDiscoveryUsesConfiguredProvider(tc.provider)
 			assert.Equal(t, tc.want, got, tc.why)
 		})
 	}
