@@ -34,6 +34,8 @@
 //	MOCK_GW_UPSTREAM_URL      OpenAI-compatible base URL incl. version segment
 //	                          (e.g. https://openrouter.ai/api/v1); empty = canned
 //	MOCK_GW_UPSTREAM_API_KEY  key sent upstream as Authorization: Bearer
+//	MOCK_GW_CANNED_DELAY      hold each canned reply this long (e.g. 3s) so a
+//	                          load test sees model-like latency  (default 0)
 package main
 
 import (
@@ -123,6 +125,13 @@ func main() {
 		log.Fatalf("MOCK_GW_TOKEN_TTL_SECONDS must be a positive integer")
 	}
 	ttl := time.Duration(ttlSeconds) * time.Second
+	var cannedDelay time.Duration
+	if v := os.Getenv("MOCK_GW_CANNED_DELAY"); v != "" {
+		cannedDelay, err = time.ParseDuration(v)
+		if err != nil || cannedDelay < 0 {
+			log.Fatalf("MOCK_GW_CANNED_DELAY must be a non-negative duration such as 3s")
+		}
+	}
 
 	store := &tokenStore{tokens: map[string]time.Time{}}
 
@@ -199,6 +208,13 @@ func main() {
 		}
 
 		if upstreamURL == "" {
+			if cannedDelay > 0 {
+				select {
+				case <-time.After(cannedDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"id":      "chatcmpl-mock",
 				"object":  "chat.completion",

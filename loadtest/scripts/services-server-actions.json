@@ -1,0 +1,38 @@
+[
+  {
+    "name": "accounts_list",
+    "path": "/rpc/query",
+    "weight": 4,
+    "input": { "columns": ["id", "account_name", "cloud_provider"], "order_by": [{ "column": "account_name", "order": "asc" }] }
+  },
+  {
+    "name": "events_list",
+    "path": "/rpc/query",
+    "weight": 4,
+    "input": { "columns": ["id", "title", "created_at"], "order_by": [{ "column": "created_at", "order": "desc" }], "limit": 25 }
+  },
+  {
+    "name": "recommendations_list",
+    "path": "/rpc/query",
+    "weight": 3,
+    "input": { "columns": ["id", "status"], "limit": 25 }
+  },
+  {
+    "name": "insights_list",
+    "path": "/rpc/query",
+    "weight": 2,
+    "input": { "columns": ["id"], "limit": 25 }
+  },
+  {
+    "name": "integrations_list",
+    "path": "/rpc/query",
+    "weight": 1,
+    "input": { "columns": ["id", "name", "type"], "limit": 50 }
+  },
+  {
+    "name": "users_list_by_tenant",
+    "path": "/rpc/query",
+    "weight": 1,
+    "input": { "columns": ["id", "username"], "limit": 50 }
+  }
+]
