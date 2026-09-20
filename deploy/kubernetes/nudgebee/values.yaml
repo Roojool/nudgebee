@@ -205,6 +205,42 @@ postgresql:
                     summary: 'Long-running query'
                     description: 'A query has been running > 5 minutes on {{ $labels.instance }}'
 
+                # Disk exhaustion is the one Postgres failure mode with no warning
+                # and no self-recovery: the instance stops accepting writes and the
+                # whole install goes down. Nothing else in this ruleset covered it,
+                # which on an unattended on-prem install is the gap that matters most.
+                #
+                # Sourced from kubelet, not the postgres exporter -- the exporter
+                # publishes no filesystem metric. So this covers the BUNDLED
+                # in-cluster Postgres only; an install pointed at an external or
+                # managed Postgres has no kubelet_volume_stats series for it and
+                # these alerts are simply inert there.
+                #
+                # The PVC name follows postgresql.fullnameOverride above
+                # (`postgresql` -> `data-postgresql-0`). Prometheus regexes are fully
+                # anchored, so this does not match other releases' volumes.
+                - alert: PostgresDiskSpaceLow
+                  expr: |
+                    kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-postgresql.*"}
+                      / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-postgresql.*"} < 0.15
+                  for: 10m
+                  labels:
+                    severity: warning
+                  annotations:
+                    summary: 'PostgreSQL volume is running low on space'
+                    description: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} is over 85% full. Note that VACUUM alone does not return space to the filesystem.'
+
+                - alert: PostgresDiskSpaceCritical
+                  expr: |
+                    kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-postgresql.*"}
+                      / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-postgresql.*"} < 0.05
+                  for: 5m
+                  labels:
+                    severity: critical
+                  annotations:
+                    summary: 'PostgreSQL volume is nearly full'
+                    description: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} is over 95% full. Postgres stops accepting writes when the volume fills; expand the PVC or reclaim space now.'
+
 clickhouse:
   enabled: false
   fullnameOverride: clickhouse
