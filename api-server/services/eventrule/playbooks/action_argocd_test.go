@@ -69,3 +69,68 @@ func TestArgoCDHistoryAction_RejectsUnsafeApplicationName(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid application_name", "for %q", name)
 	}
 }
+
+func TestArgoCDAppNameFromTracking(t *testing.T) {
+	tests := []struct {
+		name          string
+		instanceLabel string
+		trackingID    string
+		expected      string
+	}{
+		{
+			name:          "annotation tracking (resourceTrackingMethod: annotation)",
+			instanceLabel: "",
+			trackingID:    "sample-app:apps/Deployment:demo/checkout",
+			expected:      "sample-app",
+		},
+		{
+			// ArgoCD encodes the owning Application as "<ns>_<name>" here, but `argocd app get`
+			// only understands "<ns>/<name>", so the delimiter is translated.
+			name:          "annotation tracking, app in a non-default namespace",
+			instanceLabel: "",
+			trackingID:    "argocd_sample-app:apps/Deployment:demo/checkout",
+			expected:      "argocd/sample-app",
+		},
+		{
+			name:          "label tracking, app in a non-default namespace",
+			instanceLabel: "argocd_sample-app",
+			trackingID:    "",
+			expected:      "argocd/sample-app",
+		},
+		{
+			name:          "label tracking",
+			instanceLabel: "sample-app",
+			trackingID:    "",
+			expected:      "sample-app",
+		},
+		{
+			name:          "label wins over annotation (annotation+label)",
+			instanceLabel: "label-app",
+			trackingID:    "annotation-app:apps/Deployment:demo/checkout",
+			expected:      "label-app",
+		},
+		{
+			name:          "not managed by ArgoCD",
+			instanceLabel: "",
+			trackingID:    "",
+			expected:      "",
+		},
+		{
+			name:          "malformed annotation without separator is not an app name",
+			instanceLabel: "",
+			trackingID:    "sample-app",
+			expected:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := argoCDAppNameFromTracking(tt.instanceLabel, tt.trackingID)
+			assert.Equal(t, tt.expected, got)
+			if got != "" {
+				assert.True(t, argoCDAppNameRegex.MatchString(got),
+					"resolved app name must survive the injection guard in Execute")
+			}
+		})
+	}
+}
