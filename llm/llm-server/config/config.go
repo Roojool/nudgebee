@@ -853,9 +853,18 @@ type appConfig struct {
 	// double as the scratchpad cap. Default 65536; clamped to a 4096 minimum.
 	LlmServerScratchpadMaxObservationChars int `mapstructure:"llm_server_scratchpad_max_observation_chars"`
 	// LlmServerToolCallResponsePersistMaxChars caps how much of a tool's response
-	// core.CallTool writes to llm_conversation_tool_calls.response — that row is
-	// telemetry only, nothing reads it back, so oversized outputs (e.g. logs_execute_v2's
-	// full log payload) don't need persisting at full size. 0 disables it. Default 65536.
+	// core.CallTool writes to llm_conversation_tool_calls.response, so oversized
+	// outputs (e.g. logs_execute_v2's full log payload) don't need persisting at
+	// full size. 0 disables it. Default 65536.
+	//
+	// NOT telemetry-only: the answer-confidence grader reads this column back as
+	// the evidence it grades an answer against (agents/core/answer_confidence.go).
+	// This setting governs the CallTool path only (custom_agent_tool_tracking.go
+	// is its single reader); the planner's own tool calls persist their response
+	// uncapped via AfterToolCallResponse. So lowering it to save DB space narrows
+	// what a grade can rest on for custom-agent tools — below the grader's
+	// per-call slice (1600 chars) it starts costing confidence levels there, with
+	// no signal that it did.
 	LlmServerToolCallResponsePersistMaxChars int `mapstructure:"llm_server_tool_call_response_persist_max_chars"`
 	// LlmServerScratchpadCompressionActivationFraction is the fraction of the resolved model
 	// context window at which scratchpad compression activates. Below this the scratchpad is
