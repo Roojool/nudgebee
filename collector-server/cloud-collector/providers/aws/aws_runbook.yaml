@@ -27,11 +27,12 @@ rules:
         template: "ecs-health-check:{{ (index .Detail \"group\") }}:{{ (index .Detail \"clusterArn\") }}"
       description:
         template: >-
+          {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
           ECS Task {{ (index .Detail "taskArn") }} in cluster {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last }}
           (part of service {{ (index .Detail "group") | str | default "" | replace "service:" "" | default "N/A" }})
           was stopped, likely due to health check failures (Region: {{ (index .Event "region") }}).
           Stopped Reason: {{ (index .Detail "stoppedReason") }}.
-          Container '{{ safeIndex .Detail "containers" 0 "name" }}' last status: {{ safeIndex .Detail "containers" 0 "lastStatus" }}.
+          Container '{{ safeIndex $fc "name" }}' last status: {{ safeIndex $fc "lastStatus" }}.
       status: "FIRING"
       resource_id:
         template: |
@@ -56,32 +57,17 @@ rules:
         type: "aws_get_log"
         params:
           log_group_name: >-
-            {{ $logGroup := "" }}
-            {{ $container0 := (index (index .Detail "containers") 0) }}
-            {{ if $container0 }}
-              {{ $logConfig := (index $container0 "logConfiguration") }}
-              {{ if $logConfig }}
-                {{ $logDriverConfig := (index $logConfig "logDriverConfig") }}
-                {{ if $logDriverConfig }}
-                  {{ $options := (index $logDriverConfig "options") }}
-                  {{ if $options }}
-                    {{ $awslogsGroup := (index $options "awslogs-group") }}
-                    {{ if and (not (isNil $awslogsGroup)) (ne (str $awslogsGroup) "") }}
-                      {{ $logGroup = str $awslogsGroup }}
-                    {{ end }}
-                  {{ end }}
-                {{ end }}
-              {{ end }}
-            {{ end }}
-            {{ if eq $logGroup "" }}
-              {{ $logGroup = printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
-            {{ else }}
-              {{/* $logGroup is already set */}}
-            {{ end }}
-            {{ $logGroup }}
-          query: > # Assumes log stream naming convention
+            {{ printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
+          task_definition_arn: "{{ (index .Detail \"taskDefinitionArn\") }}"
+          container_name: >-
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ safeIndex $fc "name" }}
+          query: > # Uses the real awslogs-stream-prefix from the task definition; "ecs" is only a last-resort guess
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ $prefix := streamPrefixForContainer .TaskDefContainerDefs (safeIndex $fc "name") }}
+            {{ if eq $prefix "" }}{{ $prefix = "ecs" }}{{ end }}
             fields @timestamp, @message |
-            filter @logStream like /ecs\/{{ safeIndex .Detail "containers" 0 "name" }}\/{{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}/ |
+            filter @logStream like /{{ $prefix }}\/{{ safeIndex $fc "name" }}\/{{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}/ |
             sort @timestamp desc |
             limit 100
           start_time_offset: "-30m"
@@ -689,7 +675,7 @@ rules:
           description: "No container exited 0. The state-change payload doesn't mark which container is essential, and container 0 is often a sidecar: a task whose app finished cleanly while a sidecar was killed non-zero (SIGKILL 137 etc.) is a normal stop, not a failure. Checking containers[0] alone flagged thousands of healthy stops as HIGH"
     event_template:
       title:
-        template: "ECS Task Stopped Unexpectedly: {{ (index .Detail \"group\") | default ((index .Detail \"taskArn\") | str | default \"\" | splitList \"/\" | last) }} (Exit Code: {{ safeIndex .Detail \"containers\" 0 \"exitCode\" | str | default ((index .Detail \"stopCode\") | str) }})"
+        template: "{{ $fc := pickFailingContainer (index .Detail \"containers\") .TaskDefContainerDefs }}ECS Task Stopped Unexpectedly: {{ (index .Detail \"group\") | default ((index .Detail \"taskArn\") | str | default \"\" | splitList \"/\" | last) }} (Exit Code: {{ safeIndex $fc \"exitCode\" | str | default ((index .Detail \"stopCode\") | str) }})"
       severity: "HIGH" # Or Critical
       fingerprint:
         # Service-level (cluster + group + exit code), NOT taskArn: replacement
@@ -697,13 +683,15 @@ rules:
         # dedup and a crash loop produces one fresh event per stop. Exit code
         # is in the key so distinct failure modes stay separate events.
         # dedup_ttl_seconds suppresses repeats before enrichment runs.
-        template: "ecs-task-stopped:{{ (index .Detail \"clusterArn\") | str | default \"\" | splitList \"/\" | last }}:{{ (index .Detail \"group\") | default ((index .Detail \"taskArn\") | str | default \"\" | splitList \"/\" | last) }}:{{ safeIndex .Detail \"containers\" 0 \"exitCode\" | str | default ((index .Detail \"stopCode\") | str) }}"
+        template: "{{ $fc := pickFailingContainer (index .Detail \"containers\") .TaskDefContainerDefs }}ecs-task-stopped:{{ (index .Detail \"clusterArn\") | str | default \"\" | splitList \"/\" | last }}:{{ (index .Detail \"group\") | default ((index .Detail \"taskArn\") | str | default \"\" | splitList \"/\" | last) }}:{{ safeIndex $fc \"exitCode\" | str | default ((index .Detail \"stopCode\") | str) }}"
       description:
         template: >-
+          {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
           ECS Task {{ .Detail.taskArn }} in cluster {{ .Detail.clusterArn | str | default "" | splitList "/" | last }} (account: {{ .Event.account }}, region: {{ .Event.region }})
           stopped unexpectedly.
-          Container '{{ safeIndex .Detail "containers" 0 "name" }}' exited with code {{ safeIndex .Detail "containers" 0 "exitCode" }}.
-          Reason: {{ safeIndex .Detail "containers" 0 "reason" | default "N/A" }}.
+          Container '{{ safeIndex $fc "name" }}' exited with code {{ safeIndex $fc "exitCode" }}.
+          Reason: {{ safeIndex $fc "reason" | default "N/A" }}.
+          Stop Code (Task): {{ .Detail.stopCode | default "N/A" }}.
           Stopped Reason (Task): {{ .Detail.stoppedReason | default "N/A" }} (Event ID: {{ .Event.id }}).
       status: "FIRING" # Or your equivalent for "Open"
       resource_id:
@@ -745,43 +733,24 @@ rules:
       - name: "ecs_container_logs_on_stop"
         type: "aws_get_log"
         params:
-          # Log group determination can be complex. This is an example.
-          # It tries to get awslogs-group from logConfiguration, falls back to a convention.
-          # IMPORTANT: Assumes original JSON keys like 'logConfiguration', 'logDriverConfig', 'awslogs-group'
           log_group_name: >-
-            {{ $logGroup := "" }}
-            {{ $container0 := (index (index .Detail "containers") 0) }}
-            {{ if $container0 }}
-              {{ $logConfig := (index $container0 "logConfiguration") }}
-              {{ if $logConfig }}
-                {{ $logDriverConfig := (index $logConfig "logDriverConfig") }}
-                {{ if $logDriverConfig }}
-                  {{ $options := (index $logDriverConfig "options") }}
-                  {{ if $options }}
-                    {{ $awslogsGroup := (index $options "awslogs-group") }}
-                    {{/* Ensure $awslogsGroup is not nil and not an empty string if it's a string */}}
-                    {{ if and (not (isNil $awslogsGroup)) (ne (str $awslogsGroup) "") }}
-                      {{ $logGroup = str $awslogsGroup }}
-                    {{ end }}
-                  {{ end }}
-                {{ end }}
-              {{ end }}
-            {{ end }}
-            {{ if eq $logGroup "" }}
-              {{ $logGroup = printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
-            {{ else }}
-              {{/* $logGroup is already set from above */}}
-            {{ end }}
-            {{ $logGroup }}
-          query: >-
+            {{ printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
+          task_definition_arn: "{{ (index .Detail \"taskDefinitionArn\") }}"
+          container_name: >-
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ safeIndex $fc "name" }}
+          query: >- # Uses the real awslogs-stream-prefix from the task definition; "ecs" is only a last-resort guess
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ $prefix := streamPrefixForContainer .TaskDefContainerDefs (safeIndex $fc "name") }}
+            {{ if eq $prefix "" }}{{ $prefix = "ecs" }}{{ end }}
             fields @timestamp, @message |
-            filter @logStream like /ecs\/{{ safeIndex .Detail "containers" 0 "name" }}\/{{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}/ |
+            filter @logStream like /{{ $prefix }}\/{{ safeIndex $fc "name" }}\/{{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}/ |
             sort @timestamp desc |
             limit 100
           start_time_offset: "-30m"
           end_time_offset: "+5m"
           limit: 100 # This is for CloudWatch Logs Insights query limit, not SQS message limit
-        description: "Fetch logs for the primary container of the stopped task."
+        description: "Fetch logs for the container that actually failed (non-zero exit / reason set), not just container 0."
       # ... (other actions need similar (index .Detail "fieldName") updates) ...
       # Example for ecs_task_metrics_on_stop:
       # - name: "ecs_task_metrics_on_stop"
@@ -819,8 +788,10 @@ rules:
           description: "Event detailType is 'ECS Task State Change'"
         - template: '{{ eq (index .Detail "lastStatus") "STOPPED" }}'
           description: "Task lastStatus is STOPPED"
-        - template: '{{ containsStr ((index .Detail "stoppedReason") | str) "OutOfMemoryError" }}'
-          description: "stoppedReason contains 'OutOfMemoryError'"
+        - template: |
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ or (containsStr ((index .Detail "stoppedReason") | str) "OutOfMemory") (containsStr ((safeIndex $fc "reason") | str) "OutOfMemory") }}
+          description: "task-level stoppedReason or the failing container's own reason mentions OutOfMemory — a container can be OOM-killed without ECS surfacing that at the task level"
     event_template:
       title:
         template: |
@@ -883,30 +854,12 @@ rules:
         type: "aws_get_log"
         description: "Fetch logs for the container, looking for OOM messages."
         params:
-          log_group_name: | # Assumes log group name convention or derives from task def (if action enhanced)
-            {{ $logGroup := "" }}
-            {{ $container0 := (index (index .Detail "containers") 0) }}
-            {{ if $container0 }}
-              {{ $logConfig := (index $container0 "logConfiguration") }}
-              {{ if $logConfig }}
-                {{ $logDriverConfig := (index $logConfig "logDriverConfig") }}
-                {{ if $logDriverConfig }}
-                  {{ $options := (index $logDriverConfig "options") }}
-                  {{ if $options }}
-                    {{ $awslogsGroup := (index $options "awslogs-group") }}
-                    {{ if and (not (isNil $awslogsGroup)) (ne (str $awslogsGroup) "") }}
-                      {{ $logGroup = str $awslogsGroup }}
-                    {{ end }}
-                  {{ end }}
-                {{ end }}
-              {{ end }}
-            {{ end }}
-            {{ if eq $logGroup "" }}
-              {{ $logGroup = printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
-            {{ else }}
-              {{/* $logGroup is already set */}}
-            {{ end }}
-            {{ $logGroup }}
+          log_group_name: >-
+            {{ printf "/ecs/%s" (index (splitList "/" (index ((index .Detail "taskDefinitionArn") | splitList ":") 5)) 1) }}
+          task_definition_arn: "{{ (index .Detail \"taskDefinitionArn\") }}"
+          container_name: >-
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ safeIndex $fc "name" }}
           query: "fields @timestamp, @message | filter @message like /oom|out of memory/i | sort @timestamp desc | limit 100"
           start_time_offset: "-30m"
           end_time_offset: "+5m"
@@ -934,11 +887,12 @@ rules:
         template: "ecs-task-pull-error:{{ (index .Detail \"clusterArn\") | str | default \"\" | splitList \"/\" | last }}:{{ (index .Detail \"group\") | default ((index .Detail \"taskArn\") | str | default \"\" | splitList \"/\" | last) }}"
       description:
         template: |
+          {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
           ECS Task {{ (index .Detail "taskArn") }} in cluster {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last }}
           stopped due to CannotPullContainerError.
           Task Definition: {{ (index .Detail "taskDefinitionArn") }}.
-          Container: {{ safeIndex .Detail "containers" 0 "name" }}.
-          Image: {{ safeIndex .Detail "containers" 0 "image" }}.
+          Container: {{ safeIndex $fc "name" }}.
+          Image: {{ safeIndex $fc "image" }}.
       status: "FIRING"
       resource_id:
         # Durable ECS service when the task belongs to one; see the note on
@@ -975,7 +929,8 @@ rules:
           service_name: "ecr"
           # Attempt to parse repo name from image string (e.g., account.dkr.ecr.region.amazonaws.com/repo:tag)
           resource_identifier: | # Ensure $image is a string before splitList
-            {{ $image := safeIndex .Detail "containers" 0 "image" | str | default "" }}
+            {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
+            {{ $image := safeIndex $fc "image" | str | default "" }}
             {{ $parts := $image | splitList "/" }}
             {{ if ge (len $parts) 2 }}{{ index (splitList ":" (index $parts 1)) 0 }}{{ else }}{{ $image }}{{ end }} # Basic parsing
           identifier_type: "name" # Assuming repo name is the identifier

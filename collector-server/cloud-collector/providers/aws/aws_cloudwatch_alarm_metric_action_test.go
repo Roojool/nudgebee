@@ -51,14 +51,14 @@ func TestAlarmActionNamespaceRendering(t *testing.T) {
 	processor := NewTemplatedEventBridgeProcessor(EventRuleSet{}, nil)
 	pCtx := providers.NewCloudProviderContext(context.Background())
 
-	templateData := processor.prepareTemplateData(EventBridgeEvent{
+	templateData := processor.prepareTemplateData(pCtx, EventBridgeEvent{
 		ID:         "repro",
 		Source:     "aws.cloudwatch",
 		Region:     "us-east-1",
 		DetailType: "CloudWatch Alarm State Change",
 		Time:       time.Date(2026, 8, 6, 4, 37, 1, 0, time.UTC),
 		Detail:     []byte(realAlarmDetail),
-	})
+	}, providers.Account{})
 
 	nsTemplate := `
               {{ $namespace := "" }}
@@ -139,14 +139,14 @@ func TestAlarmActionNamespaceRenderingMathExpressionFirst(t *testing.T) {
 	processor := NewTemplatedEventBridgeProcessor(EventRuleSet{}, nil)
 	pCtx := providers.NewCloudProviderContext(context.Background())
 
-	templateData := processor.prepareTemplateData(EventBridgeEvent{
+	templateData := processor.prepareTemplateData(pCtx, EventBridgeEvent{
 		ID:         "repro-math",
 		Source:     "aws.cloudwatch",
 		Region:     "us-east-1",
 		DetailType: "CloudWatch Alarm State Change",
 		Time:       time.Date(2026, 8, 6, 4, 37, 1, 0, time.UTC),
 		Detail:     []byte(mathExpressionAlarmDetail),
-	})
+	}, providers.Account{})
 
 	nsTemplate := `
               {{ $namespace := "" }}

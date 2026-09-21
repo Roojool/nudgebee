@@ -254,7 +254,7 @@ func TestAwsEvenBridge_Mock_ECS(t *testing.T) {
 					"name": "my-app-container",
 					"image": "nginx:latest",
 					"exitCode": 137,
-					"reason": "OutOfMemoryError"
+					"reason": "Essential container exited with non-zero status"
 				}
 			],
 			"group": "service:my-ecs-service",

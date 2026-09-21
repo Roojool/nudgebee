@@ -311,7 +311,7 @@ func TestAlarmActionNarrowsPeriodToAlarmEvaluation(t *testing.T) {
 		},
 	}
 
-	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(ebEvent)); err != nil {
+	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(pCtx, ebEvent, providers.Account{})); err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
 	if api.got.Step != 60*time.Second {
@@ -350,7 +350,7 @@ func TestAlarmActionKeepsRulePeriodWhenAlarmIsCoarser(t *testing.T) {
 		},
 	}
 
-	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(ebEvent)); err != nil {
+	if _, err := processor.executeAction(pCtx, providers.Account{}, ebEvent, actionDef, processor.prepareTemplateData(pCtx, ebEvent, providers.Account{})); err != nil {
 		t.Fatalf("executeAction: %v", err)
 	}
 	if api.got.Step != 60*time.Second {

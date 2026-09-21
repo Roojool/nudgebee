@@ -298,7 +298,7 @@ func NewTemplatedEventBridgeProcessor(rules EventRuleSet, api awsProviderAPI) *T
 			func(pCtx providers.CloudProviderContext, ev EventBridgeEvent, acc providers.Account) {
 				pCtx.GetLogger().Info("eventprocessor: trailing-fire of deduped rule",
 					"ruleName", rule.Name, "eventId", ev.ID)
-				p.executeActionsOnlyRule(pCtx, rule, ev, acc, p.prepareTemplateData(ev))
+				p.executeActionsOnlyRule(pCtx, rule, ev, acc, p.prepareTemplateData(pCtx, ev, acc))
 			},
 		)
 	}
@@ -621,6 +621,133 @@ func (p *TemplatedEventBridgeProcessor) renderTemplateValue(ctx providers.CloudP
 					}
 				}
 				return current
+			},
+			// pickFailingContainer returns the container most likely responsible for a
+			// task stop. The state-change payload's containers[] carries no role
+			// information at all — container 0 is often a sidecar (see
+			// ECS_Task_Stopped_Unexpectedly_EventBridge's filter comment), and a
+			// sidecar routinely shows its own non-zero exitCode (SIGKILL/SIGTERM) as
+			// collateral damage when ECS tears down the task after the essential
+			// container fails — exitCode alone can't tell "crashed" from "was killed".
+			//
+			// Optional second argument: taskDefContainerDefs, the task definition's
+			// real ContainerDefinitions (as fetched into TaskDefContainerDefs by
+			// prepareTemplateData). When present, this is the actual authoritative
+			// signal — each container's Essential flag, set by whoever wrote the task
+			// definition — and takes priority: among containers showing a failure
+			// signal (non-zero exitCode or non-empty reason), the one marked
+			// Essential wins over array order or exitCode value. Without task-def
+			// data (fetch failed, or a non-ECS event), falls back to: first non-zero
+			// exitCode, else first non-empty reason, else containers[0].
+			"pickFailingContainer": func(containers any, taskDefContainerDefsArg ...any) map[string]any {
+				list, ok := containers.([]any)
+				if !ok || len(list) == 0 {
+					return map[string]any{}
+				}
+
+				essentialByName := map[string]bool{}
+				if len(taskDefContainerDefsArg) > 0 {
+					if cds, ok := taskDefContainerDefsArg[0].([]any); ok {
+						for _, c := range cds {
+							cm, ok := c.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := cm["Name"].(string)
+							essential, _ := cm["Essential"].(bool)
+							if name != "" {
+								essentialByName[name] = essential
+							}
+						}
+					}
+				}
+
+				var failing []map[string]any
+				var reasonMatch map[string]any
+				for _, c := range list {
+					cm, ok := c.(map[string]any)
+					if !ok {
+						continue
+					}
+					hasFailureSignal := false
+					if ec, exists := cm["exitCode"]; exists {
+						if f, isNum := anyToFloat64(ec); isNum && f != 0 {
+							hasFailureSignal = true
+						}
+					}
+					if r, exists := cm["reason"]; exists && r != nil && fmt.Sprintf("%v", r) != "" {
+						hasFailureSignal = true
+						if reasonMatch == nil {
+							reasonMatch = cm
+						}
+					}
+					if hasFailureSignal {
+						failing = append(failing, cm)
+					}
+				}
+
+				// Prefer a failing container the task definition marks Essential —
+				// the real "this one matters" signal, not a guess from exit codes.
+				if len(essentialByName) > 0 {
+					for _, cm := range failing {
+						name, _ := cm["name"].(string)
+						if essentialByName[name] {
+							return cm
+						}
+					}
+				}
+
+				// No task-def data, or none of the failing containers is marked
+				// Essential: fall back to the original exitCode/reason heuristic.
+				for _, cm := range failing {
+					if ec, exists := cm["exitCode"]; exists {
+						if f, isNum := anyToFloat64(ec); isNum && f != 0 {
+							return cm
+						}
+					}
+				}
+				if reasonMatch != nil {
+					return reasonMatch
+				}
+				if first, ok := list[0].(map[string]any); ok {
+					return first
+				}
+				return map[string]any{}
+			},
+			// streamPrefixForContainer returns one container's real awslogs-stream-prefix
+			// from the task definition's ContainerDefinitions (TaskDefContainerDefs,
+			// already fetched by prepareTemplateData — no new AWS call here), matched
+			// by exact name. Returns "" if not found, not awslogs, or task-def data is
+			// unavailable — callers should fall back to a literal "ecs" guess in that
+			// case, same spirit as the log-group fallback.
+			"streamPrefixForContainer": func(taskDefContainerDefs any, containerName string) string {
+				cds, ok := taskDefContainerDefs.([]any)
+				if !ok {
+					return ""
+				}
+				for _, c := range cds {
+					cm, ok := c.(map[string]any)
+					if !ok {
+						continue
+					}
+					if name, _ := cm["Name"].(string); name != containerName {
+						continue
+					}
+					logConfig, ok := cm["LogConfiguration"].(map[string]any)
+					if !ok {
+						return ""
+					}
+					if driver, _ := logConfig["LogDriver"].(string); driver != "awslogs" {
+						return ""
+					}
+					options, ok := logConfig["Options"].(map[string]any)
+					if !ok {
+						return ""
+					}
+					prefix, _ := options["awslogs-stream-prefix"].(string)
+					return prefix
+				}
+				return ""
 			},
 			// dimensionsToNameValueJson converts CloudWatch dimensions to a consistent JSON array format.
 			// Handles both EventBridge map format {"Key": "Value"} and CloudWatch API array format [{"Name": "Key", "Value": "Value"}].
@@ -1068,6 +1195,17 @@ func (p *TemplatedEventBridgeProcessor) executeAction(
 				return nil, fmt.Errorf("eventprocessor: failed to auto-discover log group name from task definition '%s' for service '%s' (action: %s)", taskDefArn, params.ServiceName, actionDef.Name)
 			}
 			logger.Info("eventprocessor: auto-discovered log group name", "logGroupName", actualLogGroupName, "service", params.ServiceName)
+		} else if params.TaskDefinitionArn != "" && params.ContainerName != "" {
+			logger.Info("eventprocessor: discovering log group for specific container",
+				"taskDefinitionArn", params.TaskDefinitionArn, "containerName", params.ContainerName)
+			taskDefDetails, errTd := p.awsAPI.GetECSTaskDefinitionDetails(pCtx, awsAccount, ebEvent.Region, params.TaskDefinitionArn)
+			if errTd != nil {
+				logger.Warn("eventprocessor: failed to describe task definition for container log group lookup, using fallback log_group_name",
+					"error", errTd, "taskDefinitionArn", params.TaskDefinitionArn, "action", actionDef.Name)
+			} else if realGroup := parseLogGroupForContainerFromTaskDefMeta(taskDefDetails.Meta, params.ContainerName); realGroup != "" {
+				actualLogGroupName = realGroup
+				logger.Info("eventprocessor: found real log group for container", "logGroupName", realGroup, "containerName", params.ContainerName)
+			}
 		} else if actualLogGroupName == "" {
 			// If auto-discovery is NOT requested and LogGroupName is empty, it's an error.
 			return nil, fmt.Errorf("eventprocessor: aws_get_log action '%s' requires either a non-empty log_group_name or auto_detect_log_group=true (with cluster_name and service_name)", actionDef.Name)
@@ -1117,14 +1255,17 @@ func (p *TemplatedEventBridgeProcessor) executeAction(
 					}
 					current = val
 				} else if s, ok := current.(struct {
-					Event  map[string]any
-					Detail map[string]any
+					Event                map[string]any
+					Detail               map[string]any
+					TaskDefContainerDefs []any
 				}); ok { // Specific handling for top-level templateData struct
 					switch key {
 					case "Event":
 						current = s.Event
 					case "Detail":
 						current = s.Detail
+					case "TaskDefContainerDefs":
+						current = s.TaskDefContainerDefs
 					default:
 						// Accessing a field not named Event or Detail on the root templateData struct
 						// This case should ideally not happen if paths are well-defined.
@@ -1930,6 +2071,39 @@ func parseLogGroupFromTaskDefMeta(meta map[string]any) string {
 	return "" // Log group not found in the expected structure
 }
 
+// parseLogGroupForContainerFromTaskDefMeta finds one specific container's awslogs-group by
+// exact name match, unlike parseLogGroupFromTaskDefMeta's "first container with an awslogs
+// driver wins" — which can't distinguish a sidecar's log group from the failed container's.
+func parseLogGroupForContainerFromTaskDefMeta(meta map[string]any, containerName string) string {
+	containerDefs, ok := meta["ContainerDefinitions"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, cdVal := range containerDefs {
+		cd, ok := cdVal.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := cd["Name"].(string); name != containerName {
+			continue
+		}
+		logConfig, ok := cd["LogConfiguration"].(map[string]any)
+		if !ok {
+			return ""
+		}
+		if driver, _ := logConfig["LogDriver"].(string); driver != "awslogs" {
+			return ""
+		}
+		options, ok := logConfig["Options"].(map[string]any)
+		if !ok {
+			return ""
+		}
+		group, _ := options["awslogs-group"].(string)
+		return group
+	}
+	return ""
+}
+
 // mapToStruct converts a map to a struct using JSON tags.
 func mapToStruct(m map[string]any, s any) error {
 	jsonBytes, err := common.MarshalJson(m)
@@ -2147,7 +2321,17 @@ func normalizeMapKeys(inputMap map[string]any) map[string]any {
 
 // prepareTemplateData creates the data structure to be used by Go templates.
 // It uses original key names from the JSON.
-func (p *TemplatedEventBridgeProcessor) prepareTemplateData(ebEvent EventBridgeEvent) any {
+//
+// For ECS Task State Change events, it also fetches the task definition once
+// up front and exposes its ContainerDefinitions (raw, PascalCase — the AWS SDK
+// shape) as TaskDefContainerDefs, so pickFailingContainer can prefer a failing
+// container marked Essential over guessing from exitCode/reason alone. This
+// runs before any rule's event_template fields render, so title/fingerprint/
+// description see the same Essential-aware selection the log action does.
+// A fetch failure (or a non-ECS event with no taskDefinitionArn) degrades
+// gracefully: TaskDefContainerDefs stays nil, and pickFailingContainer falls
+// back to its exitCode/reason-only heuristic.
+func (p *TemplatedEventBridgeProcessor) prepareTemplateData(ctx providers.CloudProviderContext, ebEvent EventBridgeEvent, account providers.Account) any {
 	var detailData map[string]any
 	if err := common.UnmarshalJson(ebEvent.Detail, &detailData); err != nil {
 		slog.Error("failed to unmarshal ebEvent.Detail", "error", err, "data", slog.AnyValue(ebEvent))
@@ -2166,12 +2350,25 @@ func (p *TemplatedEventBridgeProcessor) prepareTemplateData(ebEvent EventBridgeE
 		}
 	}
 
+	var taskDefContainerDefs []any
+	if taskDefArn, _ := detailData["taskDefinitionArn"].(string); taskDefArn != "" && ctx != nil && p.awsAPI != nil {
+		resource, errTd := p.awsAPI.GetECSTaskDefinitionDetails(ctx, account, ebEvent.Region, taskDefArn)
+		if errTd != nil {
+			slog.Warn("prepareTemplateData: failed to fetch task definition for essential-container detection, falling back to exitCode/reason heuristic",
+				"error", errTd, "taskDefinitionArn", taskDefArn)
+		} else if cds, ok := resource.Meta["ContainerDefinitions"].([]any); ok {
+			taskDefContainerDefs = cds
+		}
+	}
+
 	return struct {
-		Event  map[string]any
-		Detail map[string]any
+		Event                map[string]any
+		Detail               map[string]any
+		TaskDefContainerDefs []any
 	}{
-		Event:  normalizeMapKeys(eventMap),
-		Detail: normalizeMapKeys(detailData),
+		Event:                normalizeMapKeys(eventMap),
+		Detail:               normalizeMapKeys(detailData),
+		TaskDefContainerDefs: taskDefContainerDefs,
 	}
 }
 
@@ -2179,7 +2376,7 @@ func (p *TemplatedEventBridgeProcessor) prepareTemplateData(ebEvent EventBridgeE
 // It collects all matching rules, executes their actions, and returns the last matched event.
 func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderContext, ebEvent EventBridgeEvent, account providers.Account) (providers.Event, error) {
 	logger := ctx.GetLogger()
-	templateData := p.prepareTemplateData(ebEvent)
+	templateData := p.prepareTemplateData(ctx, ebEvent, account)
 
 	var matchedRuleNames []string
 	var lastMatchedEvent providers.Event
@@ -2336,8 +2533,9 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 		// Store the parsed detail as Raw event data
 		// Type assert templateData to access its 'Detail' field.
 		if actualTemplateData, ok := templateData.(struct {
-			Event  map[string]any
-			Detail map[string]any
+			Event                map[string]any
+			Detail               map[string]any
+			TaskDefContainerDefs []any
 		}); ok {
 			provEvent.Raw = actualTemplateData.Detail
 		} else {
