@@ -11,6 +11,7 @@ import (
 	"nudgebee/llm/security"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // confirmingCheck is the one check an investigation names as proof of its root
@@ -29,11 +30,27 @@ type confirmingCheck struct {
 	// that tool in this run — the check was observed, not just described.
 	ToolRanInRun    *bool `json:"tool_ran_in_run,omitempty"`
 	ExpectSeenInRun *bool `json:"expect_seen_in_run,omitempty"`
+	// ExpectSeenInQuery is the honest version of ExpectSeenInRun: the expected
+	// text appeared in the output of a call whose command matches the query
+	// stored above, not merely somewhere in that tool's output during the run.
+	// ExpectSeenInRun over-credited — a check storing `kubectl get deployment
+	// -o yaml` while expecting a `FATAL:` log line was flagged seen, though that
+	// command cannot print a log line. Both are kept so the week-one baseline
+	// stays comparable; phase 2 must gate on this one.
+	ExpectSeenInQuery *bool `json:"expect_seen_in_query,omitempty"`
 	// PodSpecific / FixedTime mark a check that cannot be re-run for a later
 	// firing as written.
-	PodSpecific bool      `json:"pod_specific,omitempty"`
-	FixedTime   bool      `json:"fixed_time,omitempty"`
-	RecordedAt  time.Time `json:"recorded_at"`
+	PodSpecific bool `json:"pod_specific,omitempty"`
+	FixedTime   bool `json:"fixed_time,omitempty"`
+	// VolatileValue marks an expect that pins a measured reading — a percentage,
+	// a raw byte quantity, a fractional duration, a node address. Those change
+	// between firings, so the check cannot re-prove the cause even when the
+	// cause is unchanged (dev: Elasticsearch disk expected "82%", the next
+	// firing read 87%). Measured, not rejected: the same shapes also carry
+	// configured thresholds that are perfectly stable ("high disk watermark
+	// [90%] exceeded"), and phase 1 exists to size the problem.
+	VolatileValue bool      `json:"volatile_value,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
 }
 
 // Rejection reasons. Bounded set: each is also a metric status value.
@@ -56,11 +73,27 @@ var (
 	// to one firing and are deleted with it, so they are never proof.
 	workspaceFilePattern = regexp.MustCompile(`(?i)\b(evidence_logs_[\w-]+\.txt|event_[\w-]+_evidence\.json|logs_(loki|kubectl|[a-z]+)_\d+\.txt)\b`)
 
+	// A measured reading: a percentage, a four-digit-or-longer byte quantity
+	// (configured limits are short — 512Mi, 2Gi), a fractional duration, or a
+	// node/IP address.
+	volatileValuePattern = regexp.MustCompile(`[0-9]+(\.[0-9]+)?\s?%|[0-9]{4,}\s?(Ki|Mi|Gi|KiB|MiB|GiB)\b|[0-9]+\.[0-9]{2,}\s?(seconds|secs|ms|s)\b|\bip-[0-9]+-[0-9]+-[0-9]+-[0-9]+|\b([0-9]{1,3}\.){3}[0-9]{1,3}\b`)
+
+	// Tokens of a command: names, paths, flags, keys and values.
+	commandTokenPattern = regexp.MustCompile(`[A-Za-z0-9_{}][A-Za-z0-9\-_./:={}]*`)
+
 	fixedTimePattern = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\b1[6-9]\d{11}\b`)
 	// A pod name: workload plus a ReplicaSet hash and pod suffix, or a
 	// DaemonSet/StatefulSet-style suffix.
 	genericPodPattern = regexp.MustCompile(`\b[a-z0-9]([a-z0-9-]*[a-z0-9])?-[a-z0-9]{8,10}-[a-z0-9]{5}\b`)
 )
+
+// commandFillerWords appear in most commands of a kind, so they say nothing
+// about which command a stored query refers to.
+var commandFillerWords = map[string]bool{
+	"kubectl": true, "get": true, "logs": true, "describe": true, "exec": true,
+	"the": true, "for": true, "and": true, "show": true, "why": true, "what": true,
+	"true": true, "false": true, "null": true, "sort": true, "grep": true,
+}
 
 // genericExpectWords are words that appear whenever the alert fires, so they
 // confirm the symptom, not the mechanism.
@@ -104,7 +137,7 @@ func buildConfirmingCheckBlock(namespace, workload string) string {
 	b.WriteString("<confirming_check>\n")
 	b.WriteString("tool: <the exact name of the tool you called>\n")
 	b.WriteString("query: <the exact query or command>\n")
-	b.WriteString("expect: <the specific text or value in that result that confirms the cause; it must name the specific thing involved — a workload, key, index, path or host — not just a word like error or 401>\n")
+	b.WriteString("expect: <a short fragment of that command's own output that confirms the cause — a few words, not a pasted line. It must name the specific thing involved (a workload, key, index, path, host or image tag), not just a word like error or 401, and it must be text that will read the same the next time this alert fires: no measured value that moves between firings (a percentage, a byte count, a duration, a node address). A configured threshold or a fixed identifier is fine.>\n")
 	b.WriteString("</confirming_check>\n")
 	return b.String()
 }
@@ -148,6 +181,7 @@ func parseConfirmingCheckBlock(text, namespace, workload string) (*confirmingChe
 	}
 	check.FixedTime = fixedTimePattern.MatchString(check.Query)
 	check.PodSpecific = isPodSpecific(check.Query, workload)
+	check.VolatileValue = volatileValuePattern.MatchString(check.Expect)
 	return check, ""
 }
 
@@ -195,35 +229,108 @@ func stripConfirmingCheckBlock(s string) string {
 	return strings.TrimRight(confirmingCheckBlockPattern.ReplaceAllString(s, ""), " \t\r\n")
 }
 
-// toolEvidenceInMessage reports, within this investigation's own message,
-// whether the named tool completed successfully and whether the expected text
-// appeared in one of those results (whitespace-insensitive). Both nil when it
-// cannot be determined.
-func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, expect string) (ran, seen *bool) {
+// toolEvidenceInMessage reports, within this investigation's own message:
+// whether the named tool completed successfully (ran), whether the expected
+// text appeared in any of those results (seen — the week-one definition, kept
+// for comparability), and whether it appeared in the output of a call whose
+// command matches the stored query (seenInQuery — the one phase 2 can trust).
+// All nil when it cannot be determined.
+func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, query, expect string) (ran, seen, seenInQuery *bool) {
 	if dbManager == nil || tool == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if _, err := uuid.Parse(messageId); err != nil {
-		return nil, nil
+		return nil, nil, nil
+	}
+	// Parameters are bounded here because a shell_execute heredoc can be large;
+	// the command being matched sits at the front. Responses stay in the
+	// database — a single tool result can be megabytes.
+	var calls []struct {
+		Id         string `db:"id"`
+		Parameters string `db:"parameters"`
+	}
+	if err := dbManager.Db.Select(&calls, `
+		SELECT id::text AS id, COALESCE(LEFT(parameters, 4000), '') AS parameters
+		FROM llm_conversation_tool_calls
+		WHERE message_id = $1 AND tool_name = $2 AND status = 'success'`, messageId, tool); err != nil {
+		return nil, nil, nil
+	}
+	r := len(calls) > 0
+	if !r {
+		f := false
+		return &r, &f, &f
+	}
+	matched := make([]string, 0, len(calls))
+	for _, c := range calls {
+		if queryMatchesCall(query, c.Parameters) {
+			matched = append(matched, c.Id)
+		}
 	}
 	var counts struct {
-		Ran  int `db:"ran"`
-		Seen int `db:"seen"`
+		Seen        int `db:"seen"`
+		SeenInQuery int `db:"seen_in_query"`
 	}
 	if err := dbManager.Db.Get(&counts, `
-		SELECT COUNT(*) AS ran,
-		       COUNT(*) FILTER (WHERE position($3 in regexp_replace(lower(COALESCE(response, '')), '\s+', ' ', 'g')) > 0) AS seen
-		FROM llm_conversation_tool_calls
-		WHERE message_id = $1 AND tool_name = $2 AND status = 'success'`,
-		messageId, tool, normalizeExpect(expect)); err != nil {
-		return nil, nil
+		SELECT COUNT(*) FILTER (WHERE found) AS seen,
+		       COUNT(*) FILTER (WHERE found AND id::text = ANY($4)) AS seen_in_query
+		FROM (
+		    SELECT id, position($3 in regexp_replace(lower(COALESCE(response, '')), '\s+', ' ', 'g')) > 0 AS found
+		    FROM llm_conversation_tool_calls
+		    WHERE message_id = $1 AND tool_name = $2 AND status = 'success') t`,
+		messageId, tool, normalizeText(expect), pq.Array(matched)); err != nil {
+		return nil, nil, nil
 	}
-	r, s := counts.Ran > 0, counts.Seen > 0
-	return &r, &s
+	s, sq := counts.Seen > 0, counts.SeenInQuery > 0
+	return &r, &s, &sq
 }
 
-func normalizeExpect(expect string) string {
-	return strings.Join(strings.Fields(strings.ToLower(expect)), " ")
+// queryMatchesCall reports whether a stored query names the same command as a
+// recorded tool call. The investigation rewrites its own command when it writes
+// the block — reordered flags, {window_start} in place of a timestamp, a
+// shortened pipeline — so this matches on distinctive tokens rather than
+// equality. Three quarters of them must appear in the call's parameters.
+func queryMatchesCall(query, parameters string) bool {
+	params := strings.ToLower(parameters)
+	if strings.TrimSpace(query) == "" || params == "" {
+		return false
+	}
+	tokens := distinctiveTokens(query)
+	if len(tokens) < 3 {
+		// Too little to match on (an agent-style tool given a one-line question).
+		// Fall back to containment either way round.
+		q := normalizeText(query)
+		return strings.Contains(normalizeText(params), q) || strings.Contains(q, normalizeText(params))
+	}
+	hits := 0
+	for _, t := range tokens {
+		if strings.Contains(params, t) {
+			hits++
+		}
+	}
+	return hits*4 >= len(tokens)*3
+}
+
+// distinctiveTokens returns the lowercased tokens of a command that identify it:
+// at least three characters, not a time-window placeholder, not a word that
+// appears in every command of its kind.
+func distinctiveTokens(query string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 8)
+	for _, tok := range commandTokenPattern.FindAllString(strings.ToLower(query), -1) {
+		tok = strings.Trim(tok, "-_./:")
+		if len(tok) < 3 || seen[tok] || commandFillerWords[tok] || strings.HasPrefix(tok, "{window") {
+			continue
+		}
+		seen[tok] = true
+		out = append(out, tok)
+	}
+	return out
+}
+
+// normalizeText lowercases and collapses whitespace so an expect or a command
+// compares the same however the investigation spaced it.
+func normalizeText(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
 // recordConfirmingCheck parses the block from the investigation text, fills the
@@ -241,13 +348,15 @@ func recordConfirmingCheck(ctx *security.RequestContext, dbManager *common.Datab
 		ctx.GetLogger().Info("analyzer: confirming check rejected", "event_id", eventId, "reason", reason)
 		return nil
 	}
-	check.ToolRanInRun, check.ExpectSeenInRun = toolEvidenceInMessage(dbManager, messageId, check.Tool, check.Expect)
+	check.ToolRanInRun, check.ExpectSeenInRun, check.ExpectSeenInQuery = toolEvidenceInMessage(dbManager, messageId, check.Tool, check.Query, check.Expect)
 	check.RecordedAt = time.Now().UTC()
 	common.MetricsEventAnalysisOperationsTotal("confirming_check", "produced", accountId)
 	ctx.GetLogger().Info("analyzer: confirming check recorded",
 		"event_id", eventId, "tool", check.Tool,
 		"tool_ran_in_run", boolOrUnknown(check.ToolRanInRun),
 		"expect_seen_in_run", boolOrUnknown(check.ExpectSeenInRun),
+		"expect_seen_in_query", boolOrUnknown(check.ExpectSeenInQuery),
+		"volatile_value", check.VolatileValue,
 		"pod_specific", check.PodSpecific, "fixed_time", check.FixedTime,
 		"expect_bytes", len(check.Expect))
 	return check
