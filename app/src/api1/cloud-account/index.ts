@@ -608,7 +608,7 @@ const apiCloudAccount = {
       }
       const where: any = {
         account: { _eq: accountId },
-        status: { _eq: 'Active' },
+        status: { _in: ['Active', 'Inactive'] },
         tags: { _is_null: false },
       };
       if (serviceName) {
@@ -648,7 +648,7 @@ const apiCloudAccount = {
       }
       const where: any = {
         account: { _eq: accountId },
-        status: { _eq: 'Active' },
+        status: { _in: ['Active', 'Inactive'] },
         tags: { _has_key: tagKey },
       };
       if (serviceName) {
