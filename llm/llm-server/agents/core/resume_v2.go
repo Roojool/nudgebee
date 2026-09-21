@@ -408,29 +408,25 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	return executeAgent(ctx, agentImpl, resumeReq)
 }
 
-// buildResumeAgentRequest restores both forms of tool configuration. QueryConfig
-// is the durable representation loaded from message_config, while ClientTools
-// and Capabilities are the runtime fields consumed directly by the planner and
-// executor. Omitting the runtime fields makes a request-scoped client tool work
-// for the first iteration and disappear after client-tool-result resumes it.
+// buildResumeAgentRequest carries the turn's request forward and overrides only
+// what resume changes. Copy-then-override, not an allowlist: the request already
+// arrives fully populated from the normal conversation path, and rebuilding it
+// field by field silently dropped 18 of 35 fields — account context, memory, KB
+// content, skills, images — degrading the resumed answer and evicting the first
+// turn's provider cache, which shares one slot with the shortened prefix.
+//
+// QueryConfig is the durable representation loaded from message_config; ClientTools
+// and Capabilities are the runtime fields the planner and executor read directly.
+// Omitting the runtime fields makes a request-scoped client tool work for the
+// first iteration and disappear after client-tool-result resumes it.
 func buildResumeAgentRequest(req NBAgentRequest, parentAgentID, previousState string, queryConfig toolcore.NBQueryConfig) NBAgentRequest {
-	return NBAgentRequest{
-		Query:                 req.Query,
-		AccountId:             req.AccountId,
-		UserId:                req.UserId,
-		ConversationId:        req.ConversationId,
-		MessageId:             req.MessageId,
-		AgentId:               req.AgentId,
-		ParentAgentId:         parentAgentID,
-		PreviousState:         previousState,
-		QueryConfig:           queryConfig,
-		QueryContext:          req.QueryContext,
-		SessionId:             req.SessionId,
-		ConversationSource:    req.ConversationSource,
-		EnableQueryRefinement: req.EnableQueryRefinement,
-		ClientTools:           queryConfig.ClientTools,
-		Capabilities:          queryConfig.Capabilities,
-	}
+	resumed := req
+	resumed.ParentAgentId = parentAgentID
+	resumed.PreviousState = previousState
+	resumed.QueryConfig = queryConfig
+	resumed.ClientTools = queryConfig.ClientTools
+	resumed.Capabilities = queryConfig.Capabilities
+	return resumed
 }
 
 // bubbleUpIfSiblingsDone is the recursive parent-resume helper.

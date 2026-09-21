@@ -2,6 +2,8 @@ package core
 
 import (
 	"errors"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -713,4 +715,76 @@ func TestFinalizeCompletedConversation_ScoresResumedTurn(t *testing.T) {
 		t.Fatalf("resumed turn was graded more than once (second call on %s)", extra.messageID)
 	case <-time.After(750 * time.Millisecond):
 	}
+}
+
+// resumeOverriddenFields are the only fields resume may change. Everything else
+// on the request must survive: it arrives fully populated from the normal
+// conversation path, and rebuilding it field by field is what silently dropped
+// account context, memory, KB content and skills from every resumed turn.
+var resumeOverriddenFields = map[string]bool{
+	"ParentAgentId": true,
+	"PreviousState": true,
+	"QueryConfig":   true,
+	"ClientTools":   true,
+	"Capabilities":  true,
+}
+
+func TestBuildResumeAgentRequestCarriesEveryFieldForward(t *testing.T) {
+	req := NBAgentRequest{
+		Query:               "why is it still restarting?",
+		OriginalQuery:       "why does checkout keep restarting?",
+		AccountId:           "acct-1",
+		UserId:              "user-1",
+		AccountContext:      "=== APPLICATION OVERVIEW ===\nservices: primary backend",
+		AccountPrompt:       "prefer kubectl over helm",
+		MemoryContext:       "<memory>user prefers concise answers</memory>",
+		KBPrestepContent:    "runbook: restart loop triage",
+		SkillListsMenu:      "skill: k8s-triage",
+		ConversationContext: "earlier: checkout deploy at 14:02",
+		EnableCritique:      true,
+	}
+
+	got := buildResumeAgentRequest(req, "parent-1", "state", toolcore.NBQueryConfig{})
+
+	rv, gv := reflect.ValueOf(req), reflect.ValueOf(got)
+	for i := 0; i < rv.NumField(); i++ {
+		// An unexported field would panic on Interface(); skip rather than
+		// crash, so adding one later fails this test honestly or not at all.
+		if !rv.Field(i).CanInterface() {
+			continue
+		}
+		name := rv.Type().Field(i).Name
+		if resumeOverriddenFields[name] {
+			continue
+		}
+		assert.Equal(t, rv.Field(i).Interface(), gv.Field(i).Interface(),
+			"resume dropped or altered %s — it must carry forward from the first turn", name)
+	}
+
+	assert.Equal(t, "parent-1", got.ParentAgentId)
+	assert.Equal(t, "state", got.PreviousState)
+}
+
+// TestBuildResumeAgentRequestKeepsAccountContextFromDB checks the same contract
+// against a real account's stored context, so the rendered <account_context>
+// block — which the provider cache slot is keyed on content-wise — is identical
+// on the first and resumed turn. Needs a database; skips without TEST_ACCOUNT.
+func TestBuildResumeAgentRequestKeepsAccountContextFromDB(t *testing.T) {
+	account, tenant := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_TENANT")
+	if account == "" || tenant == "" {
+		t.Skip("set TEST_ACCOUNT and TEST_TENANT to run against a database")
+	}
+
+	ctx := security.NewRequestContextForTenantAdmin(tenant)
+	firstTurn := toolcore.LoadActiveGlobalContext(ctx, account)
+	require.NotEmpty(t, firstTurn, "account has no active global context — pick one that does")
+
+	resumed := buildResumeAgentRequest(
+		NBAgentRequest{Query: "and why is it still failing?", AccountId: account, AccountContext: firstTurn},
+		"parent-1", "saved-state", toolcore.NBQueryConfig{},
+	)
+
+	assert.Equal(t, firstTurn, resumed.AccountContext)
+	assert.Equal(t, renderAccountContextBlock(firstTurn), renderAccountContextBlock(resumed.AccountContext),
+		"rendered account context differs across resume — the two prefixes would evict each other")
 }
