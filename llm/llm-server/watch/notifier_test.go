@@ -190,18 +190,28 @@ func TestResolveNotifySession_PrefersStoredColumn(t *testing.T) {
 // using the DB responder. Resolve stubbed per-notifier (no metastore, no shared state).
 func TestHTTPNotifier_RoutingOverride(t *testing.T) {
 	cases := []struct {
-		name        string
-		resolved    string
-		wantConvoID func(w Watch) string
+		name      string
+		resolved  string
+		wantPost  bool
+		wantRoute string
 	}{
-		{"chat session overrides UUID", "C0123ABCD-1699900000.001500", func(Watch) string { return "C0123ABCD-1699900000.001500" }},
-		{"empty resolve keeps UUID", "", func(w Watch) string { return w.ConversationID.String() }},
-		{"UUID resolve keeps UUID", "33333333-3333-3333-3333-333333333333", func(w Watch) string { return w.ConversationID.String() }},
+		{"chat session routes on the session key", "C0123ABCD-1699900000.001500", true, "C0123ABCD-1699900000.001500"},
+		{"google chat space routes", "spaces/AAAA/threads/BBBB", true, "spaces/AAAA/threads/BBBB"},
+		{"teams thread routes", "19:meeting_abc@thread.tacv2", true, "19:meeting_abc@thread.tacv2"},
+		// Non-routable: notifications-server's _parse_conversation splits on
+		// "-" and 404s anything that is not exactly two parts, so posting a
+		// UUID (or nothing) is a guaranteed failed delivery, not a delivery.
+		// These watches are delivered by the in-thread responder append.
+		{"empty resolve skips the post", "", false, ""},
+		{"UUID resolve skips the post", "33333333-3333-3333-3333-333333333333", false, ""},
+		{"event conversation skips the post", "event-1234", false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var got notifierRequest
+			var calls atomic.Int32
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
 				raw, _ := io.ReadAll(r.Body)
 				_ = json.Unmarshal(raw, &got.body)
 				w.WriteHeader(http.StatusOK)
@@ -218,9 +228,14 @@ func TestHTTPNotifier_RoutingOverride(t *testing.T) {
 			w := Watch{ID: uuid.New(), ConversationID: uuid.New(), TenantID: uuid.New()}
 			require.NoError(t, notifier.Notify(superAdminCtx(), w, StatusCompleted, "done"))
 
-			want := tc.wantConvoID(w)
-			assert.Equal(t, want, got.body["conversation_id"])
-			assert.Equal(t, want, got.body["session_id"])
+			if !tc.wantPost {
+				assert.Equal(t, int32(0), calls.Load(),
+					"non-routable session must not hit notifications-server at all")
+				return
+			}
+			assert.Equal(t, int32(1), calls.Load())
+			assert.Equal(t, tc.wantRoute, got.body["conversation_id"])
+			assert.Equal(t, tc.wantRoute, got.body["session_id"])
 		})
 	}
 }
@@ -248,7 +263,7 @@ func TestHTTPNotifier_AttachesActionToken_WhenConfigured(t *testing.T) {
 		config.Config.NotificationServerToken = prevTok
 	})
 
-	require.NoError(t, HTTPNotifier{}.Notify(superAdminCtx(), Watch{ID: uuid.New()}, StatusCompleted, "x"))
+	require.NoError(t, chatNotifier().Notify(superAdminCtx(), Watch{ID: uuid.New()}, StatusCompleted, "x"))
 	assert.Equal(t, "s3cr3t", gotToken)
 }
 
@@ -269,7 +284,7 @@ func TestHTTPNotifier_NoActionToken_WhenUnset(t *testing.T) {
 		config.Config.NotificationServerToken = prevTok
 	})
 
-	require.NoError(t, HTTPNotifier{}.Notify(superAdminCtx(), Watch{ID: uuid.New()}, StatusCompleted, "x"))
+	require.NoError(t, chatNotifier().Notify(superAdminCtx(), Watch{ID: uuid.New()}, StatusCompleted, "x"))
 	assert.False(t, sawHeader, "no X-ACTION-TOKEN header must be sent when the token is unset")
 }
 
@@ -341,6 +356,19 @@ func TestHTTPNotifier_NoURL_SkipsCleanly(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// chatNotifier returns an HTTPNotifier whose session resolves to a routable
+// Slack thread key. Every test that exercises the HTTP path needs one: a
+// non-routable session (web watch) now short-circuits before the POST,
+// because notifications-server 404s any conversation_id that is not a
+// "<channel>-<thread_ts>" pair. See TestHTTPNotifier_NonRoutableSession_SkipsPost.
+func chatNotifier() HTTPNotifier {
+	return HTTPNotifier{
+		resolveSessionOverride: func(*security.RequestContext, Watch) string {
+			return "C0123ABCD-1699900000.001500"
+		},
+	}
+}
+
 func TestHTTPNotifier_PostsExpectedBody_To_LLMResponse(t *testing.T) {
 	// Spin a tiny test server and verify Notify hits /llm/response with the
 	// expected POST body. Pins the contract notifications-server depends on.
@@ -363,11 +391,12 @@ func TestHTTPNotifier_PostsExpectedBody_To_LLMResponse(t *testing.T) {
 		ConversationID: uuid.New(),
 		TenantID:       uuid.New(),
 	}
-	require.NoError(t, HTTPNotifier{}.Notify(superAdminCtx(), w, StatusCompleted, "done"))
+	require.NoError(t, chatNotifier().Notify(superAdminCtx(), w, StatusCompleted, "done"))
 
 	assert.Equal(t, http.MethodPost, got.method)
 	assert.Equal(t, "/llm/response", got.path)
-	assert.Equal(t, w.ConversationID.String(), got.body["conversation_id"])
+	assert.Equal(t, "C0123ABCD-1699900000.001500", got.body["conversation_id"],
+		"chat delivery must route on the session key, never the conversation UUID")
 	assert.Equal(t, "final", got.body["type"])
 	assert.Contains(t, got.body["response"], "Watch completed")
 }
@@ -386,7 +415,7 @@ func TestHTTPNotifier_TrailingSlashOnURL_IsHandled(t *testing.T) {
 	config.Config.NotificationServerUrl = ts.URL + "///"
 	t.Cleanup(func() { config.Config.NotificationServerUrl = prev })
 
-	require.NoError(t, HTTPNotifier{}.Notify(superAdminCtx(), Watch{}, StatusCompleted, "x"))
+	require.NoError(t, chatNotifier().Notify(superAdminCtx(), Watch{}, StatusCompleted, "x"))
 	assert.Equal(t, "/llm/response", seenPath,
 		"notifier must trim trailing slashes; otherwise notifications-server returns 404")
 }
@@ -405,7 +434,7 @@ func TestHTTPNotifier_5xx_ReturnsError(t *testing.T) {
 	config.Config.NotificationServerUrl = ts.URL
 	t.Cleanup(func() { config.Config.NotificationServerUrl = prev })
 
-	err := HTTPNotifier{}.Notify(superAdminCtx(), Watch{}, StatusFailed, "")
+	err := chatNotifier().Notify(superAdminCtx(), Watch{}, StatusFailed, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "502")
 	assert.Contains(t, err.Error(), "upstream down",
@@ -424,7 +453,7 @@ func TestHTTPNotifier_4xx_ReturnsError(t *testing.T) {
 	config.Config.NotificationServerUrl = ts.URL
 	t.Cleanup(func() { config.Config.NotificationServerUrl = prev })
 
-	err := HTTPNotifier{}.Notify(superAdminCtx(), Watch{}, StatusFailed, "")
+	err := chatNotifier().Notify(superAdminCtx(), Watch{}, StatusFailed, "")
 	require.Error(t, err)
 }
 
@@ -441,6 +470,50 @@ func TestHTTPNotifier_2xx_NoError(t *testing.T) {
 	config.Config.NotificationServerUrl = ts.URL
 	t.Cleanup(func() { config.Config.NotificationServerUrl = prev })
 
-	require.NoError(t, HTTPNotifier{}.Notify(superAdminCtx(), Watch{}, StatusCompleted, "x"))
+	require.NoError(t, chatNotifier().Notify(superAdminCtx(), Watch{}, StatusCompleted, "x"))
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+// TestHTTPNotifier_NonRoutableSession_SkipsPost is the regression test for the
+// ERROR-on-a-healthy-watch defect observed live on 2026-09-20: a web-originated
+// watch completed normally, the responder appended the follow-up in-thread, and
+// the executor then logged
+//
+//	watch.executor: notify failed ... notification server returned 404:
+//	{"detail":"Invalid conversation id or notification not found"}
+//
+// notifications-server cannot route a conversation UUID (_parse_conversation
+// splits on "-" and requires exactly two parts), so that POST was never capable
+// of delivering anything. Web watches were the majority of dev traffic (57 of 76
+// rows over 90 days), so the happy path logged an ERROR every time. The notifier
+// must skip the call instead — and must NOT skip for a routable chat session,
+// where a 404 is a genuine delivery failure that has to stay loud.
+func TestHTTPNotifier_NonRoutableSession_SkipsPost(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"detail":"Invalid conversation id or notification not found"}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	prev := config.Config.NotificationServerUrl
+	config.Config.NotificationServerUrl = ts.URL
+	t.Cleanup(func() { config.Config.NotificationServerUrl = prev })
+
+	webWatch := Watch{ID: uuid.New(), ConversationID: uuid.New(), TenantID: uuid.New()}
+	webNotifier := HTTPNotifier{
+		resolveSessionOverride: func(*security.RequestContext, Watch) string { return "" },
+	}
+	for _, status := range []Status{StatusCompleted, StatusExpired, StatusFailed, StatusCancelled} {
+		require.NoError(t, webNotifier.Notify(superAdminCtx(), webWatch, status, "done"),
+			"a web watch must not report a delivery error it never attempted")
+	}
+	assert.Equal(t, int32(0), calls.Load(), "no HTTP call should have been made at all")
+
+	// Same server, routable session: the 404 must still surface as an error.
+	err := chatNotifier().Notify(superAdminCtx(), webWatch, StatusCompleted, "done")
+	require.Error(t, err, "a genuine chat delivery failure must stay loud")
+	assert.Contains(t, err.Error(), "404")
 	assert.Equal(t, int32(1), calls.Load())
 }

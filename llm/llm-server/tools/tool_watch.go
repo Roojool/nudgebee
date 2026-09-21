@@ -8,6 +8,7 @@ import (
 	"nudgebee/llm/tools/core"
 	"nudgebee/llm/watch"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -67,7 +68,10 @@ source_config shapes:
 Worked example (watch a GitHub workflow run until completion):
 {"source_kind":"tool","source_config":{"tool_name":"github_execute","tool_input":{"command":"gh run view 12345 --repo owner/repo --json status --jq .status"}},"predicate_kind":"regex","predicate_expr":"completed","poll_interval_sec":60,"max_duration_sec":1800}
 
-Returns: {"watch_id":"...","status":"PENDING","poll_interval_sec":N,"max_duration_sec":N,"next_poll_at":"...","message":"..."}
+The source is run ONCE, synchronously, before the watch is registered. Three possible replies:
+  - {"watch_id":"...","status":"PENDING",...} — registered; tell the user you will notify them.
+  - {"status":"ALREADY_MET","watch_id":null,"summary":"..."} — the condition is ALREADY true and NO watch exists. Report the outcome to the user in this turn; do NOT promise a later notification.
+  - an error — the command could not run, so no watch was registered. Fix the source (tool name, tool_config_name, the command itself) and call again, or continue without a watch. Do NOT tell the user a watch is running.
 `)
 }
 
@@ -187,8 +191,7 @@ func (WatchResourceTool) Call(nbCtx core.NbToolContext, input core.NBToolCallReq
 		notifySession = nbCtx.SessionId
 	}
 
-	manager := watch.NewManager()
-	created, err := manager.Create(nbCtx.Ctx.GetContext(), watch.CreateInput{
+	createInput := watch.CreateInput{
 		ConversationID:  conversationID,
 		AccountID:       accountID,
 		TenantID:        tenantID,
@@ -203,7 +206,69 @@ func (WatchResourceTool) Call(nbCtx core.NbToolContext, input core.NBToolCallReq
 		NotifySession:   notifySession,
 		PollIntervalSec: parsed.PollIntervalSec,
 		MaxDurationSec:  parsed.MaxDurationSec,
-	})
+	}
+
+	// Priming poll: run the source once, right now, under the caller's own
+	// context, before committing a row. Three outcomes matter here.
+	//
+	//  - The predicate already holds. Registering a background job to
+	//    rediscover that costs the user a poll interval of silence for an
+	//    answer we have in hand. Answer now, create nothing.
+	//  - The source cannot run at all. Every FAILED watch in the dev
+	//    metastore is an "observe failed: ..." — a tool not enabled for the
+	//    account, an expired GitHub App token, an agent-style tool that
+	//    cannot poll. Today the agent learns none of that; the user finds out
+	//    three polls later in a turn that ended long ago. Surface it now so
+	//    the agent can correct the call in the same turn.
+	//  - It is merely slow. A command that outruns the priming deadline is
+	//    not a broken one, so fall through and let the dispatcher have it.
+	//
+	// A predicate error is treated as non-fatal for the same reason: llm_judge
+	// failures are usually a transient model call, not a bad registration.
+	// Disabled by setting LLM_SERVER_WATCH_PRIMING_POLL_TIMEOUT_SEC to 0.
+	primeTimeout := time.Duration(config.Config.WatchPrimingPollTimeoutSec) * time.Second
+	prime := watch.Prime(nbCtx.Ctx, createInput, primeTimeout)
+	switch {
+	case prime.Err != nil && prime.Phase == watch.PrimePhaseValidate:
+		// The source's own gate rejected the config — an agent-style tool, or
+		// a destructive verb. Nothing was executed. Manager.Create would
+		// refuse this too; surfacing it here keeps the message specific.
+		nbCtx.Ctx.GetLogger().Info("watch_resource: source config rejected; refusing registration",
+			"error", prime.Err, "tool_name", sourceToolName(parsed.SourceConfig))
+		return errorResponse(fmt.Sprintf(
+			"No watch was registered and nothing was run: %v", prime.Err)), nil
+	case prime.Err != nil && prime.Phase == watch.PrimePhaseObserve && !prime.TimedOut:
+		nbCtx.Ctx.GetLogger().Info("watch_resource: priming poll failed; refusing registration",
+			"error", prime.Err, "tool_name", sourceToolName(parsed.SourceConfig))
+		return errorResponse(fmt.Sprintf(
+			"No watch was registered: the source failed when run once to validate it: %v. "+
+				"This is the command the watch would have polled, so a background watch would fail the same way. "+
+				"Fix the source (tool name, tool_config_name, or the command itself) and call watch_resource again, "+
+				"or continue without a watch.", prime.Err)), nil
+	case prime.Met:
+		nbCtx.Ctx.GetLogger().Info("watch_resource: predicate already satisfied; no watch registered",
+			"summary", prime.Summary)
+		encoded, _ := json.Marshal(map[string]any{
+			"status":   "ALREADY_MET",
+			"watch_id": nil,
+			"summary":  prime.Summary,
+			"message": "The termination condition is already satisfied, so no watch was registered. " +
+				"Report this outcome to the user now — do not say you will notify them later.",
+		})
+		return core.NBToolResponse{
+			Data:   string(encoded),
+			Type:   core.NBToolResponseTypeJson,
+			Status: core.NBToolResponseStatusSuccess,
+		}, nil
+	case prime.Err != nil:
+		// Slow source, or a transient predicate error. Register anyway, but
+		// leave the reason in the log so a systemic problem is greppable.
+		nbCtx.Ctx.GetLogger().Warn("watch_resource: priming poll inconclusive; registering anyway",
+			"error", prime.Err, "phase", string(prime.Phase), "timed_out", prime.TimedOut)
+	}
+
+	manager := watch.NewManager()
+	created, err := manager.Create(nbCtx.Ctx.GetContext(), createInput)
 	if err != nil {
 		return errorResponse(fmt.Sprintf("failed to register watch: %v", err)), nil
 	}
@@ -257,4 +322,15 @@ func errorResponse(msg string) core.NBToolResponse {
 		Type:   core.NBToolResponseTypeText,
 		Status: core.NBToolResponseStatusError,
 	}
+}
+
+// sourceToolName best-effort extracts tool_name from a source config for log
+// context only. Errors are irrelevant here — the caller is already logging a
+// failure and an empty string is an acceptable answer.
+func sourceToolName(raw json.RawMessage) string {
+	var cfg struct {
+		ToolName string `json:"tool_name"`
+	}
+	_ = json.Unmarshal(raw, &cfg)
+	return cfg.ToolName
 }

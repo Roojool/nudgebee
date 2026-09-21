@@ -599,3 +599,99 @@ func TestToolSource_Observe_MultipleConfigsPicksFirstWhenNameUnusable(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, "alpha", ft.gotToolConfigs[toolName])
 }
+
+// TestNormalizeToolObservation pins the per-tool wire-shape normalization.
+// The payloads below are verbatim `last_poll_result` values taken from the
+// dev metastore (llm_watch_tasks, 2026-08/09), which is the whole point:
+// the *_execute tools do not agree on a shape, and predicates are written
+// against the command's output, never the transport envelope.
+func TestNormalizeToolObservation(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "github_execute returns raw stdout with trailing newline",
+			in:   "0\n",
+			want: "0",
+		},
+		{
+			name: "github_execute raw json stdout is left intact",
+			in:   "{\"conclusion\":\"\",\"status\":\"queued\"}\n",
+			want: "{\"conclusion\":\"\",\"status\":\"queued\"}",
+		},
+		{
+			name: "shell_execute envelope is unwrapped and unescaped",
+			in:   `{"stdout":"No resources found in some-namespace namespace.\n0\n"}`,
+			want: "No resources found in some-namespace namespace.\n0",
+		},
+		{
+			name: "kubectl_execute envelope with extra keys is unwrapped",
+			in:   `{"stdout":"deployment \"telemetry-docs\" successfully rolled out\n","cluster":"dev"}`,
+			want: `deployment "telemetry-docs" successfully rolled out`,
+		},
+		{
+			name: "envelope with empty stdout normalizes to empty",
+			in:   `{"stdout":"","no_matches":true}`,
+			want: "",
+		},
+		{
+			name: "json object without stdout is left intact",
+			in:   `{"rows":[{"n":1}]}`,
+			want: `{"rows":[{"n":1}]}`,
+		},
+		{
+			name: "non-string stdout is left intact rather than guessed at",
+			in:   `{"stdout":42}`,
+			want: `{"stdout":42}`,
+		},
+		{
+			name: "malformed json is left intact",
+			in:   `{"stdout":"truncated...`,
+			want: `{"stdout":"truncated...`,
+		},
+		{
+			name: "crlf is normalized to lf so line anchors work",
+			in:   "Running\r\nRunning\r\n",
+			want: "Running\nRunning",
+		},
+		{
+			name: "crlf inside an envelope is normalized too",
+			in:   `{"stdout":"0\r\n"}`,
+			want: "0",
+		},
+		{
+			name: "plain multiline output keeps interior newlines",
+			in:   "NAME   READY\npod-a  1/1\n",
+			want: "NAME   READY\npod-a  1/1",
+		},
+		{
+			name: "empty input stays empty",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeToolObservation(tc.in))
+		})
+	}
+}
+
+// TestNormalizeToolObservation_UnblocksAnchoredPredicate is the end-to-end
+// statement of the bug: the exact dev-cluster payload that ran 45 polls to
+// EXPIRED now satisfies the predicate the agent wrote for it.
+func TestNormalizeToolObservation_UnblocksAnchoredPredicate(t *testing.T) {
+	for _, raw := range []string{
+		"0\n",
+		`{"stdout":"No resources found in some-namespace namespace.\n0\n"}`,
+		`{"stdout":"0\r\n"}`,
+	} {
+		p, err := CompilePredicate(PredicateKindRegex, "^0$")
+		require.NoError(t, err)
+		r, err := p.Eval(nil, Watch{}, Observation{Data: normalizeToolObservation(raw)})
+		require.NoError(t, err)
+		assert.True(t, r.Met, "raw=%q", raw)
+	}
+}

@@ -160,3 +160,31 @@ type PredicateResult struct {
 // the row in last_poll_result. Polls themselves can return larger payloads —
 // the predicate sees the full observation; we only truncate for storage.
 const MaxObservationStorageBytes = 8 * 1024
+
+// TerminalUpdate carries everything MarkTerminal needs to close out a watch.
+// It is a struct rather than a parameter list because the poll-accounting
+// fields (Polled / Observation) are meaningless for some transitions — an
+// expiry short-circuits before the source runs — and positional booleans at
+// five call sites are exactly how that distinction gets lost.
+type TerminalUpdate struct {
+	// Status is the terminal state to move to. Non-terminal values are rejected.
+	Status Status
+	// Final is the user-facing predicate/expiry summary stored in final_result.
+	Final string
+	// ErrMsg is stored in error; only meaningful for StatusFailed.
+	ErrMsg string
+	// Polled is true when this tick actually ran (or attempted) Source.Observe,
+	// and therefore must count towards poll_count.
+	Polled bool
+	// Observation is the text the terminal decision was made on, or nil when
+	// no observation was obtained (expiry, or Source.Observe itself failed).
+	//
+	// It is a pointer, not a string, because "" is a MEANINGFUL observation:
+	// "^$" is a supported predicate for "wait until this command prints
+	// nothing", so a watch can legitimately complete on empty output. Gating
+	// the write on Observation != "" would skip the update in exactly that
+	// case and leave last_poll_result holding a stale value from an earlier,
+	// non-terminal poll — a row claiming the watch completed on an
+	// observation it did not complete on.
+	Observation *string
+}

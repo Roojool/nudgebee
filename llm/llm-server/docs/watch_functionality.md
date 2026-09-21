@@ -52,6 +52,37 @@ re-enter the conversation per poll.
                 └──────────────────────────────────────┘
 ```
 
+## Priming poll
+
+`watch_resource` runs the source **once, synchronously, under the caller's own
+security context** before any row is written (`watch.Prime`, bounded by
+`LLM_SERVER_WATCH_PRIMING_POLL_TIMEOUT_SEC`, default 15s — matching the poll budget, because it runs the same command; set to 0 to disable).
+Three outcomes:
+
+| Priming result | What happens | Why |
+|---|---|---|
+| Predicate already met | No watch is created; the tool returns `{"status":"ALREADY_MET","watch_id":null,...}` | Registering a background job to rediscover a finished state costs the user a poll interval of silence for an answer the agent already has. |
+| `observe` failed, not a timeout | No watch is created; the error is returned to the agent | **Every** FAILED watch in the dev metastore is an `observe failed: ...` — a tool not enabled for the account, an expired GitHub App token, an agent-style tool that cannot poll. The agent can correct the call in the same turn instead of the user hearing about it three polls later, in a turn that ended long ago. |
+| Timed out, or the predicate errored | The watch is registered normally, reason logged | A slow command is not a broken one, and an `llm_judge` failure is usually a transient model call. Neither should block registration. |
+
+Priming runs `Source.ValidateConfig` **before** it runs anything. That gate is
+not a formatting check — for `tool` sources it carries the agent-tool reject and
+the destructive-verb deny-list (`kubectl delete`, `rm -rf`, `helm uninstall`, …).
+`Manager.Create` used to be the only caller, which meant a mutating source was
+refused without ever executing; since priming executes the command for real,
+skipping the gate would turn a rejected registration into one live
+`kubectl delete`. Pinned by `TestPrime_MutatingCommandIsRejectedWithoutExecuting`.
+
+Priming is otherwise read-only: it writes nothing, and its synthetic watch ID
+keeps the probe out of the user's conversation exactly as a dispatcher poll does.
+It runs under the **caller's** security context rather than the dispatcher's
+static admin context, so registration reflects what the requesting user can
+actually do. Accepted asymmetry: a caller narrower than that admin context can
+fail a probe whose real polls would have succeeded. Rejecting too much beats
+validating a command the user cannot run and then driving it unattended. The
+idea is borrowed from gemini-cli's `run_shell_command`, which races the process
+against a short delay and only backgrounds it if it is still running.
+
 ## States
 
 | State       | Meaning                                          | Terminal? |
@@ -128,12 +159,67 @@ A `Predicate` evaluates one observation and returns `(met, summary)`.
 
 | Kind         | Expression          | Match semantics                                  |
 |--------------|---------------------|--------------------------------------------------|
-| `regex`      | Go regex pattern    | met = pattern matched (non-empty match)          |
+| `regex`      | Go regex, compiled with `(?m)` | met = pattern located a match (an empty match counts) |
 | `substring`  | substring           | met = `strings.Contains(observation, expr)`      |
 | `llm_judge`  | yes/no question     | met = LLM returns `{"met": true, "summary": ...}` |
 
+#### Regex predicates are line-anchored
+
+`regex` expressions are compiled as `(?m)` + expr, so `^` and `$` anchor to
+line boundaries rather than to the whole observation. This reverses the
+original "never enable multiline under the user" rule, on production
+evidence: agents are instructed by
+`prompts/default/v1/_fragments/async_completion_rules.yaml` to write
+predicates like `^0$`, but Go's `$` without `(?m)` matches only at
+end-of-text, so `^0$` could never match a real, newline-terminated `0`
+observation. A dev watch polling `gh run list … | wc -l` ran 45 polls with
+zero failures and expired.
+
+Trade-off accepted: `^done$` now matches a `done` line anywhere in a
+multi-line observation. Anchors still discriminate — `^done$` does not match
+`not done yet`.
+
+A match is decided by whether the pattern *located* a match, not by the
+matched text being non-empty. `^$` is therefore a usable "wait until this
+command prints nothing" predicate. The cost is that a pathological
+always-empty-matching pattern (`a*`, `.*`) is met on the first poll; that is
+the documented contract and such a predicate is broken regardless.
+
+#### Observation normalization
+
+The `*_execute` tools do not agree on a wire shape: `github_execute` returns
+raw stdout, while `shell_execute` and `kubectl_execute` wrap it in a JSON
+envelope (`{"stdout":"…","cluster":"…"}`) whose newlines are
+backslash-escaped. Predicates are written against the command's output, never
+the envelope, so `toolSource.Observe` normalizes before the predicate runs
+(`normalizeToolObservation`):
+
+1. CRLF → LF — Go's `(?m)$` matches before `\n` but not before `\r\n`.
+2. If the payload is a JSON **object** with a string `stdout` key, unwrap to
+   that string. Raw output that merely happens to be JSON (e.g.
+   `gh … --json`) has no `stdout` key and is left untouched.
+3. Trim surrounding whitespace.
+
+The normalized text is what gets stored in `last_poll_result`, so the row
+shows what the predicate actually saw.
+
 `predicate_negate=true` inverts `met`. Useful for "wait until X is
 gone" semantics with `regex` / `substring`.
+
+### Observations are untrusted input
+
+Both prompts that see raw observation text — the `llm_judge` predicate and the
+terminal summarizer — wrap it with `watch.WrapUntrusted`, which frames it in
+`<untrusted_observation>` tags and escapes any closing tag inside the payload.
+
+An observation is not operator-authored text. It is whatever the polled command
+printed, and parts of that are routinely controlled by other people: pod names
+and annotations in `kubectl get` output, workflow names from a repository,
+application log lines echoing user input. The judge's answer decides whether a
+watch terminates, and the summarizer's output is appended verbatim to the
+user's chat thread, so injected text in either one makes the watch lie about a
+mutating action's outcome. The previous delimiter was a markdown rule (`---`),
+which any such output can forge.
 
 ### LLM judge contract
 
@@ -167,8 +253,14 @@ NEVER reaches the user's conversation.
 was registered from in `llm_watch_tasks.notify_session` (captured from the
 tool-call context at create time) and sends that as `conversation_id` /
 `session_id`. Legacy rows with a NULL column fall back to deriving it from
-`llm_conversations.session_id`. Web-originated watches keep the UUID and are
-delivered by the responder (in-thread DB append), not this webhook.
+`llm_conversations.session_id`. Web-originated watches are delivered by the
+responder (in-thread DB append) only — the notifier **skips the webhook
+entirely** when the resolved session is not chat-routable.
+`notifications-server`'s `_parse_conversation` splits the id on `-` and 404s
+anything that is not exactly two parts, so posting a conversation UUID was a
+guaranteed failed delivery that logged an ERROR on every healthy web watch
+(the majority of traffic). A 404 from a *routable* chat session is still a
+genuine delivery failure and is still returned and logged.
 
 The POST also carries `X-ACTION-TOKEN` when `NOTIFICATION_SERVER_TOKEN` is
 set — the endpoint is guarded by `verify_action_token`.
@@ -257,7 +349,7 @@ All keys default to safe values; the feature is gated by
 | `LLM_SERVER_WATCH_MAX_DURATION_SEC`              | 86400   | Ceiling on `max_duration_sec` (24h)                   |
 | `LLM_SERVER_WATCH_MAX_PER_TENANT`                | 20      | Concurrent active watches per tenant                  |
 | `LLM_SERVER_WATCH_MAX_FAILURES`                  | 3       | Consecutive failures before terminal `FAILED`         |
-| `LLM_SERVER_WATCH_PRIMING_POLL_TIMEOUT_SEC`      | 5       | (reserved for v2 priming poll)                        |
+| `LLM_SERVER_WATCH_PRIMING_POLL_TIMEOUT_SEC`      | 15      | Budget for the synchronous priming poll; 0 disables   |
 | `LLM_SERVER_WATCH_SUBMIT_TIMEOUT_SEC`            | 5       | Worker pool submission timeout                        |
 | `LLM_SERVER_WATCH_POLL_TIMEOUT_SEC`              | 60      | Per-poll cap                                          |
 | `LLM_SERVER_WATCH_DISPATCH_BATCH_SIZE`           | 100     | Max rows fetched per dispatcher tick                  |
@@ -291,10 +383,12 @@ Indexes:
 
 ## Known limitations / follow-ups
 
-- **No synchronous priming poll.** The first poll lands within
-  `WatchDispatcherIntervalSec` (default 10s) of registration. Adding a
-  priming poll path lets the tool fail fast on bad configs and
-  short-circuits "already done" cases.
+- **First scheduled poll is a full interval away.** `Manager.Create` sets
+  `next_poll_at = now + poll_interval_sec` (plus up to
+  `WatchDispatcherIntervalSec`) — verified on a live dev watch created at
+  14:52:29 with `next_poll_at` 14:52:59. The priming poll below covers the
+  "already done" and "misconfigured" cases at registration; a watch that is
+  genuinely still in progress does wait out its first interval.
 - **`NewNbToolContext` makes a DB call per poll** to resolve tool
   configs. Cheap individually, costly at scale. Cache.
 - **Predicate is recompiled per poll** (regex/substring are
@@ -314,6 +408,17 @@ Indexes:
   (`app/src/components/llm/utils/watchFollowup.js`). A `follow_up_appended_at`
   column would let clients read the delivered state directly, at the cost of a
   migration.
+- **Poll accounting on terminal transitions** runs through
+  `MarkTerminal(TerminalUpdate{…, Polled, Observation})`: a poll that ends the
+  watch increments `poll_count` and persists its observation to
+  `last_poll_result`. `TerminalUpdate.Observation` is a `*string`, so an empty
+  observation (the `^$` "wait until this prints nothing" case) is recorded as
+  the evidence rather than being mistaken for "no observation taken"; nil means
+  `Source.Observe` never returned, and the last real observation is left in
+  place for post-mortem. Expiry short-circuits before `Source.Observe`, so it
+  sets neither. Cancellation is a user action, not a poll, and touches no
+  counters. Before this, a watch that completed on its first poll reported
+  `poll_count = 0` with an empty `last_poll_result`.
 - **Time is read directly from `time.Now()`**, not from an injected
   clock. Tests of expiry / backoff should plan around this.
 - **No admin escape hatch** to bulk-cancel pending watches when

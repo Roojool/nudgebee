@@ -42,13 +42,23 @@ func (n HTTPNotifier) Notify(ctx *security.RequestContext, w Watch, status Statu
 			"watch_id", w.ID.String(), "status", string(status))
 		return nil
 	}
-	body := buildNotifyBody(w, status, summary)
 	// Chat platforms route on the session id ("<channel>-<thread_ts>"), not the
-	// conversation UUID → override when routable. Web/UUID → DB responder.
-	if s := n.resolveSession(ctx, w); isRoutableChatSession(s) {
-		body["conversation_id"] = s
-		body["session_id"] = s
+	// conversation UUID. A web-originated watch has no chat session, and
+	// notifications-server's _parse_conversation splits the id on "-" and 404s
+	// anything that is not exactly two parts — so posting a conversation UUID
+	// is a guaranteed 404, not a delivery attempt. Those watches are already
+	// delivered by the responder's in-thread DB append, so skip the call
+	// rather than log an ERROR on every healthy web watch (the majority of
+	// them). A routable session that fails still returns its error unchanged.
+	session := n.resolveSession(ctx, w)
+	if !isRoutableChatSession(session) {
+		ctx.GetLogger().Debug("watch: no chat-routable session; terminal update delivered in-thread only",
+			"watch_id", w.ID.String(), "status", string(status))
+		return nil
 	}
+	body := buildNotifyBody(w, status, summary)
+	body["conversation_id"] = session
+	body["session_id"] = session
 	url := strings.TrimRight(config.Config.NotificationServerUrl, "/") + "/llm/response"
 
 	// From request ctx → respects the poll deadline + carries trace/span IDs.

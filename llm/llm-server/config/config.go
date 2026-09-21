@@ -1688,7 +1688,15 @@ func init() {
 	viper.SetDefault("llm_server_watch_max_duration_sec", 3600)
 	viper.SetDefault("llm_server_watch_max_per_tenant", 20)
 	viper.SetDefault("llm_server_watch_max_failures", 3)
-	viper.SetDefault("llm_server_watch_priming_poll_timeout_sec", 5)
+	// Matches WatchPollTimeoutSec deliberately: priming runs the SAME command a
+	// real poll runs, so a budget below the poll budget means a command the
+	// dispatcher considers healthy is classified "too slow to judge" at
+	// registration. At the old 5s default that is what happened to
+	// github_execute — a `gh` call against a bad repo blew the deadline, was
+	// read as slow rather than broken, and the watch was registered anyway with
+	// the agent telling the user it would report back. Verified live on
+	// gke_nudgebee-dev before this was raised.
+	viper.SetDefault("llm_server_watch_priming_poll_timeout_sec", 15)
 	viper.SetDefault("llm_server_watch_submit_timeout_sec", 5)
 	// Lowered from 60s — 60 was the LLM-judge worst case, not the typical
 	// case. A bounded worker pool of 10 was being pinned for the full 60s

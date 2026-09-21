@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -508,17 +509,17 @@ func TestFetchDue_DefaultLimit(t *testing.T) {
 
 func TestMarkTerminal_RejectsNonTerminalStatus(t *testing.T) {
 	m, _, _ := newMockManager(t)
-	_, err := m.MarkTerminal(context.Background(), uuid.New(), uuid.New(), StatusPending, "", "")
+	_, err := m.MarkTerminal(context.Background(), uuid.New(), uuid.New(), TerminalUpdate{Status: StatusPending})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is not terminal")
 
-	_, err = m.MarkTerminal(context.Background(), uuid.New(), uuid.New(), StatusActive, "", "")
+	_, err = m.MarkTerminal(context.Background(), uuid.New(), uuid.New(), TerminalUpdate{Status: StatusActive})
 	require.Error(t, err)
 }
 
 func TestMarkTerminal_RejectsNilTenant(t *testing.T) {
 	m, _, _ := newMockManager(t)
-	_, err := m.MarkTerminal(context.Background(), uuid.Nil, uuid.New(), StatusCompleted, "", "")
+	_, err := m.MarkTerminal(context.Background(), uuid.Nil, uuid.New(), TerminalUpdate{Status: StatusCompleted})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenant_id is required")
 }
@@ -530,7 +531,7 @@ func TestMarkTerminal_HappyPath(t *testing.T) {
 		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	rows, err := m.MarkTerminal(context.Background(), tenant, id, StatusCompleted, "all done", "")
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{Status: StatusCompleted, Final: "all done"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), rows)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -562,7 +563,7 @@ func TestMarkTerminal_TruncatesFinalAtBoundary(t *testing.T) {
 		).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	rows, err := m.MarkTerminal(context.Background(), tenant, id, StatusCompleted, huge, "")
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{Status: StatusCompleted, Final: huge})
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), rows)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -598,7 +599,7 @@ func TestMarkTerminal_LostRaceReturnsZeroRows(t *testing.T) {
 		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	rows, err := m.MarkTerminal(context.Background(), tenant, id, StatusCompleted, "all done", "")
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{Status: StatusCompleted, Final: "all done"})
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), rows, "lost race should produce 0 rows affected")
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -807,4 +808,217 @@ func makeBytes(n int) string {
 		b[i] = 'a'
 	}
 	return string(b)
+}
+
+// ---------------------------------------------------------------------------
+// MarkTerminal poll accounting
+//
+// Regression for the live 2026-09-20 observation: a watch that completed on
+// its first poll reported poll_count = 0 through /v1/watches/list-by-conversation
+// and the WatchesTab, because UpdatePollResult/IncFailures owned the counter and
+// neither runs on a terminating tick. last_poll_result had the same hole — a
+// COMPLETED watch carried no record of the observation that completed it.
+// ---------------------------------------------------------------------------
+
+// TestMarkTerminal_CountsTerminatingPoll: a poll that ends the watch counts,
+// and its observation is persisted.
+func TestMarkTerminal_CountsTerminatingPoll(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant, "deployment rolled out").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	obs := "deployment rolled out"
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status:      StatusCompleted,
+		Final:       "matched",
+		Polled:      true,
+		Observation: &obs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_ExpiryDoesNotCountAsPoll: the expiry transition
+// short-circuits before Source.Observe, so it must not inflate poll_count or
+// clobber the last real observation.
+func TestMarkTerminal_ExpiryDoesNotCountAsPoll(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	// No poll_count clause, no $7 — exactly six args.
+	mock.ExpectExec(`SET status = \$1, final_result = \$2`).
+		WithArgs(string(StatusExpired), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status: StatusExpired,
+		Final:  "expired before condition was met",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_FailedPollCountsWithoutObservation: an observe failure has
+// no observation to persist, but the attempt still counts — consistent with
+// IncFailures, which counts every failed attempt on the non-terminal path.
+func TestMarkTerminal_FailedPollCountsWithoutObservation(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)poll_count = poll_count \+ 1`).
+		WithArgs(string(StatusFailed), nil, sqlmock.AnyArg(), sqlmock.AnyArg(), id, tenant).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status: StatusFailed,
+		ErrMsg: "observe failed: connection refused",
+		Polled: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_TruncatesObservation keeps a runaway observation from
+// bloating the row, mirroring UpdatePollResult's cap.
+func TestMarkTerminal_TruncatesObservation(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	huge := strings.Repeat("x", MaxObservationStorageBytes+5000)
+	mock.ExpectExec(`(?s)poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant,
+			sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	_, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status:      StatusCompleted,
+		Final:       "matched",
+		Polled:      true,
+		Observation: &huge,
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestCancel_DoesNotTouchPollCounters: cancellation is a user action, not a
+// poll. It must leave poll_count/failure_count/last_poll_result alone so the
+// row still shows how far the watch actually got.
+func TestCancel_DoesNotTouchPollCounters(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	mock.ExpectExec(`SET status = 'CANCELLED'`).
+		WithArgs(sqlmock.AnyArg(), id, tenant).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	require.NoError(t, m.Cancel(context.Background(), tenant, id))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestUpdatePollResult_ClearsStaleErrorOnRecovery: failure_count and error are
+// one fact. A watch that fails twice and then polls cleanly must not keep
+// advertising the old failure — the watches API and WatchesTab render `error`
+// verbatim, so a recovered ACTIVE watch would show a failure it no longer has.
+func TestUpdatePollResult_ClearsStaleErrorOnRecovery(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)failure_count = 0, error = NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	require.NoError(t, m.UpdatePollResult(context.Background(), tenant, id, "healthy output",
+		time.Now().Add(30*time.Second), true))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestUpdatePollResult_KeepsErrorWhenNotResetting: the non-reset path (used
+// where the caller has not established recovery) must leave both alone.
+func TestUpdatePollResult_KeepsErrorWhenNotResetting(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	mock.ExpectExec(`(?s)UPDATE llm_watch_tasks.*SET status = 'ACTIVE'`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	require.NoError(t, m.UpdatePollResult(context.Background(), tenant, id, "output",
+		time.Now().Add(30*time.Second), false))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_EmptyObservationIsStillEvidence is the regression test for a
+// defect introduced by this feature's own "^$" support and caught in
+// fresh-context review: gating the last_poll_result write on
+// `Observation != ""` conflated "no observation was taken" with "the command
+// legitimately produced no output".
+//
+// "^$" is a supported predicate ("wait until this command prints nothing"), so
+// a watch can complete on an empty observation. Under the old gate the write
+// was skipped for exactly that case and the terminal row kept whatever an
+// earlier, non-terminal poll had stored — a row claiming the watch completed on
+// an observation it did not complete on.
+func TestMarkTerminal_EmptyObservationIsStillEvidence(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	empty := ""
+	// $7 MUST be present and bound to "" — not omitted.
+	mock.ExpectExec(`(?s)poll_count = poll_count \+ 1.*last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant, "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	rows, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status:      StatusCompleted,
+		Final:       `regex "^$" matched (empty match at offset 0)`,
+		Polled:      true,
+		Observation: &empty,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_NoObservationLeavesLastPollResultAlone is the other half of
+// the same contract: when Observe never returned (nil), the terminal write must
+// NOT touch last_poll_result, so the last real observation survives for
+// post-mortem on a FAILED watch.
+func TestMarkTerminal_NoObservationLeavesLastPollResultAlone(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	// Exactly six args — no $7, no last_poll_result clause.
+	mock.ExpectExec(`(?s)poll_count = poll_count \+ 1`).
+		WithArgs(string(StatusFailed), nil, sqlmock.AnyArg(), sqlmock.AnyArg(), id, tenant).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	_, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status:      StatusFailed,
+		ErrMsg:      "observe failed: connection refused",
+		Polled:      true,
+		Observation: nil,
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestMarkTerminal_ObservationIsIndependentOfPolled pins that the two
+// TerminalUpdate fields are orthogonal. They used to be nested (the
+// observation write lived inside `if Polled`), which made "a non-nil
+// Observation is always persisted" an invariant held by convention: a future
+// caller passing Polled:false with an observation would have it silently
+// dropped. No production caller does that today — this exists so the coupling
+// cannot be reintroduced unnoticed.
+func TestMarkTerminal_ObservationIsIndependentOfPolled(t *testing.T) {
+	m, mock, _ := newMockManager(t)
+	id, tenant := uuid.New(), uuid.New()
+	obs := "observed without counting a poll"
+	// last_poll_result present, poll_count absent.
+	mock.ExpectExec(`(?s)last_poll_result = \$7`).
+		WithArgs(string(StatusCompleted), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), id, tenant, obs).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	_, err := m.MarkTerminal(context.Background(), tenant, id, TerminalUpdate{
+		Status:      StatusCompleted,
+		Final:       "matched",
+		Polled:      false,
+		Observation: &obs,
+	})
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

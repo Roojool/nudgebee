@@ -26,6 +26,7 @@ var (
 	metricsWatchSummarizerFailures  metric.Int64Counter
 	metricsWatchResponderFailures   metric.Int64Counter
 	metricsWatchNotifierFailures    metric.Int64Counter
+	metricsWatchPollFailures        metric.Int64Counter
 
 	watchMetricsOnce sync.Once
 )
@@ -76,6 +77,20 @@ func InitMetrics() {
 		if err != nil {
 			slog.Error("watch metrics: failed to create nb_llm_watch_notifier_failures", "error", err)
 		}
+
+		// Poll failures had no counter at all, despite being the dominant
+		// real failure class: every FAILED row in the dev metastore is an
+		// "observe failed: ..." — missing tool config, workspace exec
+		// failure, expired GitHub App token. Without this, a tenant whose
+		// watches all die on a broken integration is invisible until someone
+		// reads the rows by hand.
+		metricsWatchPollFailures, err = watchMeter.Int64Counter(
+			"nb_llm_watch_poll_failures",
+			metric.WithDescription("A watch poll failed (source observe or predicate eval). terminal=true means the consecutive-failure budget was spent and the watch moved to FAILED."),
+		)
+		if err != nil {
+			slog.Error("watch metrics: failed to create nb_llm_watch_poll_failures", "error", err)
+		}
 	})
 }
 
@@ -120,6 +135,21 @@ func recordResponderFailure(ctx context.Context) {
 		return
 	}
 	metricsWatchResponderFailures.Add(ctx, 1)
+}
+
+// recordPollFailure is called on every failed poll, whether it is being
+// retried with backoff or is the one that exhausts WatchMaxFailures.
+// phase distinguishes a source error from a predicate error so the two
+// (very different) remediations are separable on a dashboard.
+func recordPollFailure(ctx context.Context, phase string, terminal bool) {
+	InitMetrics()
+	if metricsWatchPollFailures == nil {
+		return
+	}
+	metricsWatchPollFailures.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("phase", phase),
+		attribute.Bool("terminal", terminal),
+	))
 }
 
 func recordNotifierFailure(ctx context.Context, status Status) {

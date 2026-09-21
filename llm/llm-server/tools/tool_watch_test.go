@@ -2,12 +2,15 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
+	"nudgebee/llm/watch"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -260,4 +263,106 @@ func TestWatchTools_RequestTypeInference(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, tc.want, got, "%s request-type classification", tc.tool.Name())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Priming poll
+//
+// watch_resource now runs the source once, synchronously, before committing a
+// row. These pin the two branches that short-circuit registration — the third
+// (not yet met -> register) needs a metastore and is covered in watch/.
+// ---------------------------------------------------------------------------
+
+// primeFakeSource is a watch.Source registered under a unique kind so the tool
+// can be driven without a real integration behind it.
+type primeFakeSource struct {
+	kind watch.SourceKind
+	data string
+	err  error
+}
+
+func (p *primeFakeSource) Kind() watch.SourceKind                 { return p.kind }
+func (p *primeFakeSource) ValidateConfig(_ json.RawMessage) error { return nil }
+func (p *primeFakeSource) Observe(_ *security.RequestContext, _ watch.Watch) (watch.Observation, error) {
+	if p.err != nil {
+		return watch.Observation{}, p.err
+	}
+	return watch.Observation{Data: p.data}, nil
+}
+
+func primeArgs(kind watch.SourceKind, predicate, expr string) map[string]any {
+	return map[string]any{
+		"source_kind":       string(kind),
+		"source_config":     map[string]any{"tool_name": "shell_execute", "tool_input": map[string]any{"command": "true"}},
+		"predicate_kind":    predicate,
+		"predicate_expr":    expr,
+		"poll_interval_sec": 30,
+		"max_duration_sec":  600,
+	}
+}
+
+// TestWatchResourceTool_PrimingAlreadyMet_RegistersNothing: when the condition
+// already holds, the agent must be told to answer now rather than promising a
+// notification that would arrive a poll interval later for something already
+// finished. Reaching Manager.Create here would hit the metastore, so a clean
+// ALREADY_MET response is also proof no row was attempted.
+func TestWatchResourceTool_PrimingAlreadyMet_RegistersNothing(t *testing.T) {
+	withWatchEnabled(t, true)
+	src := &primeFakeSource{kind: watch.SourceKind("tool_test_prime_met"), data: "deployment rolled out"}
+	watch.RegisterSource(src)
+
+	resp := callWith(t, validToolCtx(t), primeArgs(src.kind, "substring", "rolled out"))
+
+	require.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal([]byte(resp.Data), &body))
+	assert.Equal(t, "ALREADY_MET", body["status"])
+	assert.Nil(t, body["watch_id"], "no watch may be registered when the condition already holds")
+	assert.Contains(t, body["message"], "do not say you will notify them later",
+		"the agent must be steered away from promising a follow-up")
+}
+
+// TestWatchResourceTool_PrimingObserveFailure_RefusesRegistration: every FAILED
+// watch in the dev metastore is an observe failure. Surfacing it at
+// registration lets the agent fix the call in the same turn instead of the
+// user learning about it three polls later.
+func TestWatchResourceTool_PrimingObserveFailure_RefusesRegistration(t *testing.T) {
+	withWatchEnabled(t, true)
+	src := &primeFakeSource{
+		kind: watch.SourceKind("tool_test_prime_err"),
+		err:  errors.New("no tool configs found for - github_execute, please configure"),
+	}
+	watch.RegisterSource(src)
+
+	resp := callWith(t, validToolCtx(t), primeArgs(src.kind, "regex", "completed"))
+
+	require.Equal(t, core.NBToolResponseStatusError, resp.Status)
+	assert.Contains(t, resp.Data, "No watch was registered")
+	assert.Contains(t, resp.Data, "no tool configs found",
+		"the agent needs the actual failure, not a generic message, to correct the call")
+}
+
+// TestWatchResourceTool_PrimingDisabled_SkipsTheProbe: setting the timeout to 0
+// is the operator escape hatch. With priming off, a source that would have
+// failed the probe must not block registration — the call proceeds to Create
+// (which then fails on the absent metastore, proving the probe was skipped).
+func TestWatchResourceTool_PrimingDisabled_SkipsTheProbe(t *testing.T) {
+	withWatchEnabled(t, true)
+	prev := config.Config.WatchPrimingPollTimeoutSec
+	config.Config.WatchPrimingPollTimeoutSec = 0
+	t.Cleanup(func() { config.Config.WatchPrimingPollTimeoutSec = prev })
+
+	src := &primeFakeSource{
+		kind: watch.SourceKind("tool_test_prime_disabled"),
+		err:  errors.New("would have failed the probe"),
+	}
+	watch.RegisterSource(src)
+
+	resp := callWith(t, validToolCtx(t), primeArgs(src.kind, "regex", "completed"))
+
+	require.Equal(t, core.NBToolResponseStatusError, resp.Status)
+	assert.NotContains(t, resp.Data, "would have failed the probe",
+		"probe must not run when priming is disabled")
+	assert.Contains(t, resp.Data, "failed to register watch",
+		"the call should have proceeded past priming to Create")
 }
