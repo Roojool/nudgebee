@@ -132,8 +132,9 @@ func DispatchPRValueRefresh(
 		onDone(ValueRefreshUnnecessary, message)
 	}
 
-	runPRFollowupAgent(reqCtx, tenantID, chatRequest, "resolution_id", resolution.Id,
-		func(tenantCtx *security.RequestContext, response *llm.ChatCompletionResponse, err error) {
+	runPRFollowupAgent(reqCtx, tenantID, chatRequest,
+		followupRunSpec{dbms: dbms, followupID: followupID, reattachable: false, logKey: "resolution_id", logID: resolution.Id},
+		func(tenantCtx *security.RequestContext, _ string, response *llm.ChatCompletionResponse, err error) {
 			if err != nil {
 				fail(err.Error())
 				return

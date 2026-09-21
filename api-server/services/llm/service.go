@@ -67,20 +67,150 @@ type llmApiResponse struct {
 	} `json:"errors"`
 }
 
-func ChatCompletion(sc *security.RequestContext, request ConversationApiRequest) (*ChatCompletionResponse, error) {
-	// Make the HTTP POST request to the llm-server
-	llmServerURL := fmt.Sprintf("%s/v1/completions/chat", config.Config.LLMServerEndpoint)
+// ChatOption tunes a single ChatCompletion call. The zero set of options is the
+// behaviour every existing caller relies on.
+type ChatOption func(*chatConfig)
 
+type chatConfig struct {
+	onSubmitted func(conversationID string)
+}
+
+// WithOnSubmitted calls fn with the conversation id as soon as llm-server accepts
+// the request and before polling starts. A caller that must survive its own
+// process dying mid-run saves the id there, so another process can pick the run
+// back up with WaitForConversation instead of starting a second one. It is not
+// called when the answer came back inline (no conversation to poll).
+func WithOnSubmitted(fn func(conversationID string)) ChatOption {
+	return func(c *chatConfig) { c.onSubmitted = fn }
+}
+
+func llmRequestHeaders(sc *security.RequestContext, userID string) map[string]string {
 	headers := map[string]string{
 		"Content-Type": "application/json",
 	}
 	if sc.GetSecurityContext().GetTenantId() != "" {
 		headers["x-tenant-id"] = sc.GetSecurityContext().GetTenantId()
 	}
-	if request.UserId != "" {
-		headers["x-user-id"] = request.UserId
+	if userID != "" {
+		headers["x-user-id"] = userID
 	}
 	headers[config.Config.LLMServerTokenHeader] = config.Config.LLMServerToken
+	return headers
+}
+
+// WaitForConversation polls an already-submitted conversation to completion. It
+// is the second half of ChatCompletion, exposed so a process that did not submit
+// the request can take over waiting for it. request needs ConversationId and
+// AccountId; UserId is optional.
+func WaitForConversation(sc *security.RequestContext, request ConversationApiRequest) (*ChatCompletionResponse, error) {
+	if request.ConversationId == "" {
+		return nil, errors.New("llm: conversation_id is required to wait for a conversation")
+	}
+	return pollConversation(sc, request.ConversationId, request.AccountId, llmRequestHeaders(sc, request.UserId))
+}
+
+// pollConversation polls chat_get until the conversation completes, stops, fails,
+// or the retry budget runs out.
+func pollConversation(sc *security.RequestContext, convId, accountID string, headers map[string]string) (*ChatCompletionResponse, error) {
+	retryAttempts := config.Config.ServicesServerLLMRetryAttempts
+	backoffSec := config.Config.ServicesServerLLMInitialBackoffSeconds
+	if backoffSec <= 0 {
+		backoffSec = 2
+	}
+	backoff := time.Duration(backoffSec) * time.Second
+
+	for i := 0; i < retryAttempts; i++ {
+		select {
+		case <-sc.GetContext().Done():
+			return nil, sc.GetContext().Err()
+		case <-time.After(backoff):
+		}
+
+		getReq := llmChatRequest{
+			Action: llmAction{Name: "chat"},
+			Input: llmChatInput{
+				Request: llmChatInputRequest{
+					ConversationId: convId,
+					AccountId:      accountID,
+				},
+			},
+		}
+
+		pollResp, err := common.HttpPost(fmt.Sprintf("%s/v1/completions/chat_get", config.Config.LLMServerEndpoint),
+			common.HttpWithHeaders(headers),
+			common.HttpWithJsonBody(getReq),
+			common.HttpWithTimeout(30*time.Second),
+			common.HttpWithContext(sc.GetContext()))
+
+		if err != nil {
+			sc.GetLogger().Error("llm.ChatCompletion: error in chat_get", "error", err, "attempt", i+1)
+			continue
+		}
+
+		pollBody, err := io.ReadAll(pollResp.Body)
+		if closeErr := pollResp.Body.Close(); closeErr != nil {
+			sc.GetLogger().Warn("llm.ChatCompletion: error closing poll response body", "error", closeErr)
+		}
+		if err != nil {
+			sc.GetLogger().Error("llm.ChatCompletion: unable to read body in chat_get", "error", err)
+			continue
+		}
+
+		if pollResp.StatusCode != http.StatusOK {
+			sc.GetLogger().Warn("llm.ChatCompletion: chat_get returned non-200", "status", pollResp.StatusCode, "body", string(pollBody))
+			continue
+		}
+
+		var pollApiResponse llmApiResponse
+		if err := common.UnmarshalJson(pollBody, &pollApiResponse); err != nil {
+			sc.GetLogger().Error("llm.ChatCompletion: unable to unmarshal chat_get response", "error", err)
+			continue
+		}
+
+		if pollApiResponse.Data == nil {
+			sc.GetLogger().Error("llm.ChatCompletion: no data in chat_get response")
+			continue
+		}
+
+		status := pollApiResponse.Data.Status
+		if status == "COMPLETED" {
+			finalResponse := pollApiResponse.Data.Response
+			if len(finalResponse) == 0 && len(pollApiResponse.Data.Messages) > 0 {
+				finalResponse = []string{pollApiResponse.Data.Messages[len(pollApiResponse.Data.Messages)-1].Response}
+			}
+			return &ChatCompletionResponse{
+				Response:       finalResponse,
+				Query:          pollApiResponse.Data.Query,
+				AgentName:      pollApiResponse.Data.AgentName,
+				ConversationId: convId,
+				SessionId:      pollApiResponse.Data.SessionId,
+				Status:         pollApiResponse.Data.Status,
+			}, nil
+		}
+
+		if stoppedConversationStatuses[status] {
+			return nil, fmt.Errorf("llm: conversation was %s before it answered", strings.ToLower(status))
+		}
+
+		if status == "FAILED" || status == "ERROR" {
+			return nil, fmt.Errorf("llm: request failed with status: %s", status)
+		}
+
+		sc.GetLogger().Info("llm.ChatCompletion: request in progress", "conversation_id", convId, "attempt", i+1)
+	}
+	return nil, errors.New("llm: max retry attempts reached")
+}
+
+func ChatCompletion(sc *security.RequestContext, request ConversationApiRequest, opts ...ChatOption) (*ChatCompletionResponse, error) {
+	var cfg chatConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// Make the HTTP POST request to the llm-server
+	llmServerURL := fmt.Sprintf("%s/v1/completions/chat", config.Config.LLMServerEndpoint)
+
+	headers := llmRequestHeaders(sc, request.UserId)
 
 	chatReq := llmChatRequest{
 		Action: llmAction{Name: "chat"},
@@ -158,94 +288,10 @@ func ChatCompletion(sc *security.RequestContext, request ConversationApiRequest)
 				return nil, errors.New("llm: conversation_id not found in initial response")
 			}
 
-			// Polling for completion
-			retryAttempts := config.Config.ServicesServerLLMRetryAttempts
-			backoffSec := config.Config.ServicesServerLLMInitialBackoffSeconds
-			if backoffSec <= 0 {
-				backoffSec = 2
+			if cfg.onSubmitted != nil {
+				cfg.onSubmitted(convId)
 			}
-			backoff := time.Duration(backoffSec) * time.Second
-
-			for i := 0; i < retryAttempts; i++ {
-				select {
-				case <-sc.GetContext().Done():
-					return nil, sc.GetContext().Err()
-				case <-time.After(backoff):
-				}
-
-				getReq := llmChatRequest{
-					Action: llmAction{Name: "chat"},
-					Input: llmChatInput{
-						Request: llmChatInputRequest{
-							ConversationId: convId,
-							AccountId:      request.AccountId,
-						},
-					},
-				}
-
-				pollResp, err := common.HttpPost(fmt.Sprintf("%s/v1/completions/chat_get", config.Config.LLMServerEndpoint),
-					common.HttpWithHeaders(headers),
-					common.HttpWithJsonBody(getReq),
-					common.HttpWithTimeout(30*time.Second),
-					common.HttpWithContext(sc.GetContext()))
-
-				if err != nil {
-					sc.GetLogger().Error("llm.ChatCompletion: error in chat_get", "error", err, "attempt", i+1)
-					continue
-				}
-
-				pollBody, err := io.ReadAll(pollResp.Body)
-				if closeErr := pollResp.Body.Close(); closeErr != nil {
-					sc.GetLogger().Warn("llm.ChatCompletion: error closing poll response body", "error", closeErr)
-				}
-				if err != nil {
-					sc.GetLogger().Error("llm.ChatCompletion: unable to read body in chat_get", "error", err)
-					continue
-				}
-
-				if pollResp.StatusCode != http.StatusOK {
-					sc.GetLogger().Warn("llm.ChatCompletion: chat_get returned non-200", "status", pollResp.StatusCode, "body", string(pollBody))
-					continue
-				}
-
-				var pollApiResponse llmApiResponse
-				if err := common.UnmarshalJson(pollBody, &pollApiResponse); err != nil {
-					sc.GetLogger().Error("llm.ChatCompletion: unable to unmarshal chat_get response", "error", err)
-					continue
-				}
-
-				if pollApiResponse.Data == nil {
-					sc.GetLogger().Error("llm.ChatCompletion: no data in chat_get response")
-					continue
-				}
-
-				status := pollApiResponse.Data.Status
-				if status == "COMPLETED" {
-					finalResponse := pollApiResponse.Data.Response
-					if len(finalResponse) == 0 && len(pollApiResponse.Data.Messages) > 0 {
-						finalResponse = []string{pollApiResponse.Data.Messages[len(pollApiResponse.Data.Messages)-1].Response}
-					}
-					return &ChatCompletionResponse{
-						Response:       finalResponse,
-						Query:          pollApiResponse.Data.Query,
-						AgentName:      pollApiResponse.Data.AgentName,
-						ConversationId: convId,
-						SessionId:      pollApiResponse.Data.SessionId,
-						Status:         pollApiResponse.Data.Status,
-					}, nil
-				}
-
-				if stoppedConversationStatuses[status] {
-					return nil, fmt.Errorf("llm: conversation was %s before it answered", strings.ToLower(status))
-				}
-
-				if status == "FAILED" || status == "ERROR" {
-					return nil, fmt.Errorf("llm: request failed with status: %s", status)
-				}
-
-				sc.GetLogger().Info("llm.ChatCompletion: request in progress", "conversation_id", convId, "attempt", i+1)
-			}
-			return nil, errors.New("llm: max retry attempts reached")
+			return pollConversation(sc, convId, request.AccountId, headers)
 		}
 
 		sc.GetLogger().Warn("llm.ChatCompletion: received non-OK status", "status_code", resp.StatusCode, "attempt", attempt+1)
