@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wagslane/go-rabbitmq"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -28,6 +29,93 @@ var (
 	maxAttempts        = 3
 	reconnectTimeDelay = 5 * time.Second
 )
+
+// Unroutable-message detection for MqPublishWithMandatory.
+//
+// A publish to an exchange with no queue bound to the routing key is discarded
+// by the broker and still confirmed, so the publisher cannot tell a delivered
+// message from a dropped one. The mandatory flag makes the broker hand the
+// message back over basic.return instead; go-rabbitmq surfaces those through a
+// per-connection NotifyReturn handler, which is asynchronous, so the returned
+// message id is correlated through this registry.
+var (
+	mqReturnedMux    sync.Mutex
+	mqReturnedIDs    = make(map[string]time.Time)
+	mqReturnedPruned time.Time
+)
+
+const (
+	maxConsumerReconnectDelay = 60 * time.Second
+	// How long a basic.return stays in the registry before it is pruned. Only
+	// needs to outlive the grace window below; anything older is a leak.
+	mqReturnRetention = 2 * time.Minute
+	// How long to wait after the broker confirms a mandatory publish for a
+	// basic.return to arrive. RabbitMQ sends the return before the ack on the
+	// same channel, but the library dispatches it to another goroutine, so the
+	// ordering guarantee alone is not enough. Costs this much latency on every
+	// mandatory publish that is NOT returned — the routable, common case.
+	mqReturnGrace = 150 * time.Millisecond
+	mqReturnPoll  = 5 * time.Millisecond
+	// Prune at most this often. A consumer outage returns every message, and
+	// scanning the whole map under the lock on each one would make the publish
+	// path quadratic exactly when it is busiest.
+	mqReturnPruneInterval = 10 * time.Second
+	// Upper bound on waiting for a publisher confirm before treating the
+	// publish as failed.
+	mqConfirmTimeout = 10 * time.Second
+)
+
+// ErrMqUnroutable means the broker accepted the message but had nowhere to route
+// it — no queue is bound to the exchange for this routing key, usually because
+// the consumer that declares that queue is not running.
+var ErrMqUnroutable = fmt.Errorf("rbmq: message unroutable, no queue bound for routing key")
+
+// recordReturnedMessage is called from the NotifyReturn handler for every
+// message the broker hands back.
+func recordReturnedMessage(messageID string) {
+	if messageID == "" {
+		return
+	}
+	mqReturnedMux.Lock()
+	defer mqReturnedMux.Unlock()
+	now := time.Now()
+	if now.Sub(mqReturnedPruned) > mqReturnPruneInterval {
+		for id, seen := range mqReturnedIDs {
+			if now.Sub(seen) > mqReturnRetention {
+				delete(mqReturnedIDs, id)
+			}
+		}
+		mqReturnedPruned = now
+	}
+	mqReturnedIDs[messageID] = now
+}
+
+// takeReturnedMessage reports whether this message was returned as unroutable,
+// removing it from the registry so each publish consumes its own return.
+func takeReturnedMessage(messageID string) bool {
+	mqReturnedMux.Lock()
+	defer mqReturnedMux.Unlock()
+	if _, ok := mqReturnedIDs[messageID]; !ok {
+		return false
+	}
+	delete(mqReturnedIDs, messageID)
+	return true
+}
+
+// waitForReturn polls the registry for the grace window, returning as soon as
+// the message shows up rather than always sleeping the full window.
+func waitForReturn(messageID string) bool {
+	deadline := time.Now().Add(mqReturnGrace)
+	for {
+		if takeReturnedMessage(messageID) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(mqReturnPoll)
+	}
+}
 
 // MaxMqPayloadSize is the maximum allowed RabbitMQ message payload size (10MB).
 // RabbitMQ's default frame_max is 128MB, but large payloads cause memory pressure
@@ -194,6 +282,26 @@ func MqConsumeWithDurableQueue() MqConsumeOption {
 	}
 }
 
+// consumerReconnectDelay backs the reconnect loop off from reconnectTimeDelay to
+// maxConsumerReconnectDelay. A broker that is down stays down for minutes, and
+// eight consumers retrying every 5s for that long is pure log noise.
+func consumerReconnectDelay(attempt int) time.Duration {
+	delay := reconnectTimeDelay
+	for i := 1; i < attempt && delay < maxConsumerReconnectDelay; i++ {
+		delay *= 2
+	}
+	if delay > maxConsumerReconnectDelay {
+		return maxConsumerReconnectDelay
+	}
+	return delay
+}
+
+// shouldLogConsumerRetry throttles the reconnect logs: every attempt for the
+// first few, then one in ten. An outage still leaves a trail without flooding.
+func shouldLogConsumerRetry(attempt int) bool {
+	return attempt < 3 || attempt%10 == 0
+}
+
 func MqConsume(exchangeName string, routingKey string, queue string, concurrency int, processor func(ctx context.Context, data []byte) error, opts ...MqConsumeOption) error {
 	consumeOpts := &mqConsumeOptions{}
 	for _, opt := range opts {
@@ -212,10 +320,16 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 	// first publish — turning a real dependency alert into noise on two thirds
 	// of the fleet. Dialling keeps the gauge meaning the same thing on every
 	// pod; only the consumer count differs by role.
-	conn := getConnection()
-	if conn == nil {
-		slog.Error("rbmq: initial connection to rabbitmq failed for consumer setup", "queue", queue, "exchange", exchangeName)
-		return ErrRbmqNoConn
+	//
+	// A failed dial here is NOT fatal: the consumer goroutine below re-dials on
+	// every attempt, so a pod that starts while the broker is down (or is being
+	// recreated) still declares its queue once the broker is back. Returning
+	// early used to leave the consumer permanently unregistered — the queue was
+	// never re-declared and every message published to its exchange was dropped
+	// by the broker with no error on the publish side.
+	if conn := getConnection(); conn == nil {
+		slog.Error("rbmq: initial connection to rabbitmq failed for consumer setup, retrying in background",
+			"queue", queue, "exchange", exchangeName)
 	}
 
 	if !config.RunsBackgroundJobs() {
@@ -245,13 +359,18 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 		// Loop indefinitely to manage consumer lifecycle
 		for attempt := 0; ; attempt++ {
 			if attempt > 0 {
-				slog.Info("rbmq: delaying consumer reconnect attempt", "queue", queue, "delay", reconnectTimeDelay)
-				time.Sleep(reconnectTimeDelay)
+				delay := consumerReconnectDelay(attempt)
+				if shouldLogConsumerRetry(attempt) {
+					slog.Info("rbmq: delaying consumer reconnect attempt", "queue", queue, "delay", delay, "attempt", attempt+1)
+				}
+				time.Sleep(delay)
 			}
 
 			conn := getConnection()
 			if conn == nil {
-				slog.Error("rbmq: failed to get rabbitmq connection for consumer", "queue", queue, "attempt", attempt+1)
+				if shouldLogConsumerRetry(attempt) {
+					slog.Error("rbmq: failed to get rabbitmq connection for consumer", "queue", queue, "attempt", attempt+1)
+				}
 				continue
 			}
 
@@ -323,6 +442,7 @@ type mqPublishOptions struct {
 	ExchangeType       string
 	BackgroundRetry    bool
 	PersistentDelivery bool
+	Mandatory          bool
 	Ctx                context.Context
 }
 
@@ -367,6 +487,21 @@ func MqPublishWithBackgroundRetry() MqPublishOption {
 func MqPublishWithPersistentDelivery() MqPublishOption {
 	return func(o *mqPublishOptions) {
 		o.PersistentDelivery = true
+	}
+}
+
+// MqPublishWithMandatory turns a silent drop into an error: the message is
+// published in confirm mode with the mandatory flag, and MqPublish returns
+// ErrMqUnroutable if the broker hands it back because no queue is bound. Use it
+// wherever the caller has a fallback — without it, a publish to an exchange
+// whose queue was never declared (consumer down when the broker restarted)
+// succeeds and the payload is discarded.
+//
+// Costs up to mqReturnGrace of extra latency per publish. Not compatible with
+// MqPublishWithBackgroundRetry, which by design hides publish failures.
+func MqPublishWithMandatory() MqPublishOption {
+	return func(o *mqPublishOptions) {
+		o.Mandatory = true
 	}
 }
 
@@ -418,7 +553,7 @@ func processMessageAndDetermineAction(d rabbitmq.Delivery, processorFunc func(ct
 
 // getOrCreatePublisher returns a cached publisher for (exchangeName, routingKey)
 // or creates one. Returns ErrRbmqNoConn if the broker is unreachable.
-func getOrCreatePublisher(exchangeName, exchangeType, publisherKey string) (*rabbitmq.Publisher, error) {
+func getOrCreatePublisher(exchangeName, exchangeType, publisherKey string, confirmMode bool) (*rabbitmq.Publisher, error) {
 	rbmqPublishersMux.Lock()
 	if p, ok := rbmqPublishers[publisherKey]; ok && p != nil {
 		rbmqPublishersMux.Unlock()
@@ -440,10 +575,23 @@ func getOrCreatePublisher(exchangeName, exchangeType, publisherKey string) (*rab
 	if exchangeType != "" {
 		publisherOptions = append(publisherOptions, rabbitmq.WithPublisherOptionsExchangeKind(exchangeType))
 	}
+	if confirmMode {
+		publisherOptions = append(publisherOptions, rabbitmq.WithPublisherOptionsConfirm)
+	}
 
 	newP, pubErr := rabbitmq.NewPublisher(conn, publisherOptions...)
 	if pubErr != nil {
 		return nil, fmt.Errorf("rbmq: error creating publisher: %w", pubErr)
+	}
+	if confirmMode {
+		// Returns are delivered per connection, so the handler records every
+		// returned message id and each publish picks its own out of the
+		// registry.
+		newP.NotifyReturn(func(r rabbitmq.Return) {
+			slog.Warn("rbmq: broker returned an unroutable message",
+				"exchange", r.Exchange, "routing_key", r.RoutingKey, "reply_text", r.ReplyText, "message_id", r.MessageId)
+			recordReturnedMessage(r.MessageId)
+		})
 	}
 
 	rbmqPublishersMux.Lock()
@@ -475,13 +623,16 @@ func recyclePublisherIfMatches(publisherKey string, p *rabbitmq.Publisher) {
 // recycle the publisher on connection errors. The caller decides whether to retry.
 // Returns (recyclable, err) where recyclable is true for transient broker/channel
 // errors that may succeed on a fresh publisher; false for terminal/non-conn errors.
-func publishOnce(exchangeName, routingKey, publisherKey, exchangeType string, payload []byte, publishOptsList []func(*rabbitmq.PublishOptions)) (bool, error) {
-	pub, err := getOrCreatePublisher(exchangeName, exchangeType, publisherKey)
+func publishOnce(ctx context.Context, exchangeName, routingKey, publisherKey, exchangeType string, payload []byte, publishOptsList []func(*rabbitmq.PublishOptions), mandatory bool) (bool, error) {
+	pub, err := getOrCreatePublisher(exchangeName, exchangeType, publisherKey, mandatory)
 	if err != nil {
 		return true, err // no-conn / publisher creation: retry-eligible
 	}
 	if pub == nil {
 		return true, fmt.Errorf("rbmq: publisher instance is nil for key %s", publisherKey)
+	}
+	if mandatory {
+		return publishMandatoryOnce(ctx, pub, routingKey, publisherKey, payload, publishOptsList)
 	}
 	err = pub.Publish(payload, []string{routingKey}, publishOptsList...)
 	if err == nil {
@@ -492,6 +643,49 @@ func publishOnce(exchangeName, routingKey, publisherKey, exchangeType string, pa
 		return true, err
 	}
 	return false, err
+}
+
+// publishMandatoryOnce publishes with the mandatory flag on a confirm-mode
+// publisher, waits for the broker's confirm, then checks whether the broker
+// returned the message as unroutable. Returns (recyclable, err) like
+// publishOnce; ErrMqUnroutable is deliberately NOT recyclable — retrying on a
+// fresh publisher cannot conjure a queue, and the caller's fallback should run
+// immediately.
+func publishMandatoryOnce(ctx context.Context, pub *rabbitmq.Publisher, routingKey, publisherKey string, payload []byte, publishOptsList []func(*rabbitmq.PublishOptions)) (bool, error) {
+	messageID := uuid.NewString()
+	opts := make([]func(*rabbitmq.PublishOptions), 0, len(publishOptsList)+2)
+	opts = append(opts, publishOptsList...)
+	opts = append(opts, rabbitmq.WithPublishOptionsMandatory, rabbitmq.WithPublishOptionsMessageID(messageID))
+
+	ctx, cancel := context.WithTimeout(ctx, mqConfirmTimeout)
+	defer cancel()
+
+	confirmations, err := pub.PublishWithDeferredConfirmWithContext(ctx, payload, []string{routingKey}, opts...)
+	if err != nil {
+		if isRabbitMQConnectionError(err) {
+			recyclePublisherIfMatches(publisherKey, pub)
+			return true, err
+		}
+		return false, err
+	}
+
+	for _, confirmation := range confirmations {
+		if confirmation == nil {
+			continue
+		}
+		acked, waitErr := confirmation.WaitContext(ctx)
+		if waitErr != nil {
+			return true, fmt.Errorf("rbmq: waiting for publisher confirm failed: %w", waitErr)
+		}
+		if !acked {
+			return true, fmt.Errorf("rbmq: broker nacked message for key %s", publisherKey)
+		}
+	}
+
+	if waitForReturn(messageID) {
+		return false, ErrMqUnroutable
+	}
+	return false, nil
 }
 
 func MqPublish(exchangeName string, routingKey string, message any, opts ...MqPublishOption) error {
@@ -548,14 +742,28 @@ func MqPublish(exchangeName string, routingKey string, message any, opts ...MqPu
 		publishOptsList = append(publishOptsList, rabbitmq.WithPublishOptionsPersistentDelivery)
 	}
 
+	// The caller's context bounds the confirm wait on a mandatory publish; every
+	// other path ignores it, so publishing is never aborted just because the
+	// request that triggered it ended.
+	publishCtx := options.Ctx
+	if publishCtx == nil {
+		publishCtx = context.Background()
+	}
+
 	publisherKey := fmt.Sprintf("%s:%s", exchangeName, routingKey)
+	if options.Mandatory {
+		// A confirm-mode publisher behaves differently from a plain one, so it
+		// gets its own cache entry rather than being shared with publishers
+		// that never asked for confirms.
+		publisherKey += ":confirm"
+	}
 
 	// Fire-and-forget: one sync attempt, then hand off to background worker on failure.
 	// Callers that opt in have no useful way to react to a publish error (event already
 	// inserted, webhook already 200'd), so blocking them past one attempt costs latency
 	// without buying durability.
 	if options.BackgroundRetry {
-		_, err := publishOnce(exchangeName, routingKey, publisherKey, options.ExchangeType, marshaledData, publishOptsList)
+		_, err := publishOnce(publishCtx, exchangeName, routingKey, publisherKey, options.ExchangeType, marshaledData, publishOptsList, false)
 		if err == nil {
 			return nil
 		}
@@ -574,7 +782,7 @@ func MqPublish(exchangeName string, routingKey string, message any, opts ...MqPu
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		recyclable, err := publishOnce(exchangeName, routingKey, publisherKey, options.ExchangeType, marshaledData, publishOptsList)
+		recyclable, err := publishOnce(publishCtx, exchangeName, routingKey, publisherKey, options.ExchangeType, marshaledData, publishOptsList, options.Mandatory)
 		if err == nil {
 			return nil // Success
 		}
@@ -704,7 +912,7 @@ func retryBackgroundItem(item backgroundRetryItem) {
 			return
 		}
 
-		_, err := publishOnce(item.exchangeName, item.routingKey, item.publisherKey, item.exchangeType, item.payload, item.publishOpts)
+		_, err := publishOnce(context.Background(), item.exchangeName, item.routingKey, item.publisherKey, item.exchangeType, item.payload, item.publishOpts, false)
 		item.attempt++
 		if err == nil {
 			mqBackgroundRetrySucceed.Add(1)

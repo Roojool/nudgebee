@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/eventrule"
 	"nudgebee/services/insight"
 	"nudgebee/services/integrations"
+	integrationscore "nudgebee/services/integrations/core"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/knowledge_graph/changedetect"
 	"nudgebee/services/knowledge_graph/core"
@@ -688,6 +689,18 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 				ctx.GetLogger().Info("cron: processing expired snoozes")
 				if err := triage.ProcessExpiredSnoozes(ctx); err != nil {
 					ctx.GetLogger().Error("cron: failed to process expired snoozes", "error", err)
+				}
+			}()
+			c.JSON(200, gin.H{"status": "ok"})
+		case "Stuck Webhook Recovery":
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						ctx.GetLogger().Error("cron: panic in stuck webhook recovery", "panic", r)
+					}
+				}()
+				if err := integrationscore.RecoverStuckWebhooks(ctx); err != nil {
+					ctx.GetLogger().Error("cron: failed to recover stuck webhooks", "error", err)
 				}
 			}()
 			c.JSON(200, gin.H{"status": "ok"})

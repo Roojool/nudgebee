@@ -432,6 +432,17 @@
     num_retries: 0
     timeout_seconds: 180
   comment: Transition expired snoozed events back to OPEN every 5 minutes
+- name: Stuck Webhook Recovery
+  webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
+  schedule: '*/5 * * * *'
+  payload: {}
+  headers:
+    - name: X-ACTION-TOKEN
+      value_from_env: ACTION_API_SERVER_TOKEN
+  retry_conf:
+    num_retries: 0
+    timeout_seconds: 300
+  comment: Re-drive webhook deliveries the queue never processed, every 5 minutes
 - name: Security recommendation refresh
   webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
   schedule: '30 */2 * * *'
