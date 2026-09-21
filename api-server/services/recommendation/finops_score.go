@@ -67,11 +67,11 @@ var ruleCategoryOverrides = map[string]string{
 }
 
 // autoFixableRules earn an effort boost because they can be auto-remediated.
+// Keys are matched against rule_name exactly, so each one has to be the name
+// its producer writes: a name nothing emits costs its rule the boost silently.
 var autoFixableRules = map[string]bool{
 	"pod_right_sizing":     true,
-	"replica-rightsizing":  true,
-	"vertical-rightsizing": true,
-	"volume-rightsizing":   true,
+	"replica_right_sizing": true,
 	"pv_rightsize":         true,
 	"unused_pvc":           true,
 	"health_check":         true,
