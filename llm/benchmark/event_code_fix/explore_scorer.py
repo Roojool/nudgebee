@@ -35,11 +35,11 @@ def score_explore(scenario: dict[str, Any], response: dict[str, Any]) -> dict[st
         "similarity": eval_result.similarity,
         "quality": eval_result.quality,
         "verdict": None if verdict.failed else verdict.status,
-        "citation_grounded": _citation_grounded(scenario, response),
+        "citation_grounded": citation_grounded(scenario, response),
     }
 
 
-def _citation_grounded(scenario: dict[str, Any], response: dict[str, Any]) -> bool:
+def citation_grounded(scenario: dict[str, Any], response: dict[str, Any]) -> bool:
     """True if at least one citation names the real buggy file. No check
     configured means vacuously true, mirroring code_fix_verifier's
     empty-test-list convention."""

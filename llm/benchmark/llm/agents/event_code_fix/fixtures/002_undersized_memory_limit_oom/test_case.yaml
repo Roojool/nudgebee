@@ -1,0 +1,15 @@
+user_prompt: batch-report-worker OOMKilled
+expected_output:
+- The response must identify the memory limit (256Mi) as undersized for a legitimate, one-off large batch
+  (50000 rows), not a memory leak.
+- "The response must NOT diagnose a memory leak \u2014 memory is flat and stable until the single batch-driven\
+  \ spike, with no gradual growth trend."
+- The response should recommend raising the memory limit/request, not a code change.
+tags:
+- event_code_fix
+- event
+- diagnosis_only
+- oom
+- resource_limits
+type: rca
+event_code_fix_scenario: undersized_memory_limit_oom

@@ -1,0 +1,17 @@
+user_prompt: runbook-worker CrashLoopBackOff
+expected_output:
+- The response must identify that a slow synchronous startup task (e.g. schedule/cron sync) runs before
+  the HTTP health server starts listening, so the readiness/liveness probe deadline is exceeded before
+  the server can bind.
+- "The response must NOT attribute this to resource limits, an external dependency outage, or a runtime\
+  \ crash after the service was already healthy \u2014 the pattern is repeated connection-refused on the\
+  \ health port from the very start of every restart, not a crash mid-operation."
+tags:
+- event_code_fix
+- event
+- code_fix
+- crashloop
+- startup_ordering
+- real_incident
+type: rca
+event_code_fix_scenario: startup_ordering_crashloop

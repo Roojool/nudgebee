@@ -33,12 +33,17 @@ def env(name: str, default: str | None = None) -> str:
 
 
 class CodeAnalyzerClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        account_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         self.llm_url = env("LLM_SERVER_URL").rstrip("/")
         self.llm_token = env("LLM_SERVER_TOKEN")
-        self.account_id = env("BENCHMARK_ACCOUNT_ID")
-        self.tenant_id = env("BENCHMARK_TENANT_ID")
-        self.user_id = os.environ.get("BENCHMARK_USER_ID", "")
+        self.account_id = account_id or env("BENCHMARK_ACCOUNT_ID")
+        self.tenant_id = tenant_id or env("BENCHMARK_TENANT_ID")
+        self.user_id = user_id or os.environ.get("BENCHMARK_USER_ID", "")
         self.headers = {"X-ACTION-TOKEN": self.llm_token, "x-tenant-id": self.tenant_id}
 
     def query(

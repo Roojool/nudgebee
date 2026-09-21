@@ -103,6 +103,43 @@ re-run **resumes**, skipping anything already scored — same reasoning as
 `swebench/run_swebench.py`: losing a run to a dropped port-forward should
 cost minutes, not the whole run.
 
+## Running from the benchmark dashboard
+
+Scenarios 001–007 are also registered as the **`event_code_fix`** agent in the
+benchmark dashboard (Run Benchmark -> Agent -> `event_code_fix`), so they can be
+launched, filtered by tag and compared like any other agent. Scenario 008
+(`pr_followup`) stays CLI-only: it opens and closes a real PR on every run.
+
+How it works: `llm/agents/event_code_fix/fixtures/*/test_case.yaml` are thin
+pointers generated from `scenarios/*/scenario.yaml` (`python -m
+llm.agents.event_code_fix.sync_fixtures` from `llm/benchmark`; a CI test fails
+if they drift). The agent's `runner` (`llm/agents/event_code_fix/runner.py`)
+replaces the chat completion with the same pipeline the CLI runs, then the
+engine scores the returned diagnosis with RAGAS + the verdict judge. The fix
+verification bucket / explore citation check shows up at the end of the
+result's score reason, e.g. `[event_code_fix] bucket=resolved`.
+
+The **benchmark-server** needs these env vars (it already gets
+`ACTION_API_SERVER_TOKEN`, `LLM_SERVER_TOKEN` and `LLM_SERVER_URL` from the
+shared `nudgebee` secret):
+
+| Variable | Value |
+|---|---|
+| `API_SERVER_URL` | `http://services-server:8000` (in-cluster) |
+| `ALERTMANAGER_WEBHOOK_URL` | the `prometheus_alertmanager_webhook` integration URL incl. `?token=` — event scenarios only |
+
+The webhook token belongs to one account: select **that** account in the
+dashboard, or the alert lands elsewhere and the run fails as
+`ingestion_timeout`. The run's account/tenant come from the dashboard, not from
+`BENCHMARK_ACCOUNT_ID`/`BENCHMARK_TENANT_ID`.
+
+Differences from the CLI: no resume file (the dashboard has its own resume),
+diagnosis-only is done by tag (`diagnosis_only`), and the dashboard's LLM /
+tool-config pickers do not apply — the pipeline uses the account's own
+configured model, so the RAGAS judge is the only part they influence. A
+scenario whose fixture repo is not provisioned yet (`REPLACE_WITH_*`
+placeholders) fails immediately with a `client_error` instead of spending an RCA.
+
 ## Operational notes
 
 - Each injected alert (`event`-type scenarios) triggers

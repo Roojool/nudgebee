@@ -12,7 +12,8 @@ ENV PATH=/opt/conda/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
-    curl && \
+    curl \
+    git && \
     rm -rf /var/lib/apt/lists/* && \
     if [ "$TARGETARCH" = "arm64" ]; then \
         curl -fsSL https://github.com/conda-forge/miniforge/releases/download/24.3.0-0/Miniforge3-Linux-aarch64.sh -o miniforge.sh; \
@@ -73,6 +74,9 @@ WORKDIR /app
 ENV PYTHONPATH /app
 COPY benchmark_server /app/benchmark_server
 COPY llm /app/llm
+# Scenarios + pipeline driver for the event_code_fix agent (llm/agents/event_code_fix).
+# git: its fix verification clones the fixture repo.
+COPY event_code_fix /app/event_code_fix
 COPY pyproject.toml /app/
 COPY app.py /app/
 

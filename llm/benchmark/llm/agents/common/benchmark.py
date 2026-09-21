@@ -98,7 +98,13 @@ def _import_callable(dotted_path: str) -> Callable:
 def _resolve_hooks(config: Dict[str, Any]) -> Dict[str, Optional[Callable]]:
     """Resolve callable hooks from config dotted paths."""
     hooks = {}
-    for key in ("before_query", "after_query", "result_enricher", "answer_extractor"):
+    for key in (
+        "before_query",
+        "after_query",
+        "result_enricher",
+        "answer_extractor",
+        "runner",
+    ):
         path = config.get(key)
         if path:
             try:
@@ -192,10 +198,20 @@ def _execute_query(
     tool_names: List[str],
     db_tool_name: Optional[str],
     prefix_query: bool = True,
+    runner: Optional[Callable] = None,
+    test_case: Optional[Dict[str, Any]] = None,
 ) -> tuple:
-    """Execute a single LLM query and extract the answer."""
-    final_query = f"@{agent} {query}" if prefix_query else query
+    """Execute a single LLM query and extract the answer.
+
+    With a ``runner`` (config.yaml ``runner:``) the chat completion is skipped:
+    the runner drives the agent's own pipeline and returns ``(docs, LLMResult)``
+    directly, for suites whose unit of work is not one chat query.
+    """
     start_time = time.time()
+    if runner:
+        docs, llm_result = runner(test_case, account_id, tenant_id, user_id)
+        return docs, llm_result, round(time.time() - start_time, 2)
+    final_query = f"@{agent} {query}" if prefix_query else query
     llm_result = call_llm(
         final_query,
         account_id,
@@ -506,6 +522,8 @@ def test_agent_benchmark(
         tool_names,
         db_tool_name,
         prefix_query,
+        hooks.get("runner"),
+        test_case,
     )
 
     # Handle followup (WAITING status) — do not retry, store and return
@@ -569,6 +587,8 @@ def test_agent_benchmark(
                     tool_names,
                     db_tool_name,
                     prefix_query,
+                    hooks.get("runner"),
+                    test_case,
                 )
                 if docs:
                     error_category = None
@@ -672,6 +692,11 @@ def test_agent_benchmark(
             )
 
     score_reason = eval_result.reason.strip() if not test_failed else ""
+    # A runner's own deterministic checks (e.g. fix verification), kept out of
+    # the answer text so they can't skew the RAGAS scores.
+    score_note = test_case.get("_score_note")
+    if score_note and not test_failed:
+        score_reason = f"{score_reason}\n{score_note}".strip()
     result_data["answer_similarity"] = sim_score
     result_data["answer_relevancy"] = rel_score
     result_data["planner_relevancy"] = planner_score

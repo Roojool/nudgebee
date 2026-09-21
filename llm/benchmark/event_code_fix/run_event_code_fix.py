@@ -42,9 +42,15 @@ MODEL_MISS_SKIP_REASONS = {
 }
 
 
-def run_event_scenario(
+def run_event_pipeline(
     client: EventCodeFixClient, scenario: dict, diagnosis_only: bool
-) -> dict:
+) -> tuple[dict, dict | None]:
+    """Alert -> event -> RCA -> optional fix verification, without scoring the
+    diagnosis text (the dashboard engine scores that itself).
+
+    Returns (row, rca). rca is None when the run ended before a diagnosis
+    worth scoring; row["bucket"] already says why.
+    """
     row = {"name": scenario["name"], "tags": scenario.get("tags", [])}
     t0 = time.monotonic()
 
@@ -55,7 +61,7 @@ def run_event_scenario(
         row["bucket"] = "ingestion_timeout"
         row["detail"] = str(exc)
         row["seconds"] = round(time.monotonic() - t0, 1)
-        return row
+        return row, None
 
     rca = client.run_rca(event_id)
     row["diagnosis_seconds"] = round(time.monotonic() - t0, 1)
@@ -64,7 +70,7 @@ def run_event_scenario(
         row["bucket"] = "error:rca_invalid_payload"
         row["detail"] = "RCA response payload is not a dictionary"
         row["seconds"] = round(time.monotonic() - t0, 1)
-        return row
+        return row, None
 
     rca_status = str(rca.get("status", "")).lower()
     if rca_status not in event_rca_client.TERMINAL_OK:
@@ -76,14 +82,7 @@ def run_event_scenario(
             rca.get("status_reason") or f"RCA analysis ended with status: {rca_status}"
         )
         row["seconds"] = round(time.monotonic() - t0, 1)
-        return row
-
-    row["diagnosis"] = score_diagnosis(scenario, rca)
-    metrics = diagnosis_stage_metrics(
-        rca, client.account_id, client.tenant_id, client.user_id
-    )
-    if metrics:
-        row["diagnosis_metrics"] = metrics
+        return row, None
 
     fixture_repo = scenario.get("fixture_repo")
     if not fixture_repo:
@@ -102,10 +101,34 @@ def run_event_scenario(
             row["fix_detail"] = fix_result["detail"]
 
     row["seconds"] = round(time.monotonic() - t0, 1)
+    return row, rca
+
+
+def run_event_scenario(
+    client: EventCodeFixClient, scenario: dict, diagnosis_only: bool
+) -> dict:
+    t0 = time.monotonic()
+    row, rca = run_event_pipeline(client, scenario, diagnosis_only)
+    if rca is None:
+        return row
+
+    row["diagnosis"] = score_diagnosis(scenario, rca)
+    metrics = diagnosis_stage_metrics(
+        rca, client.account_id, client.tenant_id, client.user_id
+    )
+    if metrics:
+        row["diagnosis_metrics"] = metrics
+    # Scoring time counts toward the scenario's wall clock, as it did before
+    # the pipeline/scoring split.
+    row["seconds"] = round(time.monotonic() - t0, 1)
     return row
 
 
-def run_explore_scenario(code_analyzer: CodeAnalyzerClient, scenario: dict) -> dict:
+def query_explore(
+    code_analyzer: CodeAnalyzerClient, scenario: dict
+) -> tuple[dict, dict | None]:
+    """The read-only code_analyzer query, unscored. Returns (row, response);
+    response is None when the query itself failed (row["bucket"] says why)."""
     row = {"name": scenario["name"], "tags": scenario.get("tags", [])}
     t0 = time.monotonic()
 
@@ -122,6 +145,13 @@ def run_explore_scenario(code_analyzer: CodeAnalyzerClient, scenario: dict) -> d
 
     if response.get("_status"):
         row["bucket"] = f"error:{response['_status'].lower()}"
+        return row, None
+    return row, response
+
+
+def run_explore_scenario(code_analyzer: CodeAnalyzerClient, scenario: dict) -> dict:
+    row, response = query_explore(code_analyzer, scenario)
+    if response is None:
         return row
 
     scored = score_explore(scenario, response)

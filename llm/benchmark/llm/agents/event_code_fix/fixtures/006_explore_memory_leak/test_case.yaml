@@ -1,0 +1,12 @@
+user_prompt: Why might subscriber-cache-worker's memory grow over time? Look at the cache implementation.
+expected_output:
+- The response must identify that put() never evicts entries from the cache, so it grows without bound
+  as new subscriber ids come in.
+tags:
+- event_code_fix
+- explore
+- explore
+- oom
+- memory_leak
+type: question-answer
+event_code_fix_scenario: explore_memory_leak

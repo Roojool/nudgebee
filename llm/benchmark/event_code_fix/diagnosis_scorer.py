@@ -38,6 +38,27 @@ def get_judges():
     return _llm, _embeddings
 
 
+def diagnosis_text(rca_response: dict[str, Any]) -> str:
+    """The RCA response's diagnosis prose — what gets scored against
+    expected_diagnosis, by this module and by the dashboard engine alike."""
+    return "\n\n".join(
+        filter(
+            None,
+            [
+                rca_response.get("summary"),
+                rca_response.get("investigation"),
+                rca_response.get("analysis"),
+            ],
+        )
+    )
+
+
+def rca_session_id(rca_response: dict[str, Any]) -> str | None:
+    """LLM session id of the diagnosis stage, for token/cost lookups."""
+    fingerprint = rca_response.get("event_fingerprint")
+    return _RCA_SESSION_PREFIX + fingerprint if fingerprint else None
+
+
 def score_diagnosis(
     scenario: dict[str, Any], rca_response: dict[str, Any]
 ) -> dict[str, Any]:
@@ -53,16 +74,7 @@ def score_diagnosis(
     llm, embeddings = get_judges()
     expected = scenario.get("expected_diagnosis") or []
     reference = "\n".join(expected)
-    answer = "\n\n".join(
-        filter(
-            None,
-            [
-                rca_response.get("summary"),
-                rca_response.get("investigation"),
-                rca_response.get("analysis"),
-            ],
-        )
-    )
+    answer = diagnosis_text(rca_response)
     query = scenario["alert"]["summary"]
 
     eval_result = evaluate_single(query, answer, reference, llm, embeddings)
@@ -100,9 +112,7 @@ def diagnosis_stage_metrics(
     under a separate session not exposed on EventAnalysisResponse, so its
     tool-call/token metrics aren't captured yet — a known gap, not a guess.
     """
-    fingerprint = rca_response.get("event_fingerprint")
-    if not fingerprint:
+    session_id = rca_session_id(rca_response)
+    if not session_id:
         return None
-    return get_token_metrics(
-        _RCA_SESSION_PREFIX + fingerprint, account_id, tenant_id, user_id
-    )
+    return get_token_metrics(session_id, account_id, tenant_id, user_id)

@@ -1,0 +1,19 @@
+# Event analysis + code fix: dashboard front-end for llm/benchmark/event_code_fix.
+#
+# The scenarios (alert payloads, fixture repos, expected diagnoses) live in
+# event_code_fix/scenarios/. Each fixture here is a thin pointer to one of
+# them, kept in sync by sync_fixtures.py and test_dashboard_fixtures.py. The
+# `runner` replaces the chat completion: it drives the real alert -> event ->
+# RCA -> fix pipeline (or the read-only explore query) for the selected
+# account, then the engine scores the returned diagnosis with RAGAS + verdict
+# judge like any other agent.
+#
+# Scenario 008 (pr_followup) is not registered: it opens and closes a real PR
+# on every run, which does not belong behind a dashboard button. Run it with
+# `python event_code_fix/run_event_code_fix.py --scenario pr_followup_cache_size_limit`.
+agent: event_code_fix
+tool_names: []
+prefix_query: false
+# Never retry: a retry re-runs a whole multi-minute RCA against real LLM spend.
+max_retries: 0
+runner: llm.agents.event_code_fix.runner.run

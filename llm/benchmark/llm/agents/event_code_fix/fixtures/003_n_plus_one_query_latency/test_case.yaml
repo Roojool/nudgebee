@@ -1,0 +1,15 @@
+user_prompt: 'orders-api: high latency on /api/orders/by-email'
+expected_output:
+- The response must identify the repeated 'SELECT * FROM customers WHERE id = $1' slow-query log lines
+  on /api/orders/by-email as an N+1 query pattern (one customer lookup per order) rather than a single
+  joined query.
+- The response must connect this to the endpoint's high latency_ms, not to an unrelated infra/network
+  cause.
+tags:
+- event_code_fix
+- event
+- code_fix
+- latency
+- sql
+type: rca
+event_code_fix_scenario: n_plus_one_query_latency

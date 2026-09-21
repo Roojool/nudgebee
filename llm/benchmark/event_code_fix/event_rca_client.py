@@ -38,7 +38,12 @@ class IngestionTimeout(Exception):
 
 
 class EventCodeFixClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        account_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         # api-server: alert injection + event lookup
         self.api_url = env("API_SERVER_URL").rstrip("/")
         self.api_token = env("ACTION_API_SERVER_TOKEN")
@@ -46,9 +51,11 @@ class EventCodeFixClient:
         # llm-server: diagnosis + fix
         self.llm_url = env("LLM_SERVER_URL").rstrip("/")
         self.llm_token = env("LLM_SERVER_TOKEN")
-        self.account_id = env("BENCHMARK_ACCOUNT_ID")
-        self.tenant_id = env("BENCHMARK_TENANT_ID")
-        self.user_id = os.environ.get("BENCHMARK_USER_ID", "")
+        # The dashboard passes the run's selected account; the CLI falls back
+        # to the BENCHMARK_* env vars.
+        self.account_id = account_id or env("BENCHMARK_ACCOUNT_ID")
+        self.tenant_id = tenant_id or env("BENCHMARK_TENANT_ID")
+        self.user_id = user_id or os.environ.get("BENCHMARK_USER_ID", "")
 
     # --- stage 1: inject the alert -----------------------------------------
 
