@@ -499,3 +499,107 @@ func TestApplyTriageRuleActions(t *testing.T) {
 func strPtr(s string) *string {
 	return &s
 }
+
+// TestApplyRuleToExistingEventsRecordsMatches covers the retroactive apply path: a rule created
+// with "apply to existing" must record its matches, not just flip events.nb_status. Before the
+// fix the rule reported Matches: 0 and an empty Matched Events tab for a backlog it had actually
+// suppressed (#38740).
+func TestApplyRuleToExistingEventsRecordsMatches(t *testing.T) {
+	ctx := context.Background()
+
+	testenv.RequireMetastore(t)
+	dbManager, err := database.GetDatabaseManager(database.Metastore)
+	require.NoError(t, err, "Failed to get database manager")
+
+	db := dbManager.Db
+
+	// Seed one OPEN event in a namespace no real rule matches. Enum-backed columns are cloned
+	// from an existing row so the insert satisfies the events FK constraints.
+	const testNamespace = "zz-apply-existing-test"
+	var seeded struct {
+		ID        string `db:"id"`
+		AccountID string `db:"cloud_account_id"`
+		TenantID  string `db:"tenant"`
+	}
+	err = db.GetContext(ctx, &seeded, `
+		INSERT INTO events (id, finding_id, created_at, updated_at, title, source, aggregation_key,
+		                    finding_type, subject_type, subject_name, subject_namespace, cluster,
+		                    priority, starts_at, fingerprint, evidences, tenant, cloud_account_id,
+		                    status, nb_status)
+		SELECT gen_random_uuid(), 'zz-apply-existing-test', NOW(), NOW(), 'apply-existing match test',
+		       source, 'TestApplyExisting', finding_type, subject_type, 'test-pod', $1, cluster,
+		       priority, NOW(), 'zz-apply-existing-test-fp', '[]'::jsonb, tenant, cloud_account_id,
+		       status, 'OPEN'
+		FROM events
+		WHERE cloud_account_id IS NOT NULL AND tenant IS NOT NULL AND cluster IS NOT NULL
+		LIMIT 1
+		RETURNING id, cloud_account_id, tenant
+	`, testNamespace)
+	if err != nil {
+		t.Skipf("Could not seed a test event, skipping: %v", err)
+		return
+	}
+
+	t.Cleanup(func() {
+		// Deleting the event cascades to event_triage_rule_matches.
+		if _, err := db.ExecContext(ctx, `DELETE FROM events WHERE id = $1`, seeded.ID); err != nil {
+			t.Logf("Warning: Failed to cleanup test event: %v", err)
+		}
+	})
+
+	rule, err := CreateTriageRule(ctx, db, CreateTriageRuleRequest{
+		RuleType:       RuleTypeSuppression,
+		Action:         ActionSuppress,
+		MatchNamespace: strPtr(testNamespace),
+		Name:           strPtr("Test Apply-To-Existing Rule"),
+		Description:    strPtr("Created by unit test"),
+	}, seeded.AccountID, seeded.TenantID, systemUserID)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(ctx, `DELETE FROM event_triage_rules WHERE id = $1`, rule.ID); err != nil {
+			t.Logf("Warning: Failed to cleanup rule: %v", err)
+		}
+	})
+
+	updated, err := ApplyRuleToExistingEvents(ctx, db, rule, seeded.AccountID, systemUserID)
+	require.NoError(t, err)
+	require.Equal(t, 1, updated, "the seeded event should have been updated")
+
+	// The event was suppressed...
+	var nbStatus string
+	require.NoError(t, db.GetContext(ctx, &nbStatus, `SELECT nb_status FROM events WHERE id = $1`, seeded.ID))
+	assert.Equal(t, NBStatusSuppressed, nbStatus)
+
+	// ...and the rule reports it. Both assertions below failed before the fix.
+	var matchRows int
+	require.NoError(t, db.GetContext(ctx, &matchRows, `
+		SELECT COUNT(*) FROM event_triage_rule_matches WHERE rule_id = $1 AND event_id = $2
+	`, rule.ID, seeded.ID))
+	assert.Equal(t, 1, matchRows, "retroactive apply should record a rule match row")
+
+	var matchCount int
+	require.NoError(t, db.GetContext(ctx, &matchCount, `
+		SELECT match_count FROM event_triage_rules WHERE id = $1
+	`, rule.ID))
+	assert.Equal(t, 1, matchCount, "retroactive apply should bump the rule's match_count")
+
+	// The Matched Events tab reads through this call.
+	events, total, err := GetEventsForTriageRule(ctx, db, rule.ID, seeded.TenantID, &seeded.AccountID, 50, 0, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, events, 1)
+	assert.Equal(t, seeded.ID, events[0].ID)
+
+	// Re-applying must not double-count: the match row already exists.
+	_, err = db.ExecContext(ctx, `UPDATE events SET nb_status = 'OPEN' WHERE id = $1`, seeded.ID)
+	require.NoError(t, err)
+
+	_, err = ApplyRuleToExistingEvents(ctx, db, rule, seeded.AccountID, systemUserID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.GetContext(ctx, &matchCount, `
+		SELECT match_count FROM event_triage_rules WHERE id = $1
+	`, rule.ID))
+	assert.Equal(t, 1, matchCount, "re-applying the same rule must not double-count match_count")
+}
