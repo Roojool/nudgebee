@@ -28,6 +28,17 @@ const STATUS_TONES = {
   CANCELLED: 'neutral',
 };
 
+// DB statuses are internal: PENDING vs ACTIVE is "dispatcher picked it up yet",
+// not user-actionable. Both -> "Watching".
+const STATUS_LABELS = {
+  PENDING: 'Watching',
+  ACTIVE: 'Watching',
+  COMPLETED: 'Done',
+  EXPIRED: 'Timed out',
+  FAILED: 'Failed',
+  CANCELLED: 'Cancelled',
+};
+
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'EXPIRED', 'FAILED', 'CANCELLED']);
 
 function StatusPill({ status }) {
@@ -38,7 +49,7 @@ function StatusPill({ status }) {
   return (
     <span data-testid={`watch-status-${safeStatus.toLowerCase()}`}>
       <Label tone={STATUS_TONES[safeStatus] || STATUS_TONES.PENDING} size='md'>
-        {safeStatus}
+        {STATUS_LABELS[safeStatus] || safeStatus}
       </Label>
     </span>
   );
@@ -74,9 +85,56 @@ function formatRelative(dateString) {
 
 const WATCH_FIELDS_TO_SHOW_ON_HOVER = ['source_kind', 'predicate_kind', 'predicate_expr', 'predicate_negate'];
 
+// Diagnostics -> tooltip: one hover away for on-call, not the headline.
+export function buildHoverDetails(w) {
+  const lines = WATCH_FIELDS_TO_SHOW_ON_HOVER.map((k) => `${k}: ${String(w?.[k])}`);
+  lines.push(`id: ${w?.id ?? ''}`);
+  const pollCount = w?.poll_count ?? 0;
+  const interval = w?.poll_interval_sec;
+  lines.push(`${pollCount} ${pollCount === 1 ? 'check' : 'checks'} so far${interval ? `, every ${interval}s` : ''}`);
+  const failureCount = w?.failure_count ?? 0;
+  if (failureCount > 0) {
+    lines.push(`${failureCount} transient ${failureCount === 1 ? 'failure' : 'failures'} (retried)`);
+  }
+  return lines.join('\n');
+}
+
+// What this watch polls. The backend derives it (watch.DescribeTarget) so the
+// precedence matches the poller — deriving it here got that backwards.
+export function describeWatchTarget(w) {
+  const target = typeof w?.watch_target === 'string' ? w.watch_target.trim() : '';
+  if (!target) {
+    const expr = typeof w?.predicate_expr === 'string' ? w.predicate_expr : '';
+    if (expr) {
+      return `for “${expr.length > 40 ? `${expr.slice(0, 40)}…` : expr}”`;
+    }
+    return w?.source_kind === 'sql' ? 'a database query' : 'a command';
+  }
+  return target.length > 48 ? `${target.slice(0, 48)}…` : target;
+}
+
+// One-phrase reason a terminal watch ended, without the internal
+// `regex "x" matched: y` framing.
+export function describeWatchOutcome(w) {
+  if (w?.status === 'COMPLETED') {
+    const expr = typeof w.predicate_expr === 'string' ? w.predicate_expr : '';
+    return expr ? `matched “${expr}”` : 'condition met';
+  }
+  if (w?.status === 'FAILED') {
+    return 'the check could not run';
+  }
+  if (w?.status === 'EXPIRED') {
+    return 'gave up before the condition was met';
+  }
+  return '';
+}
+
 function WatchRow({ watch: w, onCancel }) {
   const isTerminal = TERMINAL_STATUSES.has(w.status);
-  const hoverDetails = WATCH_FIELDS_TO_SHOW_ON_HOVER.map((k) => `${k}: ${String(w[k])}`).join('\n');
+  const hoverDetails = buildHoverDetails(w);
+  // '' only if a status joins TERMINAL_STATUSES without a describeWatchOutcome
+  // case — guard so the row can't render a leading " · ".
+  const outcome = isTerminal ? describeWatchOutcome(w) : '';
   // For terminal watches, prioritize final_result (the canonical "what won")
   // and fall back to error/last_poll_result. last_poll_result for terminal watches
   // is sometimes the in-flight poll that fired right after the matching one — useful
@@ -108,8 +166,16 @@ function WatchRow({ watch: w, onCancel }) {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <StatusPill status={w.status} />
           <Tooltip title={hoverDetails} placement='right'>
-            <Typography sx={{ fontFamily: 'var(--ds-font-mono)', fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
-              {w.id.slice(0, 8)}…
+            <Typography
+              sx={{
+                fontSize: 'var(--ds-text-small)',
+                color: 'var(--ds-gray-700)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {describeWatchTarget(w)}
             </Typography>
           </Tooltip>
         </Box>
@@ -127,22 +193,18 @@ function WatchRow({ watch: w, onCancel }) {
         )}
       </Box>
 
-      {/* mid row: poll progress + interval + duration cap */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
-          <strong>{w.poll_count}</strong> polls
-          {w.failure_count > 0 && <span style={{ color: 'var(--ds-red-700)', marginLeft: 6 }}>· {w.failure_count} failed</span>}
-        </Typography>
-        <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
-          every <strong>{w.poll_interval_sec}s</strong>
-        </Typography>
-        {!isTerminal && w.next_poll_at && (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>next {formatRelative(w.next_poll_at)}</Typography>
-        )}
+      {/* Live: when you'll hear back. Terminal: why it ended. Counts & transient
+          failures -> tooltip: a failure_count on a healthy watch reads as breakage. */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
         {isTerminal ? (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>terminated {formatRelative(w.updated_at)}</Typography>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
+            {outcome ? `${outcome} · ` : ''}
+            {formatRelative(w.updated_at)}
+          </Typography>
         ) : (
-          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>expires {formatRelative(w.expires_at)}</Typography>
+          <Typography sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
+            {w.next_poll_at ? `Next check ${formatRelative(w.next_poll_at)}` : 'Checking'} · stops {formatRelative(w.expires_at)}
+          </Typography>
         )}
       </Box>
 

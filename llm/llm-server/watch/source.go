@@ -525,6 +525,19 @@ func userIDString(u *uuid.UUID) string {
 	return u.String()
 }
 
+// DescribeTarget returns the command a watch polls, for display; "" for sql sources.
+// Server-side so the UI can't re-derive it with precedence the poller doesn't use.
+func DescribeTarget(w Watch) string {
+	if w.SourceKind != SourceKindTool {
+		return ""
+	}
+	var cfg toolSourceConfig
+	if err := json.Unmarshal([]byte(w.SourceConfig), &cfg); err != nil {
+		return ""
+	}
+	return pickCommandFromConfig(&cfg)
+}
+
 // pickCommandFromConfig returns the most likely "command string" the
 // configured source will actually execute, for the purpose of pre-flight
 // inspection. Honours `Command` first, then `tool_input.command` (the

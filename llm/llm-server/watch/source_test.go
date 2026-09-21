@@ -695,3 +695,19 @@ func TestNormalizeToolObservation_UnblocksAnchoredPredicate(t *testing.T) {
 		assert.True(t, r.Met, "raw=%q", raw)
 	}
 }
+
+// Pins the precedence the drawer depends on: Command over tool_input.command (#38901).
+func TestDescribeTarget(t *testing.T) {
+	tool := func(cfg string) Watch { return Watch{SourceKind: SourceKindTool, SourceConfig: cfg} }
+
+	// Command overrides tool_input — same order as pickCommandFromConfig.
+	assert.Equal(t, "gh run view 111111",
+		DescribeTarget(tool(`{"command":"gh run view 111111","tool_input":{"command":"kubectl get pods"}}`)))
+	assert.Equal(t, "kubectl rollout status deploy/shipping -n demo",
+		DescribeTarget(tool(`{"tool_input":{"command":"kubectl rollout status deploy/shipping -n demo"}}`)))
+
+	// Shapes that must not panic or invent a target.
+	assert.Equal(t, "", DescribeTarget(tool(`{"tool_name":"x"}`)))
+	assert.Equal(t, "", DescribeTarget(tool(`not json`)))
+	assert.Equal(t, "", DescribeTarget(Watch{SourceKind: SourceKindSQL, SourceConfig: `{"query":"SELECT 1"}`}))
+}

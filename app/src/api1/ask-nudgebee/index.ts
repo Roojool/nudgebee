@@ -1993,6 +1993,7 @@ const api = {
               id
               status
               source_kind
+              watch_target
               predicate_kind
               predicate_expr
               predicate_negate

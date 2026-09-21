@@ -12524,6 +12524,7 @@ type AILlmWatchRow {
   id: String!
   status: String!
   source_kind: String!
+  watch_target: String
   predicate_kind: String!
   predicate_expr: String!
   predicate_negate: Boolean!
