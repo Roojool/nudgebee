@@ -288,7 +288,17 @@ func generateCompactResponse(ctx *security.RequestContext, accountId, conversati
 		llms.TextParts(llms.ChatMessageTypeHuman, userPrompt),
 	}
 
-	completion, err := GenerateAndTrackLLMContent(ctx, userId, accountId, conversationId, messageId, "compact_response_agent", true, messageContent, false)
+	// Reformatting a finished answer for Slack — no tools, no reasoning — so it
+	// resolves on the summary tier instead of the conversation's main model.
+	compactCtx := security.NewRequestContext(
+		context.WithValue(ctx.GetContext(), ContextKeyModelTier, ModelTierSummary),
+		ctx.GetSecurityContext(),
+		ctx.GetLogger(),
+		ctx.GetTracer(),
+		ctx.GetMeter(),
+	)
+
+	completion, err := GenerateAndTrackLLMContent(compactCtx, userId, accountId, conversationId, messageId, "compact_response_agent", true, messageContent, false)
 	if err != nil {
 		return "", fmt.Errorf("llm call for compact response generation failed: %w", err)
 	}
