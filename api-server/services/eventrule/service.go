@@ -1426,7 +1426,11 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 					result, err := action.Execute(execContext, svcParams)
 					svcResponse.DurationSeconds = time.Since(actionStart).Seconds()
 					if err != nil {
-						context.GetLogger().Error("eventrule: failed to execute action", "event_id", event.EventId, "actionName", actionName, "forEachIndex", forEachIndex, "service", svc, "error", err)
+						if strings.Contains(err.Error(), "agent not connected") {
+							context.GetLogger().Warn("eventrule: action skipped or failed due to disconnected agent", "event_id", event.EventId, "actionName", actionName, "forEachIndex", forEachIndex, "service", svc, "error", err)
+						} else {
+							context.GetLogger().Error("eventrule: failed to execute action", "event_id", event.EventId, "actionName", actionName, "forEachIndex", forEachIndex, "service", svc, "error", err)
+						}
 						svcResponse.Error = err
 					} else {
 						svcResponse.Response = result
