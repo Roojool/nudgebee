@@ -22,10 +22,18 @@ import ChannelAccountMapping from '@components/notifications/ChannelAccountMappi
 import WatchedChannels from '@components/notifications/WatchedChannels';
 import MsTeamsWebhookTargets from '@components/notifications/MsTeamsWebhookTargets';
 import SlackWebhookTargets from '@components/notifications/SlackWebhookTargets';
+import Tabs from '@shared/navigation/Tabs';
+import { useFeatureAccess } from '@hooks/useFeatureAccess';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { EmptyState } from '@ui/EmptyState';
 import CheckIcon from '@mui/icons-material/Check';
 import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
+
+// Which providers get which section under the installation table. Google Chat has
+// webhook targets too but renders through its own panel (GoogleChatSpacesPanel), and
+// Discord has neither section, so neither appears here.
+const MAPPING_PROVIDERS = ['slack', 'ms_teams'];
+const WEBHOOK_TARGETS_BY_PROVIDER = { slack: SlackWebhookTargets, ms_teams: MsTeamsWebhookTargets };
 
 const MessagingIntegrationTile = ({
   provider, // "slack" | "google_chat"
@@ -64,6 +72,11 @@ const MessagingIntegrationTile = ({
   // untagged flag stays true through the swap.
   const [loadedFor, setLoadedFor] = useState(null);
   const hasLoaded = loadedFor === provider;
+  // Which of the sections under the installation table is showing. Component-local
+  // (not a URL fragment), like Admin Overview's sub-views.
+  const [sectionTab, setSectionTab] = useState('mappings');
+  // Same flag WatchedChannels gates itself on; still resolving (null) counts as off.
+  const channelAwarenessEnabled = useFeatureAccess('CHANNEL_AWARENESS') === true;
 
   // Fetch installations
   const listMessagingPlatform = () => {
@@ -462,6 +475,24 @@ const MessagingIntegrationTile = ({
 
   const isConnected = tableData?.length > 0;
 
+  // Sections under the installation table, one tab each. Webhook targets need no
+  // app install, so they stay available before Connect; the other two only render
+  // once the app is installed (and Watched Channels only behind its feature flag) —
+  // a hidden tab, not an empty one. Nothing shows until the installation lookup has
+  // landed: before it, Webhook targets is the only visible tab, so it would render
+  // (and fetch) first and then be swapped out when the default tab becomes Mappings.
+  const hasInstallation = installationData?.length > 0;
+  const WebhookTargets = WEBHOOK_TARGETS_BY_PROVIDER[provider];
+  const sectionTabs = [
+    { value: 'mappings', text: 'Channel-Account Mappings', hidden: !MAPPING_PROVIDERS.includes(provider) || !hasInstallation },
+    { value: 'watched', text: 'Watched Channels', hidden: provider !== 'slack' || !hasInstallation || !channelAwarenessEnabled },
+    { value: 'webhooks', text: 'Webhook targets', hidden: !WebhookTargets },
+  ].map((tab) => ({ ...tab, id: `${toKebabCase(provider)}-${tab.value}-tab` }));
+  const visibleSectionTabs = hasLoaded ? sectionTabs.filter((tab) => !tab.hidden) : [];
+  // Falls back to the first visible tab when the remembered one is not available
+  // (the default, Mappings, is hidden while the workspace is not connected).
+  const activeSection = visibleSectionTabs.find((tab) => tab.value === sectionTab)?.value ?? visibleSectionTabs[0]?.value;
+
   return (
     <>
       <Modal
@@ -715,15 +746,23 @@ const MessagingIntegrationTile = ({
         )}
       </ListingLayout>
 
-      {(provider === 'slack' || provider === 'ms_teams') && (
-        <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={installationData?.length > 0} />
+      {visibleSectionTabs.length > 1 && (
+        <Box sx={{ mb: 'var(--ds-space-3)' }}>
+          <Tabs
+            value={activeSection}
+            onChange={setSectionTab}
+            behavior='filter'
+            ariaLabel={`${displayName} settings sections`}
+            options={{ tabOptions: visibleSectionTabs }}
+          />
+        </Box>
       )}
 
-      {provider === 'slack' && <WatchedChannels provider={provider} isConfigured={installationData?.length > 0} />}
+      {activeSection === 'mappings' && <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={hasInstallation} />}
 
-      {provider === 'ms_teams' && <MsTeamsWebhookTargets />}
+      {activeSection === 'watched' && <WatchedChannels provider={provider} isConfigured={hasInstallation} />}
 
-      {provider === 'slack' && <SlackWebhookTargets />}
+      {activeSection === 'webhooks' && <WebhookTargets />}
     </>
   );
 };

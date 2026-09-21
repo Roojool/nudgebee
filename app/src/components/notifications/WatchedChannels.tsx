@@ -194,7 +194,7 @@ const WatchedChannels: React.FC<WatchedChannelsProps> = ({ provider, isConfigure
   }
 
   return (
-    <Box mt={ds.space[6]}>
+    <>
       <ListingLayout id={`${provider}-watched-channels`}>
         <ListingLayout.Toolbar
           actions={
@@ -335,7 +335,7 @@ const WatchedChannels: React.FC<WatchedChannelsProps> = ({ provider, isConfigure
           <Banner tone='info' surface='section' message={`${assistantLabel} joins each selected channel and posts a notice there.`} />
         </Box>
       </Modal>
-    </Box>
+    </>
   );
 };
 
