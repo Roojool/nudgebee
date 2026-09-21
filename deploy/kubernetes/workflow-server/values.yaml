@@ -67,10 +67,16 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Flat across every measured deployment: 31-94Mi average, 63-133Mi peak, CPU p95
+# 2-46m. The chart previously shipped no memory limit.
 resources:
-  requests:
-    cpu: 250m
+  limits:
+    cpu: 500m
     memory: 500Mi
+  requests:
+    cpu: 50m
+    memory: 250Mi
 
 autoscaling:
   enabled: false

@@ -71,18 +71,17 @@ ingress:
   #    hosts:
   #      - chart-example.local
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Flat across every measured deployment: 137-197Mi average, 261-394Mi peak. CPU is
+# bursty at delivery time (p95 9-202m, brief 267m peaks) but the 500m request was
+# above the p95 of the busiest deployment and was still throttling at the 800m limit.
 resources:
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-
   limits:
-    cpu: 800m
+    cpu: 750m
     memory: 750Mi
   requests:
-    cpu: 500m
-    memory: 500Mi
+    cpu: 100m
+    memory: 250Mi
 
 startupProbe:
   httpGet:

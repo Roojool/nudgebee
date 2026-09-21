@@ -1,0 +1,22 @@
+# Small tier — for estates up to ~5 monitored clusters / 250 nodes / 10,000 pods
+# / 25 cloud accounts.
+#
+# This file is intentionally almost empty: the Small tier IS the chart default.
+# A bare `helm install nudgebee` gives you exactly these numbers, so you only need
+# this file if you want the tier written down explicitly in your release config
+# (recommended — it makes the next upgrade's diff meaningful).
+#
+# Measured basis: three separate Small-scale deployments over a 7-day window,
+# totalling 3.3-6.6 GiB average and 7.7-11.9 GiB peak memory across all services,
+# with CPU under 0.3 cores average and 2.2 cores peak.
+#
+# Read docs/sizing-and-tiers.md before changing anything here. In particular, do
+# not lower a memory *limit* to match observed average usage — several services in
+# this platform have bursts an order of magnitude above their steady state, and
+# the limit is what stands between that burst and an OOMKill.
+
+global:
+  sizingProfile: small
+
+# Everything else: chart defaults. See each subchart's values.yaml, where every
+# resource block carries the measurement it was derived from.

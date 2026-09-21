@@ -82,17 +82,17 @@ ingress:
 # -- Container resource [requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/).
 # See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#resources) for details.
 # @default -- No requests or limits.
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Flat across every measured deployment: 173-268Mi average, 213-427Mi peak. CPU
+# tracks concurrent UI users, not estate size — 6-68m average, 186m peak — and the
+# chart shipped no CPU request, so the scheduler could not account for it at all.
 resources:
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
   limits:
-    #cpu: 100m
+    cpu: 500m
     memory: 1Gi
   requests:
-    #cpu: 100m
-    memory: 384Mi
+    cpu: 50m
+    memory: 500Mi
 
 # -- Autoscaling by resources
 autoscaling:
@@ -216,4 +216,13 @@ nginx:
     repository: nginx
     tag: stable-alpine3.20-slim-nb1
     pullPolicy: IfNotPresent
-  resources: {}
+  # The sidecar was BestEffort (no requests, no limits), so it was first in line
+  # for eviction under node pressure — and it fronts the whole UI. Measured
+  # 10-21Mi memory and 1-27m CPU on every deployment. See docs/sizing-and-tiers.md.
+  resources:
+    limits:
+      cpu: 200m
+      memory: 250Mi
+    requests:
+      cpu: 25m
+      memory: 50Mi

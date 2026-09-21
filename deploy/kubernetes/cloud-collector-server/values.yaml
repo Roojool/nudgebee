@@ -67,10 +67,24 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Memory is modest and flat on our own deployments — 26-273Mi average, 895Mi peak
+# — so the old 2Gi request reserved roughly 8x what the pod uses. The request
+# comes down to 500Mi — no lower: a re-measure put small installs at 271-302Mi
+# average, so the 250Mi this started at was already below the average it has to
+# cover. The 3Gi limit does NOT come down. A customer install was found with this limit
+# manually raised to 5Gi, which is direct evidence that our measurements do not
+# capture the worst case for this service: account count, account size and API
+# throttling all vary far more in the field than across our estate. Large tier
+# goes to 6Gi for the same reason.
+# CPU is the opposite: this is the one genuinely CPU-hungry service, measured at
+# 373m average with a 2.6-core peak while sweeping 433 cloud accounts. Deliberately
+# NO CPU limit — the work is bursty discovery and throttling it just stretches the
+# sync window. The request below is the Small-estate p95; raise it with the tier.
 resources:
   requests:
-    cpu: 200m
-    memory: 2Gi
+    cpu: 100m
+    memory: 500Mi
   limits:
     memory: 3Gi
 

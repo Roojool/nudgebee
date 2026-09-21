@@ -70,13 +70,27 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md for the tier definitions and
+# the measurements these come from; values-medium/large.yaml override them.
+# Memory: steady state is 90-240Mi, but the finops-score recompute cron runs every
+# 6h for 80-90 minutes and materialises the whole recommendation set — 1.0Gi peak on
+# a small estate, 6.7Gi on the largest measured one. The old 1500Mi limit was below
+# that peak even at Small, so the cron OOM-killed the pod. Do not lower the limit
+# without changing the cron (tracked as the batch-recompute streaming fix).
+#
+# 4Gi, not 2Gi: a 15-day re-measurement found the dev deployment OOM-killing this
+# container 11 times against a 2500Mi limit — i.e. the recompute exceeds 2.5Gi on a
+# mid-sized estate even though the 30s-resolution working-set samples only caught
+# 1804Mi. The sampled peak is a floor on the real peak, not the peak, so the limit
+# has to clear the largest limit observed to fail, not the largest sample observed.
+# CPU: p95 is 24-46m; the old 300m request reserved ~10x what the service uses.
 resources:
   limits:
-    cpu: 500m
-    memory: 1500Mi
+    cpu: 1000m
+    memory: 4Gi
   requests:
-    cpu: 300m
-    memory: 1024Mi
+    cpu: 150m
+    memory: 500Mi
 
 # Background-job ("worker") deployment.
 #

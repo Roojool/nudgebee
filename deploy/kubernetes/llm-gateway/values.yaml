@@ -58,11 +58,16 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# The cheapest service we run: 19-57Mi memory, 20-111Mi peak, and CPU that never
+# reached 30m on any measured deployment. The old 250m CPU request reserved two
+# orders of magnitude more than it uses, on every replica.
 resources:
   requests:
-    cpu: 250m
-    memory: 256Mi
+    cpu: 50m
+    memory: 100Mi
   limits:
+    cpu: 500m
     memory: 1Gi
 
 autoscaling:

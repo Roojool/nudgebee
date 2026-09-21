@@ -36,13 +36,18 @@ service:
   grpcPort: 6334
 
 # Resource limits optimized for ~700MB memory footprint with on-disk storage
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Memory tracks knowledge-base content, not estate size: 17Mi on an empty install,
+# 343-424Mi mid-sized, 1079Mi average with a 1620Mi peak on the largest. The old
+# 1Gi limit was BELOW the average of the largest deployment — it was live-OOMing
+# there. 2Gi covers the measured peak at Small; values-large.yaml raises it again.
 resources:
   limits:
     cpu: 1000m
-    memory: 1Gi
+    memory: 2Gi
   requests:
-    cpu: 250m
-    memory: 700Mi
+    cpu: 100m
+    memory: 500Mi
 
 # Startup probe: gives Qdrant up to 10 minutes to recover collections on startup
 # 60 failures * 10 seconds = 600 seconds (10 minutes)

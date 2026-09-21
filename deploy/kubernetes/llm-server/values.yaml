@@ -67,9 +67,19 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Steady state is 96-382Mi, but a single pod was measured spiking to 2.9Gi while
+# marshalling a large conversation payload. The chart previously shipped no memory
+# limit at all, so that spike was unbounded — one conversation could take the node.
+# The limit is 2Gi, not 1.5Gi: a re-measure found a SMALL install (oss) peaking at
+# 1475Mi — 96% of a 1.5Gi ceiling, i.e. one bad conversation from an OOMKill.
+# values-medium/large.yaml raise it to 3Gi/4Gi.
 resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
   requests:
-    cpu: 250m
+    cpu: 50m
     memory: 500Mi
 
 autoscaling:

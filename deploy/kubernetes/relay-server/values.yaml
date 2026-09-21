@@ -102,12 +102,24 @@ ingress:
 
 secretName: 'nudgebee'
 
+# Small-tier defaults. See docs/sizing-and-tiers.md.
+# Agent connections are close to free: 27-46Mi average regardless of how many
+# clusters are attached (the largest measured deployment holds ~77 and still sits
+# at 39Mi). Peaks reach 230Mi during reconnect storms, which is what the limit
+# covers. The old 500Mi request reserved ~12x the steady state.
+#
+# 1.5Gi, not 1Gi: a 15-day re-measurement found 7 pods OOM-killed (26 restarts)
+# against a 1000Mi limit on dev, with a sampled peak of only 865Mi. Large payloads
+# cross this process twice on the reply path, so the allocation spike that kills the
+# pod is shorter than the 30s scrape interval — a 1Gi ceiling is the one that was
+# already failing, so it cannot be the fix.
 resources:
   limits:
-    memory: 1000Mi
+    cpu: 500m
+    memory: 1.5Gi
   requests:
-    cpu: 100m
-    memory: 500Mi
+    cpu: 50m
+    memory: 100Mi
 
 autoscaling:
   enabled: false

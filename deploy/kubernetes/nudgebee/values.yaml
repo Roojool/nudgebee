@@ -117,6 +117,32 @@ postgresql:
   primary:
     persistence:
       size: 50Gi
+    # The bundled database ran BestEffort-ish: a 256Mi request and NO limit,
+    # against 934Mi-2.4Gi measured average and a 4.5Gi peak on a small install.
+    # An under-requested database is the worst thing on the node to get wrong —
+    # the scheduler packs work on top of it and then the whole install stalls.
+    #
+    # The limit is set well above the measured peak on purpose. Postgres does not
+    # degrade gracefully when it hits a cgroup ceiling; it gets OOM-killed
+    # mid-transaction. Treat this ceiling as a backstop against runaway queries,
+    # not as a budget to tune down. See docs/sizing-and-tiers.md.
+    #
+    # Installs using an external managed database (RDS, CloudSQL) set
+    # postgresql.enabled=false and none of this applies.
+    #
+    # The limit covers the 5.7Gi peak measured on a small install (a re-measure
+    # moved this up from 4.5Gi, which 6Gi would have cleared by only 6%). The request is
+    # deliberately NOT set from the 2.4Gi observed average: Postgres working-set
+    # includes page cache attributed to the cgroup, so it expands to fill whatever
+    # it is given and its "average" is not a requirement the way a Go service's is.
+    # 1.5Gi clears the 934Mi floor measured on the leanest install with margin.
+    resources:
+      limits:
+        cpu: 2000m
+        memory: 8Gi
+      requests:
+        cpu: 250m
+        memory: 1.5Gi
   # Pin to the GHCR mirror of bitnami/postgresql:16.1.0-debian-11-r16.
   # Same tag the bitnami chart 13.2.25 already defaults to, but the original
   # docker.io/bitnami/postgresql path was deprecated in Bitnami's mid-2025
@@ -128,6 +154,15 @@ postgresql:
     tag: '16.1.0-debian-11-r16-nb1'
   metrics:
     enabled: true
+    # postgres-exporter sidecar: measured 16Mi. Bounded so a scrape storm cannot
+    # compete for memory with the database it is scraping.
+    resources:
+      limits:
+        cpu: 100m
+        memory: 100Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
     # Upstream prometheus-community postgres_exporter (distroless), mirrored to
     # ghcr. Replaces the frozen bitnamilegacy build whose stale Go binary +
     # debian-11 base carried 2 CRITICAL / 35 HIGH fixable that apt-upgrade could
@@ -266,11 +301,40 @@ redis:
     password: 'password'
     existingSecret: 'redis'
     existingSecretPasswordKey: 'redis-password'
+  # Used for locks and caches, not as a data store: measured 7-21Mi across every
+  # deployment. Shipped with no requests or limits, which made it BestEffort and
+  # therefore an eviction candidate — and losing the lock store wedges the
+  # schedulers that depend on it. See docs/sizing-and-tiers.md.
   replica:
     replicaCount: 0
+    resources:
+      limits:
+        cpu: 200m
+        memory: 250Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
+  master:
+    resources:
+      limits:
+        cpu: 200m
+        memory: 250Mi
+      requests:
+        cpu: 25m
+        memory: 50Mi
 rabbitmq:
   enabled: true
   fullnameOverride: rabbitmq
+  # Measured 163-165Mi average, 346-354Mi peak, at roughly 3 messages per stored
+  # event. Flat across deployments — queue depth stays near zero, so this does not
+  # grow with the estate. Shipped with no requests or limits until now.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 750Mi
+    requests:
+      cpu: 50m
+      memory: 250Mi
   image:
     registry: 'ghcr.io/nudgebee'
     repository: rabbitmq
@@ -546,9 +610,35 @@ temporal:
       tag: '1.31.2'
     enabled: true
     replicaCount: 1
-    # Upstream ships no resources for any temporal role, so all four pods ran
-    # BestEffort and history OOMKilled. GOMEMLIMIT is 90% of each memory limit
-    # (Go does not read the cgroup cap); change one, change the other.
+    # Small-tier resources. Upstream ships no resources for any temporal role, so
+    # all four pods ran BestEffort — first to be evicted under node pressure, able
+    # to grow without bound — and history OOMKilled. Losing temporal-history
+    # mid-workflow is one of the worst failure modes we have.
+    # See docs/sizing-and-tiers.md for tier overrides.
+    #
+    # GOMEMLIMIT is 90% of each memory limit (Go does not read the cgroup cap);
+    # change one, change the other. The tier overlays in values-medium/large.yaml
+    # carry their own GOMEMLIMIT for the same reason.
+    #
+    # history's request is 1.5Gi, not 1Gi: a small install (oss) averages 1199Mi,
+    # which a 1Gi request does not cover.
+    #
+    # frontend / matching / worker are flat and cheap on every measured
+    # deployment: 55-94Mi average, 65-203Mi peak, CPU p95 under 20m.
+    #
+    # history is the second-largest memory consumer in the platform. It grew
+    # monotonically within a pod's lifetime — 2139Mi -> 2533Mi over 7 days on the
+    # largest deployment, with no reclaim — because its caches had no byte ceiling.
+    # The dynamicConfig block below now sets one (cacheSizeBasedLimit plus the
+    # host-level budgets), so that growth should flatten.
+    #
+    # The limit is 3Gi rather than 2Gi anyway, for two reasons. A live
+    # single-cluster install was measured at 1718Mi average / 2043Mi peak — 99.8%
+    # of a 2Gi ceiling — and it was measured WITHOUT the cache bounds below, so we
+    # do not yet have a live reading of the bounded behaviour. Until we do, 3Gi is
+    # the headroom that keeps a shard owner from being OOM-killed mid-workflow on
+    # the strength of a projection. Re-measure once the bounded config has been
+    # running and bring it back down if the flattening holds.
     frontend:
       resources:
         limits: { cpu: 500m, memory: 500Mi }
@@ -572,11 +662,12 @@ temporal:
           value: '450MiB'
     history:
       resources:
-        limits: { cpu: 1000m, memory: 2Gi }
-        requests: { cpu: 100m, memory: 1Gi }
+        limits: { cpu: 1000m, memory: 3Gi }
+        requests: { cpu: 100m, memory: 1.5Gi }
       additionalEnv:
+        # 90% of the 3Gi limit above.
         - name: GOMEMLIMIT
-          value: '1843MiB'
+          value: '2765MiB'
     dynamicConfig:
       limit.customSearchAttributes.keyword:
         - value: 100

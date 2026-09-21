@@ -1430,8 +1430,39 @@ func init() {
 	viper.SetDefault("serper_api_key", "")
 	viper.SetDefault("jina_api_key", "")
 
+	// Workspace pods are per-tenant AI sandboxes: they run agent-issued CLI work
+	// (kubectl, cloud CLIs, repo clones, scans) and their footprint depends
+	// entirely on what the agent is doing, not on the size of the estate.
+	// Measured on production: most sandboxes sit at 10-40Mi, but individual pods
+	// reached 6.9Gi and 10.4Gi while doing real work.
+	//
+	// The memory limit was previously empty, which meant NO limit: a single
+	// tenant's agent session could grow until it evicted its neighbours or took
+	// the node down. That is the wrong failure mode — a workspace that exceeds
+	// its budget should lose its own session, not the control plane. 4Gi covers
+	// every sandbox measured except the extreme outliers above, which are the
+	// cases we deliberately want terminated.
+	//
+	// A re-measurement over 15 days (dev) and 8 days (prod) put a number on how
+	// often that termination fires: 3 of 25 dev sandboxes and 1 of 19 prod
+	// sandboxes peaked above 4Gi (7615Mi, 5079Mi, 4358Mi and 6951Mi). So roughly
+	// one session in ten on a busy install will be OOM-killed by this ceiling.
+	// That is the accepted trade — a runaway sandbox must not be able to take the
+	// node — but it is a real behaviour change from "no limit", so expect agent
+	// sessions doing heavy repo/scan work to start failing and alert on it rather
+	// than reading the kill as normal. Raise
+	// llm_server_workspace_resource_limit_memory per install if that rate hurts.
+	//
+	// Note this value is tier-blind: it is not scaled by the Small/Medium/Large
+	// profiles, because sandbox footprint tracks agent activity, not estate size.
+	//
+	// CPU is deliberately left unlimited. Agent work is bursty (measured to 4.2
+	// cores) and short; a CPU limit only stretches the command out past the ~60s
+	// HTTP client timeout every tool uses to call into the pod, turning a slow
+	// command into a failed one. Operators who must cap CPU can still set
+	// llm_server_workspace_resource_limit_cpu.
 	viper.SetDefault("llm_server_workspace_resource_limit_cpu", "")
-	viper.SetDefault("llm_server_workspace_resource_limit_memory", "")
+	viper.SetDefault("llm_server_workspace_resource_limit_memory", "4Gi")
 	viper.SetDefault("llm_server_workspace_resource_limit_storage", "5Gi")
 	viper.SetDefault("llm_server_workspace_resource_request_cpu", "250m")
 	viper.SetDefault("llm_server_workspace_resource_request_memory", "256Mi")
