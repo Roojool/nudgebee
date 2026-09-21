@@ -23,6 +23,7 @@ from server.recommendation.vertical_rightsizing.services.metrics_prometheus_serv
 
 # from server.recommendation.vertical_rightsizing.services.cluster_service import ClusterService
 from server.recommendation.vertical_rightsizing.services.nudgebee_cluster_service import ClusterService
+from server.utils.utils import ApiServerMetricsConfigs
 
 from server.recommendation.vertical_rightsizing.strategy.strateggy_nudgebee import (
     NudgebeeStrategy,
@@ -52,11 +53,16 @@ class RecommendationService:
         self._executor = ThreadPoolExecutor(self._config.max_workers)
         self.account_id = account_id
         self.tenant_id = tenant_id
+        # Both providers' queries now travel through api-server, which resolves the
+        # account's integration and its credentials. The keys and passwords below are
+        # only read when the rollback flag sends the queries straight to the provider.
+        via_api_server = ApiServerMetricsConfigs.via_api_server
+        elasticsearch = elasticsearch or {}
         if metrics_provider == "ES":
             # An ES account has no Prometheus to fall back to, so a missing connection
             # has to fail loudly. Falling through to PrometheusMetricsService is what
             # made rightsizing silently produce nothing for these accounts.
-            if not elasticsearch:
+            if not via_api_server and not elasticsearch:
                 raise ValueError(
                     f"metrics_provider=ES for account {account_id} but no elasticsearch connection was supplied"
                 )
@@ -72,15 +78,19 @@ class RecommendationService:
                 bearer_token=elasticsearch.get("bearer_token"),
                 metrics_index=elasticsearch.get("metrics_index"),
                 tls_skip_verify=bool(elasticsearch.get("tls_skip_verify", False)),
+                tenant_id=tenant_id,
+                via_api_server=via_api_server,
             )
         elif metrics_provider == "datadog":
             self._metrics_service_loaders = DatadogMetricsService(
                 config,
                 account_id,
                 self._executor,
-                api_key=datadog_api_key,
-                app_key=datadog_app_key,
-                site=datadog_site,
+                api_key=datadog_api_key or "",
+                app_key=datadog_app_key or "",
+                site=datadog_site or "",
+                tenant_id=tenant_id,
+                via_api_server=via_api_server,
             )
         else:
             self._metrics_service_loaders = PrometheusMetricsService(

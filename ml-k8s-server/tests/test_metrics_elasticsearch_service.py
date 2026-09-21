@@ -24,6 +24,7 @@ from server.recommendation.vertical_rightsizing.services.metrics_elasticsearch_s
     CONTAINER_CPU_NANOCORES,
     CONTAINER_MEMORY_WORKINGSET,
     ElasticsearchMetricsService,
+    entries_from_es_aggregations,
 )
 
 
@@ -75,13 +76,19 @@ def _object(pods=("app-abc-1", "app-abc-2")):
 
 
 def _capture(service, responses):
-    """Record the bodies sent and answer with canned responses, in order."""
+    """Record the bodies sent and answer with canned responses, in order.
+
+    The fixtures stay written as Elasticsearch replies and are flattened the way the
+    service reads them, which is also the shape api-server returns. One fixture
+    therefore covers both transports; `test_both_transports_agree_on_the_shape` is
+    what holds them to it.
+    """
     sent = []
     pending = list(responses)
 
     def fake_search(body):
         sent.append(body)
-        return pending.pop(0)
+        return entries_from_es_aggregations(pending.pop(0))
 
     service._search = fake_search
     return sent
@@ -250,28 +257,28 @@ def test_cognito_is_refused_explicitly():
     # SigV4 signing is Go-only. An unsigned request would come back 403, which the
     # caller reads as "no metrics" — the exact silent failure this work removes.
     with pytest.raises(ValueError, match="cognito"):
-        _service(auth_type="cognito")
+        _service(auth_type="cognito", via_api_server=False)
 
 
 def test_api_key_and_bearer_auth_set_headers_instead_of_basic_auth():
     # Auth now lives on the shared transport, which volume rightsizing uses too, so the
     # assertions follow it there rather than duplicating the logic per service.
-    api_key_service = _service(auth_type="api_key", api_key="abc123")
+    api_key_service = _service(auth_type="api_key", api_key="abc123", via_api_server=False)
     assert api_key_service._transport._headers["Authorization"] == "ApiKey abc123"
     assert api_key_service._transport._auth is None
 
-    bearer_service = _service(auth_type="bearer_token", bearer_token="tok")
+    bearer_service = _service(auth_type="bearer_token", bearer_token="tok", via_api_server=False)
     assert bearer_service._transport._headers["Authorization"] == "Bearer tok"
     assert bearer_service._transport._auth is None
 
-    basic_service = _service()
+    basic_service = _service(via_api_server=False)
     assert basic_service._transport._auth == ("elastic", "secret")
     assert "Authorization" not in basic_service._transport._headers
 
 
 def test_missing_url_is_rejected():
     with pytest.raises(ValueError, match="url"):
-        _service(url="")
+        _service(url="", via_api_server=False)
 
 
 def test_check_connection_reaches_the_cluster_through_the_transport():
@@ -279,14 +286,14 @@ def test_check_connection_reaches_the_cluster_through_the_transport():
     to the shared transport those attributes went with it, and nothing called this in a
     test — so it raised AttributeError on every real rightsizing run while the suite
     stayed green. It delegates now, and this asserts the call actually goes out."""
-    service = _service()
+    service = _service(via_api_server=False)
     with patch.object(service._transport, "check_connection") as delegated:
         service.check_connection()
     delegated.assert_called_once()
 
 
 def test_check_connection_raises_connection_error_when_the_cluster_refuses():
-    service = _service()
+    service = _service(via_api_server=False)
     with patch("server.recommendation.elasticsearch_client.requests.get", side_effect=OSError("refused")):
         with pytest.raises(ConnectionError, match="Elasticsearch connection failed"):
             service.check_connection()

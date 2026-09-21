@@ -8,7 +8,10 @@ must reflect pods live NOW, and only non-deleted pods may feed the multiplier.
 """
 
 from server.recommendation.vertical_rightsizing.models.objects import PodData
-from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import pods_from_series
+from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+    entries_from_datadog_response,
+    pods_from_series,
+)
 
 
 def test_pods_from_series_marks_stale_incarnations_deleted():
@@ -27,7 +30,9 @@ def test_pods_from_series_marks_stale_incarnations_deleted():
         ]
     }
 
-    pods = {p.name: p for p in pods_from_series(data, live_cutoff=cutoff)}
+    # Written as Datadog's own response and read in the shape the service consumes,
+    # which is also what api-server returns for it. One fixture, both transports.
+    pods = {p.name: p for p in pods_from_series(entries_from_datadog_response(data), live_cutoff=cutoff)}
 
     assert pods["web-live-1"].deleted is False
     assert pods["web-live-2"].deleted is False

@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 # handed PromQL it cannot run.
 METRIC_PROVIDER_PROMETHEUS = "prometheus"
 
+# The other providers whose own query language we send through this same call. The
+# provider decides the dialect: PromQL for Prometheus, a Datadog metric query for
+# Datadog, an Elasticsearch _search body for ES. api-server resolves the account's
+# integration and its credentials, so none of them are held here.
+METRIC_PROVIDER_DATADOG = "datadog"
+METRIC_PROVIDER_ELASTICSEARCH = "ES"
+
 _QUERY_KEY = "q0"
 
 _SECONDS_PER_UNIT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -184,8 +191,20 @@ def query_metrics_via_api_server(
     end_time: datetime,
     step: Union[str, int, None] = None,
     instant: bool = False,
+    metric_provider: str = METRIC_PROVIDER_PROMETHEUS,
+    request: Optional[Dict[str, Any]] = None,
+    timeout: Optional[int] = None,
 ) -> List[dict]:
-    """Run one PromQL query through api-server and return it in the relay's wire shape.
+    """Run one query through api-server and return it in the relay's wire shape.
+
+    ``query`` is written in the provider's own language and ``metric_provider`` says
+    which: PromQL by default, a Datadog metric query for METRIC_PROVIDER_DATADOG, a
+    JSON _search body for METRIC_PROVIDER_ELASTICSEARCH (with
+    ``request={"query_type": "dsl"}``). api-server holds the credentials.
+
+    ``timeout`` bounds this call. A caller that abandons its own work sooner should
+    pass its own budget: api-server keeps executing a request nobody is waiting for
+    until its 180s cap, and rightsizing gives up on a workload after 45s.
 
     One query per call on purpose: ``queries`` is a map, but batching would put every
     query under api-server's single 180s handler budget and let one slow query fail the
@@ -203,7 +222,7 @@ def query_metrics_via_api_server(
             "input": {
                 "request": {
                     "account_id": str(account_id),
-                    "metric_provider": METRIC_PROVIDER_PROMETHEUS,
+                    "metric_provider": metric_provider,
                     "queries": {_QUERY_KEY: query},
                     "start_time": _epoch_millis(start_time),
                     "end_time": _epoch_millis(end_time),
@@ -211,6 +230,7 @@ def query_metrics_via_api_server(
                     "instant": instant,
                     # These are background scans, not something a user typed.
                     "record_history": False,
+                    **({"request": request} if request else {}),
                 }
             },
         }
@@ -237,7 +257,7 @@ def query_metrics_via_api_server(
                 url,
                 headers=headers,
                 data=json.dumps(payload),
-                timeout=ApiServerMetricsConfigs.timeout,
+                timeout=timeout or ApiServerMetricsConfigs.timeout,
             )
         except Exception as e:
             raise ApiServerMetricsError(f"metrics_query request failed for query '{query}': {e}") from e
@@ -268,6 +288,13 @@ def query_metrics_via_api_server(
             if "agent not connected" in str(error).lower():
                 raise AgentNotConnectedError(str(error), 200)
             raise PromQLQueryError(f"query '{query}' failed: {error}", 200)
+
+        note = result.get("note")
+        if note:
+            # api-server states a capped or partial result in a note. Nothing downstream
+            # reads it, so a truncated aggregation would otherwise look like the whole
+            # answer — the same silent loss the note exists to end.
+            logger.warning(f"api-server note for query '{query[:120]}': {note}")
 
         payload_series = result.get("payload") or []
         entries = _to_vector_entries(payload_series) if instant else _to_series_entries(payload_series)

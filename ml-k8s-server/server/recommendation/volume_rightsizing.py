@@ -14,14 +14,22 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 
 import requests
-from server.utils.utils import DatabaseEngine, get_trace
+from server.utils.utils import ApiServerMetricsConfigs, DatabaseEngine, get_trace
 from server.utils.utils import MetricsServerConfigs
+from server.metrics.api_server_metrics import (
+    METRIC_PROVIDER_DATADOG,
+    METRIC_PROVIDER_ELASTICSEARCH,
+    query_metrics_via_api_server,
+)
 from server.metrics.prometheus_metrics import prometheus_range_query
 from server.recommendation.elasticsearch_client import ElasticsearchTransport
+from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+    entries_from_datadog_response,
+)
 from server.recommendation.storage_pricing import FALLBACK_STORAGE_RATE_PER_GB_MONTH, resolve_storage_pricing
 from sqlalchemy import text
 
@@ -87,6 +95,40 @@ class VolumeRightsizingResult:
     score: float
     timestamp: datetime
     database_stored: bool = False
+
+
+def entries_from_es_volume_aggregations(data: Dict[str, Any]) -> List[dict]:
+    """An Elasticsearch volume response in the shape api-server returns.
+
+    Only used by the direct-Elasticsearch fallback, and only for the body this module
+    builds: namespace -> claim -> max(used), max(capacity).
+    """
+    entries: List[dict] = []
+    ns_buckets = ((data or {}).get("aggregations") or {}).get("ns") or {}
+    if ns_buckets.get("sum_other_doc_count"):
+        # A capped terms aggregation drops whole namespaces, which would read as
+        # "those claims have no usage" rather than as missing data.
+        logger.warning(
+            f"Elasticsearch volume aggregation truncated at {ES_MAX_NAMESPACES} namespaces; "
+            f"{ns_buckets['sum_other_doc_count']} documents excluded"
+        )
+    for ns in ns_buckets.get("buckets", []) or []:
+        if not isinstance(ns, dict) or not (namespace := ns.get("key")):
+            continue
+        for pvc in (ns.get("pvc") or {}).get("buckets") or []:
+            if not isinstance(pvc, dict) or not (pvc_name := pvc.get("key")):
+                continue
+            for name in ("used", "capacity"):
+                value = (pvc.get(name) or {}).get("value")
+                if value is not None:
+                    entries.append(
+                        {
+                            "metric": {"ns": namespace, "pvc": pvc_name, "__name__": name},
+                            "timestamps": [0],
+                            "values": [value],
+                        }
+                    )
+    return entries
 
 
 class VolumeRightsizingService:
@@ -269,12 +311,36 @@ class VolumeRightsizingService:
         Two searches mirror the Prometheus pair — a recent window for "current" and a
         7-day window for the peak — and capacity is read from the recent one.
         """
-        transport = ElasticsearchTransport.from_config(self.elasticsearch)
+        via_api_server = ApiServerMetricsConfigs.via_api_server
+        # api-server resolves the account's Elasticsearch and its password, so neither
+        # reaches this service. The body is the same one either way.
+        transport = None if via_api_server else ElasticsearchTransport.from_config(self.elasticsearch)
 
         async def usage_maps(minutes: int) -> Tuple[Dict[str, float], Dict[str, float]]:
-            body = self._es_volume_body(minutes, namespace_filter)
-            data = await transport.async_search(body, self._executor)
-            return self._build_es_usage_maps(data)
+            now = datetime.now(timezone.utc)
+            body = self._es_volume_body(minutes, namespace_filter, now=now)
+            if via_api_server:
+                loop = asyncio.get_running_loop()
+                entries = await loop.run_in_executor(
+                    self._executor,
+                    lambda: query_metrics_via_api_server(
+                        account_id=self.account_id,
+                        tenant_id=self.tenant_id,
+                        query=json.dumps(body),
+                        start_time=now - timedelta(minutes=minutes),
+                        end_time=now,
+                        metric_provider=METRIC_PROVIDER_ELASTICSEARCH,
+                        request={"query_type": "dsl", "batch": True},
+                    ),
+                )
+            elif transport is None:
+                # Only reachable with the rollback flag off and no connection in the
+                # request. An ES account has no Prometheus to fall back to, so this has
+                # to fail loudly rather than read as "these claims have no usage".
+                raise ValueError(f"no Elasticsearch connection was supplied for account {self.account_id}")
+            else:
+                entries = entries_from_es_volume_aggregations(await transport.async_search(body, self._executor))
+            return self._build_es_usage_maps(entries)
 
         # The two windows are independent searches, so they go out together. Two is also
         # the whole fan-out — the executor backing them is already capped at 4 workers —
@@ -322,11 +388,21 @@ class VolumeRightsizingService:
         ctx_logger.info(f"Retrieved usage data for {len(volume_data)} volumes from Elasticsearch")
         return volume_data
 
-    def _es_volume_body(self, minutes: int, namespace_filter: Optional[str]) -> Dict[str, Any]:
-        """One search: namespace -> claim -> max(used), max(capacity) over the window."""
+    def _es_volume_body(
+        self, minutes: int, namespace_filter: Optional[str], now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """One search: namespace -> claim -> max(used), max(capacity) over the window.
+
+        The window is a fixed pair of timestamps rather than Elasticsearch date math,
+        because api-server ANDs its own range clause onto this body. Date math would be
+        resolved against a second, later clock — Elasticsearch's — so the two would
+        intersect to something narrower than either, by however long the request took.
+        """
+        now = now or datetime.now(timezone.utc)
+        start = now - timedelta(minutes=minutes)
         filters: List[Dict[str, Any]] = [
             {"exists": {"field": ES_PVC_FIELD}},
-            {"range": {"@timestamp": {"gte": f"now-{minutes}m", "lte": "now"}}},
+            {"range": {"@timestamp": {"gte": start.isoformat(), "lte": now.isoformat()}}},
         ]
         if namespace_filter:
             filters.append({"term": {ES_NAMESPACE_FIELD: namespace_filter}})
@@ -349,36 +425,31 @@ class VolumeRightsizingService:
             },
         }
 
-    def _build_es_usage_maps(self, data: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Flatten the nested aggregation into the {pvc}_{namespace} maps used above."""
+    def _build_es_usage_maps(self, entries: List[dict]) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Group the flattened series into the {pvc}_{namespace} maps used above."""
         used_map: Dict[str, float] = {}
         capacity_map: Dict[str, float] = {}
-        ns_buckets = ((data or {}).get("aggregations") or {}).get("ns") or {}
-        if ns_buckets.get("sum_other_doc_count"):
-            # A capped terms aggregation drops whole namespaces, which would read as
-            # "those claims have no usage" rather than as missing data.
-            logger.warning(
-                f"Elasticsearch volume aggregation truncated at {ES_MAX_NAMESPACES} namespaces; "
-                f"{ns_buckets['sum_other_doc_count']} documents excluded"
-            )
-        # Skip, do not abort: one malformed bucket must not cost every other claim its
+        # Skip, do not abort: one unreadable series must not cost every other claim its
         # recommendation. A claim that is skipped simply has no entry, which the caller
         # already treats as "no data for this claim" rather than as a zero.
-        for ns in ns_buckets.get("buckets", []) or []:
-            if not isinstance(ns, dict) or not (namespace := ns.get("key")):
+        for entry in entries or []:
+            labels = entry.get("metric") or {}
+            namespace, pvc_name = labels.get("ns"), labels.get("pvc")
+            if not namespace or not pvc_name:
                 continue
-            for pvc in (ns.get("pvc") or {}).get("buckets") or []:
-                if not isinstance(pvc, dict) or not (pvc_name := pvc.get("key")):
-                    continue
-                key = f"{pvc_name}_{namespace}"
-                try:
-                    if (used := (pvc.get("used") or {}).get("value")) is not None:
-                        used_map[key] = float(used)
-                    if (cap := (pvc.get("capacity") or {}).get("value")) is not None:
-                        capacity_map[key] = float(cap)
-                except (TypeError, ValueError):
-                    logger.warning(f"Elasticsearch volume aggregation: unreadable values for {key}; skipping")
-                    continue
+            values = entry.get("values") or []
+            if not values or values[-1] is None:
+                continue
+            key = f"{pvc_name}_{namespace}"
+            try:
+                value = float(values[-1])
+            except (TypeError, ValueError):
+                logger.warning(f"Elasticsearch volume aggregation: unreadable value for {key}; skipping")
+                continue
+            if labels.get("__name__") == "used":
+                used_map[key] = value
+            elif labels.get("__name__") == "capacity":
+                capacity_map[key] = value
         return used_map, capacity_map
 
     async def _query_prometheus_range(self, query: str, duration: timedelta) -> List[Dict]:
@@ -433,8 +504,19 @@ class VolumeRightsizingService:
         logger.info(f"Built usage map with {len(usage_map)} entries")
         return usage_map
 
-    def _query_datadog(self, query: str, from_ts: int, to_ts: int) -> dict:
-        """Execute a Datadog metrics query and return raw response JSON."""
+    def _query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
+        """Run one Datadog query and return series as {metric, timestamps, values}."""
+        if ApiServerMetricsConfigs.via_api_server:
+            # api-server resolves the account's Datadog integration and its keys, so
+            # none of them have to reach this service.
+            return query_metrics_via_api_server(
+                account_id=self.account_id,
+                tenant_id=self.tenant_id,
+                query=query,
+                start_time=datetime.fromtimestamp(from_ts, tz=timezone.utc),
+                end_time=datetime.fromtimestamp(to_ts, tz=timezone.utc),
+                metric_provider=METRIC_PROVIDER_DATADOG,
+            )
         headers: dict[str, str] = {}
         if self.datadog_api_key:
             headers["DD-API-KEY"] = self.datadog_api_key
@@ -451,10 +533,9 @@ class VolumeRightsizingService:
             timeout=60,
         )
         resp.raise_for_status()
-        result: dict = resp.json()
-        return result
+        return entries_from_datadog_response(resp.json())
 
-    async def _async_query_datadog(self, query: str, from_ts: int, to_ts: int) -> dict:
+    async def _async_query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
         """Async wrapper around _query_datadog."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
@@ -462,31 +543,27 @@ class VolumeRightsizingService:
             lambda: self._query_datadog(query, from_ts, to_ts),
         )
 
-    def _build_datadog_usage_map(self, data: dict) -> Dict[str, float]:
-        """Build pvc_namespace usage map from Datadog series response."""
+    def _build_datadog_usage_map(self, entries: List[dict]) -> Dict[str, float]:
+        """Build the {pvc}_{namespace} usage map from Datadog series."""
         usage_map: Dict[str, float] = {}
-        for series in data.get("series", []):
-            scope = series.get("scope", "")
-            tag_map = {}
-            for part in scope.split(","):
-                part = part.strip()
-                if ":" in part:
-                    k, v = part.split(":", 1)
-                    tag_map[k] = v
-
+        for series in entries or []:
+            tag_map = series.get("metric") or {}
             pvc_name = tag_map.get("persistentvolumeclaim", "")
             namespace = tag_map.get("kube_namespace", "")
             if not pvc_name or not namespace:
                 continue
 
-            key = f"{pvc_name}_{namespace}"
-            pointlist = series.get("pointlist", [])
-            if pointlist:
-                # Take the last non-None value
-                for point in reversed(pointlist):
-                    if len(point) >= 2 and point[1] is not None:
-                        usage_map[key] = float(point[1])
-                        break
+            # The last reading, not the last position: the trailing interval of a
+            # 10-minute window is usually a gap, and reading it as a zero would drop
+            # the claim or shrink it.
+            for value in reversed(series.get("values") or []):
+                if value is None:
+                    continue
+                try:
+                    usage_map[f"{pvc_name}_{namespace}"] = float(value)
+                except (TypeError, ValueError):
+                    pass
+                break
 
         logger.info(f"Built Datadog usage map with {len(usage_map)} entries")
         return usage_map
