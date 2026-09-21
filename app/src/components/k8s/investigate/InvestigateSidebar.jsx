@@ -162,7 +162,9 @@ function InvestigateSidebar({
   // event is a group leader.
   useEffect(() => {
     let cancelled = false;
-    setIncidentMembers([]);
+    // Keep the same array when already empty: a fresh [] changes `incidentMemberIds`, which
+    // re-runs InvestigateDropdown's fetch (it lists excludeIds in its deps) on every event load.
+    setIncidentMembers((prev) => (prev.length ? [] : prev));
     if (row?.id && row?.cloud_account_id && row?.incident_member_count > 0) {
       k8sApi
         .getIncidentGroupMembers(row.id, row.cloud_account_id)

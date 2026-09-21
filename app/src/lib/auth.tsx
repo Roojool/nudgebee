@@ -438,17 +438,45 @@ const LIST_ACCOUNT_FEATURE_FLAGS = `
     }
   }`;
 
+// Tenant-flag requests still in flight. featureData fills only once a fetch lands, so callers
+// firing together on mount (each `hasFeatureAccess`) would otherwise each send their own request.
+const tenantFlagsInFlight: Record<string, Promise<any[]>> = Object.create(null);
+
+function loadTenantFeatureFlags(tenantKey: string, fresh: boolean = false): Promise<any[]> {
+  // queryGraphQL resolves (it does not reject) on network and GraphQL errors, so a failed request
+  // has to be recognised here and thrown. Returning [] would be cached as "no flags enabled" for
+  // the session, and every caller sharing this request would read it.
+  const request = () =>
+    queryGraphQL(LIST_TENANT_FEATURE_FLAGS, 'GetTenantFeatureFlags', {}).then((response) => {
+      const list = response?.data?.data?.featureflags_list;
+      if (!list || response?.data?.errors?.length) {
+        throw new Error(response?.data?.errors?.[0]?.message || 'Failed to fetch tenant feature flags');
+      }
+      return list.rows || [];
+    });
+  // A refresh must reach the network, not join a request started before it.
+  if (fresh) {
+    return request();
+  }
+  if (!tenantFlagsInFlight[tenantKey]) {
+    tenantFlagsInFlight[tenantKey] = request().finally(() => {
+      delete tenantFlagsInFlight[tenantKey];
+    });
+  }
+  return tenantFlagsInFlight[tenantKey];
+}
+
 export async function hasFeatureAccess(featureName: string): Promise<boolean> {
   const tenantKey = getTenantKey();
   if (!Object.hasOwn(featureData, tenantKey)) {
     try {
-      const response = await queryGraphQL(LIST_TENANT_FEATURE_FLAGS, 'GetTenantFeatureFlags', {});
-      featureData[tenantKey] = response?.data?.data?.featureflags_list?.rows || [];
+      featureData[tenantKey] = await loadTenantFeatureFlags(tenantKey);
     } catch (error) {
       console.log('failed to fetch feature flags-', error);
     }
   }
-  const tenantFeatures: any[] = featureData[tenantKey];
+  // Unset when the fetch failed: answer "not enabled" now, and let the next call retry.
+  const tenantFeatures: any[] = featureData[tenantKey] ?? [];
   for (const f of tenantFeatures) {
     if (f['feature_id'] === featureName && f['status'] === 'enabled') {
       return true;
@@ -486,11 +514,12 @@ export async function fetchFeatureFlagsForTenant(refresh = false): Promise<any[]
   }
 
   try {
-    const response = await queryGraphQL(LIST_TENANT_FEATURE_FLAGS, 'GetTenantFeatureFlags', {});
-    featureData[tenantKey] = response?.data?.data?.featureflags_list?.rows || [];
+    featureData[tenantKey] = await loadTenantFeatureFlags(tenantKey, refresh);
   } catch (error) {
+    // Not cached: a failure must not read as "no flags", and a failed refresh must not wipe
+    // flags already loaded. Callers get what is known (or []), and the next call retries.
     console.log('Failed to fetch feature flags -', error);
-    featureData[tenantKey] = [];
+    return featureData[tenantKey] ?? [];
   }
 
   return featureData[tenantKey];

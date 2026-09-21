@@ -819,6 +819,12 @@ const Investigate = () => {
     }
   }, [selectedCluster, isK8s]);
 
+  // tabValue 0 is set optimistically below, before the AskAiCard has necessarily arrived (or when it never
+  // does, e.g. the AI service is down). Tab 0 only exists once that card does, so until then show Evidence
+  // rather than pointing Tabs at a value it has no child for.
+  const hasAskAiTab = matchedOptions.some((option) => option?.id === 'AskAiCard');
+  const activeTab = tabValue === 0 && !hasAskAiTab ? 1 : tabValue;
+
   useEffect(() => {
     if (currentInvestigation) {
       setTabValue(1);
@@ -944,9 +950,12 @@ const Investigate = () => {
   }
 
   const loadedEventIdRef = useRef(null);
+  // A boolean, not the length: the header dropdown re-sets allCluster with the demo account
+  // appended, and a changed length re-ran the whole load while the first one was in flight.
+  const hasClusters = allCluster?.length > 0;
 
   useEffect(() => {
-    if (!id || !allCluster || allCluster.length === 0) return;
+    if (!id || !hasClusters) return;
 
     // Skip reload if we already loaded this event (URL rewrite just added accountId)
     if (String(loadedEventIdRef.current) === String(id) && router.query.accountId) return;
@@ -969,7 +978,7 @@ const Investigate = () => {
     return () => {
       cancelled = true;
     };
-  }, [id, k8sAutoInvestigate, router.query.accountId, allCluster?.length]);
+  }, [id, k8sAutoInvestigate, router.query.accountId, hasClusters]);
 
   // ── Live workflow-resolution status ──
   // The "Workflow Resolution Status" button reads from `eventResolutions`, which
@@ -2268,7 +2277,7 @@ const Investigate = () => {
                             '.MuiTab-root.Mui-selected': { color: ds.gray[700], bgcolor: ds.blue[100] },
                           }}
                         >
-                          <Tabs value={tabValue} onChange={handleTabChange} aria-label='basic tabs example'>
+                          <Tabs value={activeTab} onChange={handleTabChange} aria-label='basic tabs example'>
                             {!isGeneratingCards && matchedOptions.some((option) => option?.id === 'AskAiCard') && (
                               <Tab
                                 label={
@@ -2538,7 +2547,7 @@ const Investigate = () => {
                           },
                         }}
                       >
-                        <TabPanel value={tabValue} index={0} className='ai-custom-panel'>
+                        <TabPanel value={activeTab} index={0} className='ai-custom-panel'>
                           {raisedPrResolution &&
                             (() => {
                               const url = raisedPrResolution.type_reference_id;
@@ -2657,7 +2666,7 @@ const Investigate = () => {
                           )}
                           {aiAnalysisFeedback()}
                         </TabPanel>
-                        <TabPanel value={tabValue} index={3} className='custom-panel'>
+                        <TabPanel value={activeTab} index={3} className='custom-panel'>
                           <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[6] }}>
                             {/* What has already been done, before what can be done next. The only record of
                                 it was History, at the very bottom of the tab under the plan and the
@@ -3110,7 +3119,7 @@ const Investigate = () => {
                               })}
                           </Box>
                         </TabPanel>
-                        <TabPanel value={tabValue} index={1} className='custom-panel'>
+                        <TabPanel value={activeTab} index={1} className='custom-panel'>
                           <Box sx={{ display: 'flex', flexDirection: 'column' }}>
                             {matchedOptions
                               .filter((option) => option?.id !== 'AskAiCard' && option?.id !== 'RCACard')
@@ -3142,7 +3151,7 @@ const Investigate = () => {
                             )}
                           </Box>
                         </TabPanel>
-                        <TabPanel value={tabValue} index={2} className='custom-panel'>
+                        <TabPanel value={activeTab} index={2} className='custom-panel'>
                           {matchedOptions
                             .filter((option) => option?.id === 'RCACard')
                             .map((option) => (
