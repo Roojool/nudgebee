@@ -50,6 +50,8 @@ type ModelPriceRow struct {
 	MaxOutputTokens  *int64 `json:"max_output_tokens,omitempty"`
 	MaxContextTokens *int64 `json:"max_context_tokens,omitempty"`
 
+	SupportsImageInput *bool `json:"supports_image_input,omitempty"`
+
 	IsBuiltIn bool    `json:"is_built_in"`
 	UpdatedAt *string `json:"pricing_updated_at,omitempty"`
 
@@ -80,6 +82,9 @@ type ModelPriceInput struct {
 	// Optional token ceilings; unset leaves the model on llm-server's fallbacks.
 	MaxOutputTokens  *int64 `json:"max_output_tokens,omitempty"`
 	MaxContextTokens *int64 `json:"max_context_tokens,omitempty"`
+
+	// Unset keeps the stored verdict: the upsert COALESCEs, so a price edit can't erase it.
+	SupportsImageInput *bool `json:"supports_image_input,omitempty"`
 }
 
 // Validate rejects input that would produce a nonsensical bill rather than
@@ -172,8 +177,8 @@ func UpsertModelPricing(dbManager *common.DatabaseManager, tenantId, userId stri
 			context_threshold_tokens,
 			cost_per_million_input_tokens_long_ctx, cost_per_million_output_tokens_long_ctx,
 			max_output_tokens, max_context_tokens,
-			pricing_updated_at, pricing_updated_by
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), NULLIF($13, '')::uuid)
+			pricing_updated_at, pricing_updated_by, supports_image_input
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), NULLIF($13, '')::uuid, $14)
 		ON CONFLICT (model_name, provider_name, tenant_id) WHERE tenant_id IS NOT NULL
 		DO UPDATE SET
 			cost_per_million_input_tokens          = EXCLUDED.cost_per_million_input_tokens,
@@ -185,6 +190,7 @@ func UpsertModelPricing(dbManager *common.DatabaseManager, tenantId, userId stri
 			cost_per_million_output_tokens_long_ctx = EXCLUDED.cost_per_million_output_tokens_long_ctx,
 			max_output_tokens                      = EXCLUDED.max_output_tokens,
 			max_context_tokens                     = EXCLUDED.max_context_tokens,
+			supports_image_input                   = COALESCE(EXCLUDED.supports_image_input, llm_model_pricing.supports_image_input),
 			pricing_updated_at                     = now(),
 			pricing_updated_by                     = EXCLUDED.pricing_updated_by`
 
@@ -197,7 +203,7 @@ func UpsertModelPricing(dbManager *common.DatabaseManager, tenantId, userId stri
 				nullableInt(p.ContextThresholdTokens),
 				nullableFloat(p.InputPerMLongCtx), nullableFloat(p.OutputPerMLongCtx),
 				nullableInt(p.MaxOutputTokens), nullableInt(p.MaxContextTokens),
-				userId,
+				userId, nullableBool(p.SupportsImageInput),
 			); err != nil {
 				return nil, fmt.Errorf("upsert %s/%s: %w", p.ProviderName, p.ModelName, err)
 			}
@@ -276,7 +282,7 @@ func ListModelPricing(dbManager *common.DatabaseManager, tenantId string) ([]Mod
 		       cost_per_million_cached_input_tokens, cost_per_million_cache_creation_tokens,
 		       context_threshold_tokens,
 		       cost_per_million_input_tokens_long_ctx, cost_per_million_output_tokens_long_ctx,
-		       max_output_tokens, max_context_tokens,
+		       max_output_tokens, max_context_tokens, supports_image_input,
 		       tenant_id IS NULL AS is_built_in,
 		       pricing_updated_at,
 		       EXISTS (
@@ -308,11 +314,12 @@ func ListModelPricing(dbManager *common.DatabaseManager, tenantId string) ([]Mod
 			outputLong    sql.NullFloat64
 			maxOutput     sql.NullInt64
 			maxContext    sql.NullInt64
+			supportsImage sql.NullBool
 			updatedAt     sql.NullTime
 		)
 		if err := rows.Scan(&r.ModelName, &r.ProviderName, &r.InputPerM, &r.OutputPerM,
 			&cachedInput, &cacheCreation, &threshold, &inputLong, &outputLong,
-			&maxOutput, &maxContext,
+			&maxOutput, &maxContext, &supportsImage,
 			&r.IsBuiltIn, &updatedAt, &r.HasBuiltIn); err != nil {
 			return nil, fmt.Errorf("ListModelPricing: scan failed: %w", err)
 		}
@@ -337,6 +344,9 @@ func ListModelPricing(dbManager *common.DatabaseManager, tenantId string) ([]Mod
 		if maxContext.Valid {
 			r.MaxContextTokens = &maxContext.Int64
 		}
+		if supportsImage.Valid {
+			r.SupportsImageInput = &supportsImage.Bool
+		}
 		if updatedAt.Valid {
 			s := updatedAt.Time.UTC().Format("2006-01-02T15:04:05Z")
 			r.UpdatedAt = &s
@@ -357,6 +367,13 @@ func nullableInt(v *int64) any {
 }
 
 func nullableFloat(v *float64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func nullableBool(v *bool) any {
 	if v == nil {
 		return nil
 	}

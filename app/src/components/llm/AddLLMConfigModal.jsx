@@ -1410,6 +1410,9 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
   const [priceThreshold, setPriceThreshold] = useState('');
   const [priceInputLong, setPriceInputLong] = useState('');
   const [priceOutputLong, setPriceOutputLong] = useState('');
+  // Declares that this model accepts image input (llm_model_pricing.supports_image_input).
+  // Unticked means "leave the recorded verdict alone", not "text only".
+  const [supportsImage, setSupportsImage] = useState(false);
   // The modal is mounted permanently and only toggled via `open`, so pricing
   // state survives a dismiss. Without this reset, a rate typed for one model is
   // still populated when the modal is reopened for a different one — and would
@@ -1423,10 +1426,16 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     setPriceThreshold('');
     setPriceInputLong('');
     setPriceOutputLong('');
+    setSupportsImage(false);
   }, [open]);
 
   // Only meaningful once there is a (provider, model) to attach a rate to.
   const canPrice = Boolean(provider && model && model.trim());
+  // A verdict already on file for this model (built-in or this tenant's own).
+  // When it is true there is nothing to declare, and writing it would only
+  // copy the built-in rates into a tenant row for no gain.
+  const recordedImageSupport = pricingRows.find((p) => p.provider_name === provider && p.model_name === model.trim())?.supports_image_input;
+  const declareImageSupport = supportsImage && recordedImageSupport !== true;
 
   // Saved after the config, and never allowed to fail the config save: the
   // credentials are the point of this modal, and a rejected price should not
@@ -1435,6 +1444,8 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
     if (!canPrice) return;
     const input = Number(priceInput);
     const output = Number(priceOutput);
+    // Declaring image support with no rates still needs a row; it reuses the model's existing rates below.
+    const flagOnly = declareImageSupport && priceInput === '' && priceOutput === '';
     // Pricing is optional, so both blank means "not pricing this model". One
     // blank is a half-filled form: returning silently would discard what the
     // user did type with no feedback.
@@ -1443,10 +1454,13 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
       // tier field and leaving these blank would discard that input silently.
       if ([priceCachedInput, priceCacheCreation, priceThreshold, priceInputLong, priceOutputLong].some((v) => v !== '')) {
         snackbar.error('Pricing not saved — an input and an output rate are required before the other pricing fields apply.');
+        return;
       }
-      return;
+      if (!flagOnly) {
+        return;
+      }
     }
-    if (priceInput === '' || priceOutput === '') {
+    if (!flagOnly && (priceInput === '' || priceOutput === '')) {
       snackbar.error('Pricing not saved — enter both an input and an output rate. Set it from Settings → Model Pricing.');
       return;
     }
@@ -1481,6 +1495,9 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
       cost_per_million_input_tokens: input,
       cost_per_million_output_tokens: output,
     };
+    if (declareImageSupport) {
+      price.supports_image_input = true;
+    }
 
     if (tierFilled === 3) {
       price.context_threshold_tokens = threshold;
@@ -1513,6 +1530,20 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
           // A tenant's own row wins over the built-in, as the server resolves.
           .sort((a, b) => Number(a.is_built_in) - Number(b.is_built_in))[0];
         if (match) {
+          // The upsert replaces the whole row, so ceilings set from Model Pricing would be wiped. Built-in ones stay unpinned.
+          if (!match.is_built_in) {
+            if (typeof match.max_output_tokens === 'number') {
+              price.max_output_tokens = match.max_output_tokens;
+            }
+            if (typeof match.max_context_tokens === 'number') {
+              price.max_context_tokens = match.max_context_tokens;
+            }
+          }
+          // Otherwise the 0/0 placeholder would replace the model's real rates.
+          if (flagOnly) {
+            price.cost_per_million_input_tokens = match.cost_per_million_input_tokens;
+            price.cost_per_million_output_tokens = match.cost_per_million_output_tokens;
+          }
           if (carryTier && match.context_threshold_tokens) {
             price.context_threshold_tokens = match.context_threshold_tokens;
             price.cost_per_million_input_tokens_long_ctx = match.cost_per_million_input_tokens_long_ctx;
@@ -1983,6 +2014,19 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
                   )}
                   {canPrice && (
                     <>
+                      <Checkbox
+                        id='llm-config-supports-image'
+                        size='sm'
+                        checked={supportsImage || recordedImageSupport === true}
+                        disabled={recordedImageSupport === true}
+                        onChange={setSupportsImage}
+                        label='Supports image input'
+                        description={
+                          recordedImageSupport === true
+                            ? 'Already recorded as supported for this model.'
+                            : 'Tick if this model accepts images such as screenshots and graphs. Without it, attached images are dropped before the model sees them. Leave unticked to keep the current setting.'
+                        }
+                      />
                       <Input
                         label='Input rate (USD per 1M tokens)'
                         size='sm'
