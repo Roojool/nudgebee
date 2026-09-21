@@ -1324,16 +1324,18 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
                     {addOrgButtonText}
                   </DsButton>
                 )}
-                <DsButton
-                  id={`${toKebabCase(addAccountButtonText)}-btn`}
-                  tone='primary'
-                  size='md'
-                  icon={<AddIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => setOpenAddModal(true)}
-                  aria-label={addAccountButtonText}
-                >
-                  {addAccountButtonText}
-                </DsButton>
+                {hasLoaded && totalCount > 0 && (
+                  <DsButton
+                    id={`${toKebabCase(addAccountButtonText)}-btn`}
+                    tone='primary'
+                    size='md'
+                    icon={<AddIcon sx={{ fontSize: 18 }} />}
+                    onClick={() => setOpenAddModal(true)}
+                    aria-label={addAccountButtonText}
+                  >
+                    {addAccountButtonText}
+                  </DsButton>
+                )}
               </Stack>
             ) : undefined
           }
@@ -1347,7 +1349,12 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
               description={getIntegrationDescription(cloudProvider)}
               action={
                 canManage('integrations', 'Write')
-                  ? { label: addAccountButtonText, onClick: () => setOpenAddModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  ? {
+                      id: `${toKebabCase(addAccountButtonText)}-btn`,
+                      label: addAccountButtonText,
+                      onClick: () => setOpenAddModal(true),
+                      icon: <AddIcon sx={{ fontSize: 16 }} />,
+                    }
                   : undefined
               }
             />

@@ -1083,7 +1083,7 @@ const ListIntegrations = ({ integrationName }) => {
             </Stack>
           }
           description={getIntegrationDescription(integrationName)}
-          actions={addAccountButton}
+          actions={hasLoaded && totalCount > 0 ? addAccountButton : undefined}
         />
         {showConnectPrompt ? (
           <ListingLayout.Body padding={ds.space[5]}>
@@ -1095,6 +1095,7 @@ const ListIntegrations = ({ integrationName }) => {
               action={
                 canAddAccount
                   ? {
+                      id: `add-${toKebabCase(integrationName)}-account-btn`,
                       label: `Add ${getDisplayName(integrationName)} Account`,
                       onClick: () => {
                         setSelectedIntegration({});

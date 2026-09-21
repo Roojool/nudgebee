@@ -949,16 +949,18 @@ const K8sIntegrationTile = () => {
             canManage('integrations', 'Write') ? (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <TourLauncher tourId='connect-cluster' label='How to connect a cluster' />
-                <DsButton
-                  id='add-k8s-account'
-                  tone='primary'
-                  size='md'
-                  icon={<AddIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => setOpenModal(true)}
-                  aria-label='Add K8s Account'
-                >
-                  Add K8s Account
-                </DsButton>
+                {hasLoaded && totalCount > 0 && (
+                  <DsButton
+                    id='add-k8s-account'
+                    tone='primary'
+                    size='md'
+                    icon={<AddIcon sx={{ fontSize: 18 }} />}
+                    onClick={() => setOpenModal(true)}
+                    aria-label='Add K8s Account'
+                  >
+                    Add K8s Account
+                  </DsButton>
+                )}
               </Box>
             ) : undefined
           }
@@ -972,7 +974,7 @@ const K8sIntegrationTile = () => {
               description={getIntegrationDescription('K8S')}
               action={
                 canManage('integrations', 'Write')
-                  ? { label: 'Add K8s Account', onClick: () => setOpenModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  ? { id: 'add-k8s-account', label: 'Add K8s Account', onClick: () => setOpenModal(true), icon: <AddIcon sx={{ fontSize: 16 }} /> }
                   : undefined
               }
             />

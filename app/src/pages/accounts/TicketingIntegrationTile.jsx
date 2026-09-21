@@ -296,7 +296,7 @@ const TicketingIntegrationTile = ({ tool, displayName, cloudProvider, AccountMod
           icon={<CloudProviderIcon cloud_provider={cloudProvider} width={ds.space[5]} height={ds.space[5]} />}
           title={displayName}
           description={getIntegrationDescription(cloudProvider)}
-          actions={canManage('integrations', 'Write') ? addAccountButton : undefined}
+          actions={canManage('integrations', 'Write') && hasLoaded && totalCount > 0 ? addAccountButton : undefined}
         />
         {showConnectPrompt ? (
           <ListingLayout.Body padding={ds.space[5]}>
@@ -307,7 +307,12 @@ const TicketingIntegrationTile = ({ tool, displayName, cloudProvider, AccountMod
               description={getIntegrationDescription(cloudProvider)}
               action={
                 canManage('integrations', 'Write')
-                  ? { label: `Add ${displayName} Account`, onClick: openAddModal, icon: <AddIcon sx={{ fontSize: 16 }} /> }
+                  ? {
+                      id: `add-${toKebabCase(displayName)}-account-btn`,
+                      label: `Add ${displayName} Account`,
+                      onClick: openAddModal,
+                      icon: <AddIcon sx={{ fontSize: 16 }} />,
+                    }
                   : undefined
               }
             />

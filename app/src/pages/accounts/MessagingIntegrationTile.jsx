@@ -475,6 +475,8 @@ const MessagingIntegrationTile = ({
 
   const isConnected = tableData?.length > 0;
 
+  const showConnectPrompt = hasLoaded && !isLoading && tableData?.length === 0;
+
   // Sections under the installation table, one tab each. Webhook targets need no
   // app install, so they stay available before Connect; the other two only render
   // once the app is installed (and Watched Channels only behind its feature flag) —
@@ -698,27 +700,16 @@ const MessagingIntegrationTile = ({
                 >
                   Test Notification
                 </DsButton>
-                <DsButton
-                  id={`add-to-${toKebabCase(provider)}-btn`}
-                  tone='primary'
-                  size='md'
-                  icon={
-                    isConnected ? (
-                      <CheckIcon sx={{ fontSize: 18 }} />
-                    ) : (
-                      <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='18px' height='18px' />
-                    )
-                  }
-                  disabled={isConnected}
-                  onClick={handleInstall}
-                >
-                  {isConnected ? 'Connected' : `Connect ${displayName}`}
-                </DsButton>
+                {hasLoaded && isConnected && (
+                  <DsButton id={`add-to-${toKebabCase(provider)}-btn`} tone='primary' size='md' icon={<CheckIcon sx={{ fontSize: 18 }} />} disabled>
+                    Connected
+                  </DsButton>
+                )}
               </Stack>
             ) : undefined
           }
         />
-        {hasLoaded && !isLoading && tableData?.length === 0 ? (
+        {showConnectPrompt ? (
           // This page has no filters, so an empty table can only mean "the app is not
           // installed yet" — the install instruction that used to sit permanently under
           // the title now lives here, where it is the one thing left to do.
@@ -731,6 +722,7 @@ const MessagingIntegrationTile = ({
               action={
                 canManage('messagingplatforms', 'Write')
                   ? {
+                      id: `add-to-${toKebabCase(provider)}-btn`,
                       label: `Connect ${displayName}`,
                       onClick: handleInstall,
                       icon: <CloudProviderIcon cloud_provider={provider.toUpperCase()} width='16px' height='16px' />,
