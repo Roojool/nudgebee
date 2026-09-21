@@ -70,8 +70,11 @@ func TestDiagnose_MistunedGT(t *testing.T) {
 	}
 }
 
-func TestDiagnose_ChronicPinned(t *testing.T) {
-	// Metric pinned high (~150 > θ) most of the window ⇒ chronic ⇒ investigate, never retune.
+func TestDiagnose_ChronicWithHeadroomNamesValueOutsideBand(t *testing.T) {
+	// Metric sits at ~150 against θ=100 with no natural ceiling: the off-alert baseline itself
+	// crosses θ, so this is chronic — but unlike a metric pinned at its failure bound there IS a
+	// value clear of the normal band, and #38804 is that the tuner used to return none. Stays
+	// investigate_signal (not auto-appliable) while naming the number.
 	h := mkHistory(60, concat(band(25, 150, 4), band(75, 150, 4)))
 	iv := idxInterval(h, 25, 99)
 	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 100}
@@ -82,8 +85,28 @@ func TestDiagnose_ChronicPinned(t *testing.T) {
 	if s.Diagnosis != "chronic" || s.RecommendationType != "investigate_signal" {
 		t.Fatalf("got diagnosis=%q type=%q coverage=%.2f", s.Diagnosis, s.RecommendationType, s.BaselineCoverage)
 	}
-	if s.SuggestedThreshold != 100 {
-		t.Errorf("chronic must not change the threshold, got %.2f", s.SuggestedThreshold)
+	if s.SuggestedThreshold <= 100 {
+		t.Errorf("chronic with headroom must name a value outside the normal band, got %.2f", s.SuggestedThreshold)
+	}
+}
+
+func TestDiagnose_LowCoverageCleanBaselineIsExcursion(t *testing.T) {
+	// The NodeCPUHighUsage shape measured on prod: baseline ~19 against θ=90, firing pegged at ~100
+	// for most of the window. Coverage is ~12%, which used to force "chronic ⇒ investigate, do not
+	// retune"; the baseline is clean and far below θ, so this must read as an excursion and must
+	// never be tuned off the full distribution (which would suggest >100 and silence it).
+	h := mkHistory(60, concat(band(25, 19, 6), band(175, 100, 5)))
+	iv := idxInterval(h, 25, 199)
+	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 90}
+	s, ok := diagnoseWithBaseline(ad, h, []firingInterval{iv}, nil)
+	if !ok {
+		t.Fatal("expected baseline path to handle")
+	}
+	if s.Diagnosis != "excursion" {
+		t.Fatalf("clean baseline far below θ must read as excursion, got diag=%q type=%q coverage=%.2f", s.Diagnosis, s.RecommendationType, s.BaselineCoverage)
+	}
+	if s.SuggestedThreshold != 90 {
+		t.Errorf("excursion must not raise the threshold, got %.2f", s.SuggestedThreshold)
 	}
 }
 
@@ -293,9 +316,11 @@ func TestDiagnose_MistunedWrongDirectionFlagged(t *testing.T) {
 	}
 }
 
-func TestDiagnose_ContaminatedBaselineAbstains(t *testing.T) {
-	// >40% of off-alert samples cross θ (unbounded, not pinned) ⇒ the segmentation is dirty ⇒ abstain
-	// instead of tuning off a contaminated baseline.
+func TestDiagnose_BaselineAboveThresholdNamesValueOutsideBand(t *testing.T) {
+	// >40% of off-alert samples cross θ (unbounded, not pinned). The firings themselves are
+	// corroborated, so the segmentation is sound — the threshold is simply set below the metric's
+	// normal band. Name the value clear of that band rather than abstaining; a genuine series
+	// mismatch is caught earlier now, by the per-interval self-check.
 	h := mkHistory(60, concat(band(50, 120, 60), band(10, 300, 20)))
 	iv := idxInterval(h, 50, 59)
 	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 100}
@@ -303,8 +328,77 @@ func TestDiagnose_ContaminatedBaselineAbstains(t *testing.T) {
 	if !ok {
 		t.Fatal("expected baseline path to handle")
 	}
+	if s.Diagnosis != "chronic" || s.RecommendationType != "investigate_signal" {
+		t.Fatalf("expected chronic/investigate, got %q (diag=%q)", s.RecommendationType, s.Diagnosis)
+	}
+	if s.SuggestedThreshold <= 100 {
+		t.Errorf("must name a value above the normal band, got %.2f", s.SuggestedThreshold)
+	}
+}
+
+func TestDiagnose_NoFiringIntervalsAbstains(t *testing.T) {
+	// The alert last fired outside the 7-day history window, so fetchFiringIntervals returns
+	// nothing. Every sample would then be labelled "off-alert" and the band comparison would run on
+	// the whole history — the pre-decomposition bug this file exists to prevent. Measured on prod:
+	// RabbitmqTooManyReadyMessages was published as "re-baseline 100 → 3112.56", medium confidence,
+	// off zero firing samples.
+	h := mkHistory(60, concat(band(90, 10, 4), band(10, 3000, 100)))
+	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 100}
+	s, ok := diagnoseWithBaseline(ad, h, nil, nil)
+	if !ok {
+		t.Fatal("expected baseline path to handle")
+	}
 	if s.RecommendationType != "insufficient_data" {
-		t.Fatalf("expected contamination abstain, got %q (diag=%q)", s.RecommendationType, s.Diagnosis)
+		t.Fatalf("no firing intervals must abstain, got %q (diag=%q sug=%.2f)", s.RecommendationType, s.Diagnosis, s.SuggestedThreshold)
+	}
+	if s.SuggestedThreshold != 100 {
+		t.Errorf("must not invent a threshold without firing evidence, got %.2f", s.SuggestedThreshold)
+	}
+}
+
+func TestDiagnose_UncorroboratedIntervalsAbstain(t *testing.T) {
+	// Four firing windows, only one of which contains a sample that crosses θ. Pooling firing
+	// samples (the old self-check) let that single sample vouch for all four; per interval, the
+	// history plainly does not represent what the rule evaluated.
+	vals := band(100, 10, 2) // nothing near θ=100 …
+	vals[71] = 500           // … except one sample inside the last window
+	h := mkHistory(60, vals)
+	ivs := []firingInterval{ // spaced well beyond the pad+merge distance so they stay distinct
+		idxInterval(h, 10, 15),
+		idxInterval(h, 30, 35),
+		idxInterval(h, 50, 55),
+		idxInterval(h, 70, 75),
+	}
+	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 100}
+	s, ok := diagnoseWithBaseline(ad, h, ivs, nil)
+	if !ok {
+		t.Fatal("expected baseline path to handle")
+	}
+	if s.RecommendationType != "insufficient_data" {
+		t.Fatalf("uncorroborated firing windows must abstain, got %q (diag=%q)", s.RecommendationType, s.Diagnosis)
+	}
+}
+
+func TestDecomposeHistory_CorroborationIsPerInterval(t *testing.T) {
+	// Four sampled windows, one corroborated, plus a window the history has no sample for. The
+	// unsampled window counts towards neither total — a sparse series is not a fidelity failure.
+	vals := band(60, 10, 2)
+	vals[25] = 500
+	h := mkHistory(60, vals)
+	unsampled := firingInterval{start: h.Timestamps[59] + 3600, end: h.Timestamps[59] + 7200}
+	ivs := []firingInterval{
+		idxInterval(h, 20, 29),
+		idxInterval(h, 32, 37),
+		idxInterval(h, 40, 45),
+		idxInterval(h, 48, 53),
+		unsampled,
+	}
+	d := decomposeHistory(h, ivs, 100, true)
+	if d.SampledIntervals != 4 || d.CorroboratedIntervals != 1 {
+		t.Fatalf("got sampled=%d corroborated=%d, want 4/1", d.SampledIntervals, d.CorroboratedIntervals)
+	}
+	if !d.SelfCheckFailed {
+		t.Error("1 of 4 corroborated is below the minimum — self-check should fail")
 	}
 }
 
@@ -347,5 +441,50 @@ func TestDiagnose_InsufficientBaseline(t *testing.T) {
 	}
 	if s.RecommendationType != "insufficient_data" {
 		t.Fatalf("expected insufficient_data with tiny baseline, got %q", s.RecommendationType)
+	}
+}
+
+func TestDiagnose_PostgreSQLCacheHitRatioShape(t *testing.T) {
+	// The alert #38804 was filed on, at its measured dev distribution: cache hit ratio sitting at
+	// 0.96–0.99 against a "< 0.98" threshold, in alarm ~96% of the window, 1,250 firings a week.
+	// The tuner used to return "persistent signal, not noise — investigate the root cause; do not
+	// retune" and no number at all.
+	h := mkHistory(60, concat(band(25, 0.98, 0.01), band(650, 0.96, 0.02)))
+	iv := idxInterval(h, 25, 674)
+	ad := &AlertDefinition{Operator: "<", CurrentThreshold: 0.98, MetricName: "pg_cache_hit_ratio"}
+	s, ok := diagnoseWithBaseline(ad, h, []firingInterval{iv}, nil)
+	if !ok {
+		t.Fatal("expected baseline path to handle")
+	}
+	if s.RecommendationType == "insufficient_data" {
+		t.Fatalf("must not abstain on a corroborated, tunable alert: %s", s.Reason)
+	}
+	if s.SuggestedThreshold >= 0.98 {
+		t.Fatalf("must name a threshold below the normal band, got %.4g (type=%q diag=%q reason=%s)",
+			s.SuggestedThreshold, s.RecommendationType, s.Diagnosis, s.Reason)
+	}
+	t.Logf("type=%q diag=%q suggested=%.4g reduction=%.0f%% reason=%s",
+		s.RecommendationType, s.Diagnosis, s.SuggestedThreshold, s.EstimatedReduction, s.Reason)
+}
+
+func TestDiagnose_IntervalsOutsideHistoryAbstain(t *testing.T) {
+	// The events table reports a firing window, but it does not overlap the fetched history at all
+	// (ingestion lag between the events query and the metric fetch, or an event that started after
+	// the history snapshot). Nothing gets carved out, so "baseline" would be the whole history —
+	// the same failure as having no intervals, reached by a different route.
+	h := mkHistory(60, band(60, 10, 2))
+	away := firingInterval{start: h.Timestamps[59] + 10_000, end: h.Timestamps[59] + 10_001}
+	ad := &AlertDefinition{Operator: ">", CurrentThreshold: 100}
+	s, ok := diagnoseWithBaseline(ad, h, []firingInterval{away}, nil)
+	if !ok {
+		t.Fatal("expected baseline path to handle")
+	}
+	if s.RecommendationType != "insufficient_data" {
+		t.Fatalf("firing windows outside the history must abstain, got %q (diag=%q)", s.RecommendationType, s.Diagnosis)
+	}
+
+	d := decomposeHistory(h, []firingInterval{away}, 100, true)
+	if d.SampledIntervals != 0 || !d.SelfCheckFailed {
+		t.Errorf("got sampled=%d selfCheckFailed=%v, want 0/true", d.SampledIntervals, d.SelfCheckFailed)
 	}
 }

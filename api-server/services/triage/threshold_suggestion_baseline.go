@@ -21,11 +21,12 @@ import (
 // Discriminator constants. Chosen to reproduce the hand labels on the eval set; tunable, and must be
 // validated against that set rather than asserted.
 const (
-	chronicCoverageMax       = 0.30 // baseline coverage below this ⇒ metric lives in an alarm state (chronic)
+	chronicCoverageMax       = 0.30 // baseline coverage below this ⇒ baseline covers too little of the window to trust at high confidence
 	mistunedFraction         = 0.90 // |band edge − θ| ≤ (1−this)·θ ⇒ normal band reaches the threshold (mis-tuned)
 	excursionFraction        = 0.70 // |band edge − θ| ≥ (1−this)·θ ⇒ firings are genuine excursions
 	intervalMergeSteps       = 2    // merge firing intervals separated by fewer than N fetch steps
 	baselineContaminationMax = 0.40 // fraction of OFF-ALERT baseline that may cross θ before the baseline is deemed contaminated/chronic
+	corroboratedIntervalMin  = 0.50 // fraction of sampled firing intervals that must contain a θ-crossing sample
 )
 
 // firingInterval is a [start, end] window (unix seconds) during which the alert rule was firing.
@@ -42,10 +43,18 @@ type baselineDecomposition struct {
 	Firing         DistStats
 	Coverage       float64 // baseline sample count / total sample count
 	IntervalCount  int
-	// SelfCheckFailed: the events table says the alert fired, but the fetched history contains no
-	// firing-window sample that violates the threshold — the history provably does not represent
-	// what the rule evaluated (wrong series / resolution / step). §1.5 of the design doc.
+	// SelfCheckFailed: the events table says the alert fired, but the fetched history does not
+	// corroborate those firings — the history provably does not represent what the rule evaluated
+	// (wrong series / resolution / step). §1.5 of the design doc. Measured per interval, not over
+	// the pooled firing samples: pooling let a single violating sample vouch for hundreds of
+	// intervals, which is how histories that never cross θ reached a confident verdict.
 	SelfCheckFailed bool
+	// SampledIntervals / CorroboratedIntervals: firing intervals that contain at least one sample,
+	// and of those, the ones containing at least one sample that crosses θ. Intervals the history
+	// has no sample for at all are excluded from both — a sparse series shouldn't read as a
+	// fidelity failure.
+	SampledIntervals      int
+	CorroboratedIntervals int
 	// SeasonalitySuspected: weekday vs weekend baseline medians diverge materially — a 7-day window
 	// may be too short to tune reliably.
 	SeasonalitySuspected bool
@@ -172,12 +181,18 @@ func padAndMergeIntervals(intervals []firingInterval, alertDef *AlertDefinition,
 // firing distributions plus the §1.5 self-check.
 func decomposeHistory(mh *MetricHistory, intervals []firingInterval, threshold float64, isGT bool) baselineDecomposition {
 	var baseline, firing, wdVals, weVals []float64
-	inFiring := intervalMasker(intervals)
+	firingIdx := intervalIndexer(intervals)
+	samplesPer := make([]int, len(intervals))
+	violatingPer := make([]int, len(intervals))
 
 	for i := 0; i < len(mh.Timestamps) && i < len(mh.Values); i++ {
 		ts, v := mh.Timestamps[i], mh.Values[i]
-		if inFiring(ts) {
+		if idx := firingIdx(ts); idx >= 0 {
 			firing = append(firing, v)
+			samplesPer[idx]++
+			if (isGT && v > threshold) || (!isGT && v < threshold) {
+				violatingPer[idx]++
+			}
 			continue
 		}
 		baseline = append(baseline, v)
@@ -197,17 +212,25 @@ func decomposeHistory(mh *MetricHistory, intervals []firingInterval, threshold f
 		coverage = float64(len(baseline)) / float64(total)
 	}
 
-	// Self-check: events fired but no firing-window sample violates the threshold.
-	selfCheckFailed := false
-	if len(intervals) > 0 {
-		violating := 0
-		for _, v := range firing {
-			if (isGT && v > threshold) || (!isGT && v < threshold) {
-				violating++
-			}
+	// Self-check: the events table says the alert fired, but the history does not corroborate it.
+	// Per interval — an interval is corroborated when at least one of its samples crosses θ, which
+	// is the minimum the rule needed to fire. Intervals with no samples at all are not counted
+	// either way. Zero intervals is its own failure: without them every sample is labelled
+	// "off-alert" and the band comparison below silently runs on the whole history.
+	sampledIntervals, corroborated := 0, 0
+	for i := range intervals {
+		if samplesPer[i] == 0 {
+			continue
 		}
-		selfCheckFailed = violating == 0
+		sampledIntervals++
+		if violatingPer[i] > 0 {
+			corroborated++
+		}
 	}
+	// No intervals, or intervals that the history has no sample for anywhere, are the same failure:
+	// nothing was carved out, so "baseline" is the whole history.
+	selfCheckFailed := sampledIntervals == 0 ||
+		float64(corroborated)/float64(sampledIntervals) < corroboratedIntervalMin
 
 	// Phase E — flag weekly seasonality when weekday and weekend baseline medians diverge materially.
 	// A 7-day window can't distinguish a Monday batch job from a degradation; this caps confidence
@@ -223,30 +246,33 @@ func decomposeHistory(mh *MetricHistory, intervals []firingInterval, threshold f
 	}
 
 	return baselineDecomposition{
-		baselineSorted:       baseline,
-		firingSorted:         firing,
-		Baseline:             statsOfSorted(baseline),
-		Firing:               statsOfSorted(firing),
-		Coverage:             coverage,
-		IntervalCount:        len(intervals),
-		SelfCheckFailed:      selfCheckFailed,
-		SeasonalitySuspected: seasonalitySuspected,
+		baselineSorted:        baseline,
+		firingSorted:          firing,
+		Baseline:              statsOfSorted(baseline),
+		Firing:                statsOfSorted(firing),
+		Coverage:              coverage,
+		IntervalCount:         len(intervals),
+		SelfCheckFailed:       selfCheckFailed,
+		SampledIntervals:      sampledIntervals,
+		CorroboratedIntervals: corroborated,
+		SeasonalitySuspected:  seasonalitySuspected,
 	}
 }
 
-// intervalMasker returns a closure that reports whether a unix timestamp falls in any interval.
-// Intervals are assumed sorted by start (padAndMergeIntervals guarantees this).
-func intervalMasker(intervals []firingInterval) func(int64) bool {
+// intervalIndexer returns a closure giving the index of the interval a unix timestamp falls in,
+// or -1 when it falls in none. Intervals are assumed sorted by start (padAndMergeIntervals
+// guarantees this). The index is what lets the self-check attribute samples per interval.
+func intervalIndexer(intervals []firingInterval) func(int64) int {
 	if len(intervals) == 0 {
-		return func(int64) bool { return false }
+		return func(int64) int { return -1 }
 	}
-	return func(ts int64) bool {
+	return func(ts int64) int {
 		// Binary search for the last interval whose start <= ts.
 		i := sort.Search(len(intervals), func(i int) bool { return intervals[i].start > ts })
-		if i == 0 {
-			return false
+		if i == 0 || ts > intervals[i-1].end {
+			return -1
 		}
-		return ts <= intervals[i-1].end
+		return i - 1
 	}
 }
 
@@ -291,10 +317,17 @@ func diagnoseWithBaseline(alertDef *AlertDefinition, mh *MetricHistory, interval
 		Confidence:         "low",
 	}
 
-	// §1.5 self-check: history doesn't represent what the rule evaluated → abstain.
+	// §1.5 self-check: history doesn't corroborate the rule's firings → abstain. Every diagnosis
+	// below is a statement about how firing behaviour differs from baseline, so it needs firing
+	// evidence held to the same standard as the baseline gates that follow.
 	if decomp.SelfCheckFailed {
 		s.RecommendationType = "insufficient_data"
-		s.Reason = "Alert fired but the fetched metric history contains no firing-window sample that crosses the threshold — the history does not represent the series/resolution the rule evaluated. Abstaining until fidelity is fixed."
+		if decomp.SampledIntervals == 0 {
+			s.Reason = "No firing window for this alert falls inside the 7-day metric history, so the history cannot be split into off-alert and firing behaviour — every sample would be labelled off-alert and any threshold derived from it would describe a period the alert never fired in. Abstaining."
+		} else {
+			s.Reason = fmt.Sprintf("Only %d of %d firing windows contain a metric sample that crosses the threshold — the history does not represent the series/resolution the rule evaluated. Abstaining until fidelity is fixed.",
+				decomp.CorroboratedIntervals, decomp.SampledIntervals)
+		}
 		return s, true
 	}
 
@@ -313,33 +346,67 @@ func diagnoseWithBaseline(alertDef *AlertDefinition, mh *MetricHistory, interval
 		return s, true
 	}
 
-	// 1) CHRONIC (coverage) — the metric is in an alarm state most of the window.
-	if decomp.Coverage < chronicCoverageMax {
+	// 1) CHRONIC — the metric sits past θ even when the alert is NOT firing.
+	//
+	// This used to be decided on coverage (the share of the window the alert spent firing), but
+	// coverage describes the alert's firing pattern, not the threshold: a node genuinely pegged at
+	// 100% CPU for six days has low coverage AND a clean baseline far below θ (measured on prod:
+	// NodeCPUHighUsage, baseline p50=19.26 against θ=90), and a coverage verdict sent it to
+	// "investigate, do not retune" while alerts whose threshold simply sits inside the metric's
+	// normal band got the same answer and no number (#38804). What separates the two is whether
+	// the OFF-ALERT baseline itself crosses θ — so that is the test, and coverage only caps
+	// confidence further down. Low-coverage alerts with a clean baseline now fall through to the
+	// band comparison, which reads them as excursions on their own evidence.
+	if blViol := violationRate(decomp.baselineSorted, theta, isGT); blViol > baselineContaminationMax {
 		s.Diagnosis = "chronic"
 		s.RecommendationType = "investigate_signal"
-		s.Reason = fmt.Sprintf("Metric is in an alarm state ~%.0f%% of the window (off-alert coverage only %.0f%%). This is a persistent signal, not noise — investigate the root cause; do not retune.",
-			(1-decomp.Coverage)*100, decomp.Coverage*100)
-		return s, true
-	}
 
-	// Baseline-quality gate — how much of the OFF-ALERT baseline itself crosses θ. Off-alert windows
-	// should mostly NOT violate; a high rate means either the metric is chronically pinned at a
-	// failure bound, or the firing intervals don't cleanly separate normal from alarm (under-recorded
-	// events / series mismatch). Both make the band comparison below unreliable.
-	if blViol := violationRate(decomp.baselineSorted, theta, isGT); blViol > baselineContaminationMax {
+		// Pinned at the metric's own failure bound (100% of requests failing, a ratio at 1.0):
+		// no threshold outside the normal band exists, because the normal band ends at the bound.
 		bounded, upper, lower := boundsFor(alertDef, decomp.Baseline)
-		pinned := bounded && ((isGT && decomp.Baseline.P50 >= upper-(upper-lower)*0.05) ||
-			(isLT && decomp.Baseline.P50 <= lower+(upper-lower)*0.05))
-		if pinned {
-			s.Diagnosis = "chronic"
-			s.RecommendationType = "investigate_signal"
-			s.Reason = fmt.Sprintf("Metric is pinned at its failure bound (baseline p50=%.3g; %.0f%% of off-alert samples cross the threshold) — a persistent failure state, not noise. Investigate; do not retune.",
+		if bounded && ((isGT && decomp.Baseline.P50 >= upper-(upper-lower)*0.05) ||
+			(isLT && decomp.Baseline.P50 <= lower+(upper-lower)*0.05)) {
+			s.Reason = fmt.Sprintf("Metric is pinned at its failure bound (baseline p50=%.3g; %.0f%% of off-alert samples cross the threshold) — a persistent failure state, not noise. No threshold outside the metric's own range exists. Investigate; do not retune.",
 				decomp.Baseline.P50, blViol*100)
-		} else {
-			s.RecommendationType = "insufficient_data"
-			s.Reason = fmt.Sprintf("Baseline is contaminated: %.0f%% of off-alert samples still cross the threshold, so the firing intervals don't cleanly separate normal from alarm (under-recorded events or a series mismatch). Abstaining rather than tuning off a dirty baseline.",
-				blViol*100)
+			return s, true
 		}
+
+		// Otherwise there IS headroom, and statistics alone cannot say whether the system is
+		// persistently degraded or the threshold was set inside normal behaviour — the same shape
+		// covers "100% of requests are 4xx" and "normal load average is 4.9 against a threshold of
+		// 2". So state both readings and name the value that would sit outside the observed normal
+		// band, instead of returning no number at all. The type stays investigate_signal: it keeps
+		// the alert on the tuning list, and applying the value takes an explicit accept (the apply
+		// path promotes a user-supplied threshold to tune_threshold).
+		// Derived from the WHOLE observed history, not the off-alert baseline. Reaching this branch
+		// means the baseline itself crosses θ most of the time, so there is no clean off-alert
+		// normal to re-baseline against — the metric's actual operating range is what the full
+		// history shows. (The one shape where that would be wrong, a clean baseline far from θ with
+		// a long firing window, no longer arrives here: its baseline violation rate is low, so it
+		// reads as an excursion.)
+		fMed := computeMedian(full)
+		fMad := computeMAD(full)
+		var outside float64
+		var method string
+		if isGT {
+			outside, method = computeUpperThreshold(full, fMed, fMad, percentile(full, 95))
+			outside = applySanityCap(outside, theta, percentile(full, 99))
+		} else {
+			outside, method = computeLowerThreshold(full, fMed, fMad)
+			if floor := minOf(theta*0.1, percentile(full, 1)); outside < floor {
+				outside = floor
+			}
+		}
+		if (isGT && outside > theta) || (isLT && outside < theta) {
+			s.SuggestedThreshold = roundTo(outside, 2)
+			s.Method = method + "-chronic"
+			s.EstimatedReduction = estimateReduction(full, theta, s.SuggestedThreshold, isGT)
+			s.Reason = fmt.Sprintf("Threshold %.3g sits inside the metric's normal operating range: %.0f%% of off-alert samples already cross it (baseline p50=%.3g, observed p50=%.3g). Either the system is persistently degraded, or the threshold was set inside normal behaviour — the evidence cannot tell those apart. %.3g is the nearest value outside the observed range (~%.0f%% fewer firings); confirm the current level is acceptable before applying it.",
+				theta, blViol*100, decomp.Baseline.P50, s.MetricP50, s.SuggestedThreshold, s.EstimatedReduction)
+			return s, true
+		}
+		s.Reason = fmt.Sprintf("Threshold %.3g sits inside the metric's normal operating range: %.0f%% of off-alert samples already cross it (baseline p50=%.3g), and the observed distribution is too spread out to place a threshold clear of it. Review the alert definition rather than the number.",
+			theta, blViol*100, decomp.Baseline.P50)
 		return s, true
 	}
 
@@ -404,6 +471,12 @@ func diagnoseWithBaseline(alertDef *AlertDefinition, mh *MetricHistory, interval
 		s.Reason = fmt.Sprintf("Normal (off-alert) band reaches the threshold: baseline p%s=%.2f vs threshold %.2f. Re-baseline to %.2f (baseline median=%.2f, MAD=%.2f).",
 			tailLabel(isGT), bandEdge, theta, s.SuggestedThreshold, bMed, bMad)
 		s.Confidence = computeConfidence(decomp.baselineSorted, theta, s.SuggestedThreshold, alertQuality)
+		// Coverage is no longer a verdict, but it still bounds how much the baseline can be trusted:
+		// a baseline drawn from a sliver of the window describes less of normal behaviour than the
+		// sample count alone suggests.
+		if decomp.Coverage < chronicCoverageMax && s.Confidence == "high" {
+			s.Confidence = "medium"
+		}
 		if decomp.SeasonalitySuspected {
 			if s.Confidence == "high" {
 				s.Confidence = "medium"
