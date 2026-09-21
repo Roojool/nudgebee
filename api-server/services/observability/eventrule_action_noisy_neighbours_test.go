@@ -2,13 +2,17 @@ package observability
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"nudgebee/services/eventrule/playbooks"
+	"nudgebee/services/security"
 )
 
 // Moved here with the action itself, from the playbooks stage-2.2 CanAutoExecute table.
@@ -64,11 +68,96 @@ func TestNoisyNeighboursSpecsAreKeyedByPodAndContainer(t *testing.T) {
 	assert.Zero(t, specs["kube-dns-1/absent"].Requested)
 }
 
+// esNNFixture decodes a per-container search response the way esNoisyNeighbours does.
+// cpu_used is in nanocores, as Elastic Agent reports it.
+func esNNFixture(t *testing.T, raw string) esNNResponse {
+	t.Helper()
+	var resp esNNResponse
+	require.NoError(t, json.Unmarshal([]byte(raw), &resp))
+	return resp
+}
+
+// The ES path used to report memory only, so an ES-default account lost the CPU half of
+// the card that the PromQL path shows. The two lists are ranked independently — the
+// container holding the most memory is rarely the one burning the most CPU.
+func TestESNoisyNeighboursReportsCPUAlongsideMemory(t *testing.T) {
+	resp := esNNFixture(t, `{"aggregations":{"pods":{"buckets":[
+	  {"key":"api-1","ns":{"buckets":[{"key":"shop"}]},"containers":{"buckets":[
+	     {"key":"api","used":{"value":900},"cpu_used":{"value":250000000}}]}},
+	  {"key":"batch-1","ns":{"buckets":[{"key":"jobs"}]},"containers":{"buckets":[
+	     {"key":"worker","used":{"value":100},"cpu_used":{"value":1500000000}}]}}]}}}`)
+	specs := map[string]esContainerSpec{
+		"api-1/api":      {Requested: 800, Limit: 1000, CPURequested: 0.5, CPULimit: 1},
+		"batch-1/worker": {Requested: 50, CPURequested: 2},
+	}
+
+	d := buildESNoisyNeighbourData("node-a", resp, specs, 15)
+
+	require.True(t, d.CPUMeasured)
+	// nanocores → cores
+	assert.InDelta(t, 1.75, d.NodeCPUUsed, 1e-9)
+	assert.InDelta(t, 1000.0, d.NodeUsed, 1e-9)
+	assert.InDelta(t, 850.0, d.TotalRequested, 1e-9)
+
+	require.Len(t, d.Neighbours, 2)
+	assert.Equal(t, "api", d.Neighbours[0]["name"], "memory list is ranked by memory")
+
+	require.Len(t, d.CPUNeighbours, 2)
+	top := d.CPUNeighbours[0]
+	assert.Equal(t, "worker", top["name"], "CPU list is ranked by CPU, independently")
+	assert.Equal(t, "batch-1", top["pod_name"])
+	assert.Equal(t, "jobs", top["namespace"])
+	assert.Equal(t, "node-a", top["node_name"])
+	assert.InDelta(t, 1.5, top["cpu_used"], 1e-9)
+	assert.InDelta(t, 2.0, top["cpu_requested"], 1e-9)
+	assert.InDelta(t, 0.0, top["cpu_limit"], 1e-9)
+	assert.InDelta(t, 1.0, d.CPUNeighbours[1]["cpu_limit"], 1e-9)
+}
+
+// The node gauge must reflect the whole node, not just the rows shown, so totals are
+// summed before each list is cut to topN.
+func TestESNoisyNeighboursTotalsTheNodeBeforeCuttingToTopN(t *testing.T) {
+	resp := esNNFixture(t, `{"aggregations":{"pods":{"buckets":[
+	  {"key":"p1","containers":{"buckets":[{"key":"a","used":{"value":10},"cpu_used":{"value":1000000000}}]}},
+	  {"key":"p2","containers":{"buckets":[{"key":"b","used":{"value":30},"cpu_used":{"value":3000000000}}]}},
+	  {"key":"p3","containers":{"buckets":[{"key":"c","used":{"value":20},"cpu_used":{"value":2000000000}}]}}]}}}`)
+
+	d := buildESNoisyNeighbourData("node-a", resp, nil, 2)
+
+	assert.InDelta(t, 60.0, d.NodeUsed, 1e-9)
+	assert.InDelta(t, 6.0, d.NodeCPUUsed, 1e-9)
+	require.Len(t, d.Neighbours, 2)
+	require.Len(t, d.CPUNeighbours, 2)
+	assert.Equal(t, "b", d.Neighbours[0]["name"])
+	assert.Equal(t, "c", d.Neighbours[1]["name"])
+	assert.Equal(t, "b", d.CPUNeighbours[0]["name"])
+}
+
+// An index without the CPU field must still say "not measured". Reporting 0 CPU would
+// claim the node is idle, which is a different and much more misleading statement.
+func TestESNoisyNeighboursLeavesCPUUnmeasuredWhenTheIndexHasNone(t *testing.T) {
+	resp := esNNFixture(t, `{"aggregations":{"pods":{"buckets":[
+	  {"key":"p1","containers":{"buckets":[{"key":"a","used":{"value":10},"cpu_used":{"value":null}}]}}]}}}`)
+
+	d := buildESNoisyNeighbourData("node-a", resp, nil, 15)
+
+	assert.False(t, d.CPUMeasured)
+	assert.Empty(t, d.CPUNeighbours)
+	require.Len(t, d.Neighbours, 1)
+
+	rendered, err := noisyNeighboursResponse("p1", "ns", nil, d)
+	require.NoError(t, err)
+	raw, err := json.Marshal(rendered)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "cpu_neighbours")
+	assert.NotContains(t, string(raw), "cpu_used")
+}
+
 // Both providers render through noisyNeighboursResponse, so the payload the UI consumes
 // cannot drift between them. The card reads these fields verbatim.
 func TestNoisyNeighboursPayloadShapeIsProviderIndependent(t *testing.T) {
 	resp, err := noisyNeighboursResponse("p1", "ns", map[string]any{"node_name": "n1"},
-		&esNoisyNeighbourData{
+		&noisyNeighbourData{
 			NodeName: "n1", NodeUsed: 100, NodeAllocatable: 200, TotalRequested: 150,
 			Neighbours: []map[string]any{{"name": "c1", "pod_name": "p1", "memory_used": 100.0}},
 		})
@@ -79,6 +168,130 @@ func TestNoisyNeighboursPayloadShapeIsProviderIndependent(t *testing.T) {
 	for _, want := range []string{"node_name", "memory_used", "memory_allocatable", "memory_requested", "total_pods", "neighbours"} {
 		assert.Containsf(t, string(out), want, "payload missing %q", want)
 	}
+}
+
+// The dispatch to the Elasticsearch path compared against "elasticsearch", a name the
+// registry never produces, so no account ever reached it. The provider/source pair
+// here is exactly what GetLogsMetricsTracesProvider returns for an ES integration.
+func TestNoisyNeighboursRoutesElasticsearchAccountsToTheESPath(t *testing.T) {
+	assert.True(t, usesElasticsearchMetrics("ES", "user"),
+		"an ES metrics integration must take the Elasticsearch path")
+
+	assert.False(t, usesElasticsearchMetrics("elasticsearch", "user"),
+		"not a registered provider name — the string the old comparison looked for")
+
+	// Deliberately false, and the reason this asks the registry instead of comparing
+	// provider == "ES": there is no agent-sourced Elasticsearch METRICS source (the
+	// ("ES","agent") registration is for logs), and the ES implementation reads its
+	// connection from GetElasticsearchConfig, which only accepts user-sourced
+	// integrations. Routing ("ES","agent") here would fail on config lookup.
+	assert.False(t, usesElasticsearchMetrics("ES", "agent"),
+		"no agent-sourced Elasticsearch metrics source exists")
+	for _, p := range []struct{ provider, source string }{
+		{"prometheus", "user"},
+		{"prometheus", "agent"},
+		{"datadog", "user"},
+		{"", ""},
+	} {
+		assert.Falsef(t, usesElasticsearchMetrics(p.provider, p.source),
+			"%s/%s must stay on the PromQL path", p.provider, p.source)
+	}
+}
+
+// Drives Execute itself, not just the helper: the dispatch line is where the original
+// bug was, and a test of the helper alone stays green if that line is reverted.
+// One row per branch of fetchNoisyNeighbours.
+func TestNoisyNeighboursExecuteDispatchesOnTheDefaultMetricsProvider(t *testing.T) {
+	origProvider, origES, origProm := noisyNeighboursMetricsProvider, fetchESNoisyNeighbours, fetchPromNoisyNeighbours
+	t.Cleanup(func() {
+		noisyNeighboursMetricsProvider, fetchESNoisyNeighbours, fetchPromNoisyNeighbours = origProvider, origES, origProm
+	})
+
+	type call struct{ impl, provider, source string }
+	var calls []call
+	data := func(node string) *noisyNeighbourData {
+		return &noisyNeighbourData{NodeName: node, Neighbours: []map[string]any{}}
+	}
+	fetchESNoisyNeighbours = func(_ *security.RequestContext, _, node string, _, _ int) (*noisyNeighbourData, error) {
+		calls = append(calls, call{impl: "es"})
+		return data(node), nil
+	}
+	promFails := false
+	fetchPromNoisyNeighbours = func(_ *security.RequestContext, _, provider, source, node string, _, _ time.Time) (*noisyNeighbourData, error) {
+		calls = append(calls, call{impl: "prom", provider: provider, source: source})
+		if promFails {
+			return nil, errors.New("agent not connected")
+		}
+		return data(node), nil
+	}
+
+	// node_name is passed so Execute does not need the pod inventory to find it.
+	params := map[string]any{"pod_name": "api-1", "namespace": "shop", "node_name": "node-a"}
+	ctx := impactedServicesCtx("tenant-1", "acc", "pod_oom_killer_enricher", "pod", "api-1", "shop")
+
+	cases := []struct {
+		name             string
+		provider, source string
+		lookupErr        error
+		promFails        bool
+		want             []call
+		wantCard         bool
+		wantErr          bool
+	}{
+		{name: "an ES default is answered from Elasticsearch",
+			provider: "ES", source: "user", want: []call{{impl: "es"}}, wantCard: true},
+		{name: "a Prometheus default is asked through the resolved source",
+			provider: "prometheus", source: "user", want: []call{{"prom", "prometheus", "user"}}, wantCard: true},
+		{name: "no configured provider falls to the agent's Prometheus",
+			provider: "prometheus", source: "agent", want: []call{{"prom", "prometheus", "agent"}}, wantCard: true},
+		{name: "a Chronosphere default is queried as Chronosphere",
+			provider: "chronosphere", source: "user", want: []call{{"prom", "chronosphere", "user"}}, wantCard: true},
+		{name: "a provider with no implementation falls back to the account's Prometheus",
+			provider: "datadog", source: "user", want: []call{{"prom", "prometheus", ""}}, wantCard: true},
+		{name: "with no Prometheus to fall back to, the card is skipped rather than failed",
+			provider: "datadog", source: "user", promFails: true, want: []call{{"prom", "prometheus", ""}}},
+		{name: "a failed provider lookup is an error, not a guess",
+			lookupErr: errors.New("db down"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, promFails = nil, tc.promFails
+			noisyNeighboursMetricsProvider = func(*security.RequestContext, string, string, string, string) (string, string, error) {
+				return tc.provider, tc.source, tc.lookupErr
+			}
+			resp, err := (&noisyNeighboursAction{}).Execute(ctx, params)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, calls)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, calls)
+			if tc.wantCard {
+				assert.NotNil(t, resp)
+			} else {
+				assert.Nil(t, resp)
+			}
+		})
+	}
+}
+
+// The real PromQL implementation, through the metrics layer: the resolved provider is
+// what reaches FetchMetricsQuery, not a hardcoded "prometheus".
+func TestPromNoisyNeighboursAsksTheResolvedProvider(t *testing.T) {
+	recorder := stubUserPrometheus(t, "", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	})
+	now := time.Now().UTC()
+
+	_, err := promNoisyNeighbours(testRequestContext(), "acc", "prometheus", "user", "node-a", now.Add(-10*time.Minute), now)
+
+	// Every query comes back empty, so the node looks unknown to this Prometheus —
+	// an error, not an idle-node card.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no metrics for node "node-a"`)
+	require.NotEmpty(t, recorder.all())
+	assert.Contains(t, recorder.all()[0].URL.Query().Get("query"), `node="node-a"`)
 }
 
 // Without a node there is nothing to narrow by, and an unfiltered query would return the
@@ -93,7 +306,7 @@ func TestNoisyNeighboursESRefusesAnEmptyNodeName(t *testing.T) {
 // A node with nothing on it must render as an empty list. A nil slice marshals to
 // `null`, which the card iterates.
 func TestNoisyNeighboursEmptyNodeRendersAsEmptyList(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName: "n1", Neighbours: []map[string]any{},
 	})
 	require.NoError(t, err)
@@ -150,7 +363,7 @@ func TestNoisyNeighboursRunsForContentionAlerts(t *testing.T) {
 // A node pinned on CPU starves everything on it while memory looks fine, so the
 // payload has to carry CPU for a reader to reach the right answer.
 func TestNoisyNeighboursPayloadCarriesCPUWhenMeasured(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName:        "node-1",
 		CPUMeasured:     true,
 		NodeCPUUsed:     5.994,
@@ -176,7 +389,7 @@ func TestNoisyNeighboursPayloadCarriesCPUWhenMeasured(t *testing.T) {
 // Elasticsearch clusters cannot report CPU here. Reporting zero would read as
 // "nothing is using CPU", which is a stronger and wronger claim than silence.
 func TestNoisyNeighboursOmitsCPUWhenNotMeasured(t *testing.T) {
-	resp, err := noisyNeighboursResponse("p1", "ns", nil, &esNoisyNeighbourData{
+	resp, err := noisyNeighboursResponse("p1", "ns", nil, &noisyNeighbourData{
 		NodeName:   "node-1",
 		Neighbours: []map[string]any{},
 	})

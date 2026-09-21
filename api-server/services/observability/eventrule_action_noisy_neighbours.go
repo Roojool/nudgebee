@@ -65,6 +65,32 @@ const (
 	noisyNeighboursLookbackMinutes = 10
 )
 
+// Indirected so a test can drive Execute through the provider dispatch without the
+// integration tables or a live Elasticsearch behind them. The dispatch line is the
+// part that was wrong, so it is the part that has to be exercised.
+var (
+	noisyNeighboursMetricsProvider = GetLogsMetricsTracesProvider
+	fetchESNoisyNeighbours         = esNoisyNeighbours
+	fetchPromNoisyNeighbours       = promNoisyNeighbours
+)
+
+// usesElasticsearchMetrics reports whether the account's metrics provider is the
+// Elasticsearch source, by asking the same registry that routes its queries.
+//
+// This used to be `provider == "elasticsearch"`. The registry spells it "ES", so the
+// comparison never matched and every Elasticsearch account fell through to PromQL,
+// which it cannot answer: the card was empty on exactly the clusters its ES path was
+// written for, with no error. Deriving the answer from getMetricsSource means a
+// caller cannot disagree with the registry about a provider's name.
+func usesElasticsearchMetrics(provider, source string) bool {
+	metricSource, err := getMetricsSource(provider, source)
+	if err != nil {
+		return false
+	}
+	_, isES := metricSource.(*ElasticSaasMetricSource)
+	return isES
+}
+
 func (a *noisyNeighboursAction) CanAutoExecute(ctx playbooks.PlaybookActionContext) bool {
 	if !noisyNeighboursAggKeys[ctx.GetEvent().AggregationKey] {
 		return false
@@ -101,6 +127,77 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		return nil, errors.New("noisy_neighbours_enricher: no node_name on event (subject_node empty)")
 	}
 
+	tenantID, accountID := ctx.GetTenantId(), ctx.GetAccountId()
+	if tenantID == "" || accountID == "" {
+		return nil, errors.New("noisy_neighbours_enricher: tenant ID and account ID required")
+	}
+	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
+
+	start, end := playbooks.RangeQueryWindow(ctx.GetEvent(), noisyNeighboursLookbackMinutes, time.Now().UTC())
+	data, err := fetchNoisyNeighbours(requestCtx, accountID, nodeName, start, end)
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
+		// No implementation can answer for this account. Leaving the event without
+		// the card is honest; an empty card would claim the node is idle.
+		return nil, nil
+	}
+	return noisyNeighboursResponse(podName, namespace, rawParams, data)
+}
+
+// fetchNoisyNeighbours is the one place that decides which implementation answers,
+// and it decides by the account's DEFAULT metrics provider — the rule every metrics
+// card follows, so the enricher itself carries no provider knowledge.
+//
+//   - Elasticsearch: the ES implementation.
+//   - Prometheus family (prometheus, chronosphere — including an agent's Prometheus
+//     when nothing is configured): the PromQL implementation, asked through the
+//     provider and source that were resolved, so a Chronosphere default is queried as
+//     Chronosphere rather than as whatever "prometheus" happens to resolve to.
+//   - Any other provider (Datadog, New Relic, ...) has no implementation yet. The
+//     PromQL one is tried against the account's Prometheus, which keeps the card on
+//     accounts that have both; when that fails too, the result is (nil, nil) and the
+//     card is skipped with a log line naming the provider, instead of surfacing the
+//     Prometheus resolver's "agent not connected", which says nothing about why.
+func fetchNoisyNeighbours(ctx *security.RequestContext, accountID, nodeName string, start, end time.Time) (*noisyNeighbourData, error) {
+	provider, source, err := noisyNeighboursMetricsProvider(ctx, accountID, "", "metrics", "")
+	if err != nil {
+		return nil, fmt.Errorf("noisy_neighbours_enricher: metrics provider: %w", err)
+	}
+	switch {
+	case usesElasticsearchMetrics(provider, source):
+		data, esErr := fetchESNoisyNeighbours(ctx, accountID, nodeName,
+			noisyNeighboursLookbackMinutes, noisyNeighboursTopN)
+		if esErr != nil {
+			return nil, fmt.Errorf("noisy_neighbours_enricher: elasticsearch: %w", esErr)
+		}
+		return data, nil
+	case answersPromQL(provider):
+		return fetchPromNoisyNeighbours(ctx, accountID, provider, source, nodeName, start, end)
+	default:
+		data, promErr := fetchPromNoisyNeighbours(ctx, accountID, integrationPrometheus, "", nodeName, start, end)
+		if promErr != nil {
+			ctx.GetLogger().Info("noisy_neighbours_enricher: no implementation for this metrics provider, and no Prometheus to fall back to; skipping the card",
+				"account_id", accountID, "provider", provider, "source", source, "fallback_error", promErr)
+			return nil, nil
+		}
+		return data, nil
+	}
+}
+
+// answersPromQL reports whether a metrics provider is queried in PromQL over the
+// cAdvisor and kube-state-metrics series the PromQL implementation reads.
+func answersPromQL(provider string) bool {
+	switch provider {
+	case "prometheus", "chronosphere":
+		return true
+	}
+	return false
+}
+
+// promNoisyNeighbours answers from Prometheus-family metrics.
+func promNoisyNeighbours(ctx *security.RequestContext, accountID, provider, source, nodeName string, start, end time.Time) (*noisyNeighbourData, error) {
 	// We assemble five instant queries against the host node so the
 	// resulting `neighbours` shape matches what the legacy Robusta
 	// playbook emitted (memory_analyzer.py:100 →
@@ -198,36 +295,14 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		nodeName,
 	)
 
-	tenantID, accountID := ctx.GetTenantId(), ctx.GetAccountId()
-	if tenantID == "" || accountID == "" {
-		return nil, errors.New("noisy_neighbours_enricher: tenant ID and account ID required")
-	}
-	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
-
-	// Ask the account's own metrics provider. The five PromQL queries below reach the
-	// agent's prometheus_url, which a cluster shipping to Elasticsearch does not have —
-	// so on those clusters this card was permanently empty with nothing to say why.
-	provider, _, provErr := GetLogsMetricsTracesProvider(requestCtx, accountID, "", "metrics", "")
-	if provErr != nil {
-		return nil, fmt.Errorf("noisy_neighbours_enricher: metrics provider: %w", provErr)
-	}
-	if provider == "elasticsearch" {
-		data, esErr := esNoisyNeighbours(requestCtx, accountID, nodeName,
-			noisyNeighboursLookbackMinutes, noisyNeighboursTopN)
-		if esErr != nil {
-			return nil, fmt.Errorf("noisy_neighbours_enricher: elasticsearch: %w", esErr)
-		}
-		return noisyNeighboursResponse(podName, namespace, rawParams, data)
-	}
-
 	// One batch through the metrics layer, which runs it on the connection the
 	// user configured or the cluster agent's Prometheus. Every query is scoped to
 	// a single node over a 10-minute range, so the added CPU half costs
 	// evaluation time on a few dozen series, not a fan-out.
-	start, end := playbooks.RangeQueryWindow(ctx.GetEvent(), noisyNeighboursLookbackMinutes, time.Now().UTC())
-	output, err := FetchMetricsQuery(requestCtx, FetchMetricsRequest{
-		AccountId:      accountID,
-		MetricProvider: integrationPrometheus,
+	output, err := FetchMetricsQuery(ctx, FetchMetricsRequest{
+		AccountId:            accountID,
+		MetricProvider:       provider,
+		MetricProviderSource: source,
 		Queries: map[string]string{
 			"top_pods":       topPodsQuery,
 			"node_used":      nodeUsageQuery,
@@ -336,7 +411,7 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		return nil, fmt.Errorf("noisy_neighbours_enricher: no metrics for node %q — it does not look like a node this cluster's Prometheus knows", nodeName)
 	}
 
-	return noisyNeighboursResponse(podName, namespace, rawParams, &esNoisyNeighbourData{
+	return &noisyNeighbourData{
 		NodeName:        nodeName,
 		NodeUsed:        nodeUsed,
 		NodeAllocatable: nodeAlloc,
@@ -346,14 +421,14 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		NodeCPUUsed:     nodeCPUUsed,
 		NodeCPUCapacity: nodeCPUCapacity,
 		CPUNeighbours:   cpuNeighbours,
-	})
+	}, nil
 }
 
 // noisyNeighboursResponse renders the card. Both providers go through it so the payload
 // the UI consumes cannot drift between them — the fields below are consumed verbatim by
 // the NoisyNeighbour card, and a missing `name` or `memory_requested` renders as
 // "Container undefined does not have a memory requests".
-func noisyNeighboursResponse(podName, namespace string, rawParams map[string]any, d *esNoisyNeighbourData) (playbooks.PlaybookActionResponse, error) {
+func noisyNeighboursResponse(podName, namespace string, rawParams map[string]any, d *noisyNeighbourData) (playbooks.PlaybookActionResponse, error) {
 	data := map[string]any{
 		"node_name":          d.NodeName,
 		"memory_used":        d.NodeUsed,
