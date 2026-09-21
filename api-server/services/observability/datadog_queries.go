@@ -97,24 +97,17 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 	for _, metricKey := range metrics {
 		switch metricKey {
 		// (Cases remain identical, they just use the updated filterStr)
-		case "http_status":
-			queries[metricKey] = fmt.Sprintf("sum:trace.servlet.request.hits{%s} by {http.status_code}.as_rate()", filterStr)
-		case "http_max_response_time":
-			queries[metricKey] = fmt.Sprintf("max:trace.servlet.request.duration{%s}%s", filterStr, groupBy)
 		case "network_receive_packet":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.network.rx_bytes{%s}%s", filterStr, groupBy)
 		case "network_transmit_packets":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.network.tx_bytes{%s}%s * -1", filterStr, groupBy)
-		case "http_throughput":
-			queries[metricKey] = fmt.Sprintf("sum:trace.servlet.request.hits{%s}%s.as_rate()", filterStr, groupBy)
-		case "http_latency_p95":
-			queries[metricKey] = fmt.Sprintf("p95:trace.servlet.request.duration{%s}%s", filterStr, groupBy)
-		case "http_latency_p99":
-			queries[metricKey] = fmt.Sprintf("p99:trace.servlet.request.duration{%s}%s", filterStr, groupBy)
-		case "http_latency_sum":
-			queries[metricKey] = fmt.Sprintf("sum:trace.servlet.request.duration{%s}%s", filterStr, groupBy)
-		case "http_error_rate":
-			queries[metricKey] = fmt.Sprintf("(sum:trace.servlet.request.errors{%s}%s / sum:trace.servlet.request.hits{%s}%s) * 100", filterStr, groupBy, filterStr, groupBy)
+		// HTTP metrics come from APM trace metrics, not the kube_* series above — see
+		// datadog_http_queries.go for why they need their own filter and operation name.
+		case "http_throughput", "http_latency_p95", "http_latency_p99", "http_latency_sum",
+			"http_error_rate", "http_status", "http_max_response_time":
+			if q := buildDatadogHTTPQuery(metricKey, meta); q != "" {
+				queries[metricKey] = q
+			}
 		case "network_usage":
 			queries[metricKey] = fmt.Sprintf("default(avg:container.net.tcp.connection.time.seconds.total{%s}%s, avg:kubernetes.network.rx_bytes{%s}%s)", filterStr, groupBy, filterStr, groupBy)
 		case "cpu_usage":

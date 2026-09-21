@@ -3202,6 +3202,9 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		if meta.Kind == "node" {
 			queries = buildDatadogNodeQueries(meta, meta.RequestedMetrics)
 		} else {
+			if requestsDatadogHTTPKeys(meta.RequestedMetrics) {
+				meta.APMOperation = probeDatadogAPMOperation(ctx, req, metricsProvider, integrationSource, meta)
+			}
 			queries = buildDatadogWorkloadQueries(meta, meta.RequestedMetrics)
 		}
 
@@ -3289,6 +3292,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	// Post-process Datadog percentile queries: collapse per-host series into a single percentile series
 	if metricsProvider == "datadog" {
 		datadogNanocoresToCores(output.Results)
+		datadogHTTPLabels(output.Results)
 		percentileKeys := make(map[string]float64)
 		for _, m := range meta.RequestedMetrics {
 			switch m {
@@ -3428,6 +3432,11 @@ type RequestMetadata struct {
 	RangeWindow string
 	Step        string
 	RateWindow  string
+	// APMOperation is the Datadog trace operation the workload's HTTP spans are
+	// recorded under (http.server.request, servlet.request, ...). Datadog names trace
+	// metrics after it and it differs by tracer, so it is probed per request; empty
+	// means none was found and the Datadog HTTP keys are not built.
+	APMOperation string
 }
 
 func parseRequestMetadata(reqMap map[string]any) (RequestMetadata, error) {
