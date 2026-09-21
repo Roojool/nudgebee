@@ -14,17 +14,56 @@ const imageSupportCacheTTL = 5 * time.Minute
 // imageSupportCache is a lazily-refreshed, in-memory view of the explicit
 // per-model vision-capability verdicts recorded in llm_model_pricing. Only
 // (provider, model) pairs with a non-NULL supports_image_input row are
-// present — a missing entry means "unknown", not "false".
+// present — a missing entry means "unknown", not "false". An empty tenantId
+// caches the built-in catalog; otherwise it caches that tenant's own rows.
 type imageSupportCache struct {
-	mu       sync.RWMutex
-	values   map[string]bool
-	loadedAt time.Time
+	tenantId string
+	// createdAt ages out a tenant cache that never managed to load.
+	createdAt time.Time
+	mu        sync.RWMutex
+	values    map[string]bool
+	loadedAt  time.Time
 	// refreshMu serializes refresh attempts so concurrent stale lookups don't
 	// all hit the DB at once (a request storm right as the TTL expires).
 	refreshMu sync.Mutex
 }
 
-var imageSupport = &imageSupportCache{}
+// imageSupport is the built-in catalog; tenantImageSupport holds one cache per
+// tenant that has been looked up.
+var (
+	imageSupport         = &imageSupportCache{}
+	tenantImageSupportMu sync.Mutex
+	tenantImageSupport   = map[string]*imageSupportCache{}
+)
+
+// imageSupportForTenant returns the cache of tenantId's own verdicts; an empty
+// tenantId is the built-in catalog.
+func imageSupportForTenant(tenantId string) *imageSupportCache {
+	if tenantId == "" {
+		return imageSupport
+	}
+	tenantImageSupportMu.Lock()
+	defer tenantImageSupportMu.Unlock()
+	if c, ok := tenantImageSupport[tenantId]; ok {
+		return c
+	}
+	// Drop caches of tenants that stopped sending images, so the map stays
+	// bounded by active tenants (same shape as loadModelLimitsCatalog).
+	for k, old := range tenantImageSupport {
+		old.mu.RLock()
+		lastActive := old.loadedAt
+		old.mu.RUnlock()
+		if lastActive.IsZero() {
+			lastActive = old.createdAt
+		}
+		if time.Since(lastActive) > 4*imageSupportCacheTTL {
+			delete(tenantImageSupport, k)
+		}
+	}
+	c := &imageSupportCache{tenantId: tenantId, createdAt: time.Now()}
+	tenantImageSupport[tenantId] = c
+	return c
+}
 
 // lookup returns the recorded vision-capability verdict for (provider, model).
 // known is false when there is no explicit DB verdict (column NULL, no row,
@@ -79,7 +118,7 @@ func (c *imageSupportCache) refresh() map[string]bool {
 		return values
 	}
 
-	catalog, err := dao.GetImageSupportCatalog()
+	catalog, err := dao.GetImageSupportCatalog(c.tenantId)
 	if err != nil {
 		slog.Warn("image: failed to load image-support catalog, falling back to default heuristic", "error", err)
 		return values

@@ -540,7 +540,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	imagesUnsupportedByModel := false
 	if len(request.Images) > 0 {
 		provider, model := resolveEffectiveVisionProvider(ctx, request.AccountId, agent.GetName(), request.ConversationId)
-		if _, ok := resolveVisionCapableTier(provider, model); !ok {
+		if _, ok := resolveVisionCapableTier(request.AccountId, provider, model); !ok {
 			imagesUnsupportedByModel = true
 		}
 	}

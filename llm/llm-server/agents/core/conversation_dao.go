@@ -309,7 +309,7 @@ type IConversationDao interface {
 	GetConversationTokenUsage(conversationId, accountId string) ([]TokenMetrics, error)
 	GetConversationCost(provider string, model string, nonCachedInputTokens, cachedInputTokens, cacheCreationTokens, outputTokens, thinkingTokens int, tenantId string) (float64, error)
 	GetConversationCosts(models []string, tenantId string) (map[string]modelPricing, error)
-	GetImageSupportCatalog() (map[string]bool, error)
+	GetImageSupportCatalog(tenantId string) (map[string]bool, error)
 	GetConversationTokenUsageDetailed(conversationId, accountId string) ([]TokenUsageDetailedRecord, error)
 	GetConversationLifecycleStorageCost(conversationId string, tenantId string) (float64, error)
 	GetConversationToolCallsStats(conversationId, accountId string) (ToolCallsStats, error)
@@ -3247,13 +3247,22 @@ func (chat *ConversationDao) GetConversationCosts(models []string, tenantId stri
 }
 
 // GetImageSupportCatalog returns the explicit vision-capability verdicts recorded
-// in llm_model_pricing.supports_image_input, keyed by "provider:model". Rows
+// in llm_model_pricing.supports_image_input, keyed by "provider:model": the
+// built-in rows when tenantId is empty, otherwise that tenant's own rows. Rows
 // where the column is NULL are omitted — callers must treat a missing key as
 // "unknown", not "false", and fall back to their own default heuristic.
-func (chat *ConversationDao) GetImageSupportCatalog() (map[string]bool, error) {
-	rows, err := chat.dbManager.Db.Queryx(`SELECT provider_name, model_name, supports_image_input
+func (chat *ConversationDao) GetImageSupportCatalog(tenantId string) (map[string]bool, error) {
+	query := `SELECT provider_name, model_name, supports_image_input
 		FROM llm_model_pricing
-		WHERE supports_image_input IS NOT NULL AND tenant_id IS NULL`)
+		WHERE supports_image_input IS NOT NULL AND tenant_id IS NULL`
+	args := []any{}
+	if tenantId != "" {
+		query = `SELECT provider_name, model_name, supports_image_input
+		FROM llm_model_pricing
+		WHERE supports_image_input IS NOT NULL AND tenant_id = $1`
+		args = append(args, tenantId)
+	}
+	rows, err := chat.dbManager.Db.Queryx(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("GetImageSupportCatalog: query failed: %w", err)
 	}

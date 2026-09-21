@@ -605,7 +605,7 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 	}
 
 	// Vision safety net: strip image parts if the resolved model does not support vision
-	if hasImageParts(promptMessages) && !IsVisionCapableModel(provider, model) {
+	if hasImageParts(promptMessages) && !IsVisionCapableModel(accountId, provider, model) {
 		ctx.GetLogger().Warn("llm: stripping image parts — model does not support vision",
 			"provider", provider, "model", model, "agent", agentName)
 		promptMessages = stripImagePartsWithFallback(promptMessages)
