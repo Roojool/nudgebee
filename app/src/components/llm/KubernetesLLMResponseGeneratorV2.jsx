@@ -2079,6 +2079,7 @@ const KubernetesLLMResponseGenerator = ({
             <MessageStream
               messages={displayMessages}
               isProcessing={isConversationInProgress}
+              isBusy={isSystemBusy}
               collapsedObj={collapsedObj}
               setCollapsedObj={setCollapsedObj}
               showFullText={showFullText}
