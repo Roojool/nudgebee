@@ -153,6 +153,7 @@ const baseFilters = (baseTitle) => [
     id: 'AITools',
     fragment: 'ai-tools',
     icon: AgentIcon,
+    iconSize: 16,
     tabOptions: AI_TOOLS_SUB_TABS,
   },
   {
