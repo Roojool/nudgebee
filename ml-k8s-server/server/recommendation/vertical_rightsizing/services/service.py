@@ -50,7 +50,10 @@ class RecommendationService:
         tenant_id: str = "",
     ) -> None:
         self._config = config
-        self._executor = ThreadPoolExecutor(self._config.max_workers)
+        # Named so a leaked pool is identifiable in `py-spy dump` and in
+        # /proc/<pid>/task/*/comm on a live pod, rather than being one more
+        # anonymous "ThreadPoolExecutor-N_M" among the process's other pools.
+        self._executor = ThreadPoolExecutor(self._config.max_workers, thread_name_prefix="rightsizing")
         self.account_id = account_id
         self.tenant_id = tenant_id
         # Both providers' queries now travel through api-server, which resolves the
@@ -99,6 +102,28 @@ class RecommendationService:
         self._k8s_loader = ClusterService(account_id, self._executor, config)
         self._strategy = NudgebeeStrategy(NudgebeeStrategySettings())
         self.errors: list[dict] = []
+
+    def close(self) -> None:
+        """Release this scan's thread pool.
+
+        One service is built per scan and then dropped. Its worker threads park on the work
+        queue instead of exiting, and each one keeps the scan's object graph -- metrics
+        client, config, fetched series -- reachable. Measured on dev: a pod that consumed
+        three scans held one extra thread and ~33MB per scan against a pod that consumed
+        none, and the threads never came back, even for a scan that aborted in 0.35s.
+
+        Relying on the executor being garbage collected is what failed in production:
+        something still referenced it, so the weakref callback that would have drained the
+        workers never fired. Shutting down explicitly does not care what holds the
+        reference, which is why it is done here rather than by hunting the referrer.
+
+        cancel_futures drops queries still queued, whose results were discarded when the
+        scan ended; wait=True joins only the handful already in flight. Every callable
+        handed to this pool is an HTTP request with its own timeout, so the join is bounded
+        by one timeout rather than by the backlog -- keep it that way, since an untimed call
+        here would stall the RabbitMQ consumer thread.
+        """
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def __get_resource_minimal(self, resource: ResourceType) -> float:
         if resource == ResourceType.CPU:

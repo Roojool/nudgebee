@@ -119,7 +119,12 @@ async def generate_recommendations(
         elasticsearch=elasticsearch,
         tenant_id=tenant_id,
     )
-    return await runner.run()
+    try:
+        return await runner.run()
+    finally:
+        # In a finally, not after the await: the scans that leak are the ones that raise.
+        # A scan that aborts immediately still built the pool, and still leaked it.
+        runner.close()
 
 
 def get_resource_minimal(resource: ResourceType) -> float:

@@ -70,6 +70,10 @@ pre-commit = "4.6.2"
 black = "26.5.1"
 mypy = "1.5.1"
 flake8 = "7.3.0"
+# The suite and its [tool.pytest.ini_options] block predate this entry: `make test` only
+# ever worked because poetry is configured to skip venv creation locally and picked pytest
+# up from the ambient interpreter. In CI's real venv it was "Command not found: pytest".
+pytest = ">=8.3,<10.0"
 
 
 [tool.poetry.group.extras.dependencies]

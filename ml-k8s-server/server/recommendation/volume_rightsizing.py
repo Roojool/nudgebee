@@ -166,11 +166,25 @@ class VolumeRightsizingService:
         self.datadog_app_key = datadog_app_key
         self.datadog_site = datadog_site
         self.elasticsearch = elasticsearch
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        # Named so a leaked pool is identifiable in `py-spy dump` and in
+        # /proc/<pid>/task/*/comm on a live pod.
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pvc-rightsize")
 
         # Configuration from original implementation
         self.overprovisioning_threshold = 0.9  # 90% usage threshold
         self.minimum_savings_threshold = 0.1  # Minimum $1 savings to recommend
+
+    def close(self) -> None:
+        """Release this scan's thread pool.
+
+        One service is built per scan and then dropped; without this its worker threads park
+        on the work queue for the life of the gunicorn worker, holding the scan's object
+        graph with them. See RecommendationService.close for the measurements.
+
+        Note the prometheus provider path never submits to this pool, so those threads are
+        created and leaked having done no work at all.
+        """
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     async def generate_recommendations(
         self, namespace_filter: Optional[str] = None, max_recommendations: Optional[int] = None
@@ -1269,10 +1283,16 @@ async def generate_volume_rightsizing_recommendations(
         datadog_site=datadog_site,
         elasticsearch=elasticsearch,
     )
-    result = await service.generate_recommendations(namespace_filter=namespace, max_recommendations=max_recommendations)
-    if persist_recommendation:
-        await service.store_recommendations_to_db(
-            result, namespace_filter=namespace, max_recommendations=max_recommendations
+    try:
+        result = await service.generate_recommendations(
+            namespace_filter=namespace, max_recommendations=max_recommendations
         )
-        result.database_stored = True
-    return result
+        if persist_recommendation:
+            await service.store_recommendations_to_db(
+                result, namespace_filter=namespace, max_recommendations=max_recommendations
+            )
+            result.database_stored = True
+        return result
+    finally:
+        # In a finally, not after the return: the scans that leak are the ones that raise.
+        service.close()
