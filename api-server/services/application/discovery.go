@@ -740,12 +740,12 @@ func discoverAndUpdateFrameworkAndDashboardAttributes(ctx *security.RequestConte
 
 	for arn, discovery := range appArnDataMap {
 		if discovery.application == "" {
-			ctx.GetLogger().Error("discovery: unable to identify application", "arn", arn, "data", slog.AnyValue(discovery))
+			ctx.GetLogger().Warn("discovery: unable to identify application", "arn", arn, "data", slog.AnyValue(discovery))
 			continue
 		}
 		workloadResourceId, ok := workloadIdMap[fmt.Sprintf("%s/%s", discovery.namespace, discovery.application)]
 		if !ok {
-			ctx.GetLogger().Error("discovery: unable to identify workload", "arn", arn, "data", slog.AnyValue(discovery))
+			ctx.GetLogger().Warn("discovery: unable to identify workload", "arn", arn, "data", slog.AnyValue(discovery))
 			continue
 		}
 
