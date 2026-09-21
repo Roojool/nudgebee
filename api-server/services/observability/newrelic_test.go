@@ -3322,6 +3322,10 @@ func TestBuildNewRelicWorkloadQueries(t *testing.T) {
 		assert.Contains(t, queries["http_latency_p95"], "percentile(duration, 95)")
 		assert.Contains(t, queries["http_latency_p99"], "percentile(duration, 99)")
 		assert.Contains(t, queries["http_error_rate"], "percentage(count(*), WHERE error IS true)")
+
+		// The evidence cards ask for the workload-level key, which the same NRQL answers.
+		aliased := buildNewRelicWorkloadQueries(meta, []string{"workload_http_latency_p99"})
+		assert.Equal(t, queries["http_latency_p99"], aliased["workload_http_latency_p99"])
 	})
 
 	t.Run("Empty namespace returns empty for workload metrics", func(t *testing.T) {

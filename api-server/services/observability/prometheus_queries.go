@@ -277,6 +277,22 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// --- Resources ---
 		case "cpu_usage":
 			queries[metricKey] = fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[5m]))`, containerFilter)
+		// Per-pod forms of the two usage keys, for charts that draw one line per pod
+		// (the anomaly and SLO evidence cards). Same containerFilter as the totals
+		// above, so container!="" keeps the pod-level cgroup series out: summing it
+		// alongside the per-container series counts every pod twice.
+		case "cpu_usage_by_pod":
+			queries[metricKey] = fmt.Sprintf(`sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[5m]))`, containerFilter)
+		case "memory_usage_by_pod":
+			queries[metricKey] = fmt.Sprintf(`sum by (pod, namespace) (container_memory_working_set_bytes{__CLUSTER__ %s})`, containerFilter)
+		// One series for the whole workload. http_latency_p99 above is per path and
+		// method over an hour, shaped for the latency table; an evidence chart needs a
+		// single p99 line at the chart's own resolution. Both this and cpu_throttling
+		// read the node-agent's eBPF metrics, so they answer only where that agent runs.
+		case "workload_http_latency_p99":
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s"}[5m])))`, safeMeta.Name, safeMeta.Namespace)
+		case "cpu_throttling":
+			queries[metricKey] = fmt.Sprintf(`sum by (container_id) (rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__ container_id=~".*%s/%s.*"}[5m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request":
 			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{__CLUSTER__ %sresource="cpu"})`, containerFilter)
 		case "cpu_limit":

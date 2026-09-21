@@ -91,6 +91,17 @@ func TestBuildDatadogWorkloadQueries_DeploymentResourceMetrics(t *testing.T) {
 			expected: "avg:kubernetes.cpu.usage.total{kube_namespace:shop, kube_deployment:web} by {kube_deployment}",
 		},
 		{
+			name:     "cpu_throttling from the agent's kubelet check, scoped by the same kube tags",
+			metric:   "cpu_throttling",
+			expected: "sum:kubernetes.cpu.cfs.throttled.seconds{kube_namespace:shop, kube_deployment:web} by {kube_deployment}",
+		},
+		{
+			// Trace metrics carry no kube_* tags, so the match is on the APM service name.
+			name:     "workload_http_latency_p99 from APM, matched on service name",
+			metric:   "workload_http_latency_p99",
+			expected: "p99:trace.http.server.request{service:web}",
+		},
+		{
 			name:     "memory_usage uses working_set",
 			metric:   "memory_usage",
 			expected: "avg:kubernetes.memory.working_set{kube_namespace:shop, kube_deployment:web} by {kube_deployment}",

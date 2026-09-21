@@ -3015,6 +3015,11 @@ func GetLogsQuery(ctx *security.RequestContext, fetchLogRequest FetchLogRequest)
 // tables behind getMetricsSourceForAccount.
 var metricsSourceForAccount = getMetricsSourceForAccount
 
+// utilisationProviderForAccount resolves which provider FetchMetricUtilisation builds
+// queries for. Indirected for the same reason as metricsSourceForAccount: so a test can
+// choose the provider without the integration tables behind it.
+var utilisationProviderForAccount = GetLogsMetricsTracesProvider
+
 func FetchMetricsQuery(ctx *security.RequestContext, fetchMetricsRequest FetchMetricsRequest) (OutputMetricQuery, error) {
 	source, err := metricsSourceForAccount(ctx, fetchMetricsRequest.AccountId, fetchMetricsRequest.MetricProvider, fetchMetricsRequest.MetricProviderSource)
 	if err != nil {
@@ -3162,7 +3167,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		return OutputMetricQuery{}, fmt.Errorf("account_id is required")
 	}
 
-	metricsProvider, integrationSource, err := GetLogsMetricsTracesProvider(ctx, req.AccountId, req.MetricProvider, "metrics", req.MetricProviderSource)
+	metricsProvider, integrationSource, err := utilisationProviderForAccount(ctx, req.AccountId, req.MetricProvider, "metrics", req.MetricProviderSource)
 	if err != nil {
 		return OutputMetricQuery{}, err
 	}
@@ -3283,6 +3288,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 
 	// Post-process Datadog percentile queries: collapse per-host series into a single percentile series
 	if metricsProvider == "datadog" {
+		datadogNanocoresToCores(output.Results)
 		percentileKeys := make(map[string]float64)
 		for _, m := range meta.RequestedMetrics {
 			switch m {
@@ -3321,6 +3327,33 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	}
 
 	return output, nil
+}
+
+// datadogNanocoresToCores converts CPU series Datadog reports in nanocores to cores.
+//
+// A utilisation key names a quantity in the product's unit: CPU is cores for every
+// provider (Prometheus natively, Elasticsearch and New Relic by conversion). Datadog's
+// kubernetes.cpu.usage.total is nanocores and was passed through as-is, so the same
+// workload read 0.04 on one provider and 2,000,000 on another, and sat on a chart
+// beside requests and limits that Datadog already reports in cores.
+//
+// Keyed on the unit Datadog attaches to each series, not on the metric key, so it
+// covers every CPU key and nothing else. Done here rather than in the Datadog source
+// because that source also runs users' own queries, which must come back unscaled.
+func datadogNanocoresToCores(results []QueryResult) {
+	const nanocoresPerCore = 1e9
+	for i := range results {
+		for j := range results[i].Payload {
+			series := &results[i].Payload[j]
+			if series.Metric["unit"] != "nanocore" {
+				continue
+			}
+			for k := range series.Values {
+				series.Values[k] /= nanocoresPerCore
+			}
+			series.Metric["unit"] = "core"
+		}
+	}
 }
 
 // computePercentileFromSeries computes a percentile across multiple host series at each timestamp.

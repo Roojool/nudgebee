@@ -110,18 +110,65 @@ func TestFetchMetricsQuery_UserPrometheusRangeReturnsTypedSeries(t *testing.T) {
 	assert.Equal(t, `sum(rate(container_cpu_usage_seconds_total{pod=~"api.*"}[5m]))`, req.URL.Query().Get("query"), "no labels configured: the query is sent as written")
 }
 
+// stubUtilisationProvider fixes which provider FetchMetricUtilisation builds queries
+// for, in place of the account's integration rows.
+func stubUtilisationProvider(t *testing.T, provider, source string) {
+	t.Helper()
+	orig := utilisationProviderForAccount
+	utilisationProviderForAccount = func(*security.RequestContext, string, string, string, string) (string, string, error) {
+		return provider, source, nil
+	}
+	t.Cleanup(func() { utilisationProviderForAccount = orig })
+}
+
+// fakeMetricSource stands in for a non-Prometheus provider: it records the native
+// queries it is handed and answers only the keys it is given series for, which is how
+// a real source behaves for a key its builder has no query for.
+type fakeMetricSource struct {
+	MetricSource
+	answers map[string][]Result
+	queries map[string]string
+}
+
+func (f *fakeMetricSource) FetchMetricsQuery(_ *security.RequestContext, req FetchMetricsRequest) (OutputMetricQuery, error) {
+	f.queries = req.Queries
+	out := OutputMetricQuery{}
+	for key, query := range req.Queries {
+		out.Results = append(out.Results, QueryResult{QueryKey: key, Query: query, Payload: f.answers[key]})
+	}
+	return out, nil
+}
+
+func stubMetricSource(t *testing.T, source MetricSource) {
+	t.Helper()
+	orig := metricsSourceForAccount
+	metricsSourceForAccount = func(*security.RequestContext, string, string, string) (MetricSource, error) {
+		return source, nil
+	}
+	t.Cleanup(func() { metricsSourceForAccount = orig })
+}
+
 func TestWorkloadMetricEvidence_RendersThePersistedCard(t *testing.T) {
+	stubUtilisationProvider(t, "prometheus", "user")
 	recorder := stubUserPrometheus(t, `cluster="prod"`, promMatrixResponse)
 
 	end := time.Now().UTC()
-	card, err := WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "cpu", "Cpu Metric", end.Add(-time.Hour), end)
+	card, err := WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "Deployment", "cpu", "Cpu Metric", end.Add(-time.Hour), end)
 	require.NoError(t, err)
 
 	assert.Equal(t, "prometheus", card["type"])
 	assert.Equal(t, "Cpu Metric", card["additional_info"].(map[string]any)["title"])
 	assert.Equal(t, "1.0", card["metadata"].(map[string]any)["query-result-version"])
-	assert.Contains(t, card["metadata"].(map[string]any)["query"], `pod=~"api.*"`)
 	assert.Empty(t, card["insight"])
+
+	// Prometheus has the per-pod key, so the card keeps one line per pod. The
+	// selection is the utilisation layer's: container!="" is what stops each pod
+	// being counted twice, and "api-" is what stops workload "api" matching
+	// "api-gateway"'s pods.
+	shown := card["metadata"].(map[string]any)["query"].(string)
+	assert.Contains(t, shown, `sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{`)
+	assert.Contains(t, shown, `pod=~"api-.*"`)
+	assert.Contains(t, shown, `container!=""`)
 
 	data := card["data"].(map[string]any)
 	assert.Equal(t, "matrix", data["result_type"])
@@ -131,12 +178,94 @@ func TestWorkloadMetricEvidence_RendersThePersistedCard(t *testing.T) {
 	assert.Equal(t, []any{1.7e9, 1.70000006e9}, first["timestamps"], "float seconds, as the agent emits")
 	assert.Equal(t, []any{"1", "2.5"}, first["values"], "strings, as the agent emits")
 
-	query := recorder.all()[0].URL.Query().Get("query")
-	assert.Contains(t, query, `cluster="prod"`)
-	assert.Contains(t, query, `namespace="shop"`)
+	for _, req := range recorder.all() {
+		query := req.URL.Query().Get("query")
+		assert.Contains(t, query, `cluster="prod"`)
+		assert.Contains(t, query, `namespace="shop"`)
+	}
 
-	_, err = WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "disk", "Disk", end.Add(-time.Hour), end)
+	_, err = WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "Deployment", "disk", "Disk", end.Add(-time.Hour), end)
 	assert.Error(t, err, "unknown workload metric")
+}
+
+// The account's default provider answers, not Prometheus. Datadog has no per-pod key,
+// so the card falls to the workload total; it reports CPU in nanocores, which the
+// utilisation layer turns into cores so the number means the same on every provider.
+func TestWorkloadMetricEvidence_IsAnsweredByTheDefaultProvider(t *testing.T) {
+	stubUtilisationProvider(t, "datadog", "user")
+	source := &fakeMetricSource{answers: map[string][]Result{
+		"cpu_usage": {{
+			Metric:     map[string]string{"kube_stateful_set": "loki", "unit": "nanocore"},
+			Timestamps: []int64{1700000000},
+			Values:     []float64{2_500_000_000},
+		}},
+	}}
+	stubMetricSource(t, source)
+
+	end := time.Now().UTC()
+	card, err := WorkloadMetricEvidence(testRequestContext(), "acc", "loki", "loki", "StatefulSet", "cpu", "Cpu Metric", end.Add(-time.Hour), end)
+	require.NoError(t, err)
+
+	// The kind reaches the builder: a StatefulSet is filtered by its own tag.
+	assert.Equal(t, "avg:kubernetes.cpu.usage.total{kube_namespace:loki, kube_stateful_set:loki} by {kube_stateful_set}",
+		source.queries["cpu_usage"])
+	assert.NotContains(t, source.queries, "cpu_usage_by_pod", "Datadog has no per-pod key")
+
+	assert.Equal(t, source.queries["cpu_usage"], card["metadata"].(map[string]any)["query"],
+		"the card shows the provider's own query")
+	series := card["data"].(map[string]any)["series_list_result"].([]any)
+	require.Len(t, series, 1)
+	first := series[0].(map[string]any)
+	assert.Equal(t, []any{"2.5"}, first["values"], "nanocores become cores")
+	assert.Equal(t, "core", first["metric"].(map[string]any)["unit"])
+}
+
+// A provider with no equivalent for a metric answers nothing, and the card carries no
+// series — which the investigate page hides. There is no fallback to Prometheus.
+func TestWorkloadMetricEvidence_IsEmptyWhereTheProviderHasNoSuchMetric(t *testing.T) {
+	stubUtilisationProvider(t, "solarwinds", "user")
+	source := &fakeMetricSource{}
+	stubMetricSource(t, source)
+
+	end := time.Now().UTC()
+	card, err := WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "Deployment", "cpu_throttling", "Cpu Throttling Metric", end.Add(-time.Hour), end)
+	require.NoError(t, err)
+
+	assert.Empty(t, source.queries, "SolarWinds has no throttling query, so nothing is asked")
+	data := card["data"].(map[string]any)
+	assert.Equal(t, "matrix", data["result_type"])
+	assert.Empty(t, data["series_list_result"])
+}
+
+// A provider the utilisation layer has no builder for at all is an error; both callers
+// skip a failed metric, so the event simply carries no such card. Splunk rather than
+// CubeAPM, which the utilisation layer now serves through the Prometheus builders.
+func TestWorkloadMetricEvidence_FailsForAProviderWithNoUtilisationSupport(t *testing.T) {
+	stubUtilisationProvider(t, "splunk_enterprise", "user")
+
+	end := time.Now().UTC()
+	_, err := WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "Deployment", "cpu", "Cpu Metric", end.Add(-time.Hour), end)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "splunk_enterprise")
+}
+
+// Only series Datadog labels as nanocores are scaled: memory, and CPU requests and
+// limits that Datadog already reports in cores, must pass through untouched.
+func TestDatadogNanocoresToCores(t *testing.T) {
+	results := []QueryResult{
+		{QueryKey: "cpu_usage", Payload: []Result{{Metric: map[string]string{"unit": "nanocore"}, Values: []float64{1_500_000_000, 250_000_000}}}},
+		{QueryKey: "cpu_request", Payload: []Result{{Metric: map[string]string{"unit": "core"}, Values: []float64{0.5}}}},
+		{QueryKey: "memory_usage", Payload: []Result{{Metric: map[string]string{"unit": "byte"}, Values: []float64{1024}}}},
+		{QueryKey: "no_unit", Payload: []Result{{Metric: map[string]string{}, Values: []float64{7}}}},
+	}
+
+	datadogNanocoresToCores(results)
+
+	assert.Equal(t, []float64{1.5, 0.25}, results[0].Payload[0].Values)
+	assert.Equal(t, "core", results[0].Payload[0].Metric["unit"])
+	assert.Equal(t, []float64{0.5}, results[1].Payload[0].Values)
+	assert.Equal(t, []float64{1024}, results[2].Payload[0].Values)
+	assert.Equal(t, []float64{7}, results[3].Payload[0].Values)
 }
 
 func TestPromQLCardEncoders_MatchTheAgentShapesThePlaybookParsersRead(t *testing.T) {

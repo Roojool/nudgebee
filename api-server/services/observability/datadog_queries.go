@@ -119,6 +119,18 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 			queries[metricKey] = fmt.Sprintf("default(avg:container.net.tcp.connection.time.seconds.total{%s}%s, avg:kubernetes.network.rx_bytes{%s}%s)", filterStr, groupBy, filterStr, groupBy)
 		case "cpu_usage":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.cpu.usage.total{%s}%s", filterStr, groupBy)
+		// Seconds per second the workload's containers spent throttled, from the
+		// Datadog agent's kubelet check. It carries the same kube_* tags as usage, so
+		// filterStr scopes it to the workload exactly.
+		case "cpu_throttling":
+			queries[metricKey] = fmt.Sprintf("sum:kubernetes.cpu.cfs.throttled.seconds{%s}%s", filterStr, groupBy)
+		// APM latency. Trace metrics carry no kube_* tags, only service/env/resource,
+		// so this matches on the APM service being named after the workload. Where it
+		// is not, the query matches nothing and the card is empty.
+		case "workload_http_latency_p99":
+			if meta.Name != "" {
+				queries[metricKey] = fmt.Sprintf("p99:trace.http.server.request{service:%s}", meta.Name)
+			}
 		case "cpu_request":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.cpu.requests{%s}%s", filterStr, groupBy)
 		case "cpu_limit":

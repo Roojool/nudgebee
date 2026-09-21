@@ -502,7 +502,7 @@ func buildDynatraceWorkloadQueries(meta RequestMetadata, metrics []string) map[s
 			if ns != "" && name != "" {
 				queries[metricKey] = dqlHTTPLatencyPercentile(ns, name, 95)
 			}
-		case "http_latency_p99":
+		case "http_latency_p99", "workload_http_latency_p99":
 			if ns != "" && name != "" {
 				queries[metricKey] = dqlHTTPLatencyPercentile(ns, name, 99)
 			}

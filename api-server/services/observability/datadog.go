@@ -1072,6 +1072,12 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 		if err != nil {
 			return OutputMetricQuery{}, fmt.Errorf("failed to map datadog response for query %q: %w", queryKey, err)
 		}
+		// Report the query that actually ran, as the other sources do. Without it a
+		// caller showing "what was asked" (the executed-query tooltip, an evidence
+		// card's metadata) had nothing to show for Datadog.
+		for i := range queryOutput.Results {
+			queryOutput.Results[i].Query = injected
+		}
 		finalOutput.Results = append(finalOutput.Results, queryOutput.Results...)
 	}
 

@@ -985,7 +985,7 @@ func GenerateAnomalyEvent(dbms *database.DatabaseManager, anomaly *Anomaly) erro
 		}
 		workloadKindMap[name] = kind
 	}
-	evidences, err := collectEvidences(anomaly)
+	evidences, err := collectEvidences(anomaly, workloadKindMap[anomaly.Name])
 	if err != nil {
 		slog.Error("anomaly: error collecting evidences", "error", err, "account_id", anomaly.AccountId, "anomaly_id", anomaly.Id, "anomaly_type", anomaly.AnomalyType, "name", anomaly.Name, "namespace", anomaly.Namespace)
 		evidences = []any{}
@@ -1035,7 +1035,7 @@ func GenerateAnomalyEvent(dbms *database.DatabaseManager, anomaly *Anomaly) erro
 	return err
 }
 
-func collectEvidences(anomaly *Anomaly) ([]any, error) {
+func collectEvidences(anomaly *Anomaly, workloadKind string) ([]any, error) {
 	// anomaly to map
 	anomalyMap, err := common.MarshalStructToMap(anomaly)
 	if err != nil {
@@ -1060,14 +1060,13 @@ func collectEvidences(anomaly *Anomaly) ([]any, error) {
 	var g errgroup.Group
 
 	// Workload metrics (memory, cpu, latency, cpu_throttling), through the
-	// metrics layer so the account's own Prometheus answers — the cluster
-	// agent's or a user-connected one.
+	// metrics layer so the account's default metrics provider answers.
 	metricsCtx := security.NewRequestContextForTenantAdmin(anomaly.Tenant, slog.Default(), nil, nil)
 	for i, metricName := range metricNames {
 		i, metricName := i, metricName
 		g.Go(func() error {
 			title := fmt.Sprintf("%s Metric", strings.ToTitle(strings.ReplaceAll(metricName, "_", " ")))
-			res, err := observability.WorkloadMetricEvidence(metricsCtx, anomaly.AccountId, anomaly.Name, anomaly.Namespace, metricName, title, startTime, endTime)
+			res, err := observability.WorkloadMetricEvidence(metricsCtx, anomaly.AccountId, anomaly.Name, anomaly.Namespace, workloadKind, metricName, title, startTime, endTime)
 			if err != nil {
 				slog.Error("anomaly: error getting workload ", "error", err, "metric", metricName, "workload", anomaly.Name, "namespace", anomaly.Namespace)
 				return nil

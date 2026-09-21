@@ -187,6 +187,28 @@ func TestBuildPrometheusWorkloadQueries_DeploymentResourceMetrics(t *testing.T) 
 			expected: `sum(rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"web-.*", container!="",}[5m]))`,
 		},
 		{
+			// container!="" is load-bearing: without it the pod-level cgroup series is
+			// summed with the per-container ones and every pod counts twice.
+			name:     "cpu_usage_by_pod is the same selection, one series per pod",
+			metric:   "cpu_usage_by_pod",
+			expected: `sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"web-.*", container!="",}[5m]))`,
+		},
+		{
+			name:     "memory_usage_by_pod is working set, one series per pod",
+			metric:   "memory_usage_by_pod",
+			expected: `sum by (pod, namespace) (container_memory_working_set_bytes{__CLUSTER__  namespace="shop", pod=~"web-.*", container!="",})`,
+		},
+		{
+			name:     "workload_http_latency_p99 is one p99 line for the workload",
+			metric:   "workload_http_latency_p99",
+			expected: `histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ actual_destination_workload_name=~"web.*", actual_destination_workload_namespace="shop"}[5m])))`,
+		},
+		{
+			name:     "cpu_throttling from the node-agent's per-container counter",
+			metric:   "cpu_throttling",
+			expected: `sum by (container_id) (rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__ container_id=~".*shop/web.*"}[5m]))`,
+		},
+		{
 			name:     "memory_usage over working set bytes",
 			metric:   "memory_usage",
 			expected: `sum(container_memory_working_set_bytes{__CLUSTER__  namespace="shop", pod=~"web-.*", container!="",})`,
