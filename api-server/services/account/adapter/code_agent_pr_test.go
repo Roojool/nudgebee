@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"nudgebee/services/internal/database/models"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,5 +72,64 @@ func TestExtractPRFromAgentResponse(t *testing.T) {
 			url, _ := extractPRFromAgentResponse(tt.resp)
 			assert.Equal(t, tt.wantURL, url)
 		})
+	}
+}
+
+// A no-op is two very different outcomes wearing one status. Only the one where
+// the agent actually looked may retire the recommendation; the other has to hand
+// it back, or a change nobody made is recorded as applied.
+func TestNoOpOutcome(t *testing.T) {
+	cases := []struct {
+		name       string
+		response   map[string]any
+		wantStatus models.RecommendationResolutionStatus
+		wantMsg    string
+	}{
+		{
+			name:       "agent looked and found the change already there",
+			response:   map[string]any{"no_op_basis": "specialist_verdict", "message": "already present in values-test.yaml"},
+			wantStatus: models.RecommendationResolutionStatusSuccess,
+			wantMsg:    "already present in values-test.yaml",
+		},
+		{
+			name:       "run proposed nothing, so nothing was established",
+			response:   map[string]any{"no_op_basis": "no_implementation_instructions"},
+			wantStatus: models.RecommendationResolutionStatusFailed,
+		},
+		{
+			name:       "an absent basis is not a verdict",
+			response:   map[string]any{"message": "no changes were needed"},
+			wantStatus: models.RecommendationResolutionStatusFailed,
+		},
+		{
+			name:       "an unrecognised basis is not a verdict either",
+			response:   map[string]any{"no_op_basis": "something_new"},
+			wantStatus: models.RecommendationResolutionStatusFailed,
+		},
+	}
+
+	for _, c := range cases {
+		gotStatus, gotMsg := noOpOutcome(c.response)
+		if gotStatus != c.wantStatus {
+			t.Errorf("%s: got status %q, want %q", c.name, gotStatus, c.wantStatus)
+		}
+		if c.wantMsg != "" && gotMsg != c.wantMsg {
+			t.Errorf("%s: got message %q, want %q", c.name, gotMsg, c.wantMsg)
+		}
+		if gotMsg == "" {
+			t.Errorf("%s: a resolution must always carry a reason", c.name)
+		}
+	}
+}
+
+// The message a user reads must never assert the change is already in place
+// unless that was actually established.
+func TestNoOpOutcomeNeverClaimsPresenceWithoutAVerdict(t *testing.T) {
+	_, msg := noOpOutcome(map[string]any{"no_op_basis": "no_implementation_instructions"})
+	if strings.Contains(strings.ToLower(msg), "already present") {
+		t.Errorf("message claims the change is already present without a verdict: %q", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "not confirmed") {
+		t.Errorf("message should say the values were not confirmed: %q", msg)
 	}
 }

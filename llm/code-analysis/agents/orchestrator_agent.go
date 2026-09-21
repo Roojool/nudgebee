@@ -475,9 +475,18 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 		if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil && resultData != nil {
 			resultData["execution_status"] = ExecutionStatusNoOp
 			resultData["mode"] = mode
+			// Only a specialist verdict is a finding about the file. Everything
+			// else that lands here simply produced nothing, and saying the change
+			// is already present would be inventing a result nobody reported.
+			// Specialists that rewrite requires_fix set the basis themselves,
+			// because only they still know what the model originally said. The
+			// rest are judged here: a stated requires_fix=false is a verdict,
+			// and an absent one is not.
+			basis := resolveNoOpBasis(resultData, factsData)
+			resultData[NoOpBasisKey] = basis
 			if request.RaisePR {
 				resultData["pr_creation_status"] = "skipped"
-				resultData["pr_creation_reason"] = "No code change required — the specialist determined the requested change is already present / no fix is needed."
+				resultData["pr_creation_reason"] = noOpReason(basis)
 			}
 			if modifiedJSON, err := json.Marshal(resultData); err == nil {
 				return string(modifiedJSON), nil
@@ -1766,7 +1775,51 @@ func (a *OrchestratorAgent) executeFixAndReviewLoop(ctx context.Context, session
 // the file and returning requires_fix=false. An empty diff from the fixer is not
 // eligible: by then the specialist has already said a change is needed, so the
 // honest reading is that the fix failed to land, not that it was there all along.
+//
+// A specialist run that produced no implementation instructions also lands here,
+// because there is nothing to hand the fixer. That is not the same finding, and
+// NoOpBasisKey says which of the two happened. Read it before telling anyone the
+// change is already present.
 const ExecutionStatusNoOp = "no_op"
+
+// resolveNoOpBasis works out why a run ended with no change. Specialists that
+// rewrite requires_fix record the basis themselves, because only they still know
+// what the model originally said. For the rest, a stated requires_fix=false is a
+// verdict about the file and an absent one is not, so silence is never read as
+// agreement.
+func resolveNoOpBasis(resultData, factsData map[string]any) string {
+	if basis, _ := resultData[NoOpBasisKey].(string); basis != "" {
+		return basis
+	}
+	if stated, _ := factsData["requires_fix_stated"].(bool); stated {
+		return NoOpBasisSpecialistVerdict
+	}
+	return NoOpBasisNoInstructions
+}
+
+// noOpReason is what the caller is told. Only a verdict earns the claim that the
+// change is already in place; anything else says plainly that nothing was
+// established, so no one downstream treats silence as confirmation.
+func noOpReason(basis string) string {
+	if basis == NoOpBasisSpecialistVerdict {
+		return "No code change required — the specialist determined the requested change is already present / no fix is needed."
+	}
+	return "No pull request was created: the analysis finished without proposing a change. This does not mean the change is already present — the requested values were not confirmed against the target file."
+}
+
+// NoOpBasisKey carries why a run ended in ExecutionStatusNoOp.
+const NoOpBasisKey = "no_op_basis"
+
+const (
+	// NoOpBasisSpecialistVerdict means the specialist looked and said no change
+	// is needed. Only this basis supports telling the user the change is
+	// already present.
+	NoOpBasisSpecialistVerdict = "specialist_verdict"
+	// NoOpBasisNoInstructions means the run finished without anything to act on,
+	// so no judgement about the file was ever made. Nothing can be concluded
+	// about what the file contains.
+	NoOpBasisNoInstructions = "no_implementation_instructions"
+)
 
 // ExecutionStatusSuccess marks a fix-mode run that produced a diff. The fixer
 // already emits it on the PR path; buildFinalResponse falls back to it so a

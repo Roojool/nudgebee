@@ -51,6 +51,11 @@ type SubmitAnalysisInput struct {
 	PRList       []any          `json:"pr_list,omitempty"`
 	PRInfo       map[string]any `json:"pr_info,omitempty"` // Information about created PR
 	RequiresFix  bool           `json:"requires_fix,omitempty"`
+	// RequiresFixStated records whether the model actually supplied
+	// requires_fix. Callers need to tell "it judged no fix is needed" apart
+	// from "it never said", because those two mean very different things to
+	// whoever is told no change was made.
+	RequiresFixStated bool `json:"requires_fix_stated,omitempty"`
 
 	// EXPLORE-MODE STRUCTURED CONTRACT
 	// Answer is the headline response in plain prose (no markdown). Required
@@ -651,18 +656,19 @@ func (t *SubmitAnalysisTool) Execute(ctx context.Context, input map[string]any) 
 	// Create the structured result - this is what gets extracted by the system
 	result := map[string]any{
 		// EXISTING FIELDS - Must maintain exact compatibility
-		"title":         params.Title,
-		"description":   params.Description,
-		"file_path":     params.FilePath,
-		"line_number":   params.LineNumber,
-		"error_message": params.ErrorMessage,
-		"original_code": params.OriginalCode,
-		"fixed_code":    params.FixedCode,
-		"code_context":  params.CodeContext,
-		"git_diff":      params.GitDiff,
-		"commits":       params.Commits,
-		"pr_list":       params.PRList,
-		"requires_fix":  params.RequiresFix,
+		"title":               params.Title,
+		"description":         params.Description,
+		"file_path":           params.FilePath,
+		"line_number":         params.LineNumber,
+		"error_message":       params.ErrorMessage,
+		"original_code":       params.OriginalCode,
+		"fixed_code":          params.FixedCode,
+		"code_context":        params.CodeContext,
+		"git_diff":            params.GitDiff,
+		"commits":             params.Commits,
+		"pr_list":             params.PRList,
+		"requires_fix":        params.RequiresFix,
+		"requires_fix_stated": params.RequiresFixStated,
 
 		// NEW ENHANCEMENT FIELDS - Only include if not empty
 		"confidence_score":    params.ConfidenceScore,
@@ -847,6 +853,7 @@ func (t *SubmitAnalysisTool) enhanceWithToolOutputs(input map[string]any, params
 	// requires_fix - defaults to false if not specified
 	if v, ok := input["requires_fix"].(bool); ok {
 		params.RequiresFix = v
+		params.RequiresFixStated = true
 	}
 
 	// NEW ENHANCEMENT FIELDS

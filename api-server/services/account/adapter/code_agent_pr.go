@@ -27,6 +27,37 @@ import (
 // services share this value as their contract, so it must stay in sync.
 const codeAgentNoOpStatus = "no_op"
 
+// A no-op says nothing on its own about what the target file contains. These
+// mirror NoOpBasisKey and its values in llm/code-analysis (orchestrator_agent.go)
+// and say which of the two very different outcomes produced it: the agent read
+// the file and judged no change needed, or it finished without proposing one and
+// never reached a judgement. Only the first may be recorded as applied.
+const (
+	codeAgentNoOpBasisKey        = "no_op_basis"
+	codeAgentNoOpBasisSpecialist = "specialist_verdict"
+)
+
+// noOpOutcome decides what a no-op run means for the resolution row. The agent
+// having looked and found the change already in place settles the work. A run
+// that ended without proposing anything settles nothing: it never established
+// what the file holds, so recording it as applied would retire a recommendation
+// whose change was never made. Failing it instead hands the recommendation back
+// for another attempt.
+func noOpOutcome(agentResponse map[string]any) (models.RecommendationResolutionStatus, string) {
+	basis, _ := agentResponse[codeAgentNoOpBasisKey].(string)
+	msg := firstNonEmptyStringField(agentResponse, "message", "pr_creation_reason", "execution_summary", "description")
+	if basis == codeAgentNoOpBasisSpecialist {
+		if msg == "" {
+			msg = "No change needed — the requested change is already present."
+		}
+		return models.RecommendationResolutionStatusSuccess, msg
+	}
+	if msg == "" {
+		msg = "No pull request was created: the analysis finished without proposing a change, and the requested values were not confirmed against the target file."
+	}
+	return models.RecommendationResolutionStatusFailed, msg
+}
+
 // codeAgentPRParams carries everything dispatchCodeAgentPR needs to run one
 // @agent_code_2 "fix + raise PR" conversation asynchronously and record its
 // outcome on a resolution row. The caller supplies a prompt builder; everything
@@ -43,8 +74,14 @@ type codeAgentPRParams struct {
 	// RepoURL, when set, is used verbatim as the git repository passed to the
 	// agent (needed for GitLab / self-hosted hosts). Empty → the GitHub URL is
 	// built from Org/Repo for backward compatibility.
-	RepoURL        string
-	Provider       string // "github" (default) or "gitlab"; recorded in PR lifecycle metadata
+	RepoURL  string
+	Provider string // "github" (default) or "gitlab"; recorded in PR lifecycle metadata
+	// Namespace and Workload identify the Kubernetes object the change is for.
+	// The agent envelope has carried these fields all along; leaving them empty
+	// makes the run read as "unknown", which is what lets an agent answer about
+	// a sibling environment's file and sound just as certain.
+	Namespace      string
+	Workload       string
 	Label          string // used in log lines + failure messages (e.g. "code agent")
 	SuccessMessage string // user-facing status_message when the PR is raised
 }
@@ -126,6 +163,12 @@ func dispatchCodeAgentPR(ctx AccountAdapterContext, p codeAgentPRParams, buildPr
 			"raise_pr":          true,
 			"recommendation_id": p.RecommendationID,
 			"account_id":        p.AccountID,
+		}
+		if p.Namespace != "" {
+			codeAgentPayload["namespace"] = p.Namespace
+		}
+		if p.Workload != "" {
+			codeAgentPayload["workload"] = p.Workload
 		}
 		codeAgentPayloadJSON, _ := common.MarshalJson(codeAgentPayload)
 		prompt := "@agent_code_2 " + string(codeAgentPayloadJSON)
@@ -215,15 +258,13 @@ func dispatchCodeAgentPR(ctx AccountAdapterContext, p codeAgentPRParams, buildPr
 			}
 
 		case executionStatus == codeAgentNoOpStatus:
-			// Authoritative structured signal (not prose matching): the agent
-			// determined the requested change is already present, so no PR was needed.
-			// A benign informational outcome, not a failure.
-			msg := firstNonEmptyStringField(agentResponse, "message", "pr_creation_reason", "execution_summary", "description")
-			if msg == "" {
-				msg = "No change needed — the requested change is already present."
+			status, msg := noOpOutcome(agentResponse)
+			if status == models.RecommendationResolutionStatusSuccess {
+				ctx.GetLogger().Info("recommendation_resolution: code agent reported no change needed", "label", p.Label)
+			} else {
+				ctx.GetLogger().Warn("recommendation_resolution: code agent produced no change and no verdict", "label", p.Label)
 			}
-			ctx.GetLogger().Info("recommendation_resolution: code agent reported no change needed", "label", p.Label)
-			updateStatus(models.RecommendationResolutionStatusSuccess, truncateForStatus(msg), "")
+			updateStatus(status, truncateForStatus(msg), "")
 
 		case executionStatus == "success":
 			if reason := prCreationFailureReason(agentResponse); reason != "" {

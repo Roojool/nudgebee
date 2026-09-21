@@ -3271,7 +3271,7 @@ func diffChangedFiles(diff string) []string {
 // must not re-derive that from which JSON keys happen to be populated.
 const (
 	codeOutcomeSuccess = "success" // a diff (and possibly a PR) was produced
-	codeOutcomeNoOp    = "no_op"   // the requested change is already present
+	codeOutcomeNoOp    = "no_op"   // the agent read the code and the change is already present
 	codeOutcomeFailed  = "failed"  // the run could not finish or errored out
 )
 
@@ -3283,7 +3283,14 @@ func codeAgentOutcome(actualResponse map[string]any, response EventAnalysisRespo
 	outcome := ""
 	switch response.ExecutionStatus {
 	case codeOutcomeNoOp:
-		outcome = codeOutcomeNoOp
+		// A no-op only means the change is already there when the agent looked
+		// and said so. A run that proposed nothing established nothing about the
+		// code, and is inconclusive rather than a clean bill of health.
+		if basis, _ := actualResponse[agents.CodeAnalysisNoOpBasisKey].(string); basis == agents.CodeAnalysisNoOpBasisSpecialist {
+			outcome = codeOutcomeNoOp
+		} else {
+			outcome = codeOutcomeFailed
+		}
 	case codeOutcomeFailed:
 		outcome = codeOutcomeFailed
 	case "":

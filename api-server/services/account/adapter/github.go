@@ -1880,7 +1880,23 @@ func formatRequestedValuesForPrompt(data map[string]any) map[string]any {
 	return out
 }
 
+// workloadIdentityFromRequest reads the namespace and workload name off the
+// resource being changed. Two workloads in one cluster can share a chart and
+// differ only by namespace, so an agent that is not told which one it is acting
+// for has no way to tell their values files apart.
+func workloadIdentityFromRequest(request ApplyRecommendationRequest) (namespace string, workload string) {
+	if meta, ok := request.Resource.Meta.Object().(map[string]any); ok {
+		namespace, _ = meta["namespace"].(string)
+		workload, _ = meta["controller"].(string)
+	}
+	if workload == "" && request.Resource.Name != nil {
+		workload = *request.Resource.Name
+	}
+	return namespace, workload
+}
+
 func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, request ApplyRecommendationRequest, gitDetail gitDetailFromDeployment, recommendResolutionId string) error {
+	workloadNamespace, workloadName := workloadIdentityFromRequest(request)
 	dispatchCodeAgentPR(ctx, codeAgentPRParams{
 		AccountID:         request.Recommendation.CloudAccountId,
 		RecommendationID:  request.Recommendation.Id,
@@ -1889,6 +1905,8 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 		Org:               gitDetail.Org,
 		Repo:              gitDetail.Repo,
 		Branch:            gitDetail.BaseBranch,
+		Namespace:         workloadNamespace,
+		Workload:          workloadName,
 		Label:             "code agent",
 		SuccessMessage:    "PR raised successfully by code agent",
 	}, func() (string, error) {
@@ -1911,6 +1929,8 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 **Repository**: %s/%s
 **Branch**: %s
 **Helm Values File**: %s
+**Workload**: %s
+**Namespace**: %s
 
 **User Requested Values** (use these exact values for the update):
 %s
@@ -1919,7 +1939,7 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 %s
 
 **Instructions**:
-1. View the Helm values file to understand the current resource configuration
+1. View the Helm values file named above. That file is the only one you may change, and the only one that decides whether this change is already made. Sibling environments often keep a near-identical file, so what any other values file contains says nothing about this workload.
 2. If you need to understand the template mapping, search for templates (deployment.yaml, Chart.yaml). If no templates are found after 2-3 searches, this is likely a values-only repository - proceed with direct modification of the values file.
 3. Identify the correct YAML path in the values file for each container
 4. Update only the specified CPU/memory values at the correct paths
@@ -1943,6 +1963,8 @@ Make minimal, precise changes only.`,
 			gitDetail.Repo,
 			gitDetail.BaseBranch,
 			gitDetail.FilePath,
+			workloadName,
+			workloadNamespace,
 			string(requestDataJSON),
 			string(recommendationJSON),
 			resizePolicySection,

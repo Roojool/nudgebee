@@ -3,6 +3,7 @@ package api
 import (
 	"testing"
 
+	"nudgebee/llm/agents"
 	"nudgebee/llm/services_server"
 
 	"github.com/stretchr/testify/assert"
@@ -79,7 +80,11 @@ func TestCodeAgentOutcome(t *testing.T) {
 
 	t.Run("no_op keeps the agent's answer and citations", func(t *testing.T) {
 		outcome, explanation := codeAgentOutcome(
-			map[string]any{"answer": "already implemented", "citations": citations},
+			map[string]any{
+				"answer":                        "already implemented",
+				"citations":                     citations,
+				agents.CodeAnalysisNoOpBasisKey: agents.CodeAnalysisNoOpBasisSpecialist,
+			},
 			EventAnalysisResponse{ExecutionStatus: "no_op"},
 		)
 		assert.Equal(t, codeOutcomeNoOp, outcome)
@@ -99,9 +104,27 @@ func TestCodeAgentOutcome(t *testing.T) {
 	})
 
 	t.Run("empty response yields no explanation so the caller skips", func(t *testing.T) {
-		outcome, explanation := codeAgentOutcome(map[string]any{}, EventAnalysisResponse{ExecutionStatus: "no_op"})
+		outcome, explanation := codeAgentOutcome(
+			map[string]any{agents.CodeAnalysisNoOpBasisKey: agents.CodeAnalysisNoOpBasisSpecialist},
+			EventAnalysisResponse{ExecutionStatus: "no_op"},
+		)
 		assert.Equal(t, codeOutcomeNoOp, outcome)
 		assert.Empty(t, explanation)
+	})
+
+	// The specialist saying so is what makes a no-op mean the code already does
+	// this. A run that proposed nothing checked nothing, and the investigate page
+	// must not show it as a clean result.
+	t.Run("a no_op without a verdict is inconclusive, not already present", func(t *testing.T) {
+		for _, basis := range []string{"no_implementation_instructions", "", "something_new"} {
+			resp := map[string]any{"description": "produced no instructions"}
+			if basis != "" {
+				resp[agents.CodeAnalysisNoOpBasisKey] = basis
+			}
+			outcome, explanation := codeAgentOutcome(resp, EventAnalysisResponse{ExecutionStatus: "no_op"})
+			assert.Equal(t, codeOutcomeFailed, outcome, "basis %q", basis)
+			assert.Contains(t, explanation, "produced no instructions")
+		}
 	})
 }
 

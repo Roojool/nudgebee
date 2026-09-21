@@ -73,6 +73,14 @@ const codeAgentFailuresCacheNS = "code_agent_conv_failures"
 // present, so no diff and no PR were produced. It is a SUCCESS, not a failure.
 const codeAnalysisNoOpStatus = "no_op"
 
+// A no-op carries the reason it happened. Mirrors NoOpBasisKey in
+// llm/code-analysis (orchestrator_agent.go): only a specialist verdict is a
+// finding about the file, so only it may be read back as "already present".
+const (
+	CodeAnalysisNoOpBasisKey        = "no_op_basis"
+	CodeAnalysisNoOpBasisSpecialist = "specialist_verdict"
+)
+
 // noopGuardPrefix tags a cached no-op terminal answer in codeAgentFailuresCacheNS,
 // distinguishing it from a failure-guard entry. A re-dispatch within the same
 // message replays this answer as a success instead of re-running the analysis,
@@ -1808,7 +1816,14 @@ func noOpTerminalAnswer(responseStr string) (string, bool) {
 	// silent skip. Never hardcode a specific case — use the agent's own fields.
 	detail := firstNonEmptyField(resp, "pr_creation_reason", "description", "root_cause_analysis", "execution_summary")
 	var b strings.Builder
-	b.WriteString("No pull request was created — the requested change is already present in the repository, so no modifications were needed.")
+	// Say the change is already there only when the agent actually checked and
+	// said so. Otherwise the run simply proposed nothing, which tells the reader
+	// nothing about the file and must not read as if it did.
+	if basis, _ := resp[CodeAnalysisNoOpBasisKey].(string); basis == CodeAnalysisNoOpBasisSpecialist {
+		b.WriteString("No pull request was created — the requested change is already present in the repository, so no modifications were needed.")
+	} else {
+		b.WriteString("No pull request was created — the analysis finished without proposing a change. This does not mean the change is already present: the requested values were not confirmed against the target file.")
+	}
 	if detail != "" {
 		b.WriteString("\n\n")
 		b.WriteString(detail)
