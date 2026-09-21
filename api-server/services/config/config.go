@@ -594,9 +594,11 @@ func init() {
 	// The rollback switch for per-resource graph updates. When false, every
 	// resource ref — from the detector, EventBridge/EventGrid or the Kubernetes
 	// collector — rebuilds its account instead of being patched, which is how the
-	// graph behaved before per-resource updates existed. Off until per-resource
-	// output has been compared with account rebuilds on a live environment.
-	viper.SetDefault("kg_resource_patch_enabled", false)
+	// graph behaved before per-resource updates existed. On by default: shipping
+	// it off meant the patch path never ran anywhere, so the comparison it was
+	// waiting for could not happen. It stays a switch, so turning it off restores
+	// account rebuilds without a deploy.
+	viper.SetDefault("kg_resource_patch_enabled", true)
 
 	// Event post-process queue configuration
 	viper.SetDefault("rabbit_mq_event_post_process_exchange", "event_post_process_exchange")

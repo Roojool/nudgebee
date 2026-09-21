@@ -54,3 +54,17 @@ func TestServerRoleDefaultsToAll(t *testing.T) {
 		t.Errorf("default SERVER_ROLE = %q, want %q", Config.ServerRole, ServerRoleAll)
 	}
 }
+
+// Per-resource knowledge-graph updates are on unless an environment explicitly
+// turns them off. They shipped off, and two days on dev showed the detector
+// publishing refs that never reached the patch path — so the comparison the
+// switch was waiting for could not happen. This pins the default; flipping it
+// back to false silently would stop per-resource updates everywhere again.
+func TestResourcePatchEnabledByDefault(t *testing.T) {
+	if v, ok := os.LookupEnv("KG_RESOURCE_PATCH_ENABLED"); ok {
+		t.Skipf("KG_RESOURCE_PATCH_ENABLED=%q is set in the environment; the compiled-in default is not observable here", v)
+	}
+	if !Config.KGResourcePatchEnabled {
+		t.Error("default kg_resource_patch_enabled = false, want true")
+	}
+}
