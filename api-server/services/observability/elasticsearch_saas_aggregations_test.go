@@ -105,12 +105,15 @@ func TestParseESAggregations_KeyedBuckets(t *testing.T) {
 // the shape — never an empty result, which reads as "you have no data" and is what
 // sent one investigation through 86 queries against data that was present.
 func TestParseESAggregations_UnsupportedShapeIsAnError(t *testing.T) {
+	// top_hits returns documents, not a number, so there is nothing to plot. It
+	// replaced `percentiles` as this test's example when percentiles became
+	// readable — see TestParseESMetrics_PercentilesPerPod.
 	body := `{"hits":{"total":{"value":5},"hits":[]},"aggregations":{
-	 "pcts":{"values":{"95.0":12.3,"99.0":45.6}},
+	 "docs":{"hits":{"total":{"value":5},"max_score":1.0,"hits":[{"_id":"a"}]}},
 	 "ok_one":{"value":1.0}}}`
 	res, _, err := parseESMetricsHitsWithStats([]byte(body), 1787800000000)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pcts", "the error must name the aggregation we could not read")
+	assert.Contains(t, err.Error(), "docs", "the error must name the aggregation we could not read")
 	assert.Contains(t, err.Error(), "terms", "and list what is supported")
 	// Whatever WAS readable is still returned rather than discarded.
 	require.Len(t, res, 1)

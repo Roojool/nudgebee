@@ -1088,18 +1088,22 @@ type DatadogResponse struct {
 }
 
 type SeriesItem struct {
-	Unit        []*UnitItem `json:"unit"`
-	QueryIdx    int         `json:"query_index"`
-	Aggr        string      `json:"aggr"`
-	Metric      string      `json:"metric"`
-	TagSet      []string    `json:"tag_set"`
-	Expression  string      `json:"expression"`
-	Scope       string      `json:"scope"`
-	Interval    int         `json:"interval"`
-	Start       int64       `json:"start"`
-	End         int64       `json:"end"`
-	PointList   [][]float64 `json:"pointlist"`
-	DisplayName string      `json:"display_name"`
+	Unit       []*UnitItem `json:"unit"`
+	QueryIdx   int         `json:"query_index"`
+	Aggr       string      `json:"aggr"`
+	Metric     string      `json:"metric"`
+	TagSet     []string    `json:"tag_set"`
+	Expression string      `json:"expression"`
+	Scope      string      `json:"scope"`
+	Interval   int         `json:"interval"`
+	Start      int64       `json:"start"`
+	End        int64       `json:"end"`
+	// PointList is [[epoch_millis, value], ...]. The value is nullable: Datadog
+	// emits [ts, null] for an interval the series has no data in, which is normal
+	// on a per-pod query whose pods each lived for part of the window. Decoded as
+	// []float64 those nulls became a measured 0 — see datadogMapToOutputMetricWithKey.
+	PointList   [][]*float64 `json:"pointlist"`
+	DisplayName string       `json:"display_name"`
 }
 
 type UnitItem struct {
@@ -1138,20 +1142,32 @@ func datadogMapToOutputMetricWithKey(bodyBytes []byte, queryKey string) (OutputM
 
 		var timestamps []int64
 		var values []float64
+		gaps := 0
 		for _, point := range s.PointList {
-			if len(point) == 2 {
-				t := int64(point[0] / 1000) // ms to sec
-				v := point[1]
-				timestamps = append(timestamps, t)
-				values = append(values, v)
+			if len(point) != 2 || point[0] == nil {
+				continue
 			}
+			timestamps = append(timestamps, int64(*point[0]/1000)) // ms to sec
+			if point[1] == nil {
+				// A gap, not a zero. Carried as NaN so Result.MarshalJSON sends it as
+				// null at the right position, and counted so the caller can tell an
+				// interval with no data from one that measured zero.
+				values = append(values, math.NaN())
+				gaps++
+				continue
+			}
+			values = append(values, *point[1])
 		}
 
-		qr.Payload = append(qr.Payload, Result{
+		result := Result{
 			Metric:     metricMap,
 			Timestamps: timestamps,
 			Values:     values,
-		})
+		}
+		if gaps > 0 {
+			result.NonFinite = map[string]int{nonFiniteGap: gaps}
+		}
+		qr.Payload = append(qr.Payload, result)
 	}
 
 	return OutputMetricQuery{Results: []QueryResult{qr}}, nil
