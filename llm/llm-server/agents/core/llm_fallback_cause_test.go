@@ -25,7 +25,7 @@ func TestHandleQuotaErrorNamesTheRealCause(t *testing.T) {
 	newRC := func() *retryContext {
 		return &retryContext{
 			ctx:             security.NewRequestContextForSuperAdmin(),
-			agentId:         "memory_compose",
+			agentId:         "memory_rerank",
 			currentModel:    "Qwen/Test",
 			currentProvider: "huggingface",
 			lastErr:         upstream,
@@ -69,7 +69,7 @@ func TestHandleQuotaErrorExhaustedFallbacksNamesTheRealCause(t *testing.T) {
 	newRC := func() *retryContext {
 		return &retryContext{
 			ctx:             security.NewRequestContextForSuperAdmin(),
-			agentId:         "memory_compose",
+			agentId:         "memory_rerank",
 			currentModel:    "Qwen/Test",
 			currentProvider: "huggingface",
 			lastErr:         upstream,
@@ -111,7 +111,7 @@ func TestHandleQuotaErrorNilLastErrDoesNotRenderPercentBangW(t *testing.T) {
 	newRC := func() *retryContext {
 		return &retryContext{
 			ctx:             security.NewRequestContextForSuperAdmin(),
-			agentId:         "memory_compose",
+			agentId:         "memory_rerank",
 			currentModel:    "Qwen/Test",
 			currentProvider: "huggingface",
 			// lastErr deliberately nil — simulates the circuit-open dispatch path.

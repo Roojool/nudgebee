@@ -125,10 +125,10 @@ func TestSetCustomRulesAndPatternsRoundTrip(t *testing.T) {
 // Names are not a closed set -> trim/dedupe/cap IS the whole contract.
 func TestParseEgressDisabledAgents(t *testing.T) {
 	t.Run("normalises", func(t *testing.T) {
-		got, err := parseEgressDisabledAgents([]string{"  websearch  ", "", "memory_compose", "WebSearch", "   "})
+		got, err := parseEgressDisabledAgents([]string{"  websearch  ", "", "memory_rerank", "WebSearch", "   "})
 		require.NoError(t, err)
 		// Dedupe keeps the FIRST spelling -> operator's casing survives.
-		assert.Equal(t, []string{"websearch", "memory_compose"}, got)
+		assert.Equal(t, []string{"websearch", "memory_rerank"}, got)
 	})
 
 	t.Run("empty input yields nil, not an empty slice", func(t *testing.T) {
