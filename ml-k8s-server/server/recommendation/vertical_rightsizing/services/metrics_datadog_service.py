@@ -59,8 +59,15 @@ def pods_from_series(entries: List[dict], live_cutoff: float) -> list[PodData]:
         if not pod_name:
             continue
         for ts in series.get("timestamps") or []:
-            if float(ts) > last_seen.get(pod_name, 0.0):
-                last_seen[pod_name] = float(ts)
+            # A timestamp that cannot be read is skipped rather than raised: it
+            # would otherwise take down the whole scan for one unreadable point,
+            # and a pod's liveness is decided by its latest READABLE observation.
+            try:
+                seen = float(ts)
+            except (TypeError, ValueError):
+                continue
+            if seen > last_seen.get(pod_name, 0.0):
+                last_seen[pod_name] = seen
     return [PodData(name=name, deleted=seen < live_cutoff) for name, seen in last_seen.items()]
 
 
@@ -200,8 +207,13 @@ class DatadogMetricsService(MetricsService):
                 if value is None:
                     continue
                 # api-server formats values as strings; the direct path leaves them
-                # numeric. Both end up in numpy arrays, so settle it here.
-                samples.append((float(ts), float(value)))
+                # numeric. Both end up in numpy arrays, so settle it here. An
+                # unreadable point is dropped like a gap — one of them must not cost
+                # the workload its recommendation.
+                try:
+                    samples.append((float(ts), float(value)))
+                except (TypeError, ValueError):
+                    logger.warning(f"Datadog: unreadable sample for pod {pod_name}, skipping")
         return result
 
     async def get_cluster_summary(self) -> Dict[str, Any]:

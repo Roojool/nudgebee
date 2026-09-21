@@ -569,14 +569,16 @@ class VolumeRightsizingService:
 
             # The last reading, not the last position: the trailing interval of a
             # 10-minute window is usually a gap, and reading it as a zero would drop
-            # the claim or shrink it.
+            # the claim or shrink it. A reading that cannot be read as a number is
+            # skipped the same way, so the scan keeps walking back to an older one
+            # rather than leaving the claim with no usage at all.
             for value in reversed(series.get("values") or []):
                 if value is None:
                     continue
                 try:
                     usage_map[f"{pvc_name}_{namespace}"] = float(value)
                 except (TypeError, ValueError):
-                    pass
+                    continue
                 break
 
         logger.info(f"Built Datadog usage map with {len(usage_map)} entries")

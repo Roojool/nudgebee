@@ -182,3 +182,91 @@ class TestElasticsearchThroughApiServer:
             [{"metric": {"pods": "app-abc-1", "__name__": "count"}, "timestamps": [0], "values": ["5"]}]
         )
         assert aggs["app-abc-1"].timestamp > 0
+
+
+class TestUnreadableReadingsAreSkippedNotFatal:
+    """One unreadable point must not cost a claim its usage or a workload its scan.
+
+    Raised in review of #38823: the volume scan walks a series backwards for the most
+    recent usable reading, and gave up on the whole claim when the first one it tried
+    would not parse — which reads downstream as "this claim has no usage" and shrinks
+    or drops it.
+    """
+
+    def test_volume_usage_falls_back_to_an_older_readable_value(self):
+        from unittest.mock import MagicMock, patch
+
+        from server.recommendation.volume_rightsizing import VolumeRightsizingService
+
+        with patch(
+            "server.recommendation.volume_rightsizing.DatabaseEngine.get_engine",
+            return_value=MagicMock(),
+        ):
+            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant", metrics_provider="datadog")
+
+        usage = svc._build_datadog_usage_map(
+            [
+                {
+                    "metric": {"persistentvolumeclaim": "data-loki-0", "kube_namespace": "loki"},
+                    # Newest last. The newest reading is unreadable, the one before it is good.
+                    "values": [7_000_000_000.0, 8_000_000_000.0, "not-a-number"],
+                }
+            ]
+        )
+        assert usage == {"data-loki-0_loki": pytest.approx(8_000_000_000.0)}
+
+    def test_a_series_of_only_unreadable_values_yields_no_entry(self):
+        from unittest.mock import MagicMock, patch
+
+        from server.recommendation.volume_rightsizing import VolumeRightsizingService
+
+        with patch(
+            "server.recommendation.volume_rightsizing.DatabaseEngine.get_engine",
+            return_value=MagicMock(),
+        ):
+            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant", metrics_provider="datadog")
+
+        usage = svc._build_datadog_usage_map(
+            [
+                {
+                    "metric": {"persistentvolumeclaim": "data-loki-0", "kube_namespace": "loki"},
+                    "values": ["nope", None, "also-nope"],
+                }
+            ]
+        )
+        assert usage == {}, "no usage is the honest answer; a zero would shrink the claim"
+
+    def test_liveness_ignores_an_unreadable_timestamp(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            pods_from_series,
+        )
+
+        pods = {
+            p.name: p
+            for p in pods_from_series(
+                [
+                    {"metric": {"pod_name": "web-1"}, "timestamps": ["bad", 1_000_500.0]},
+                    {"metric": {"pod_name": "web-2"}, "timestamps": ["bad"]},
+                ],
+                live_cutoff=1_000_000.0,
+            )
+        }
+        assert pods["web-1"].deleted is False, "the readable point still decides liveness"
+        assert "web-2" not in pods, "a series with nothing readable carries no liveness signal"
+
+    def test_an_unreadable_sample_is_dropped_like_a_gap(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            DatadogMetricsService,
+        )
+
+        svc = DatadogMetricsService(config=None, account_id="acct", executor=None, tenant_id="t")
+        parsed = svc._parse_series_by_pod_container(
+            [
+                {
+                    "metric": {"pod_name": "web-1", "kube_container_name": "web"},
+                    "timestamps": [1_700_000_000, 1_700_000_060],
+                    "values": ["oops", "1500000"],
+                }
+            ]
+        )
+        assert parsed["web"]["web-1"] == [(1_700_000_060.0, 1_500_000.0)]
