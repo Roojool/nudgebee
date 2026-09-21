@@ -3,10 +3,18 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { Browser, Locator, Page, expect } from "@playwright/test";
 import { LoginPage } from "../../../pages/LoginPage";
-import { AUTH_STATE_PATH, LLM_FUNCTION_FLAG_VERIFIED_PATH, AUTH_STATE_DIR } from "../../utils/paths";
+import {
+  AUTH_STATE_PATH,
+  LLM_FUNCTION_FLAG_VERIFIED_PATH,
+  AUTH_STATE_DIR,
+} from "../../utils/paths";
 import { NubiLocators } from "../nubiLocators";
 import { TenantSettingsLocators } from "../../admin/TenantSettings/tenantSettingsLocators";
-import { discardUnsavedEdits, openTenantSettings, toast } from "../../admin/TenantSettings/tenantSettingsHelper";
+import {
+  discardUnsavedEdits,
+  openTenantSettings,
+  toast,
+} from "../../admin/TenantSettings/tenantSettingsHelper";
 import {
   FEATURE_LLM_FUNCTION,
   FEATURE_LLM_FUNCTION_DESCRIPTION,
@@ -25,15 +33,22 @@ export const FUNCTIONS_TAB_HINT =
   "module failure. ensureLlmFunctionFeatureEnabled() is meant to have settled this already.";
 
 function featureToggle(locators: TenantSettingsLocators): Locator {
-  return locators.featureToggle(FEATURE_LLM_FUNCTION).or(locators.featureToggleByDescription(FEATURE_LLM_FUNCTION_DESCRIPTION)).first();
+  return locators
+    .featureToggle(FEATURE_LLM_FUNCTION)
+    .or(locators.featureToggleByDescription(FEATURE_LLM_FUNCTION_DESCRIPTION))
+    .first();
 }
 
 const FLAG_VERIFIED_TTL_MS = 60 * 60 * 1000;
 
 function flagVerifiedRecently(): boolean {
   if (!existsSync(LLM_FUNCTION_FLAG_VERIFIED_PATH)) return false;
-  const writtenAt = Number(readFileSync(LLM_FUNCTION_FLAG_VERIFIED_PATH, "utf-8"));
-  return Number.isFinite(writtenAt) && Date.now() - writtenAt < FLAG_VERIFIED_TTL_MS;
+  const writtenAt = Number(
+    readFileSync(LLM_FUNCTION_FLAG_VERIFIED_PATH, "utf-8")
+  );
+  return (
+    Number.isFinite(writtenAt) && Date.now() - writtenAt < FLAG_VERIFIED_TTL_MS
+  );
 }
 
 function markFlagVerified(): void {
@@ -41,9 +56,14 @@ function markFlagVerified(): void {
   writeFileSync(LLM_FUNCTION_FLAG_VERIFIED_PATH, String(Date.now()));
 }
 
-export async function ensureLlmFunctionFeatureEnabled(browser: Browser, baseURL?: string): Promise<void> {
+export async function ensureLlmFunctionFeatureEnabled(
+  browser: Browser,
+  baseURL?: string
+): Promise<void> {
   if (flagVerifiedRecently()) {
-    console.log(`"${FEATURE_LLM_FUNCTION}" was already verified earlier in this run — skipping the admin check`);
+    console.log(
+      `"${FEATURE_LLM_FUNCTION}" was already verified earlier in this run — skipping the admin check`
+    );
     return;
   }
 
@@ -65,7 +85,9 @@ export async function ensureLlmFunctionFeatureEnabled(browser: Browser, baseURL?
     ).toBeVisible({ timeout: 30000 });
 
     if (await toggle.isChecked()) {
-      console.log(`"${FEATURE_LLM_FUNCTION}" is already enabled — nothing to do`);
+      console.log(
+        `"${FEATURE_LLM_FUNCTION}" is already enabled — nothing to do`
+      );
       markFlagVerified();
       return;
     }
@@ -82,22 +104,37 @@ export async function ensureLlmFunctionFeatureEnabled(browser: Browser, baseURL?
       if (!(await featureToggle(ts).isChecked())) {
         await featureToggle(ts).click();
         await expect(featureToggle(ts)).toBeChecked();
-        await ts.saveButton().click();
-        await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({ timeout: 60000 });
+        // Cope with both shapes of the Features tab: this PR applies the toggle on change
+        // (no Save), while the currently-deployed build still needs Save. Take whichever is present.
+        const save = ts.saveButton();
+        if ((await save.count()) > 0) {
+          await save.click();
+          await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({
+            timeout: 60000,
+          });
+        } else {
+          await expect(featureToggle(ts)).toBeEnabled({ timeout: 60000 });
+        }
       }
 
       const reloaded = await discardUnsavedEdits(page);
       await reloaded.openTab(reloaded.featuresTab);
       await expect(reloaded.featuresTable).toBeVisible({ timeout: 60000 });
       if (await featureToggle(reloaded).isChecked()) {
-        console.log(`"${FEATURE_LLM_FUNCTION}" enabled and verified on attempt ${attempt}/${attempts}`);
+        console.log(
+          `"${FEATURE_LLM_FUNCTION}" enabled and verified on attempt ${attempt}/${attempts}`
+        );
         markFlagVerified();
         return;
       }
-      console.log(`"${FEATURE_LLM_FUNCTION}" did not read back as enabled on attempt ${attempt}/${attempts}, retrying...`);
+      console.log(
+        `"${FEATURE_LLM_FUNCTION}" did not read back as enabled on attempt ${attempt}/${attempts}, retrying...`
+      );
     }
 
-    throw new Error(`Failed to enable "${FEATURE_LLM_FUNCTION}" after ${attempts} attempts`);
+    throw new Error(
+      `Failed to enable "${FEATURE_LLM_FUNCTION}" after ${attempts} attempts`
+    );
   } finally {
     await page.close();
     await context.close();
@@ -112,10 +149,16 @@ export async function openNubiChat(page: Page): Promise<NubiLocators> {
   return locators;
 }
 
-export async function typeCallAndExpectOffered(locators: NubiLocators, text: string, functionName: string): Promise<void> {
+export async function typeCallAndExpectOffered(
+  locators: NubiLocators,
+  text: string,
+  functionName: string
+): Promise<void> {
   await expect(async () => {
     await locators.chatTextbox.fill("");
     await locators.chatTextbox.fill(text);
-    await expect(locators.callSuggestion(functionName)).toBeVisible({ timeout: 5000 });
+    await expect(locators.callSuggestion(functionName)).toBeVisible({
+      timeout: 5000,
+    });
   }).toPass({ timeout: 90000, intervals: [2000, 3000, 5000] });
 }

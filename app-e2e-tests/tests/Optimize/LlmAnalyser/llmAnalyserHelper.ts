@@ -2,8 +2,15 @@
 import { Page, Locator, Browser, expect } from "@playwright/test";
 import { LoginPage } from "../../../pages/LoginPage";
 import { LlmAnalyserLocators, AnalyserScreen } from "./llmAnalyserLocators";
-import { discardUnsavedEdits, openTenantSettings, toast } from "../../admin/TenantSettings/tenantSettingsHelper";
-import { FEATURE_LLM_ANALYSER, SAVE_SUCCESS_TEXT } from "../../admin/TenantSettings/tenantSettingsConstants";
+import {
+  discardUnsavedEdits,
+  openTenantSettings,
+  toast,
+} from "../../admin/TenantSettings/tenantSettingsHelper";
+import {
+  FEATURE_LLM_ANALYSER,
+  SAVE_SUCCESS_TEXT,
+} from "../../admin/TenantSettings/tenantSettingsConstants";
 
 // playwright.config.ts sets `baseURL: process.env.BASE_URL`, so an unset BASE_URL does not
 // fail here — it fails later as a goto against "about:blank". Named up front so the run
@@ -31,12 +38,17 @@ const NO_ROOT_HINT =
 // change, and CostAnalyser resolves its own screen from the sub-fragment after the slash —
 // so `#llm-analyser/models` opens that screen directly. Clicking the strip is exercised on
 // its own by the navigation test, so the other tests do not all depend on that interaction.
-export async function openAnalyser(page: Page, screen?: AnalyserScreen): Promise<LlmAnalyserLocators> {
+export async function openAnalyser(
+  page: Page,
+  screen?: AnalyserScreen
+): Promise<LlmAnalyserLocators> {
   const locators = new LlmAnalyserLocators(page);
   await new LoginPage(page).doFullLogin();
 
   await page.goto(`/optimise#llm-analyser${screen ? `/${screen}` : ""}`);
-  await expect(locators.llmAnalyserTab, NO_TAB_HINT).toBeVisible({ timeout: 60000 });
+  await expect(locators.llmAnalyserTab, NO_TAB_HINT).toBeVisible({
+    timeout: 60000,
+  });
   await expect(locators.root, NO_ROOT_HINT).toBeVisible({ timeout: 60000 });
 
   return locators;
@@ -45,12 +57,17 @@ export async function openAnalyser(page: Page, screen?: AnalyserScreen): Promise
 // Lands on a screen whose fragment the module does not recognise, so the caller can assert
 // what the rejection does. Deliberately does not wait for a selected screen — which one
 // ends up selected is what the test observes.
-export async function openAnalyserWithFragment(page: Page, fragment: string): Promise<LlmAnalyserLocators> {
+export async function openAnalyserWithFragment(
+  page: Page,
+  fragment: string
+): Promise<LlmAnalyserLocators> {
   const locators = new LlmAnalyserLocators(page);
   await new LoginPage(page).doFullLogin();
 
   await page.goto(`/optimise#llm-analyser/${fragment}`);
-  await expect(locators.llmAnalyserTab, NO_TAB_HINT).toBeVisible({ timeout: 60000 });
+  await expect(locators.llmAnalyserTab, NO_TAB_HINT).toBeVisible({
+    timeout: 60000,
+  });
   await expect(locators.root, NO_ROOT_HINT).toBeVisible({ timeout: 60000 });
 
   return locators;
@@ -61,7 +78,10 @@ export async function openAnalyserWithFragment(page: Page, fragment: string): Pr
 // from this spec's test.beforeAll — not per test — since flipping and saving the tenant flag
 // is an admin write, and redoing it before every test would just race the flag against
 // itself for no benefit once the first check has already settled it.
-export async function ensureLlmAnalyserFeatureEnabled(browser: Browser, baseURL?: string): Promise<void> {
+export async function ensureLlmAnalyserFeatureEnabled(
+  browser: Browser,
+  baseURL?: string
+): Promise<void> {
   // browser.newPage() does NOT inherit playwright.config.ts's `use` block (baseURL,
   // storageState, …) the way the test/context fixtures do — it opens a bare context. The
   // relative goto() below still resolves because doFullLogin() first navigates to an
@@ -84,11 +104,15 @@ export async function ensureLlmAnalyserFeatureEnabled(browser: Browser, baseURL?
       .then(() => true)
       .catch(() => false);
     if (tabVisible) {
-      console.log("LLM Analyser tab is visible — feature flag is already on, nothing to do");
+      console.log(
+        "LLM Analyser tab is visible — feature flag is already on, nothing to do"
+      );
       return;
     }
 
-    console.log("LLM Analyser tab did not appear — checking the LLM_ANALYSER tenant feature flag");
+    console.log(
+      "LLM Analyser tab did not appear — checking the LLM_ANALYSER tenant feature flag"
+    );
     const ts = await openTenantSettings(page);
     await ts.openTab(ts.featuresTab);
     await expect(ts.featuresTable).toBeVisible({ timeout: 60000 });
@@ -122,24 +146,41 @@ export async function ensureLlmAnalyserFeatureEnabled(browser: Browser, baseURL?
       if (!(await toggle.isChecked())) {
         await toggle.click();
         await expect(toggle).toBeChecked();
-        await ts.saveButton().click();
-        await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({ timeout: 60000 });
+        // Cope with both shapes of the Features tab: this PR applies the toggle on change
+        // (no Save), while the currently-deployed build still needs Save. Take whichever is present.
+        const save = ts.saveButton();
+        if ((await save.count()) > 0) {
+          await save.click();
+          await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({
+            timeout: 60000,
+          });
+        } else {
+          await expect(toggle).toBeEnabled({ timeout: 60000 });
+        }
       }
 
-      // Read back from a reload rather than trusting the click+toast — the same reasoning
+      // Read back from a reload rather than trusting the in-page switch — the same reasoning
       // the Features suite itself uses: only a reload proves the flag actually persisted.
       const reloaded = await discardUnsavedEdits(page);
       await reloaded.openTab(reloaded.featuresTab);
       await expect(reloaded.featuresTable).toBeVisible({ timeout: 60000 });
-      const confirmed = await reloaded.featureToggle(FEATURE_LLM_ANALYSER).isChecked();
+      const confirmed = await reloaded
+        .featureToggle(FEATURE_LLM_ANALYSER)
+        .isChecked();
       if (confirmed) {
-        console.log(`"${FEATURE_LLM_ANALYSER}" enabled and verified on attempt ${attempt}/${attempts}`);
+        console.log(
+          `"${FEATURE_LLM_ANALYSER}" enabled and verified on attempt ${attempt}/${attempts}`
+        );
         return;
       }
-      console.log(`"${FEATURE_LLM_ANALYSER}" did not read back as enabled on attempt ${attempt}/${attempts}, retrying...`);
+      console.log(
+        `"${FEATURE_LLM_ANALYSER}" did not read back as enabled on attempt ${attempt}/${attempts}, retrying...`
+      );
     }
 
-    throw new Error(`Failed to enable "${FEATURE_LLM_ANALYSER}" after ${attempts} attempts`);
+    throw new Error(
+      `Failed to enable "${FEATURE_LLM_ANALYSER}" after ${attempts} attempts`
+    );
   } finally {
     await page.close();
     await context.close();
@@ -149,26 +190,48 @@ export async function ensureLlmAnalyserFeatureEnabled(browser: Browser, baseURL?
 // MUI Tab carries aria-selected on the tab itself, which — unlike the URL — is always in
 // step with what is actually rendered, so it is what "which screen am I on" is asserted
 // against.
-export async function expectScreenSelected(locators: LlmAnalyserLocators, screen: AnalyserScreen): Promise<void> {
-  await expect(locators.screenTab(screen)).toHaveAttribute("aria-selected", "true", { timeout: 30000 });
+export async function expectScreenSelected(
+  locators: LlmAnalyserLocators,
+  screen: AnalyserScreen
+): Promise<void> {
+  await expect(locators.screenTab(screen)).toHaveAttribute(
+    "aria-selected",
+    "true",
+    { timeout: 30000 }
+  );
 }
 
-export async function expectScreenNotSelected(locators: LlmAnalyserLocators, screen: AnalyserScreen): Promise<void> {
-  await expect(locators.screenTab(screen)).toHaveAttribute("aria-selected", "false", { timeout: 30000 });
+export async function expectScreenNotSelected(
+  locators: LlmAnalyserLocators,
+  screen: AnalyserScreen
+): Promise<void> {
+  await expect(locators.screenTab(screen)).toHaveAttribute(
+    "aria-selected",
+    "false",
+    { timeout: 30000 }
+  );
 }
 
 // Clicks a screen on the inner strip and waits for it to take. CustomTabs runs in
 // behavior='router' mode here, so the click both navigates and moves the selection — the
 // URL is asserted separately by the navigation test rather than folded in here.
-export async function openScreen(locators: LlmAnalyserLocators, screen: AnalyserScreen): Promise<void> {
+export async function openScreen(
+  locators: LlmAnalyserLocators,
+  screen: AnalyserScreen
+): Promise<void> {
   await locators.screenTab(screen).click();
   await expectScreenSelected(locators, screen);
 }
 
 // The checked option of a ds/ToggleGroup. Each option is a role="radio" carrying
 // aria-checked, so this reads the group's committed state rather than its styling.
-export async function expectToggleChecked(option: Locator, checked: boolean): Promise<void> {
-  await expect(option).toHaveAttribute("aria-checked", String(checked), { timeout: 30000 });
+export async function expectToggleChecked(
+  option: Locator,
+  checked: boolean
+): Promise<void> {
+  await expect(option).toHaveAttribute("aria-checked", String(checked), {
+    timeout: 30000,
+  });
 }
 
 // Park the cursor away from the Optimize tab strip. Left on the strip, AnchorComponent

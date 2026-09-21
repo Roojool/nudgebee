@@ -332,7 +332,7 @@ const FeatureWhyCell = ({ text }) => {
   );
 };
 
-const FeatureToggleCell = ({ feature, choice, canEdit, onChange }) => {
+const FeatureToggleCell = ({ feature, choice, canEdit, saving, onChange }) => {
   // Plain on/off switch: with no override it shows the flag's shipped polarity instead of an unselected state.
   const effectiveChoice = effectiveFeatureChoice(feature, choice);
   return (
@@ -340,7 +340,7 @@ const FeatureToggleCell = ({ feature, choice, canEdit, onChange }) => {
       size='md'
       checked={effectiveChoice === 'on'}
       onChange={(_, checked) => onChange(checked ? 'on' : 'off')}
-      disabled={!canEdit}
+      disabled={!canEdit || saving}
       aria-label={feature.display_name || feature.value}
     />
   );
@@ -401,7 +401,8 @@ const TenantSettings = () => {
   const [showFlagIds, setShowFlagIds] = useState(false);
   // Each flag is on/off/default, since "default" (no explicit row) and "off" are distinct states for a default-on flag.
   const [featureChoices, setFeatureChoices] = useState({});
-  const [initialChoices, setInitialChoices] = useState({});
+  // feature_id -> true while its toggle write is in flight, so the Switch is disabled and can't double-fire.
+  const [savingFeatures, setSavingFeatures] = useState({});
   const [featureOptions, setFeatureOptions] = useState([]);
   const [tenantName, setTenantName] = useState(session?.tenant?.name);
   const [checkboxEnabled, setCheckboxEnabled] = useState(false);
@@ -501,7 +502,6 @@ const TenantSettings = () => {
             }
           });
           setFeatureChoices(choices);
-          setInitialChoices(choices);
         }
       } catch (error) {
         if (!cancelled) {
@@ -592,23 +592,7 @@ const TenantSettings = () => {
         return;
       }
 
-      // 'default' is sent through to the API, which deletes the row rather than storing that word.
-      const updatePayload = featureOptions
-        .filter((f) => (featureChoices[f.value] || 'default') !== (initialChoices[f.value] || 'default'))
-        .map((f) => ({
-          feature_id: f.value,
-          status: storedFromDisplayed(featureChoices[f.value] || 'default', f.stored_value_inverted),
-        }));
-
-      if (updatePayload.length > 0) {
-        const updateFeatureFlagResponse = await updateTenantFeatureFlag(updatePayload);
-        if (updateFeatureFlagResponse?.data?.errors) {
-          snackbar.error(`Failed to save feature configuration - ${parseHttpResponseBodyMessage(updateFeatureFlagResponse.data)}`);
-          return;
-        }
-        snackbar.success('Feature configuration saved.');
-        fetchFeatureFlagsForTenant(true); // refresh cache
-      }
+      // Feature flags aren't saved here -- each toggle persists on change via handleFeatureChoice.
       if (checkboxEnabled) {
         const updateAllowedLoginDomainResponse = await upsertTenantAttributes([
           {
@@ -666,8 +650,35 @@ const TenantSettings = () => {
     }
   };
 
-  const handleFeatureChoice = (featureValue, choice) => {
+  // Feature toggles apply immediately -- optimistically flip the Switch, persist the one flag,
+  // and roll back to the pre-toggle value if the write fails so the UI never shows a change that isn't live.
+  const handleFeatureChoice = async (featureValue, choice) => {
+    if (!canEdit) return;
+    const feature = featureOptions.find((f) => f.value === featureValue);
+    const prevChoice = featureChoices[featureValue] || 'default';
     setFeatureChoices((prev) => ({ ...prev, [featureValue]: choice }));
+    setSavingFeatures((prev) => ({ ...prev, [featureValue]: true }));
+    try {
+      const response = await updateTenantFeatureFlag([
+        { feature_id: featureValue, status: storedFromDisplayed(choice, feature?.stored_value_inverted) },
+      ]);
+      if (response?.data?.errors) {
+        setFeatureChoices((prev) => ({ ...prev, [featureValue]: prevChoice }));
+        snackbar.error(`Failed to update feature - ${parseHttpResponseBodyMessage(response.data)}`);
+        return;
+      }
+      fetchFeatureFlagsForTenant(true).catch((err) => console.error('Failed to refresh feature flags cache:', err)); // refresh cache
+      snackbar.success(`${feature?.display_name || featureValue} ${choice === 'on' ? 'enabled' : 'disabled'}.`);
+    } catch (error) {
+      setFeatureChoices((prev) => ({ ...prev, [featureValue]: prevChoice }));
+      snackbar.error(`Failed to update feature - ${parseHttpResponseBodyMessage(error)}`);
+    } finally {
+      setSavingFeatures((prev) => {
+        const next = { ...prev };
+        delete next[featureValue];
+        return next;
+      });
+    }
   };
 
   const buildFeatureRow = (f) => {
@@ -693,6 +704,7 @@ const TenantSettings = () => {
             feature={f}
             choice={featureChoices[f.value] || 'default'}
             canEdit={canEdit}
+            saving={!!savingFeatures[f.value]}
             onChange={(choice) => handleFeatureChoice(f.value, choice)}
           />
         ),
@@ -979,11 +991,6 @@ const TenantSettings = () => {
                     )} capabilities are active for your tenant. Toggle a feature on or off, changes apply immediately.`}
                   />
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[3] }}>
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
                     <Button
                       composition='icon-only'
                       tone='ghost'
@@ -1026,8 +1033,8 @@ const TenantSettings = () => {
           page tab, not a modal. Switching to another Admin tab remounts this one
           fresh (ErrorBoundary's key in user-management/index.jsx), so navigating
           away already discards unsaved edits the same way Cancel used to.
-          Every tab (General, Labels' three subtabs, Features) carries its own Save
-          in its card header/footer now -- no shared bottom bar. */}
+          General and the three Labels subtabs each carry their own Save; Features has
+          no Save because its toggles apply immediately on change -- no shared bottom bar. */}
     </>
   );
 };
