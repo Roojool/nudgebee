@@ -485,9 +485,11 @@ const MessagingIntegrationTile = ({
   // (and fetch) first and then be swapped out when the default tab becomes Mappings.
   const hasInstallation = installationData?.length > 0;
   const WebhookTargets = WEBHOOK_TARGETS_BY_PROVIDER[provider];
+  const mappingsHidden = !MAPPING_PROVIDERS.includes(provider) || !hasInstallation;
+  const watchedHidden = provider !== 'slack' || !hasInstallation || !channelAwarenessEnabled;
   const sectionTabs = [
-    { value: 'mappings', text: 'Channel-Account Mappings', hidden: !MAPPING_PROVIDERS.includes(provider) || !hasInstallation },
-    { value: 'watched', text: 'Watched Channels', hidden: provider !== 'slack' || !hasInstallation || !channelAwarenessEnabled },
+    { value: 'mappings', text: 'Channel-Account Mappings', hidden: mappingsHidden },
+    { value: 'watched', text: 'Watched Channels', hidden: watchedHidden },
     { value: 'webhooks', text: 'Webhook targets', hidden: !WebhookTargets },
   ].map((tab) => ({ ...tab, id: `${toKebabCase(provider)}-${tab.value}-tab` }));
   const visibleSectionTabs = hasLoaded ? sectionTabs.filter((tab) => !tab.hidden) : [];
@@ -750,11 +752,28 @@ const MessagingIntegrationTile = ({
         </Box>
       )}
 
-      {activeSection === 'mappings' && <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={hasInstallation} />}
+      {/* Once visible, every section stays mounted across tab switches (hidden via CSS,
+          not unmounted) so its already-fetched data survives switching tabs instead of
+          re-fetching on every switch back — Mappings/Watched Channels both paginate the
+          same Slack channels_list endpoint and were colliding on Slack's rate limit;
+          Webhook targets has no such collision but was re-querying needlessly too. */}
+      {!mappingsHidden && (
+        <Box sx={{ display: activeSection === 'mappings' ? 'block' : 'none' }}>
+          <ChannelAccountMapping provider={provider} displayName={displayName} isConfigured={hasInstallation} />
+        </Box>
+      )}
 
-      {activeSection === 'watched' && <WatchedChannels provider={provider} isConfigured={hasInstallation} />}
+      {!watchedHidden && (
+        <Box sx={{ display: activeSection === 'watched' ? 'block' : 'none' }}>
+          <WatchedChannels provider={provider} isConfigured={hasInstallation} />
+        </Box>
+      )}
 
-      {activeSection === 'webhooks' && <WebhookTargets />}
+      {WebhookTargets && (
+        <Box sx={{ display: activeSection === 'webhooks' ? 'block' : 'none' }}>
+          <WebhookTargets />
+        </Box>
+      )}
     </>
   );
 };
