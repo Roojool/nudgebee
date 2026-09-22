@@ -33,9 +33,9 @@ var executionTargetKinds = []executionTargetKind{
 	{
 		tool:      ToolExecuteAwsCliCommand,
 		title:     "AWS accounts",
-		usage:     `aws_execute: pass account="<name>". aws in shell_execute always uses the current account.`,
+		usage:     `aws_execute: pass account="<name>". shell_execute AWS commands: pass --profile <name>; use aws configure list-profiles to discover visible names. Read and write commands use the normal classification and approval flow.`,
 		showIDs:   true,
-		usedByAny: []string{ToolExecuteAwsCliCommand},
+		usedByAny: []string{ToolExecuteAwsCliCommand, core.ToolExecuteShellCommand},
 	},
 }
 
@@ -126,6 +126,12 @@ func RenderExecutionTargets(ctx *security.RequestContext, accountID string, save
 // kubectlUsesConfigSubcommand reports whether any kubectl invocation in a
 // command (including shell pipelines) runs `kubectl config ...`.
 func kubectlUsesConfigSubcommand(command string) bool {
+	return kubectlUsesTopLevelCommand(command, "config")
+}
+
+// kubectlUsesTopLevelCommand reports whether any kubectl invocation uses the
+// requested top-level command, accounting for global flags before the command.
+func kubectlUsesTopLevelCommand(command, target string) bool {
 	for _, words := range shellSegments(command) {
 		if len(words) == 0 || filepath.Base(words[0]) != "kubectl" {
 			continue
@@ -138,7 +144,7 @@ func kubectlUsesConfigSubcommand(command string) bool {
 				rest = rest[1:]
 			}
 		}
-		if len(rest) > 0 && rest[0] == "config" {
+		if len(rest) > 0 && strings.EqualFold(rest[0], target) {
 			return true
 		}
 	}

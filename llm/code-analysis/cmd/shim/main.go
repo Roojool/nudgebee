@@ -25,6 +25,35 @@ type WorkspaceExecuteResponse struct {
 	Error  string `json:"error"`
 }
 
+const workspaceExecuteHTTPTimeout = 150 * time.Second
+
+func resultExitCode(result any) int {
+	read := func(value any) int {
+		switch code := value.(type) {
+		case float64:
+			if code >= 1 && code <= 255 {
+				return int(code)
+			}
+		case int:
+			if code >= 1 && code <= 255 {
+				return code
+			}
+		}
+		return 0
+	}
+
+	switch value := result.(type) {
+	case map[string]any:
+		return read(value["exit_code"])
+	case string:
+		var decoded map[string]any
+		if json.Unmarshal([]byte(strings.TrimSpace(value)), &decoded) == nil {
+			return read(decoded["exit_code"])
+		}
+	}
+	return 0
+}
+
 func main() {
 	// 1. Read Configuration
 	llmServerUrl := os.Getenv("NB_LLM_SERVER_URL")
@@ -88,7 +117,10 @@ func main() {
 	req.Header.Set("X-Workspace-Token", token)
 
 	client := &http.Client{
-		Timeout: 120 * time.Second,
+		// Cloud-collector defaults to a 120-second process timeout. Leave room
+		// for proxying and response serialization so its structured timeout and
+		// exit status reach the caller instead of becoming a client timeout.
+		Timeout: workspaceExecuteHTTPTimeout,
 	}
 
 	resp, err := client.Do(req)
@@ -188,6 +220,9 @@ func main() {
 
 	if result.Error != "" {
 		fmt.Fprintf(os.Stderr, "Error from tool: %s\n", result.Error)
+		if exitCode := resultExitCode(result.Result); exitCode != 0 {
+			os.Exit(exitCode)
+		}
 		os.Exit(1)
 	}
 }

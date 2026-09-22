@@ -62,7 +62,7 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
 		require.Equal(t, "aws-prod", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME])
-		require.False(t, strings.HasPrefix(resp.Data, "[account:"))
+		require.True(t, strings.HasPrefix(resp.Data, "[account: aws-prod]\n"), resp.Data)
 	})
 
 	t.Run("account argument uses that account's credentials for this call", func(t *testing.T) {
@@ -78,7 +78,7 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 		capture, _, err := run(t, core.NBToolCallRequest{Command: "aws --profile aws-demo s3 ls"})
 		require.NoError(t, err)
 		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
-		require.Equal(t, "aws --profile aws-demo s3 ls", capture.command, "commands are not parsed for AWS")
+		require.Equal(t, "export PATH=/usr/bin:$PATH; aws --profile aws-demo s3 ls", capture.command, "the direct tool bypasses the workspace shim without parsing the AWS arguments")
 	})
 
 	t.Run("a unique account id selects that account", func(t *testing.T) {
@@ -91,7 +91,7 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 		capture, resp, err := run(t, core.NBToolCallRequest{Command: "aws s3 ls", Arguments: map[string]any{"account": "740395098545"}})
 		require.NoError(t, err)
 		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
-		require.False(t, strings.HasPrefix(resp.Data, "[account:"))
+		require.True(t, strings.HasPrefix(resp.Data, "[account: aws-prod]\n"), resp.Data)
 	})
 
 	t.Run("a shared account id is refused with the matching names", func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestAwsExecuteNamesAccountOnCredentialFailure(t *testing.T) {
 	require.Empty(t, capture.command)
 }
 
-func TestShellAwsAlwaysUsesSavedAccount(t *testing.T) {
+func TestShellAwsUsesShimWithoutWorkspaceCredentials(t *testing.T) {
 	const account = "shell-aws-saved"
 	awsFixture(t, account)
 
@@ -134,7 +134,9 @@ func TestShellAwsAlwaysUsesSavedAccount(t *testing.T) {
 	tool := ShellTool{AccountId: account, workspaceManager: capture}
 	_, err := tool.Call(awsCtx(t, account, tool), core.NBToolCallRequest{Command: "aws --profile aws-demo sts get-caller-identity"})
 	require.NoError(t, err)
-	require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
+	require.NotContains(t, capture.env, "AWS_ACCESS_KEY_ID")
+	require.Equal(t, "aws-prod", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME], "the shim receives the per-call default; an explicit profile can still override it")
+	require.Equal(t, "aws --profile aws-demo sts get-caller-identity", capture.command)
 	require.Equal(t, "", ShellTool{}.ConfirmationKey(`{"command":"aws --profile aws-demo s3 rm s3://b/k"}`))
 }
 
@@ -188,10 +190,11 @@ func TestRenderExecutionTargets(t *testing.T) {
 	require.Contains(t, block, "<execution_targets>")
 	require.Contains(t, block, "Kubernetes clusters: current k8s-prod; others you can use: k8s-dev.")
 	require.Contains(t, block, "AWS accounts: current aws-prod; others you can use: aws-demo (136781626097).")
+	require.Contains(t, block, "shell_execute AWS commands: pass --profile <name>")
 	require.NotContains(t, block, "aws-secret", "accounts the user cannot read are not listed")
 
-	require.NotContains(t, RenderExecutionTargets(sc, account, saved, []string{core.ToolExecuteShellCommand}), "AWS accounts",
-		"shell aws cannot switch accounts, so AWS is listed only for aws_execute")
+	require.Contains(t, RenderExecutionTargets(sc, account, saved, []string{core.ToolExecuteShellCommand}), "AWS accounts",
+		"shell_execute supports per-call AWS account selection through --profile")
 	require.Empty(t, RenderExecutionTargets(sc, account, saved, []string{"logs"}), "no targetable tool, no block")
 }
 

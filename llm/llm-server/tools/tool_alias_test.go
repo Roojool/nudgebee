@@ -109,17 +109,17 @@ var (
 func TestAwsCliTool_ToolPromptSafetyRules(t *testing.T) {
 	joined := joinLines(AwsCliTool{}.ToolPrompt())
 	assert.Contains(t, joined, "do not override an agent policy", "aws ToolPrompt must defer read routing to the active agent")
+	assert.Contains(t, joined, "pass that exact name", "aws ToolPrompt must preserve a named account across delegation")
 	assert.Contains(t, joined, "IAM", "aws ToolPrompt must warn against self-IAM-modify")
 	assert.Contains(t, joined, "--filters", "aws ToolPrompt must call out the plural --filters gotcha")
 	assert.Contains(t, joined, "Cost Explorer", "aws ToolPrompt must cover credit/refund exclusion")
 	assert.Contains(t, joined, "Evidence-based", "aws ToolPrompt must include evidence-based invariant")
 }
 
-func TestAwsCliTool_DescriptionDefersReadRoutingToAgent(t *testing.T) {
+func TestAwsCliTool_DescriptionDefersRoutingToAgent(t *testing.T) {
 	description := AwsCliTool{}.Description()
 	assert.Contains(t, description, "Follow the active agent's system prompt")
-	assert.Contains(t, description, "assigns AWS reads to the workspace shell")
-	assert.Contains(t, description, "approval and resume behavior is preserved")
+	assert.Contains(t, description, "Both paths use the normal command classification and approval flow")
 	assert.NotContains(t, description, "Prioritize this tool")
 }
 func TestGcpCliTool_ToolPromptSafetyRules(t *testing.T) {

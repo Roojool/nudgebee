@@ -5,6 +5,7 @@ package tools
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -76,16 +77,19 @@ func TestShellTargetLive(t *testing.T) {
 			require.Contains(t, fmt.Sprint(result.Data), marker)
 			if tc.owner == ToolExecuteKubectlCommand {
 				ctx.ToolConfig = selected
-				result, err = (KubectlExecuteTool{}).Call(ctx, core.NBToolCallRequest{Command: tc.command + " && cat " + common.ShellEscape(file)})
+				result, err = (KubectlExecuteTool{}).Call(ctx, core.NBToolCallRequest{Command: tc.command})
 				require.NoError(t, err)
 				require.Equal(t, core.NBToolResponseStatusSuccess, result.Status, "%s", result.Data)
 				require.Contains(t, fmt.Sprint(result.Data), tc.expected)
-				require.Contains(t, fmt.Sprint(result.Data), marker)
 				require.Contains(t, fmt.Sprint(run("cat "+common.ShellEscape(file)).Data), marker)
 			}
 			ctx.QueryConfig.ToolConfigs[tc.owner] = "missing-" + uuid.NewString()
-			_, err = shell.Call(ctx, core.NBToolCallRequest{Command: tc.command})
-			require.ErrorContains(t, err, "unavailable or unauthorized")
+			result, err = shell.Call(ctx, core.NBToolCallRequest{Command: tc.command})
+			require.Error(t, err)
+			rejection := fmt.Sprint(result.Data)
+			require.True(t,
+				strings.Contains(rejection, "unavailable or unauthorized") || strings.Contains(rejection, "not selected"),
+				"missing selection must be rejected, got: %s", rejection)
 			ctx.QueryConfig.ToolConfigs[tc.owner] = selected.Name
 		})
 	}

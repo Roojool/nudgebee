@@ -546,7 +546,7 @@ func (m KubectlExecuteTool) Description() string {
 		**Usage:**
 
 		* **Routing:** Availability does not make this tool the default for every Kubernetes command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns Kubernetes reads to the workspace shell, do not use this tool for those reads; keep this direct path for mutations and commands with uncertain effects so approval and resume behavior is preserved.
-		* **Input:** Provide a valid, 'kubectl' command as input. Shell piping (|) is supported when the active agent routes the operation here; this support does not override its tool-routing policy. Reads of Secret-bearing kinds (secrets, sealedsecrets, externalsecrets) and secret-mounted exec/cp are blocked.
+		* **Input:** Provide a valid, 'kubectl' command as input. Shell piping (|) is supported when the active agent routes the operation here; this support does not override its tool-routing policy. Reads of Secret-bearing kinds (secrets, sealedsecrets, externalsecrets) are blocked. kubectl cp is also blocked because its local path would resolve outside the conversation workspace.
 		* **Output:** The tool will return the output of the executed command.
 		* **Cluster:** By default the command runs on the conversation's current cluster. To run it on another connected cluster, pass its name in 'cluster' (or use '--context <name>'). Shell-safe names returned by 'kubectl config get-contexts' are accepted here too; copy them exactly rather than inventing a normalized name. An unknown name returns the list of available clusters. If the conversation has no current cluster yet, the first cluster you name becomes its current cluster. Only kubectl commands switch clusters; other tools (logs, events, metrics, resource search, helm) stay on the current cluster. Output from another cluster carries a "cluster" field; cite it.
 
@@ -810,6 +810,9 @@ func ValidateKubectlRelayCommand(command string) error {
 	if hasShellExpansion(trimmed) {
 		return errors.New("kubectl: shell variable and command expansion ($, $(), and backticks) is blocked")
 	}
+	if kubectlUsesTopLevelCommand(trimmed, "cp") {
+		return errors.New("kubectl: cp is blocked because local paths resolve on the relay or cluster agent, not in the conversation workspace")
+	}
 
 	if blocked := kubectlBlockedKind(trimmed); blocked != "" {
 		return fmt.Errorf("kubectl: access to %q is blocked. Secret-bearing kinds (secrets, sealedsecrets, externalsecrets, secretstores, secretproviderclasses) are not readable via this tool", blocked)
@@ -892,6 +895,9 @@ func validateKubectlCommandAccess(command string) error {
 	}
 	if hasShellExpansion(command) {
 		return errors.New("kubectl: shell variable and command expansion ($, $(), and backticks) is blocked")
+	}
+	if kubectlUsesTopLevelCommand(command, "cp") {
+		return errors.New("kubectl: cp is blocked because local paths resolve on the relay or cluster agent, not in the conversation workspace")
 	}
 	if blocked := kubectlBlockedKind(command); blocked != "" {
 		return fmt.Errorf("kubectl: access to %q is blocked. Secret-bearing kinds (secrets, sealedsecrets, externalsecrets, secretstores, secretproviderclasses) are not readable via this tool", blocked)

@@ -237,8 +237,13 @@ COPY --from=builder /app/code-analysis-agent .
 COPY --from=builder /app/shim /usr/local/bin/shim
 RUN chown appuser:appuser ./code-analysis-agent /usr/local/bin/shim
 
-# Create symlinks for shims
-RUN ln -s /usr/local/bin/shim /usr/local/bin/kubectl && \
+# Create symlinks for shims. Keep apk's real AWS CLI at /usr/bin/aws so the
+# existing direct aws_execute path can bypass the workspace shim during the
+# read-only migration phase. Fail the build if that compatibility dependency is
+# absent instead of producing an image whose direct aws_execute path is broken.
+RUN test -x /usr/bin/aws || { echo "native AWS CLI is required at /usr/bin/aws" >&2; exit 1; }; \
+    ln -s /usr/local/bin/shim /usr/local/bin/kubectl && \
+    ln -s /usr/local/bin/shim /usr/local/bin/aws && \
     ln -s /usr/local/bin/shim /usr/local/bin/helm && \
     ln -s /usr/local/bin/shim /usr/local/bin/psql && \
     ln -s /usr/local/bin/shim /usr/local/bin/mysql && \

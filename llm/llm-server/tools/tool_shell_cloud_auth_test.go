@@ -66,6 +66,12 @@ func TestShellCloudAuth_AwsFlow_NonCloudCommand(t *testing.T) {
 	assert.Equal(t, "ls -la /tmp", wrapped, "non-cloud commands should be unchanged with AWS auth")
 }
 
+func TestShellCloudAuth_AwsUsesWorkspaceShim(t *testing.T) {
+	assert.True(t, shellCloudAuthUsesShim("aws --profile production ec2 describe-instances"))
+	assert.False(t, shellCloudAuthUsesShim("gcloud compute instances list"))
+	assert.False(t, shellCloudAuthUsesShim("echo harmless"))
+}
+
 // --- GCP end-to-end flow ---
 
 func TestShellCloudAuth_GcpFlow_BestEffort(t *testing.T) {

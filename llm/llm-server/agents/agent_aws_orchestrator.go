@@ -70,7 +70,7 @@ func (a *AwsOrchestratorAgent) GetNameAliases() []string {
 }
 
 func (a *AwsOrchestratorAgent) GetDescription() string {
-	return `Lean-loop AWS SRE/DevOps troubleshooting orchestrator: workspace-based AWS reads and local analysis, approval-aware direct AWS mutations, and specialists reached on-demand via search_tools + delegate_agent.`
+	return `Lean-loop AWS SRE/DevOps troubleshooting orchestrator: workspace-based AWS commands and local analysis with the normal approval flow, and specialists reached on-demand via search_tools + delegate_agent.`
 }
 
 func (a *AwsOrchestratorAgent) GetPlannerType() core.AgentPlannerType {

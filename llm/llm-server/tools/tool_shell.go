@@ -61,7 +61,7 @@ func (m ShellTool) Description() string {
 
 	**Stateless shell:** Each call is a fresh ` + "`sh -c`" + `, so ` + "`cd`" + ` and environment variables do NOT persist. Files do (they live on disk). Put environment setup and the command that consumes it in the same call (` + "`export FOO=bar && command`" + `), or pass the value through the CLI's explicit flags. Shell profile files are not sourced automatically.
 
-	**Credentials auto-injected:** AWS / GCP / Azure credentials, ` + "`GITHUB_TOKEN`" + ` and ` + "`GITLAB_TOKEN`" + ` are injected automatically when the command invokes the corresponding CLI. You do NOT need to plan an ` + "`aws configure`, `gcloud auth`, `gh auth login`, or `glab auth login`" + ` step.
+	**Credentials handled automatically:** Infrastructure CLIs receive credentials through their configured execution boundary; ` + "`GITHUB_TOKEN`" + ` and ` + "`GITLAB_TOKEN`" + ` are injected when their CLIs are invoked. You do NOT need to plan an ` + "`aws configure`, `gcloud auth`, `gh auth login`, or `glab auth login`" + ` step.
 
 	**Large Data Redirection:** Identify large output by command intent (log dumps, metric time-series, multi-resource JSON, or queries expecting >50 records). Redirect stdout to a relative workspace file (` + "`command > data.json`" + `). Then inspect using ` + "`jq`, `grep`, `awk`, or `head` (`jq .key data.json | head -n 50`)" + ` to keep context usage bounded.
 
@@ -71,7 +71,7 @@ func (m ShellTool) Description() string {
 
 	**Preserve failures:** Check collection succeeded before analyzing its output. Keep stderr visible; avoid blanket error suppression or appending || true to every command. A partial or failed collection must not be presented as an empty successful result.
 
-	**Kubernetes cluster:** ` + "`kubectl`" + ` runs on the conversation's current cluster. Add ` + "`--context <cluster-name>`" + ` to run a command on another connected cluster (one cluster per command); an unknown name returns the list of available clusters. ` + "`aws`" + ` always uses the conversation's current AWS account; use aws_execute with ` + "`account`" + ` for another one.
+	**Execution target:** ` + "`kubectl`" + ` runs on the conversation's current cluster. Add ` + "`--context <cluster-name>`" + ` to run a command on another connected cluster (one cluster per command). ` + "`aws`" + ` runs on the current AWS account; add ` + "`--profile <account-name>`" + ` to use another connected account. Unknown names return the available targets.
 
 	**Empty-match is success.** When grep-family searchers (` + "`grep` / `egrep` / `fgrep` / `rg` / `ack` / `ag`" + `) find no matches, the observation comes back as ` + "`{\"stdout\":\"\",\"no_matches\":true}`" + ` with a Success status — the command ran fine and there is nothing to find. Do NOT retry the same command — either widen the pattern or conclude that no match exists. This semantic also applies when the searcher is the last segment of a pipeline (` + "`kubectl get pods | grep ready`" + `). It does NOT apply to ` + "`find`" + ` (whose exit 1 is a real path / permission error) or plain ` + "`jq`" + ` (which exits 0 and returns ` + "`null`" + ` on missing keys).
 
@@ -188,14 +188,17 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		}
 	}
 
-	// Prepare env — inject cloud credentials if the account is a cloud account (AWS/GCP/Azure).
-	// This allows the shell tool to run cloud CLI commands (aws, gcloud, az) without requiring
-	// the planner to route through specialized cloud tools.
+	// Prepare env. GCP/Azure still use workspace-scoped auth; AWS is relayed by
+	// the workspace shim and never receives credentials in this environment.
 	env := map[string]string{}
-	if selected := nbRequestContext.QueryConfig.ToolConfigs[ToolExecuteKubectlCommand]; selected != "" {
+	commandOwner := ShellConfigToolName(originalCommand)
+	if selected := nbRequestContext.QueryConfig.ToolConfigs[commandOwner]; commandOwner != "" && selected != "" {
+		// The shim treats this as the default for a command that does not name
+		// its own --context/--profile. This is what makes a delegate's child-only
+		// target apply to shell commands without rewriting their argv.
 		env[workspace.ENV_NB_TOOL_CONFIG_NAME] = selected
 	}
-	if ShellConfigToolName(originalCommand) == ToolExecuteKubectlCommand {
+	if commandOwner == ToolExecuteKubectlCommand {
 		// Keep the existing target-bound credential path for writes that were
 		// visible to the planner and passed its confirmation gate. Reads and
 		// kubeconfig discovery are resolved from concrete argv by the shim.
@@ -215,7 +218,7 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 	}
 	cloudAuth, err := m.buildCloudAuthEnv(nbRequestContext, command)
 	if err != nil {
-		if ShellConfigToolName(originalCommand) != "" {
+		if commandOwner != "" {
 			return core.NBToolResponse{}, fmt.Errorf("shell: target credentials unavailable: %w", err)
 		}
 		// Non-fatal for local commands only.
@@ -571,12 +574,18 @@ func firstTokenIsFileReader(originalCommand string) bool {
 	return false
 }
 
-// buildCloudAuthEnv checks if the shell tool's account is a cloud account (AWS/GCP/Azure)
-// and returns the auth environment + command wrappers needed for CLI access.
+// buildCloudAuthEnv returns the workspace auth environment + command wrappers
+// needed for GCP/Azure CLI access. AWS is handled by the workspace shim.
 // For non-cloud accounts (e.g. K8s), it falls back to cross-account auth when the
 // command is a recognized cloud CLI (gcloud, aws, az).
 func (m ShellTool) buildCloudAuthEnv(nbRequestContext core.NbToolContext, command string) (*CloudAuthResult, error) {
 	if m.AccountId == "" {
+		return nil, nil
+	}
+	// AWS CLI calls are relayed by the workspace shim and receive credentials
+	// only inside cloud-collector. Never place AWS credentials in the workspace
+	// command environment, including for AWS-origin workspaces.
+	if shellCloudAuthUsesShim(command) {
 		return nil, nil
 	}
 	if owner := ShellConfigToolName(command); owner != "" {
@@ -615,6 +624,11 @@ func (m ShellTool) buildCloudAuthEnv(nbRequestContext core.NbToolContext, comman
 		// only if the command is a recognized cloud CLI.
 		return m.buildCrossAccountCloudAuth(nbRequestContext, command)
 	}
+}
+
+func shellCloudAuthUsesShim(command string) bool {
+	provider, _ := detectCloudCLI(command)
+	return provider == "aws"
 }
 
 // cloudCLIMapping maps command substrings to their cloud provider and

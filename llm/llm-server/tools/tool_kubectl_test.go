@@ -360,6 +360,8 @@ func TestValidateKubectlCommandAccess(t *testing.T) {
 		`kubectl get pods >/dev/null; printf '\163ecrets' | xargs kubectl get`,
 		`kubectl get pods | cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
 		`kubectl get pods | grep -e. /var/run/./secrets/kubernetes.io/serviceaccount/token`,
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
 	}
 	for _, command := range blocked {
 		require.Error(t, validateKubectlCommandAccess(command), command)
@@ -440,6 +442,8 @@ func TestValidateKubectlCommandAccess_SecretExclusion(t *testing.T) {
 		`kubectl exec api -- cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
 		`kubectl exec api -- sh -c "cat /run/secrets/token"`,
 		`kubectl cp api:/var/run/secrets/token /tmp/token`,
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
 		`kubectl attach api -- cat /var/lib/kubelet/pods/uuid/volumes/kubernetes.io~secret/token`,
 		// Path obfuscations
 		`kubectl exec api -- cat /var/run/./secrets/token`,
@@ -494,6 +498,17 @@ func TestValidateKubectlRelayCommand(t *testing.T) {
 	}
 	for _, command := range allowed {
 		require.NoError(t, ValidateKubectlRelayCommand(command), command)
+	}
+}
+
+func TestKubectlCopyIsBlockedAtToolAndRelayBoundaries(t *testing.T) {
+	commands := []string{
+		`kubectl cp local.txt api:/tmp/local.txt`,
+		`kubectl --context k8s-dev cp api:/tmp/result.txt result.txt`,
+	}
+	for _, command := range commands {
+		require.ErrorContains(t, validateKubectlCommandAccess(command), "local paths resolve", command)
+		require.ErrorContains(t, ValidateKubectlRelayCommand(command), "local paths resolve", command)
 	}
 }
 

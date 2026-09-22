@@ -26,8 +26,9 @@ func init() {
 // investigation methodology, decision trees, and rich examples.
 func (t AwsCliTool) ToolPrompt() []string {
 	return []string{
-		"**Routing boundary:** These rules apply after the active agent has selected `aws_execute`; they do not override an agent policy that routes AWS reads and local computation through the workspace shell.",
-		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs, ARNs, or IPs — empty CLI results = 'not found'.",
+		"**Routing boundary:** These rules apply after the active agent has selected `aws_execute`; they do not override an agent policy that routes AWS commands and local computation through the workspace shell.",
+		"**Target preservation:** If the task names an AWS account, pass that exact name in `account` on every `aws_execute` call; for a command routed through `shell_execute`, pass it as `--profile <name>`. Never silently fall back to the conversation default.",
+		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs, ARNs, or IPs — empty CLI results = 'not found'. Every result starts with its resolved account name; preserve that provenance in conclusions.",
 		"**IAM safety:** NEVER attempt to modify your own IAM permissions or roles to grant access. `aws iam add-user-policy`, `aws iam attach-role-policy`, and similar are OFF LIMITS. Report missing permissions as a finding.",
 		"**Filter syntax gotcha:** `--filters` is plural. Values follow `Name=<filter>,Values=<value>` — e.g. `--filters Name=vpc-id,Values=vpc-12345`. Common wrong forms: `--filter …` (singular), `vpc-id=vpc-12345` (missing Name=/Values=).",
 		"**Group-by syntax gotcha:** `--group-by` values are `Type=DIMENSION,Key=<KEY>` space-separated between groups — e.g. `--group-by Type=DIMENSION,Key=SERVICE Type=DIMENSION,Key=REGION`. NOT `Type=SERVICE Type=REGION` and NOT comma-separated between groups.",
@@ -110,9 +111,9 @@ func (t AwsCliTool) Description() string {
 
 		**Usage:**
 
-		* **Routing:** Availability does not make this tool the default for every AWS command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns AWS reads to the workspace shell, do not use this tool for those reads; keep this direct path for mutations and commands with uncertain effects so approval and resume behavior is preserved.
+		* **Routing:** Availability does not make this tool the default for every AWS command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. Both paths use the normal command classification and approval flow.
 		* **Input:**  A valid 'aws' CLI command string.  Include necessary options and arguments. Be explicit about regions.
-		* **Account:** By default the command runs in the conversation's current AWS account. To run it in another connected AWS account, pass its name in 'account' (shell_execute always uses the current AWS account). An unknown name returns the list of available accounts. If the conversation has no current AWS account yet, the first account you name becomes it. Only aws commands switch accounts; other tools stay on the current account. Output from another account starts with "[account: <name>]"; cite it.
+		* **Account:** By default the command runs in the conversation's current AWS account. To run it in another connected AWS account, pass its name in 'account'. AWS commands inside shell_execute can select an account with '--profile <name>'. An unknown name returns the list of available accounts. If the conversation has no current AWS account yet, the first account you name becomes it. Only aws commands switch accounts; other tools stay on the current account. Every result starts with "[account: <name>]"; cite it.
 		* **Output:**  The raw output of the executed 'aws' CLI command.
 
 		**Examples:**
@@ -156,9 +157,7 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 	if err != nil {
 		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
 	}
-	// crossAccount marks a call that runs in an account other than the
-	// conversation's saved one; its output names the account it came from.
-	crossAccount := target.Name != nbRequestContext.ToolConfig.Name
+	provenance := awsTargetProvenance(target)
 
 	accountId := TargetAccountID(target)
 
@@ -170,32 +169,25 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 	if err != nil {
 		// Check for permanent STS errors that should not be retried
 		errMsg := err.Error()
-		if crossAccount {
-			errMsg = fmt.Sprintf("[account: %s]\n%s", target.Name, errMsg)
-		}
+		errMsg = provenance + errMsg
 		if strings.Contains(errMsg, "PERMANENT ERROR") {
 			return core.NBToolResponse{
 				Data:   errMsg,
 				Status: core.NBToolResponseStatusError,
 			}, nil
 		}
-		if crossAccount {
-			return core.NBToolResponse{Data: errMsg, Status: core.NBToolResponseStatusError}, err
-		}
-		return core.NBToolResponse{}, err
+		return core.NBToolResponse{Data: errMsg, Status: core.NBToolResponseStatusError}, err
 	}
 
 	auth.Env[workspace.ENV_NB_TOOL_CONFIG_NAME] = target.Name
 
-	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, auth.Env)
-	if crossAccount {
-		response = fmt.Sprintf("[account: %s]\n%s", target.Name, response)
-	}
+	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, directAwsWorkspaceCommand(command), auth.Env)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("aws: unable to execute shell script", "error", err.Error(), "command", command, "account", target.Name)
 		if response == "" {
 			response = err.Error()
 		}
+		response = provenance + response
 		// aws uses `aws <service> help` (no dashes), NOT `--help`, as the
 		// canonical help subcommand — hardcoding `--help` here would send
 		// the model to a slightly different code path.
@@ -204,12 +196,25 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 			Status: core.NBToolResponseStatusError,
 		}, err
 	}
+	response = provenance + response
 
 	return core.NBToolResponse{
 		Data:   response,
 		Type:   core.NBToolResponseTypeText,
 		Status: core.NBToolResponseStatusSuccess,
 	}, nil
+}
+
+func awsTargetProvenance(target core.ToolConfig) string {
+	return fmt.Sprintf("[account: %s]\n", target.Name)
+}
+
+// directAwsWorkspaceCommand preserves the existing aws_execute path while the
+// workspace's normal `aws` command is a relay shim. /usr/bin precedes the shim
+// in /usr/local/bin, while the rest of PATH stays available for existing
+// pipelines and scripts accepted by this tool.
+func directAwsWorkspaceCommand(command string) string {
+	return "export PATH=/usr/bin:$PATH; " + command
 }
 
 // classifyAwsVerb checks a single verb against AWS verb lists.

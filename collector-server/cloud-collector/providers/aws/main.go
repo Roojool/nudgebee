@@ -1323,6 +1323,9 @@ func validateAwsV2Command(command string) error {
 	if len(args) < 2 || args[0] != "aws" {
 		return fmt.Errorf("AWS CLI command must start with aws")
 	}
+	if err := validateAwsV2Arguments(args[1:]); err != nil {
+		return err
+	}
 	positionals, err := awsCommandPositionals(args)
 	if err != nil {
 		return err
@@ -1337,7 +1340,89 @@ func validateAwsV2Command(command string) error {
 	if service == "sts" && len(positionals) > 1 && awsV2BlockedStsOperations[positionals[1]] {
 		return fmt.Errorf("command %q is not allowed", "sts "+positionals[1])
 	}
+	if len(positionals) > 1 && awsV2BlockedOperations[service][positionals[1]] {
+		return fmt.Errorf("AWS workspace CLI operation %s %s is not allowed", service, positionals[1])
+	}
 	return nil
+}
+
+func validateAwsV2Arguments(args []string) error {
+	for _, arg := range args {
+		lower := strings.ToLower(arg)
+		switch {
+		case matchesAwsV2BlockedOption(lower, "--profile"):
+			return fmt.Errorf("AWS profiles must be resolved by the workspace proxy")
+		case matchesAwsV2BlockedOption(lower, "--endpoint-url"):
+			return fmt.Errorf("custom AWS endpoints are not allowed")
+		case matchesAwsV2BlockedOption(lower, "--ca-bundle") || matchesAwsV2BlockedOption(lower, "--no-verify-ssl"):
+			return fmt.Errorf("custom AWS TLS settings are not allowed")
+		case matchesAwsV2BlockedOption(lower, "--with-decryption"):
+			return fmt.Errorf("decrypting AWS parameter values in the workspace CLI is not allowed")
+		case strings.Contains(lower, "file://") || strings.Contains(lower, "fileb://"):
+			return fmt.Errorf("AWS workspace CLI cannot read files from cloud-collector")
+		}
+	}
+	return nil
+}
+
+// matchesAwsV2BlockedOption also matches long-option abbreviations accepted by
+// AWS CLI. Ambiguous prefixes fail closed. The comparison remains scoped to
+// the explicit transport-boundary denylist above; unrelated AWS flags pass.
+func matchesAwsV2BlockedOption(arg, blockedOption string) bool {
+	option, _, _ := strings.Cut(arg, "=")
+	return strings.HasPrefix(option, "--") && len(option) > len("--") && strings.HasPrefix(blockedOption, option)
+}
+
+// awsV2BlockedOperations are unsafe at the cloud-collector transport boundary
+// regardless of whether the outer tool call was approved. They expose fresh
+// credentials or require collector-local file access; ordinary AWS mutations
+// are authorized and approval-gated by llm-server before reaching this API.
+var awsV2BlockedOperations = map[string]map[string]bool{
+	"codeartifact": {
+		"get-authorization-token": true,
+	},
+	"ecr": {
+		"get-authorization-token": true,
+		"get-login-password":      true,
+	},
+	"eks": {
+		"get-token": true,
+	},
+	"cognito-identity": {
+		"get-credentials-for-identity": true,
+		"get-open-id-token":            true,
+	},
+	"lightsail": {
+		"get-instance-access-details":                  true,
+		"get-relational-database-master-user-password": true,
+	},
+	"rds": {
+		"generate-db-auth-token": true,
+	},
+	"redshift": {
+		"get-cluster-credentials":          true,
+		"get-cluster-credentials-with-iam": true,
+	},
+	"redshift-serverless": {
+		"get-credentials": true,
+	},
+	"s3": {
+		"cp":      true,
+		"mv":      true,
+		"presign": true,
+		"sync":    true,
+	},
+	"s3api": {
+		"get-object":            true,
+		"get-object-torrent":    true,
+		"put-object":            true,
+		"select-object-content": true,
+		"upload-part":           true,
+	},
+	"secretsmanager": {
+		"batch-get-secret-value": true,
+		"get-secret-value":       true,
+	},
 }
 
 func awsCliEnv(ctx context.Context, account providers.Account, command string) ([]string, error) {
