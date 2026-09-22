@@ -3247,7 +3247,9 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		} else if clusterLevel {
 			// Cluster-level needs two separate API calls (different groupBy per metric group).
 			// The helper handles both calls, merges results, and post-processes percentiles.
-			return fetchSolarWindsClusterUtilisation(ctx, req, metricsProvider, integrationSource, meta, instant)
+			out, err := fetchSolarWindsClusterUtilisation(ctx, req, metricsProvider, integrationSource, meta, instant)
+			canonicaliseUtilisationLabels(out.Results, metricsProvider)
+			return out, err
 		} else {
 			// Workload queries use SUM: pod-level metrics must be summed across all pods
 			// belonging to the workload to yield total workload resource consumption.
@@ -3260,10 +3262,14 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	// all three, so they are built and reduced in openobserve_queries.go; the workload
 	// and node keys still come from the Prometheus builders there.
 	case "openobserve":
-		return fetchOpenObserveUtilisation(ctx, req, meta, integrationSource, instant)
+		out, err := fetchOpenObserveUtilisation(ctx, req, meta, integrationSource, instant)
+		canonicaliseUtilisationLabels(out.Results, metricsProvider)
+		return out, err
 
 	case "ES":
-		return fetchESMetricUtilisation(ctx, req, meta)
+		out, err := fetchESMetricUtilisation(ctx, req, meta)
+		canonicaliseUtilisationLabels(out.Results, metricsProvider)
+		return out, err
 
 	default:
 		return OutputMetricQuery{}, fmt.Errorf("not supporting this metrics provider: %v", metricsProvider)
@@ -3329,6 +3335,11 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 			}
 		}
 	}
+
+	// Last, so every provider's series leave this function naming the same dimension
+	// the same way. Deliberately not in FetchMetricsQuery: that path runs the user's
+	// own query and must return their labels untouched.
+	canonicaliseUtilisationLabels(output.Results, metricsProvider)
 
 	return output, nil
 }
