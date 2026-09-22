@@ -52,6 +52,9 @@ var datadogPerPodKeys = map[string]string{
 var datadogPerPodUnanswerable = map[string]string{
 	"container_memory_max_usage_by_pod": "Datadog reports no cgroup high-water mark. " +
 		"kubernetes.memory.working_set is a different number — answering with it would size a limit too low.",
+	"container_oomkilled_limit_by_pod": "Datadog reports no per-container terminated reason, so there is nothing " +
+		"to join a memory limit against. kubernetes_state.container.restarts counts restarts of every cause — " +
+		"answering with it would report a limit for containers that were never OOM-killed.",
 }
 
 // datadogRollupSecondsForPods picks the finest rollup whose response stays inside the

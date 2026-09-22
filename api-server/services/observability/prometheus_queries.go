@@ -401,6 +401,35 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 				containerFilter)
 			queries[metricKey] = expr
 
+		case "container_oomkilled_limit_by_pod":
+			// The memory LIMIT a container was holding when the kubelet OOM-killed it.
+			//
+			// Not a usage series: it is a spec value, gated on an event having
+			// happened. kube-state-metrics publishes the two halves separately, so the
+			// only way to ask "what was the limit at the kill" is to join them — the
+			// limit series multiplied by the terminated-reason series, which is 1 only
+			// where the reason is OOMKilled and absent everywhere else, so the product
+			// exists only for containers that were actually killed.
+			//
+			// `job` is in the join keys because both halves come from kube-state-metrics
+			// and carry it; dropping it would join a container's limit against another
+			// scraper's kill record. `namespace` is in them too, which the PromQL this
+			// replaces left out — two namespaces running a same-named pod would
+			// otherwise cross-join, and the limit reported for one could come from the
+			// other's kill.
+			//
+			// No promKubeletPreferred: neither half is a cAdvisor series, so there is
+			// no per-scraper duplication to collapse and no `instance` arm to prefer.
+			oomFilter := promSelector(containerFilter, `resource="memory"`)
+			killFilter := promSelector(containerFilter, `reason="OOMKilled"`)
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, container, pod) (`+
+					`max by (namespace, container, pod, job) (kube_pod_container_resource_limits{__CLUSTER__ %s})`+
+					` * on (namespace, container, pod, job) group_left(reason) `+
+					`max by (namespace, container, pod, job, reason) (kube_pod_container_status_last_terminated_reason{__CLUSTER__ %s})`+
+					`)`,
+				oomFilter, killFilter)
+
 		// Requests and limits for the SAME series shape as the usage keys above, so a
 		// consumer can join usage against its spec on (namespace, pod, container)
 		// without a second request shape to reason about.

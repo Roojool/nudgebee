@@ -533,6 +533,10 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// high-water mark has no field in any Elasticsearch layout we read, so it falls
 	// through to esUtilUnsupportedNote rather than being answered with the working
 	// set, which is a different number and would size a limit too low.
+	//
+	// container_oomkilled_limit_by_pod is absent for the same reason and falls the
+	// same way: it needs a per-container terminated reason to join a limit against,
+	// and no layout here carries one.
 	// Per-container keys, at every scope.
 	//
 	// At workload and pod scope a namespace term filter already pins every document

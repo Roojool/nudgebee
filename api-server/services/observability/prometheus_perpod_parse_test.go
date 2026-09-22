@@ -20,6 +20,10 @@ func TestPerPodQueriesAreValidPromQL(t *testing.T) {
 		"container_cpu_usage_by_pod",
 		"container_memory_working_set_by_pod",
 		"container_memory_max_usage_by_pod",
+		// The join is the one query here the parser earns its keep on: two selectors,
+		// a vector match with an explicit `on`, and a group_left, all built from the
+		// same shared filter string.
+		"container_oomkilled_limit_by_pod",
 	}
 
 	shapes := map[string]RequestMetadata{
