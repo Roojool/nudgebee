@@ -532,8 +532,21 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 				AND cr.workload_type != 'Job'
 		),
 		scan_state AS (
+			-- scanned_at comes from the summary payload, which only the scanner
+			-- writes. updated_at cannot be used here: a BEFORE UPDATE trigger
+			-- bumps it on every write to the row, and the daily FinOps score
+			-- recompute rewrites every Open recommendation, so it reports every
+			-- image as scanned hours ago however long ago it was really scanned.
+			-- Reading it made the freshness test below permanently true, so no
+			-- image with a summary row was ever re-scanned again. Measured on
+			-- dev: median updated_at age 0.22 days against a median real scan
+			-- age of 21.8 days, oldest 70 days.
+			-- A missing or unparseable value reads as never scanned, which
+			-- re-scans the image rather than hiding it.
 			SELECT account_object_id AS image,
-				updated_at AS last_scanned,
+				CASE WHEN recommendation->>'scanned_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+					THEN (recommendation->>'scanned_at')::timestamptz
+				END AS last_scanned,
 				recommendation->>'status' AS last_status
 			FROM recommendation
 			WHERE cloud_account_id = $1
@@ -839,6 +852,130 @@ func countActiveAgentsForAccount(ctx *security.RequestContext, dbms *database.Da
 	return count, nil
 }
 
+// imageScanInventoryFreshHours bounds how stale an account's Kubernetes
+// inventory may be before the departed-image sweep refuses to touch it. An agent
+// that stops reporting leaves the inventory frozen, and a frozen inventory lists
+// no current images — indistinguishable from an account that really has nothing
+// deployed. Archiving on that reading would retire every finding a tenant has.
+const imageScanInventoryFreshHours = 24
+
+// imageScanDepartedBatchLimit caps rows archived per sweep. The backlog is
+// millions of rows on a large estate; archiving it in one statement would leave
+// that many dead tuples on a table this size in a single pass, and hand the same
+// number to the retention job at once.
+const imageScanDepartedBatchLimit = 20000
+
+// archiveImageScanFindingsForDepartedImages retires vulnerability findings whose
+// image is no longer anywhere in the account's inventory.
+//
+// Findings are normally retired by re-scanning their image: the scan archives
+// everything Open for that image and re-opens whatever it still finds. Scan
+// candidates come only from running pods, so an image that has left the cluster
+// can never be re-scanned, and its findings stay Open forever. Every superseded
+// build tag leaves its vulnerabilities behind, and they are shown to users
+// alongside the ones that still apply.
+//
+// An image counts as present if any pod row still carries it, if any workload
+// declares it, or if the scanner itself confirmed it within the re-scan window.
+// Pod rows outlive the pod, so a CronJob between runs and a briefly restarting
+// workload both stay covered; the workload side covers a Deployment scaled to
+// zero, which declares an image but has no pods; the scanner side covers an
+// image the inventory does not model, such as one that only ever runs as an init
+// container.
+//
+// Only Open rows are touched, and only into Archive. Dismissed, InProgress and
+// Closed are set by people and must survive, and Closed in particular means a
+// resolution the user started has settled, which this has no business claiming.
+// If an image comes back the next scan re-opens its rows.
+// departedImageArchiveQuery builds the sweep statement over the given tables.
+// The table names are parameters so the statement can be exercised verbatim
+// against throwaway tables in a real Postgres: it is a destructive UPDATE
+// driven by a three-way UNION, a jsonb text extraction and a guarded timestamp
+// cast, none of which Go can check.
+//
+// The container lists are type-checked rather than coalesced. A JSON null is not
+// a SQL NULL, so coalesce lets it through and expanding it aborts the whole
+// statement: one malformed row anywhere would stop the sweep for every account.
+//
+// The row cap needs no ordering to make progress. An archived row leaves the
+// Open set it is selected from, so each pass takes a different batch and the
+// backlog drains whatever order the planner chooses. Sorting millions of rows
+// to pick a batch would cost more than it settles.
+func departedImageArchiveQuery(recommendationTable, podTable, workloadTable string) string {
+	return fmt.Sprintf(`
+		WITH fresh_accounts AS (
+			SELECT cloud_account_id, tenant_id
+			FROM %[2]s
+			GROUP BY cloud_account_id, tenant_id
+			HAVING max(last_seen) > now() - make_interval(hours => $1)
+		),
+		known_images AS (
+			SELECT p.cloud_account_id, p.tenant_id, c->>'image' AS image
+			FROM %[2]s p
+			JOIN fresh_accounts f
+			  ON f.cloud_account_id = p.cloud_account_id AND f.tenant_id = p.tenant_id
+			CROSS JOIN LATERAL jsonb_array_elements(
+				CASE WHEN jsonb_typeof(p.meta->'config'->'containers') = 'array'
+					THEN p.meta->'config'->'containers' ELSE '[]'::jsonb END) c
+			WHERE c->>'image' IS NOT NULL
+		UNION
+			SELECT w.cloud_account_id, w.tenant_id, c->>'image'
+			FROM %[3]s w
+			JOIN fresh_accounts f
+			  ON f.cloud_account_id = w.cloud_account_id AND f.tenant_id = w.tenant_id
+			CROSS JOIN LATERAL jsonb_array_elements(
+				CASE WHEN jsonb_typeof(w.meta->'config'->'containers') = 'array'
+					THEN w.meta->'config'->'containers' ELSE '[]'::jsonb END) c
+			WHERE w.is_active IS NOT FALSE AND c->>'image' IS NOT NULL
+		UNION
+			SELECT s.cloud_account_id, s.tenant_id, s.account_object_id
+			FROM %[1]s s
+			JOIN fresh_accounts f
+			  ON f.cloud_account_id = s.cloud_account_id AND f.tenant_id = s.tenant_id
+			WHERE s.category = 'Security'
+			  AND s.rule_name = 'image_scan_summary'
+			  AND s.status <> 'Archive'
+			  AND s.account_object_id IS NOT NULL
+			  AND s.recommendation->>'scanned_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+			  AND (s.recommendation->>'scanned_at')::timestamptz > now() - make_interval(days => $2)
+		),
+		departed AS (
+			SELECT r.id
+			FROM %[1]s r
+			JOIN fresh_accounts f
+			  ON f.cloud_account_id = r.cloud_account_id AND f.tenant_id = r.tenant_id
+			WHERE r.category = 'Security'
+			  AND r.rule_name = 'image_scan'
+			  AND r.status = 'Open'
+			  AND r.recommendation->>'image_name' IS NOT NULL
+			  AND NOT EXISTS (
+				SELECT 1 FROM known_images k
+				WHERE k.cloud_account_id = r.cloud_account_id
+				  AND k.tenant_id = r.tenant_id
+				  AND k.image = r.recommendation->>'image_name'
+			  )
+			LIMIT $3
+		)
+		UPDATE %[1]s r
+		SET status = $4
+		FROM departed d
+		WHERE r.id = d.id AND r.status = $5`, recommendationTable, podTable, workloadTable)
+}
+
+func archiveImageScanFindingsForDepartedImages(ctx *security.RequestContext, dbms *database.DatabaseManager) error {
+	res, err := dbms.Db.Exec(
+		departedImageArchiveQuery("recommendation", "k8s_pods", "k8s_workloads"),
+		imageScanInventoryFreshHours, imageScanFreshDays, imageScanDepartedBatchLimit,
+		models.RecommendationStatusArchive, models.RecommendationStatusOpen)
+	if err != nil {
+		return fmt.Errorf("image_scanner: archive departed images: %w", err)
+	}
+	if count, err := res.RowsAffected(); err == nil && count > 0 {
+		ctx.GetLogger().Info("archived image scan findings for departed images", "count", count)
+	}
+	return nil
+}
+
 func GenerateRecommendation(ctx *security.RequestContext, request GenerateRecommendationRequest) (GenerateRecommendationResponse, error) {
 	t0 := time.Now()
 	defer func() {
@@ -857,6 +994,9 @@ func GenerateRecommendation(ctx *security.RequestContext, request GenerateRecomm
 	if len(request.AccountId) == 0 {
 		if err := archiveRecommendationsForInactiveResources(ctx, dbms); err != nil {
 			ctx.GetLogger().Error("error archiving recommendations for inactive resources", "error", err)
+		}
+		if err := archiveImageScanFindingsForDepartedImages(ctx, dbms); err != nil {
+			ctx.GetLogger().Error("error archiving image scan findings for departed images", "error", err)
 		}
 	}
 

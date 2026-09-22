@@ -127,7 +127,11 @@ func upsertImageScanSummary(ctx *security.RequestContext, account ScanAccount, s
 	// resource_id stays NULL — the unique index is NULLS NOT DISTINCT, so the
 	// stable (rule_name, account, NULL, category, image) tuple upserts in place.
 	// created_at is left to its column default on first insert and untouched on
-	// conflict, so it records the FIRST scan; updated_at tracks the LAST.
+	// conflict, so it records the FIRST scan. updated_at does NOT record the
+	// last scan: an UPDATE trigger bumps it on every write to the row, and the
+	// daily FinOps score recompute rewrites every Open recommendation. The
+	// payload's scanned_at is the only record of when this image was really
+	// scanned, so anything reasoning about scan freshness must read that.
 	now := time.Now()
 	_, err = dbms.Db.Exec(
 		`INSERT INTO recommendation

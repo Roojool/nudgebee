@@ -129,6 +129,11 @@ jobs:
       # its request/limit lines, with no error. It can only be asserted against a
       # real planner, so it runs here.
       #
+      # recommendation carries the departed-image archive, a destructive UPDATE
+      # driven by a three-way UNION over jsonb, a text extraction and a guarded
+      # timestamp cast. Go cannot check any of that, and the failure mode is
+      # retiring findings that still apply.
+      #
       # event carries the enrichment merge, a hand-written statement over jsonb
       # and NOT NULL columns. Each defect it has had was invisible to Go tests and
       # only surfaced against a real Postgres: a uuid column compared with text, a
