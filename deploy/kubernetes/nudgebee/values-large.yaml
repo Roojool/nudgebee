@@ -42,12 +42,17 @@ services-server:
     # why it has not been OOM-killing. If the batch-recompute streaming fix lands,
     # this comes back down.
     #
-    # The request is 2Gi rather than the p95-derived figure used elsewhere: this
-    # container is above 2Gi for roughly 30% of the day, and a low request on a
-    # workload that large raises its eviction priority exactly when the node is
-    # under the pressure it is helping cause.
+    # The request is set from p95 (4495Mi measured), like the CPU requests, not
+    # from the 514Mi average. This container is above 2Gi for roughly 30% of the
+    # day; an average-derived request would leave it running far above its own
+    # reservation most of the time, which is both the first thing evicted under
+    # node pressure and the preferred node-OOM victim. Raising the limit without
+    # raising the request would have traded a cgroup OOMKill for an eviction.
+    #
+    # This is the most expensive line in this file: 5Gi x 3 replicas = 15GiB
+    # reserved. It comes back down when the recompute is made to stream.
     limits: { cpu: 2000m, memory: 12Gi }
-    requests: { cpu: 300m, memory: 2Gi }
+    requests: { cpu: 300m, memory: 5Gi }
 
 k8s-collector:
   resources:
@@ -69,16 +74,21 @@ relay-server:
     # Still cheap at 77 attached clusters — 39Mi average. Agent connections scale
     # almost for free; this is headroom for reconnect storms and for the
     # large-payload reply path, not for growth.
+    # Held at the Medium request for monotonicity. Large's own p95 is lower
+    # (82Mi) — agent count does not drive this, payload size does.
     limits: { cpu: 1000m, memory: 2Gi }
-    requests: { cpu: 150m, memory: 250Mi }
+    requests: { cpu: 150m, memory: 500Mi }
 
 cloud-collector-server:
   replicaCount: 2
   resources:
     # The one genuinely CPU-hungry service: 373m average with a 2.6-core peak
     # sweeping 433 cloud accounts. Still no CPU limit, on purpose.
+    # Memory request from p95, held at the Medium figure for monotonicity —
+    # the driver is the largest single account's billing report, not estate size,
+    # and the busiest Medium install measures higher than Large. See #38972.
     limits: { memory: 6Gi }
-    requests: { cpu: 500m, memory: 500Mi }
+    requests: { cpu: 500m, memory: 1Gi }
 
 ml-k8s-server:
   replicaCount: 2

@@ -511,9 +511,25 @@ ticket-server:
 ml-k8s-server:
   enabled: true
   fullnameOverride: ml-server
+  # #37330 pinned this to request = limit = 4Gi for Guaranteed QoS after a live
+  # OOM in PRODUCTION. Two things have since made that pin the wrong shape here:
+  #
+  # 1. It no longer applies where the incident happened. values-medium/large.yaml
+  #    override both request and limit (1.5Gi/5Gi and 2Gi/6Gi), and a tier overlay
+  #    beats this block — so Medium and Large are already Burstable. The pin only
+  #    ever survived at Small, which is the one tier that never had the outage.
+  # 2. At Small it was the single largest reservation in the whole chart — 4Gi of
+  #    a 15.5GiB total, 26%, and 2.7x what a Medium install reserves for the same
+  #    service. On a 16GiB node that is the difference between scheduling and not.
+  #
+  # Measured on the two real Small installs over 15 days: 497-611Mi average,
+  # p95 1049Mi, peak 1221Mi, and zero OOMKills and zero restarts. The request now
+  # comes from p95 like every other spiky service. The 4Gi LIMIT is untouched, so
+  # the OOMKill ceiling that actually stopped the incident is still there; what
+  # changes is that the pod no longer reserves 4x its p95.
   resources:
     requests:
-      memory: 4Gi
+      memory: 1.5Gi
     limits:
       memory: 4Gi
 postgres_migrations:

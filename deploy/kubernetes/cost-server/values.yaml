@@ -52,13 +52,18 @@ useObservabilityMetrics: false
 # ceiling is not reserved capacity, so an over-generous one costs nothing at
 # steady state, while a tight one is an OOMKill. See the "never lower a memory
 # limit" rule in docs/sizing-and-tiers.md.
+# Memory request is set from p95 (120Mi on the leanest Small install), not from
+# the 36-47Mi average. A 100Mi request sat *below* measured p95, which puts the
+# pod above its own request more than 5% of the time — first in line for eviction
+# under node pressure and the preferred node-OOM victim, on a service already
+# seen OOMKilling at a customer.
 resources:
   limits:
     cpu: 500m
     memory: 2Gi
   requests:
     cpu: 50m
-    memory: 100Mi
+    memory: 250Mi
 
 autoscaling:
   enabled: false

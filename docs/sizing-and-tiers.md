@@ -35,13 +35,37 @@ default has to be safe for a real customer, not just for a laptop demo.
 
 ### What each tier actually costs
 
-Total across all control-plane services, excluding the database:
+Two different numbers, and mixing them up is how you end up with Pending pods.
 
-| Tier | Memory (avg) | Memory (peak) | CPU (avg) | CPU (peak) | Plan for |
-|---|---|---|---|---|---|
-| Small | 3.3 – 6.6 GiB | 7.7 – 11.9 GiB | 0.2 – 0.3 cores | ~2.2 cores | 3 CPU / 16 GiB |
-| Medium | 11.3 GiB | 27.6 GiB | 0.80 cores | 10.1 cores | 5 CPU / 32 GiB |
-| Large | 21.1 GiB | 32.3 GiB | 1.11 cores | 6.6 cores | 8 CPU / 48 GiB |
+**What it uses** — measured, across all control-plane services, excluding the database:
+
+| Tier | Memory (avg) | Memory (peak) | CPU (avg) | CPU (peak) |
+|---|---|---|---|---|
+| Small | 3.3 – 6.6 GiB | 7.7 – 11.9 GiB | 0.2 – 0.3 cores | ~2.2 cores |
+| Medium | 11.3 GiB | 27.6 GiB | 0.80 cores | 10.1 cores |
+| Large | 21.1 GiB | 32.3 GiB | 1.11 cores | 6.6 cores |
+
+**What it reserves** — the sum of requests including the bundled database, which is
+what the scheduler actually needs to place the pods:
+
+| Tier | Memory requested | CPU requested | Plan for (allow ~8% node overhead) |
+|---|---|---|---|
+| Small | 13.0 GiB | 2.5 cores | **4 CPU / 16 GiB** |
+| Medium | 24.7 GiB | 6.1 cores | **8 CPU / 32 GiB** |
+| Large | 46.5 GiB | 10.3 cores | **12 CPU / 56 GiB** |
+
+Size from the second table, not the first. A node advertises roughly 92% of its
+memory as allocatable once the kubelet and system reserves are taken out, so a
+16 GiB node offers ~14.7 GiB. The earlier version of this page recommended
+3 CPU / 16 GiB for Small and 8 CPU / 48 GiB for Large, both derived from measured
+*usage*; Small fitted only after `ml-k8s-server` stopped reserving 4Gi (below),
+and Large still needed a bigger node. CPU was under on Medium and Large either
+way.
+
+These are single-node figures for the common case where the control plane runs on
+one node. Spread across several nodes the totals are the same, but a single pod's
+request must still fit inside one node's allocatable — the largest single request
+at Small is 1.5 GiB.
 
 ### Confidence
 
@@ -62,11 +86,42 @@ Total across all control-plane services, excluding the database:
 CPU pressure would matter. Sizing work should start with memory and treat CPU as an
 afterthought — which is the opposite of how our charts were written.
 
-**Memory requests come from the average. Memory limits come from the peak.**
-Not from the average with a percentage on top. Several services in this platform
-burst an order of magnitude above steady state — services-server sits at 90-240Mi
-and hits 6.7Gi four times a day. A limit set from average usage is an OOMKill with
-a delay on it.
+**Memory limits come from the peak.** Not from the average with a percentage on
+top. Several services in this platform burst an order of magnitude above steady
+state — services-server sits at 90-240Mi and hits 6.3-7.9Gi four times a day. A
+limit set from average usage is an OOMKill with a delay on it.
+
+**Memory requests come from the average for flat services, and from p95 for spiky
+ones.** The request is not just an accounting figure: it sets the QoS class and
+the pod's `oom_score_adj`. A pod running above its own request is the first thing
+the kubelet evicts under node pressure and the preferred victim of a node-level
+OOM. So raising a limit while lowering the request does not remove an OOM risk —
+it converts a cgroup OOMKill into an eviction, and widens the request-to-limit gap
+on exactly the pods most likely to be far above their request when a node fills.
+
+That matters here because the cluster is already overcommitted at the limit level:
+measured 86% of allocatable cluster-wide on one install and 123% on another, with
+individual nodes at 253%. Limits are not reserved, so overcommit is expected and
+fine — right up until several services burst together.
+
+The test for which rule applies: if p95 is close to the average, the service is
+flat and the average is a fine request. If p95 is multiples of the average, the
+service spends a meaningful share of its life in the burst, and the request has to
+cover that. Five services in this chart are sized this way — `services-server`,
+`cloud-collector-server`, `cost-server`, `relay-server`, and the agent's `runner`.
+The first three and the runner each have a periodic job that holds a whole result
+set in memory; `relay-server` is spiky for a different reason (large payloads cross
+the process twice on the reply path) but the request rule is the same. Everything
+else stays on the average, where the gap is small enough not to matter.
+
+`k8s-collector` is the instructive near-miss: its p95 is 1.4-2.4x its average,
+which looks spiky until you compare it to the request. 500Mi already clears the
+406Mi worst p95 at every tier, so there is nothing to change. Apply the test to the
+request, not to the ratio in isolation.
+
+The cost is real: `services-server` at Large reserves 5Gi x 3 replicas. When a
+service's burst is expensive enough that reserving it is painful, that is the
+signal to fix the burst rather than to size around it.
 
 **Never lower a memory limit. Ratchet it up only.** This is the most important
 rule on this page and the one that is easiest to talk yourself out of, because a
@@ -152,36 +207,29 @@ process memory rather than page cache charged to the cgroup.
 
 ---
 
-## Known tier inversion: `ml-k8s-server`
+## Resolved tier inversion: `ml-k8s-server`
 
-One service does not follow the tier table, and it is worth knowing before you
-read a rendered manifest and think something is broken.
+Kept here because a reader of the git history will find the old shape and wonder.
 
-`ml-k8s-server` OOM-killed in production, and PR #37330 fixed it by pinning the
-service to **request = limit = 4Gi** — Guaranteed QoS, the strongest anti-eviction
-posture Kubernetes offers. That override lives in the umbrella
-`nudgebee/values.yaml`, and a parent chart's values beat a subchart's, so it wins
-over the 1.5Gi request in `ml-k8s-server/values.yaml`.
+PR #37330 responded to an `ml-k8s-server` OOM **in production** by pinning the
+service to request = limit = 4Gi in the umbrella `nudgebee/values.yaml` —
+Guaranteed QoS, the strongest anti-eviction posture Kubernetes offers. A parent
+chart's values beat a subchart's, so that won over the subchart request.
 
-The profile overlays are read *after* the umbrella, so they still apply. The net
-effect:
+The profile overlays are read *after* the umbrella, though, and
+`values-medium.yaml` / `values-large.yaml` set both request and limit. So the pin
+never applied at the tiers it was written for — Medium and Large were already
+Burstable — and survived only at **Small**, the one tier that never had the
+outage. It made Small reserve 4Gi against a measured p95 of 1049Mi, which was 26%
+of the entire Small budget and 2.7x what Medium reserves for the same service.
 
-| Tier | Effective memory request | From |
-|---|---|---|
-| Small | **4Gi** | umbrella override (#37330) |
-| Medium | 1.5Gi | `values-medium.yaml` |
-| Large | 2Gi | `values-large.yaml` |
+Resolved by taking the Small request from p95 like every other spiky service
+(1.5Gi) and leaving the **4Gi limit untouched** — the OOMKill ceiling that
+actually ended the incident is still in place; only the reservation moved. Small
+dropped from 15.5 GiB to 13.0 GiB, and requests are now monotonic across tiers.
 
-Small therefore reserves more than Medium or Large for this one service. That is
-backwards, and it is deliberate for now: #37330 was a response to a real outage,
-and unpicking someone's live OOM fix as a side effect of a sizing change is the
-wrong trade. Limits are unaffected and remain monotonic (4Gi / 5Gi / 6Gi).
-
-The clean resolution, when someone wants it, is to make `ml-k8s-server`
-Guaranteed at every tier — request = limit of 4Gi / 5Gi / 6Gi — and delete the
-umbrella override so the numbers live in one place again. Until then, do not
-"correct" the subchart request on its own; that changes nothing at Small and only
-makes the file lie harder.
+Evidence: over 15 days on the two real Small installs, `ml-k8s-server` averaged
+497-611Mi, p95 1049Mi, peak 1221Mi, with **zero OOMKills and zero restarts**.
 
 ## Known memory defects
 

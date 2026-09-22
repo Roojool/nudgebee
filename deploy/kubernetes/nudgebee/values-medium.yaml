@@ -37,8 +37,14 @@ services-server:
     # Medium. A 4Gi ceiling was below the limit this container has already been
     # observed to OOM against (2.5Gi on a mid-sized estate) plus the headroom that
     # a >2x estate implies.
+    # Memory request from p95 (1788Mi on the busiest Medium install), not the
+    # 129-183Mi average. The recompute keeps this container above any
+    # average-derived request for a large share of the day, which is exactly when
+    # a low request makes it the first pod evicted under node pressure. Note the
+    # spread within this tier is wide — a quieter Medium install measures 285Mi
+    # p95 — so an operator sizing a small Medium estate can tune this down.
     limits: { cpu: 1500m, memory: 6Gi }
-    requests: { cpu: 250m, memory: 750Mi }
+    requests: { cpu: 250m, memory: 2Gi }
 
 k8s-collector:
   resources:
@@ -59,15 +65,23 @@ relay-server:
     # 1.5Gi, matching Small: the failure here is a sub-scrape-interval allocation
     # spike on the large-payload reply path, not estate growth. Dev sat at 35Mi
     # average and still OOM-killed 7 pods against a 1000Mi limit.
+    # Memory request from p95 (263Mi on the busiest Medium install), not the
+    # 24-36Mi average. relay-server is the spikiest service in the chart by ratio
+    # — p95 is 7.5x its average — because large payloads cross this process twice
+    # on the reply path. A 250Mi request sat just below that p95.
     limits: { cpu: 750m, memory: 1.5Gi }
-    requests: { cpu: 100m, memory: 250Mi }
+    requests: { cpu: 100m, memory: 500Mi }
 
 cloud-collector-server:
   resources:
     # No CPU limit on purpose — cloud discovery is bursty and throttling it only
     # stretches the sync window.
+    # Memory request from p95 (854Mi on the busiest Medium install), not the
+    # 130-478Mi average: the daily usage-report job holds one account's whole
+    # monthly billing report, so the pod sits well above any average-derived
+    # request for the duration of that job. See issue #38972.
     limits: { memory: 4Gi }
-    requests: { cpu: 300m, memory: 500Mi }
+    requests: { cpu: 300m, memory: 1Gi }
 
 ml-k8s-server:
   replicaCount: 2
@@ -107,7 +121,7 @@ notifications:
 cost-server:
   resources:
     limits: { cpu: 750m, memory: 2Gi }
-    requests: { cpu: 100m, memory: 100Mi }
+    requests: { cpu: 100m, memory: 250Mi }
 
 ticket-server:
   resources:
