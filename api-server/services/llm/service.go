@@ -113,6 +113,9 @@ func WaitForConversation(sc *security.RequestContext, request ConversationApiReq
 // or the retry budget runs out.
 func pollConversation(sc *security.RequestContext, convId, accountID string, headers map[string]string) (*ChatCompletionResponse, error) {
 	retryAttempts := config.Config.ServicesServerLLMRetryAttempts
+	if retryAttempts <= 0 || retryAttempts > 30 {
+		retryAttempts = 30
+	}
 	backoffSec := config.Config.ServicesServerLLMInitialBackoffSeconds
 	if backoffSec <= 0 {
 		backoffSec = 2
@@ -120,10 +123,18 @@ func pollConversation(sc *security.RequestContext, convId, accountID string, hea
 	backoff := time.Duration(backoffSec) * time.Second
 
 	for i := 0; i < retryAttempts; i++ {
+		if err := sc.GetContext().Err(); err != nil {
+			return nil, err
+		}
 		select {
 		case <-sc.GetContext().Done():
 			return nil, sc.GetContext().Err()
 		case <-time.After(backoff):
+		}
+
+		backoff = backoff * 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
 		}
 
 		getReq := llmChatRequest{
