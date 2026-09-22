@@ -26,19 +26,12 @@ import { ProgressBar } from '@ui/ProgressBar';
 import { Label } from '@ui/Label';
 import ScopeChip from '@components/llm/ScopeChip';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
+import BudgetHistoryTable from '@components/llm/BudgetHistoryTable';
+import { formatCurrency, formatCount } from 'src/utils/common';
 
 const renderAccountGroupIcon = (provider) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
-
-const formatCurrency = (amount) => {
-  if (amount == null || amount === 0) return '$0.00';
-  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
-  if (amount >= 1) return `$${amount.toFixed(2)}`;
-  return `$${amount.toFixed(4)}`;
-};
-
-const formatCount = (n) => (n != null ? n.toLocaleString() : '0');
 
 const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -1614,6 +1607,8 @@ const LLMConsumptionTab = ({ accountId, readOnly = false, cardElevation = 'raise
           )}
         </Box>
       )}
+
+      {isAdmin && <BudgetHistoryTable accountId={accountId} isTenantWide={isTenantWide} />}
 
       <Modal
         open={!!deleteConfirm}

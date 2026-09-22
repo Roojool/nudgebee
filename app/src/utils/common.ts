@@ -750,6 +750,15 @@ export const formatAuditActor = (actor: string) => {
     .join(' ');
 };
 
+export const formatCurrency = (amount: number | null | undefined) => {
+  if (amount == null || amount === 0) return '$0.00';
+  if (amount >= 1000) return `$${(amount / 1000).toFixed(2)}K`;
+  if (amount >= 1) return `$${amount.toFixed(2)}`;
+  return `$${amount.toFixed(4)}`;
+};
+
+export const formatCount = (n: number | null | undefined) => (n != null ? n.toLocaleString() : '0');
+
 export const formatActionNameForAuditMessage = (actionName: string) => {
   if (!actionName) return '';
   let formattedName = actionName
