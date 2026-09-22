@@ -10,15 +10,15 @@ require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/PagerDuty/go-pagerduty v1.8.0
-	github.com/agiledragon/gomonkey/v2 v2.14.2
+	github.com/agiledragon/gomonkey/v2 v2.14.3
 	github.com/alecthomas/participle/v2 v2.1.4
 	github.com/allegro/bigcache/v3 v3.2.0
 	github.com/andygrunwald/go-jira v1.17.0
 	github.com/aws/aws-sdk-go-v2 v1.47.0
-	github.com/aws/aws-sdk-go-v2/config v1.33.4
+	github.com/aws/aws-sdk-go-v2/config v1.33.5
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.42.0
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.74.0
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.332.0
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.0
 	github.com/beltran/gohive v1.8.1
 	github.com/eko/gocache/lib/v4 v4.4.0
@@ -64,7 +64,7 @@ require (
 	go.opentelemetry.io/otel/sdk/metric v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.23.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/apimachinery v0.37.0
@@ -85,7 +85,7 @@ require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/alecthomas/repr v0.5.1 // indirect
 	github.com/apache/thrift v0.24.0 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.4 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.3 // indirect
@@ -95,7 +95,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.10.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.50.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/beltran/gosasl v1.0.0 // indirect
 	github.com/beltran/gssapi v0.0.0-20200324152954-d86554db4bab // indirect
