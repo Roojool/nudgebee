@@ -71,16 +71,30 @@ def get_model_path(account_id: str, tenant_id: str, namespace: str, deployment_n
     return f"{tenant_id}/{account_id}/{namespace}/{deployment_name}/"
 
 
-def get_http_session_with_retry(retry_attempts: int = 3, backoff_factor: float = 1) -> requests.Session:
-    # Configure retry settings for HTTP requests
-    retry_strategy = None
-    if retry_attempts > 0:
-        retry_strategy = Retry(
-            total=retry_attempts,  # Total number of retries
-            status_forcelist=RETRY_STATUS_CODES,  # Retry on these HTTP status codes
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # Only retry on these HTTP methods
-            backoff_factor=backoff_factor,  # Backoff factor for delay between retries
-        )
+def get_http_session_with_retry(
+    retry_attempts: int = 3,
+    backoff_factor: float = 1,
+    retry_strategy: Optional[Retry] = None,
+) -> requests.Session:
+    """A session whose retry policy is the one asked for.
+
+    ``retry_strategy`` takes a ready-made policy for a caller that needs something the
+    two knobs cannot express -- retrying the connect phase but not the read phase, say.
+    """
+    if retry_strategy is None:
+        if retry_attempts > 0:
+            retry_strategy = Retry(
+                total=retry_attempts,  # Total number of retries
+                status_forcelist=RETRY_STATUS_CODES,  # Retry on these HTTP status codes
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # Only retry on these HTTP methods
+                backoff_factor=backoff_factor,  # Backoff factor for delay between retries
+            )
+        else:
+            # Explicitly Retry(0), never None: requests maps ``max_retries=None`` onto
+            # Retry.DEFAULT, which is Retry(3). A POST caller was unaffected -- POST is
+            # absent from urllib3's default allowed_methods, so nothing was retried --
+            # but a GET/PUT/DELETE caller asking for no retries silently got three.
+            retry_strategy = Retry(0, read=False)
     # Create a session with the retry strategy
     session = requests.Session()
     session.mount("https://", HTTPAdapter(max_retries=retry_strategy))

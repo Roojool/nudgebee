@@ -20,6 +20,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from urllib3 import Retry
+
 from server.utils.utils import ApiServerMetricsConfigs, get_http_session_with_retry, get_trace
 
 from opentelemetry import context
@@ -42,6 +44,31 @@ METRIC_PROVIDER_ELASTICSEARCH = "ES"
 _QUERY_KEY = "q0"
 
 _SECONDS_PER_UNIT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+# Retry the connect phase only. A refused connection means api-server never saw the
+# query, so re-sending costs nothing -- which is not true of a read failure, where the
+# query may already be running and a retry would double the cost of the slowest scans.
+# Keeping read=0 preserves exactly what the previous ``retry_attempts=0`` achieved: that
+# asked for no retries and got none, since POST is absent from urllib3's default
+# allowed_methods. What it also got was no way back from a refused connection.
+#
+# services-server runs a single replica on many installs, so a restart is a ~30s window
+# in which every query here is refused outright. connect=4 with backoff_factor=1 sleeps
+# 0/2/4/8s: ~14s over five attempts, measured against a closed port. That stays inside
+# api-server's own 30s budget for the anomaly call, so an answer that arrives after a
+# retry is still consumed rather than abandoned. The connect allowance applies to POST:
+# urllib3 checks allowed_methods for status retries, not for connect retries.
+_CONNECT_RETRY = Retry(total=None, connect=4, read=0, status=0, other=0, redirect=0, backoff_factor=1)
+
+# The connect phase gets its own short budget, separate from the read budget below. A
+# refused connection fails instantly, so the retries above cost only their backoff -- but
+# a connect that hangs instead of being refused (a stale kube-proxy DNAT rule pointing at
+# an address that never answers the SYN) burns the whole timeout on every attempt. Sharing
+# one 170s scalar across both phases would turn that into 5 x 170s + backoff, about 14
+# minutes for a single query. Bounded here at 5 x 3s + 14s of backoff, which stays inside
+# api-server's 30s budget for the anomaly call. In-cluster TCP connect is sub-millisecond,
+# so 3s is already far more than a healthy connect needs.
+_CONNECT_TIMEOUT_SECONDS = 3
 
 
 class ApiServerMetricsError(Exception):
@@ -249,12 +276,12 @@ def query_metrics_via_api_server(
 
         url = f"{ApiServerMetricsConfigs.url}/rpc/metrics"
         try:
-            response = get_http_session_with_retry().request(
+            response = get_http_session_with_retry(retry_strategy=_CONNECT_RETRY).request(
                 "POST",
                 url,
                 headers=headers,
                 data=json.dumps(payload),
-                timeout=timeout or ApiServerMetricsConfigs.timeout,
+                timeout=(_CONNECT_TIMEOUT_SECONDS, timeout or ApiServerMetricsConfigs.timeout),
             )
         except Exception as e:
             raise ApiServerMetricsError(f"metrics_query request failed for query '{query}': {e}") from e
