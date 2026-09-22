@@ -109,6 +109,25 @@ const SectionHeader = ({ title, description }) => (
   </Box>
 );
 
+// pr clears the fixed Nubi chat launcher (56px, 32px off the corner), which otherwise overlaps
+// the Save on a short tab like Traces.
+const SaveFooter = ({ onSave, loading, disabled }) => (
+  <Box
+    sx={{
+      display: 'flex',
+      justifyContent: 'flex-end',
+      mt: ds.space[5],
+      pt: ds.space[4],
+      pr: ds.space.mul(0, 28),
+      borderTop: `1px solid ${ds.gray[200]}`,
+    }}
+  >
+    <Button size='md' onClick={onSave} loading={loading} disabled={disabled} sx={{ minWidth: ds.space.mul(0, 70) }}>
+      Save
+    </Button>
+  </Box>
+);
+
 // Hand-maintained: the DB catalog (public.feature) has no when/why columns yet, so a flag missing here just falls back to its own description.
 // A function taking the brand, not a constant: two entries name the product, which
 // is tenant-branded and only resolved once /api/public/app_config has landed.
@@ -416,16 +435,48 @@ const TenantSettings = () => {
   });
   const [webhookMappingSaved, setWebhookMappingSaved] = useState(false);
   const [webhookMappingModified, setWebhookMappingModified] = useState(false);
+  const [savedSnapshot, setSavedSnapshot] = useState(null);
 
   // Read-only for anyone but a tenant admin, super admin, or `tenants:Write` holder -- mirrors the backend CanManage gate every write goes through.
   const canEdit = canEditTenantSettings();
+
+  // Must mirror every field handleSaveSettings writes; drives the Save button's dirty state.
+  const currentSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        tenantName,
+        checkboxEnabled,
+        allowDomainValue,
+        defaultAuthRole,
+        selectedObservabilityPlatform,
+        logSettings,
+        traceSettings,
+        webhookLabelMapping,
+      }),
+    [tenantName, checkboxEnabled, allowDomainValue, defaultAuthRole, selectedObservabilityPlatform, logSettings, traceSettings, webhookLabelMapping]
+  );
+  const isDirty = savedSnapshot !== null && currentSnapshot !== savedSnapshot;
+
+  useEffect(() => {
+    if (!initialLoading && savedSnapshot === null) {
+      setSavedSnapshot(currentSnapshot);
+    }
+  }, [initialLoading, savedSnapshot, currentSnapshot]);
 
   useEffect(() => {
     let cancelled = false;
     const fetchTenantAttributes = async () => {
       try {
         setLoading(true);
-        const [tenantAttributes, features] = await Promise.all([getTenantAttributes(), getFeatures()]);
+        // listUserTenants rides along here (not a separate parallel call) so tenantName is set
+        // before initialLoading flips -- otherwise the dirty-check baseline is captured without it
+        // and a late tenantName update starts the form out dirty. `.catch` keeps a tenant-list
+        // failure from failing the whole settings load.
+        const [tenantAttributes, features, tenantsRes] = await Promise.all([
+          getTenantAttributes(),
+          getFeatures(),
+          apiUserManagement.listUserTenants(session?.user?.email).catch(() => null),
+        ]);
         if (cancelled) {
           return;
         }
@@ -503,6 +554,12 @@ const TenantSettings = () => {
           });
           setFeatureChoices(choices);
         }
+
+        const tenants = tenantsRes?.data ?? [];
+        if (tenants.length > 0) {
+          // Falls back to the session name (not blank) to guard against a momentarily stale session after a rename. See issue #32696.
+          setTenantName(tenants.find((t) => t.name === session?.tenant?.name)?.name || session?.tenant?.name || '');
+        }
       } catch (error) {
         if (!cancelled) {
           snackbar.error(`Failed to fetch Tenant settings - ${parseHttpResponseBodyMessage(error)}`);
@@ -515,27 +572,7 @@ const TenantSettings = () => {
       }
     };
 
-    const fetchTenant = async () => {
-      try {
-        apiUserManagement.listUserTenants(session?.user?.email).then((res) => {
-          if (cancelled) {
-            return;
-          }
-          const tenants = res.data ?? [];
-          if (tenants.length > 0) {
-            // Falls back to the session name (not blank) to guard against a momentarily stale session after a rename. See issue #32696.
-            setTenantName(tenants.find((t) => t.name === session?.tenant?.name)?.name || session?.tenant?.name || '');
-          }
-        });
-      } catch {
-        if (!cancelled) {
-          setTenantName('');
-        }
-      }
-    };
-
     fetchTenantAttributes();
-    fetchTenant();
     return () => {
       cancelled = true;
     };
@@ -646,6 +683,7 @@ const TenantSettings = () => {
     }
 
     if (saveSucceeded) {
+      setSavedSnapshot(currentSnapshot);
       snackbar.success('Tenant Settings saved successfully');
     }
   };
@@ -819,21 +857,7 @@ const TenantSettings = () => {
 
             {/* handleSaveSettings commits pending changes from all tabs at once, not just
                 General's -- each tab/subtab just carries its own Save button to this one handler. */}
-            {canEdit && (
-              <Box
-                sx={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  mt: ds.space[5],
-                  pt: ds.space[4],
-                  borderTop: `1px solid ${ds.gray[200]}`,
-                }}
-              >
-                <Button size='md' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                  Save
-                </Button>
-              </Box>
-            )}
+            {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
           </Card>
         )}
 
@@ -855,20 +879,7 @@ const TenantSettings = () => {
               ariaLabel='Label mapping'
             />
             {activeLabelTab === 'log' && (
-              <Card
-                variant='outlined'
-                elevation='flat'
-                header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description='Map Logs label keys to product concepts.' />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
-                }
-              >
+              <Card variant='outlined' elevation='flat' header={<SectionHeader description='Map Logs label keys to product concepts.' />}>
                 <Box display='flex' flexDirection='column' gap={ds.space[3]}>
                   <TenantAccountCommonSettings idPrefix='log-label' settings={logSettings} setSettings={setLogSettings} disabled={!canEdit} />
                   {/* This card maps label names only. Two boxes used to sit below the grid and
@@ -881,6 +892,7 @@ const TenantSettings = () => {
                     integration &rarr; Advanced Settings &rarr; Default Log Filters.
                   </Typography>
                 </Box>
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
 
@@ -889,14 +901,7 @@ const TenantSettings = () => {
                 variant='outlined'
                 elevation='flat'
                 header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description="Map your trace backend's field names onto the canonical trace fields. Leave a field blank to use the provider default." />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
+                  <SectionHeader description="Map your trace backend's field names onto the canonical trace fields. Leave a field blank to use the provider default." />
                 }
               >
                 <TenantAccountCommonSettings
@@ -909,6 +914,7 @@ const TenantSettings = () => {
                   setSettings={setTraceSettings}
                   disabled={!canEdit}
                 />
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
 
@@ -916,16 +922,7 @@ const TenantSettings = () => {
               <Card
                 variant='outlined'
                 elevation='flat'
-                header={
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: ds.space[3] }}>
-                    <SectionHeader description='Map alert label keys to event fields. Order matters — first non-empty value is used.' />
-                    {canEdit && (
-                      <Button size='sm' onClick={handleSaveSettings} loading={loading} sx={{ minWidth: ds.space.mul(0, 70) }}>
-                        Save
-                      </Button>
-                    )}
-                  </Box>
-                }
+                header={<SectionHeader description='Map alert label keys to event fields. Order matters — first non-empty value is used.' />}
               >
                 <Box display='flex' flexDirection='column' gap={ds.space[3]}>
                   <Typography sx={{ color: ds.gray[600], fontSize: ds.text.body, lineHeight: ds.space.mul(0, 10) }}>
@@ -972,6 +969,7 @@ const TenantSettings = () => {
                     disabled={!canEdit}
                   />
                 </Box>
+                {canEdit && <SaveFooter onSave={handleSaveSettings} loading={loading} disabled={!isDirty} />}
               </Card>
             )}
           </Box>
@@ -998,6 +996,9 @@ const TenantSettings = () => {
                       icon={showFlagIds ? <VisibilityOffOutlinedIcon sx={{ fontSize: 16 }} /> : <VisibilityOutlinedIcon sx={{ fontSize: 16 }} />}
                       aria-label={showFlagIds ? 'Hide flag ids' : 'Show flag ids'}
                       tooltip={showFlagIds ? 'Hide flag ids' : 'Show flag ids'}
+                      // Flip off so swapping the label on click can't re-flip the tooltip and flicker.
+                      tooltipPlacement='top'
+                      tooltipDisableFlip
                       onClick={() => setShowFlagIds((v) => !v)}
                     />
                   </Box>

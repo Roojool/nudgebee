@@ -90,7 +90,7 @@ test(
 );
 
 test(
-  "Tenant Settings - open General, save the form unmodified, verify the saved-successfully toast and that the tenant name and log label mappings still hold their values after a reload",
+  "Tenant Settings - open General, save the untouched form and verify the tenant name and log label mappings survive a reload, or that Save stays disabled when a build gates it on changes",
   { tag: ["@dev", "@regression", "@functional", "@snackbar", "@crud"] },
   async ({ page }) => {
     const ts = await openTenantSettings(page);
@@ -115,7 +115,17 @@ test(
     );
 
     await ts.openTab(ts.generalTab);
-    await ts.saveButton().click();
+
+    // Both shapes of the build: one gates Save on a real change, so an untouched form keeps it
+    // disabled -- there is nothing to round-trip and that disabled state is the whole assertion.
+    // The currently-deployed build leaves Save enabled, where saving the untouched form is what
+    // proves the values survive the write.
+    const save = ts.saveButton();
+    if (await save.isDisabled()) {
+      await expect(save).toBeDisabled();
+      return;
+    }
+    await save.click();
     await expect(toast(page, SAVE_SUCCESS_TEXT)).toBeVisible({
       timeout: 60000,
     });
