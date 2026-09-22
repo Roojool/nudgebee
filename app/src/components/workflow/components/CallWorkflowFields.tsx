@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Typography } from '@mui/material';
 import { Switch } from '@ui/Switch';
 import { Callout } from '@ui/Callout';
+import { CodeBlock } from '@ui/CodeBlock';
 import { ds } from 'src/utils/colors';
 import apiWorkflow from '@api1/workflow';
 import FilterDropdown from '@ui/FilterDropdown';
@@ -319,7 +320,7 @@ const CallWorkflowFields: React.FC<CallWorkflowFieldsProps> = ({
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[400], mb: 1 }}>
         Run another workflow by name and return its result. Inputs are forwarded to the called workflow; outputs are available as{' '}
-        <code>Tasks[&apos;this-task-id&apos;].output</code>.
+        <CodeBlock inline code={"Tasks['this-task-id'].output"} />.
       </Typography>
 
       {/* Workflow picker */}

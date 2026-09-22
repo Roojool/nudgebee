@@ -10,6 +10,7 @@ import Tooltip from '@ui/Tooltip';
 import Text from '@shared/format/Text';
 import Datetime from '@shared/format/Datetime';
 import { Label } from '@ui/Label';
+import { CodeBlock } from '@ui/CodeBlock';
 import { ListingLayout } from '@ui/ListingLayout';
 import { Button as DsButton } from '@ui/Button';
 import SearchInput from '@ui/SearchInput';
@@ -1948,7 +1949,8 @@ const WorkflowListing: React.FC = () => {
                 ))}
               </Box>
               <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-600)', mt: 1 }}>
-                Note: automations that pass <code>workflow_name</code> as a template (<code>{`{{ ... }}`}</code>) can&apos;t be detected here.
+                Note: automations that pass <CodeBlock inline code='workflow_name' /> as a template (<CodeBlock inline code={`{{ ... }}`} />)
+                can&apos;t be detected here.
               </Box>
             </Box>
           )}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import { Button } from '@ui/Button';
+import { CodeBlock } from '@ui/CodeBlock';
 import { Link } from '@ui/Link';
 import CheckIcon from '@mui/icons-material/Check';
 import { FormCard, FormField } from '@shared/forms/FormComponents';
@@ -1081,10 +1082,7 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
         >
           • This workflow triggers when a new optimization recommendation is created
           <br />• Use the filters above to narrow which recommendations trigger this workflow
-          <br />• The recommendation data is available in the workflow as{' '}
-          <code style={{ backgroundColor: ds.background[100], padding: 'var(--ds-space-1) var(--ds-space-1)', borderRadius: 'var(--ds-radius-sm)' }}>
-            event
-          </code>
+          <br />• The recommendation data is available in the workflow as <CodeBlock inline code='event' />
           <br />• Leave all filters empty to trigger on any recommendation
         </Typography>
       </Box>
@@ -1585,25 +1583,8 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
               >
                 • Define JSON inputs that will be passed to the workflow when triggered manually
                 <br />• These inputs will be available to workflow tasks as variables
-                <br />• Example:{' '}
-                <code
-                  style={{
-                    backgroundColor: ds.background[100],
-                    padding: 'var(--ds-space-1) var(--ds-space-1)',
-                    borderRadius: 'var(--ds-radius-sm)',
-                  }}
-                >
-                  {`{"param": "value", "count": 10}`}
-                </code>
-                <br />• Leave empty{' '}
-                <code
-                  style={{
-                    backgroundColor: ds.background[100],
-                    padding: 'var(--ds-space-1) var(--ds-space-1)',
-                    borderRadius: 'var(--ds-radius-sm)',
-                  }}
-                >{`{}`}</code>{' '}
-                for no inputs
+                <br />• Example: <CodeBlock inline code={`{"param": "value", "count": 10}`} />
+                <br />• Leave empty <CodeBlock inline code='{}' /> for no inputs
               </Typography>
             </Box>
           </FormCard>

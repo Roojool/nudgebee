@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Typography, Box } from '@mui/material';
 import { Checkbox } from '@ui/Checkbox';
+import { CodeBlock } from '@ui/CodeBlock';
 import { Input } from '@ui/Input';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
@@ -449,9 +450,9 @@ const TriggerWorkflowModal: React.FC<TriggerWorkflowModalProps> = ({
             }}
             component='div'
           >
-            • Simple parameters: <code>{`{"env": "test", "debug": true}`}</code>
-            <br />• Complex data: <code>{`{"user": {"id": 123, "name": "test"}, "config": {"timeout": 30}}`}</code>
-            <br />• Empty inputs: <code>{`{}`}</code>
+            • Simple parameters: <CodeBlock inline code={`{"env": "test", "debug": true}`} />
+            <br />• Complex data: <CodeBlock inline code={`{"user": {"id": 123, "name": "test"}, "config": {"timeout": 30}}`} />
+            <br />• Empty inputs: <CodeBlock inline code='{}' />
           </Typography>
         </Box>
       </Box>

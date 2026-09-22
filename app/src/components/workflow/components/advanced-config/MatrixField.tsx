@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Typography, TextField } from '@mui/material';
 import { Chip } from '@ui/Chip';
+import { CodeBlock } from '@ui/CodeBlock';
 import { Button } from '@ui/Button';
 import { Add, Close, GridView } from '@mui/icons-material';
 import { Input } from '@ui/Input';
@@ -249,7 +250,7 @@ const MatrixField: React.FC<MatrixFieldProps> = ({ value, onChange, disabled = f
 
           {entries.length > 0 && (
             <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-brand-500)', mt: 0.5 }}>
-              Access values in task params using: <code style={{ fontSize: 'var(--ds-text-caption)' }}>{'{{ Matrix.<param_name> }}'}</code>
+              Access values in task params using: <CodeBlock inline code={'{{ Matrix.<param_name> }}'} />
             </Typography>
           )}
         </Box>
