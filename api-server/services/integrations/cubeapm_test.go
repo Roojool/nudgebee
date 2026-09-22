@@ -285,3 +285,27 @@ func TestProbeCubeAPMTraceQueryAPIIgnoresTransportErrors(t *testing.T) {
 		t.Errorf("err = %v, want nil on a transport failure", err)
 	}
 }
+
+// A 401 from the query probe has two causes, and the one the message names first
+// used to be the only one it named. CubeAPM's UI port answers the metrics path
+// with 401 rather than 404, so the port mix-up never reaches the 404 branch that
+// was written for it — verified against a live CubeAPM. The message must offer
+// both, or it sends the user to rotate a working token.
+func TestCubeAPMTestConnectionUnauthorizedNamesBothCauses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	err := CubeAPM{}.TestConnection(nil, []core.IntegrationConfigValue{
+		{Name: "cubeapm_url", Value: server.URL},
+	}, "acct")
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+	for _, want := range []string{"cubeapm_token", "web interface", CubeAPMDefaultQueryPort} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("401 message does not mention %q: %s", want, err)
+		}
+	}
+}

@@ -219,7 +219,14 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 	case http.StatusOK:
 		return probeCubeAPMTraceQueryAPI(url, token)
 	case http.StatusUnauthorized:
-		return fmt.Errorf("CubeAPM rejected the credentials (HTTP 401) — check cubeapm_token")
+		// Two different mistakes arrive here, and only one of them is a credential.
+		// CubeAPM's UI port answers this same path with 401 (not 404), so a
+		// cubeapm_url pointing at the web interface lands here rather than at the
+		// 404 branch below, which was written for exactly that mix-up. Naming only
+		// the token sent those users to change a credential that was already fine.
+		return fmt.Errorf("CubeAPM rejected the request at %s (HTTP 401) — check cubeapm_token; "+
+			"if that URL is the web interface, point it at the query port (%s) instead",
+			url, CubeAPMDefaultQueryPort)
 	case http.StatusForbidden:
 		return fmt.Errorf("insufficient permissions for CubeAPM (HTTP 403)")
 	case http.StatusNotFound:
