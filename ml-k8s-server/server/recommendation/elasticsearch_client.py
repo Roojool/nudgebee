@@ -91,13 +91,15 @@ class ElasticsearchTransport:
 
     def search(self, body: Dict[str, Any]) -> Dict[str, Any]:
         resp = requests.post(
-            f"{self._url}/{self._index}/_search",
+            f"{self._url}/{self._index}/_search?ignore_unavailable=true&allow_no_indices=true",
             json=body,
             headers=self._headers,
             auth=self._auth,
             verify=self._verify,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
+        if resp.status_code == 404:
+            return {}
         resp.raise_for_status()
         payload: Dict[str, Any] = resp.json()
         return payload

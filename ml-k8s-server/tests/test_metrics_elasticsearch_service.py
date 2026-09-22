@@ -11,7 +11,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from server.recommendation.vertical_rightsizing.models.allocations import (
     ResourceAllocations,
@@ -297,3 +297,26 @@ def test_check_connection_raises_connection_error_when_the_cluster_refuses():
     with patch("server.recommendation.elasticsearch_client.requests.get", side_effect=OSError("refused")):
         with pytest.raises(ConnectionError, match="Elasticsearch connection failed"):
             service.check_connection()
+
+
+def test_transport_search_returns_empty_dict_on_404():
+    service = _service(via_api_server=False)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    with patch("server.recommendation.elasticsearch_client.requests.post", return_value=mock_resp):
+        res = service._transport.search({"query": {"match_all": {}}})
+        assert res == {}
+
+
+def test_transport_search_includes_ignore_unavailable_and_allow_no_indices():
+    service = _service(via_api_server=False)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"hits": {"hits": []}}
+    with patch("server.recommendation.elasticsearch_client.requests.post", return_value=mock_resp) as mock_post:
+        res = service._transport.search({"query": {"match_all": {}}})
+        assert res == {"hits": {"hits": []}}
+        mock_post.assert_called_once()
+        url = mock_post.call_args[0][0]
+        assert "ignore_unavailable=true" in url
+        assert "allow_no_indices=true" in url
