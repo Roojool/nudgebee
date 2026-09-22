@@ -17,6 +17,12 @@ import (
 	"golang.org/x/exp/maps"
 )
 
+// notYetArchived keeps the archive UPDATEs off rows already at their target: an
+// UPDATE writes a new row version and fires the updated_at trigger even when
+// nothing changed. Both columns are nullable, so `status != 'Deleted'` would
+// skip (Deleted, NULL) rows and `is_active = false` would skip NULL.
+const notYetArchived = `(is_active IS DISTINCT FROM false OR status IS DISTINCT FROM 'Deleted')`
+
 // gcpRegionShape matches a real GCP regional value (geo-direction-number, e.g.
 // us-central1, asia-south1). It deliberately rejects "global" and multi-region
 // codes ("us", "eu", "asia") that also appear in cloud_resourses.region for
@@ -530,10 +536,10 @@ func StoreResources(ctx *security.RequestContext, accountId string, serviceName 
 			for i := range archiveScopeRegions {
 				placeholders[i] = fmt.Sprintf("$%d", i+3)
 			}
-			archiveResourcesQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing') and region in (%s)`, strings.Join(placeholders, ", "))
+			archiveResourcesQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and `+notYetArchived+` and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing') and region in (%s)`, strings.Join(placeholders, ", "))
 			args = append([]any{accountId, strings.ToLower(serviceName)}, lo.ToAnySlice(archiveScopeRegions)...)
 		} else {
-			archiveResourcesQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing')`
+			archiveResourcesQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and ` + notYetArchived + ` and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing')`
 			args = []any{accountId, strings.ToLower(serviceName)}
 		}
 		updatedResources, err := dbms.Exec(archiveResourcesQuery, args...)
@@ -558,10 +564,10 @@ func StoreResources(ctx *security.RequestContext, accountId string, serviceName 
 			for i := range archiveScopeRegions {
 				bPlaceholders[i] = fmt.Sprintf("$%d", i+3)
 			}
-			billingArchiveQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and meta->>'nb_source' = 'billing' and region in (%s)`, strings.Join(bPlaceholders, ", "))
+			billingArchiveQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and `+notYetArchived+` and meta->>'nb_source' = 'billing' and region in (%s)`, strings.Join(bPlaceholders, ", "))
 			billingArgs = append([]any{accountId, strings.ToLower(serviceName)}, lo.ToAnySlice(archiveScopeRegions)...)
 		} else {
-			billingArchiveQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and meta->>'nb_source' = 'billing'`
+			billingArchiveQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and ` + notYetArchived + ` and meta->>'nb_source' = 'billing'`
 			billingArgs = []any{accountId, strings.ToLower(serviceName)}
 		}
 		if billingResult, billingErr := dbms.Exec(billingArchiveQuery, billingArgs...); billingErr != nil {
@@ -712,7 +718,7 @@ func storeResourcesInsert(ctx *security.RequestContext, dbms *common.DatabaseMan
 				placeholders[i] = fmt.Sprintf("$%d", i+3) // $3, $4, $5...
 			}
 			inClause := strings.Join(placeholders, ", ")
-			archiveResourcesQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing') and region in (%s)`, inClause)
+			archiveResourcesQuery = fmt.Sprintf(`update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and `+notYetArchived+` and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing') and region in (%s)`, inClause)
 			archiveArgs = []any{accountId, strings.ToLower(serviceName)}
 			for _, region := range allRegions {
 				archiveArgs = append(archiveArgs, region)
@@ -720,7 +726,7 @@ func storeResourcesInsert(ctx *security.RequestContext, dbms *common.DatabaseMan
 		} else {
 			// No regions in resourceMap (e.g., global services like IAM, S3)
 			// Archive all resources for this service/account
-			archiveResourcesQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing')`
+			archiveResourcesQuery = `update cloud_resourses set is_active = false, status = 'Deleted' where account = $1 and lower(service_name) = $2 and ` + notYetArchived + ` and (meta->>'nb_source' IS NULL OR meta->>'nb_source' != 'billing')`
 			archiveArgs = []any{accountId, strings.ToLower(serviceName)}
 		}
 
