@@ -60,8 +60,15 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 		}
 		if kbType == "integration" || kbType == core.KnowledgeKindIndexedOnly {
 			searchCtx, traceID := core.WithRetrievalTraceID(deadline)
-			docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, ctx.Query, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
-			docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, ctx.Query, docs, traceID)
+			// load_skills names a document but states no search intent, so the
+			// turn's task prompt was being embedded. Prefer the model's own
+			// keyword; else build from the subject. Falls back to ctx.Query.
+			searchQuery := core.BuildRetrievalQuery(keyword, ctx.QueryConfig, ctx.Query)
+			if searchQuery == "" {
+				searchQuery = ctx.Query
+			}
+			docs := core.QueryRAGCollectionReranked(searchCtx, ctx.UserId, ctx.AccountId, searchQuery, ragKBModule, selected.Collection, ragSkillTopK, ctx.ConversationId, ctx.MessageId, "", false)
+			docs = core.JudgeKBResults(ctx.Ctx, ctx.AccountId, ctx.UserId, ctx.ConversationId, ctx.MessageId, searchQuery, docs, traceID)
 			var scoped core.RAGSearchResults
 			for _, doc := range docs {
 				if collection, _ := doc.Metadata["collection"].(string); collection == selected.Collection {

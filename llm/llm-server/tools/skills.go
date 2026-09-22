@@ -248,7 +248,7 @@ func (m LoadSkillsTool) Call(ctx core.NbToolContext, input core.NBToolCallReques
 		}
 	}
 	// Integration results are query-dependent and never enter the name cache.
-	enrichIntegrationSkillsFromRAG(ctx, results)
+	enrichIntegrationSkillsFromRAG(ctx, input, results)
 	var missingNames []string
 	for _, name := range requestedNames {
 		if _, found := results[strings.ToLower(name)]; !found {
@@ -508,15 +508,24 @@ const ragKBModule = "knowledge_base"
 
 // enrichIntegrationSkillsFromRAG searches each resolved collection independently.
 // One deadline bounds the batch; no query-dependent content is cached by KB name.
-func enrichIntegrationSkillsFromRAG(ctx core.NbToolContext, results map[string]skillData) {
+func enrichIntegrationSkillsFromRAG(ctx core.NbToolContext, input core.NBToolCallRequest, results map[string]skillData) {
 	retrievalCtx, cancel := context.WithTimeout(ctx.Ctx.GetContext(), ragSkillTimeout)
 	defer cancel()
+	// Prefer the model's own keyword over the turn's task prompt — the prompt is
+	// boilerplate-heavy and identical across investigations.
+	keyword, _ := input.Arguments["keyword"].(string)
+	// Loop-invariant: the query depends on the turn, not on which skill is
+	// being enriched. Only the per-skill fallback below varies.
+	baseQuery := core.BuildRetrievalQuery(keyword, ctx.QueryConfig, ctx.Query)
+	if baseQuery == "" {
+		baseQuery = strings.TrimSpace(ctx.Query)
+	}
 	for key, skill := range results {
 		if skill.KBType != "integration" || strings.TrimSpace(skill.Data) != "" {
 			continue
 		}
 		collection := core.KnowledgebaseCollectionName(core.Knowledgebase{Id: skill.ID, KBType: skill.KBType, IntegrationId: skill.IntegrationID})
-		query := strings.TrimSpace(ctx.Query)
+		query := baseQuery
 		if query == "" {
 			query = key
 		}

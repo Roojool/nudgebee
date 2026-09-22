@@ -51,7 +51,7 @@ func TestSkillFetching_IntegrationIsolationAndQueryCache(t *testing.T) {
 	for _, query := range []string{"first question", "second question", "first question"} {
 		ctx.Query = query
 		results := map[string]skillData{"a": {ID: "kb-a", KBType: "integration", IntegrationID: &a}, "b": {ID: "kb-b", KBType: "integration", IntegrationID: &b}}
-		enrichIntegrationSkillsFromRAG(ctx, results)
+		enrichIntegrationSkillsFromRAG(ctx, core.NBToolCallRequest{}, results)
 		require.Len(t, results, 2)
 		assert.Equal(t, "integration-a_knowledge_base:"+query, results["a"].Data)
 		assert.Equal(t, "integration-b_knowledge_base:"+query, results["b"].Data)
@@ -69,7 +69,7 @@ func TestSkillFetching_IntegrationMissingIsNotEmptySuccess(t *testing.T) {
 	t.Cleanup(func() { config.Config.RAGServerUrl = old })
 	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name()}
 	results := map[string]skillData{"empty": {ID: "empty", KBType: "integration"}, "manual": {ID: "manual", Data: "keep"}}
-	enrichIntegrationSkillsFromRAG(ctx, results)
+	enrichIntegrationSkillsFromRAG(ctx, core.NBToolCallRequest{}, results)
 	assert.NotContains(t, results, "empty")
 	assert.Equal(t, "keep", results["manual"].Data)
 }

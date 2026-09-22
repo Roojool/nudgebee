@@ -801,3 +801,99 @@ func DeleteMemoryFromRAG(accountId, id string) error {
 
 	return nil
 }
+
+// RetrievalQueryMaxBytes bounds every query that reaches an embedder.
+//
+// Bytes, not tokens, because this package cannot count the tokens that matter.
+// The limit being protected belongs to the embedding model (bge-small-en-v1.5,
+// 512 WordPiece tokens), and llm-server's own CountTokens speaks the chat
+// model's BPE instead — measured over 60 real queries it reports 1.33x fewer
+// tokens than bge on aggregate and up to 2x fewer on a single query, because
+// hyphenated resource names shatter into WordPiece but survive BPE.
+//
+// 600 is sized against bge directly: the densest real query measured 0.54
+// bge-tokens per byte, so 600 bytes is at most ~325 tokens — inside the window
+// with room to spare, and checked with len(). Built queries run 7 tokens at the
+// median and 45 at the maximum, so this bound is a backstop, not a budget.
+const RetrievalQueryMaxBytes = 600
+
+// retrievalHintKeys are the QueryConfig.Labels keys naming the subject of a
+// turn, in priority order.
+var retrievalHintKeys = []string{
+	"subject_name", "subject_namespace", "subject_type", "subject_node",
+	"service", "services", "alertname", "aggregation_key",
+}
+
+// BuildRetrievalQuery derives what a retrieval path embeds.
+//
+// Three cases, in order. A query the model itself wrote (a tool's query or
+// keyword argument) wins: it has stated intent that nothing inferred can beat.
+// A question that already fits the bound is returned untouched — it was never
+// the problem, and natural language carries intent a list of labels cannot.
+// Only past the bound is the query rebuilt from the turn's subject, because
+// what sits there is a rendered task prompt whose opening is identical across
+// every copy: truncating it keeps the shared boilerplate and drops the part
+// that identifies the turn.
+//
+// Returns "" when there is nothing to build from, so callers keep their
+// existing behaviour rather than embed something worse.
+func BuildRetrievalQuery(preferred string, qc NBQueryConfig, question string) string {
+	if p := strings.TrimSpace(preferred); p != "" {
+		return common.TruncateHead(p, RetrievalQueryMaxBytes)
+	}
+
+	// A question that already fits the embedder is left alone. Natural language
+	// states intent that a list of labels cannot, so rewriting a query that was
+	// never too long is risk without benefit.
+	if q := strings.TrimSpace(question); q != "" && len(q) <= RetrievalQueryMaxBytes {
+		return q
+	}
+
+	// Past the bound the question is a rendered task prompt, not a question:
+	// its opening is identical across every copy, so truncating it keeps the
+	// shared boilerplate and drops what identifies the turn. Build from the
+	// subject instead.
+	seen := make(map[string]struct{})
+	var parts []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		key := strings.ToLower(v)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, v)
+	}
+
+	add(qc.Workload)
+	add(qc.Namespace)
+	for _, k := range retrievalHintKeys {
+		// Labels is map[string]any, so a slice can arrive either shape: JSON
+		// decoding yields []any, a Go-side caller can hand over []string.
+		// Missing one drops the label silently, which is worse than the branch.
+		switch v := qc.Labels[k].(type) {
+		case string:
+			add(v)
+		case []string:
+			for _, item := range v {
+				add(item)
+			}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+
+	// Nothing to build from. Callers keep their existing behaviour rather than
+	// embed something worse.
+	if len(parts) == 0 {
+		return ""
+	}
+	return common.TruncateHead(strings.Join(parts, " "), RetrievalQueryMaxBytes)
+}
