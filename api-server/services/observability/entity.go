@@ -261,6 +261,28 @@ type GetUtilisationTrendRequest struct {
 	// — right for a picker-driven chart, too coarse for an evidence card drawn
 	// over a ten-minute incident window, where it halves the points.
 	StepInterval int `json:"step_interval,omitempty"`
+
+	// Aggregate collapses each series the requested keys define to ONE point over
+	// the window: avg, sum, max, min, count, or p1..p99. Empty leaves every key
+	// exactly as it behaves today, which is what keeps the UI byte-identical.
+	// See metrics_aggregate_spec.go for why this is the only parameterised axis.
+	Aggregate string `json:"aggregate,omitempty"`
+
+	// PodNames scopes a query to an exact set of pods instead of the workload's name
+	// prefix. Rightsizing needs it twice over: it resolves pods through the owner
+	// chain so it knows pods that no longer exist, and the prefix form is wrong for
+	// it — "services-server" renders as pod=~"services-server-.*", which also matches
+	// services-server-worker, so a workload can be sized on another's pods.
+	//
+	// Absent (nil) means fall back to the prefix. Present but EMPTY means the caller
+	// resolved the pod list and it is empty, so the honest answer is no data — not
+	// every pod in the namespace.
+	PodNames []string `json:"pod_names,omitempty"`
+
+	// Step is the bucket width in seconds, overriding the one promAggWindow derives
+	// from the range. The rightsizing strategy samples at 75s, and a percentile taken
+	// over 5-minute averages is not the same number.
+	Step int `json:"step,omitempty"`
 }
 
 // OutputMetricQuery represents the response structure for metric and log group queries.

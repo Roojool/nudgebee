@@ -1,6 +1,10 @@
 package observability
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
 
 // Prometheus utilisation query builders. These render abstract metric keys into
 // PromQL for node- and workload-scoped utilisation, and are dispatched from
@@ -129,10 +133,30 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 	if safeMeta.Namespace != "" {
 		// Define the Pod Matcher based on Kind
 		var podMatcher string
-		if safeMeta.Name != "" {
-			if safeMeta.Kind == "pod" {
+		// An exact pod list is scope in its own right, so it must not depend on a
+		// workload name also being present: pod_names with no workload_name would
+		// otherwise drop the matcher entirely and answer for the whole namespace.
+		if safeMeta.Name != "" || safeMeta.PodNamesSupplied {
+			switch {
+			case safeMeta.PodNamesSupplied && len(safeMeta.PodNames) == 0:
+				// The caller resolved the pod list and it is empty. That is a real
+				// answer, so the selector must match nothing — falling back to the
+				// prefix would size this workload on its neighbours' pods.
+				//
+				// An exact match on a name Kubernetes cannot produce, rather than a
+				// clever regex: RFC1123 forbids underscores, and `pod=~"$^"` is NOT
+				// empty-matching-nothing — Prometheus anchors matchers to ^(?:…)$ and
+				// `$^` still matches the EMPTY string, which cAdvisor emits for
+				// machine-level cgroups.
+				podMatcher = `pod="__no_pods_resolved__"`
+			case safeMeta.PodNamesSupplied:
+				// An exact list beats the prefix, which is wrong twice over: it misses
+				// pods that no longer exist, and "services-server" also matches
+				// "services-server-worker", so one workload gets sized on another's.
+				podMatcher = fmt.Sprintf(`pod=~"%s"`, promPodNameAlternation(safeMeta.PodNames))
+			case safeMeta.Kind == "pod":
 				podMatcher = fmt.Sprintf(`pod="%s"`, safeMeta.Name)
-			} else {
+			default:
 				// Regex match for deployments/statefulsets
 				podMatcher = fmt.Sprintf(`pod=~"%s-.*"`, safeMeta.Name)
 			}
@@ -229,6 +253,35 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 	// --- 5. Build Queries ---
 	for _, metricKey := range metrics {
 		switch metricKey {
+		// --- Per-pod container usage, for rightsizing -----------------------------
+		//
+		// One series per pod and container, unlike cpu_usage/memory_usage which sum
+		// the workload into one. The shape is in the key name so it cannot vary with
+		// the request: ~30 UI call sites read payload[0], and a key that sometimes
+		// fans out would render one pod as the workload total, with no error.
+		//
+		// meta.Aggregate collapses each series to one point when the caller asks for
+		// it (rightsizing asks for p92/p95/p97/p99, and count for its data floor);
+		// empty leaves a time series, so these keys are chartable too.
+		case "container_cpu_usage_by_pod":
+			expr := promKubeletPreferred(
+				`max by (container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[`+rateW+`]))`,
+				containerFilter)
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+		case "container_memory_working_set_by_pod":
+			expr := promKubeletPreferred(
+				`max by (container, pod) (container_memory_working_set_bytes{__CLUSTER__ %s})`,
+				containerFilter)
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+		case "container_memory_max_usage_by_pod":
+			// The cgroup high-water mark, the floor for a memory LIMIT recommendation.
+			// No other provider carries it, so they return nothing and say so; the
+			// strategy already treats it as optional.
+			expr := promKubeletPreferred(
+				`max by (container, pod) (container_memory_max_usage_bytes{__CLUSTER__ %s})`,
+				containerFilter)
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+
 		// --- PVC Metrics ---
 		case "pvc_usage":
 			queries[metricKey] = fmt.Sprintf(`sum(kubelet_volume_stats_used_bytes{__CLUSTER__ %s})`, pvcFilter)
@@ -410,4 +463,49 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		}
 	}
 	return queries
+}
+
+// promPodNameAlternation renders an exact pod list as a PromQL alternation. The empty
+// case is handled by the caller, which emits a match-nothing selector instead.
+//
+// Names are escaped because they reach a regex, even though Kubernetes names cannot
+// contain regex metacharacters today — the matcher should not be the thing that
+// depends on that staying true.
+func promPodNameAlternation(pods []string) string {
+	escaped := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		// QuoteMeta FIRST, then the string escape. The other order leaves the
+		// backslashes QuoteMeta adds unescaped for the PromQL literal, and a pod name
+		// containing a "." (RFC1123 allows it) renders as pod=~"my\.pod", which the
+		// parser rejects outright: `unknown escape sequence U+002E`. One unparseable
+		// matcher fails the whole query, so this is not a cosmetic ordering.
+		escaped = append(escaped, escapePromQLString(regexp.QuoteMeta(pod)))
+	}
+	return strings.Join(escaped, "|")
+}
+
+// promKubeletPreferred collapses the duplicate series a cluster with two cAdvisor
+// scrapers produces.
+//
+// kube-state-metrics and the kubelet can both report the same container, under
+// different `job` labels, so summing or maxing across them double counts — the 2x
+// overcount this work has already chased once. The rightsizing loaders solve it by
+// grouping on (container, pod, job) and keeping the kubelet copy; the same preference
+// is expressed here in the query, where it belongs, because it is a property of a
+// Prometheus deployment and not of the contract. The fallback arm answers clusters
+// whose kubelet series are labelled with some other job name.
+func promKubeletPreferred(expr, filter string) string {
+	// The shared filters are built with a trailing comma so callers can append to
+	// them; both arms here append, so trim it first or the selector gets `,,` and
+	// Prometheus rejects the whole query. The filter is also EMPTY for a request
+	// that carries no namespace — a cluster-wide shape this same builder already
+	// serves for p90_cpu and friends — and a leading comma there is just as invalid.
+	filter = strings.TrimRight(filter, ", ")
+	kubeletFilter := `job="kubelet"`
+	if filter != "" {
+		kubeletFilter = filter + `, ` + kubeletFilter
+	}
+	return fmt.Sprintf(`%s or %s`,
+		fmt.Sprintf(expr, kubeletFilter),
+		fmt.Sprintf(expr, filter))
 }

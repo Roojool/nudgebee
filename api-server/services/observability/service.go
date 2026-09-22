@@ -3190,6 +3190,30 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	// 24h window. Harmless for other providers/kinds, which ignore these fields.
 	meta.RangeWindow, meta.Step, meta.RateWindow = promAggWindow(req.StartTime, req.EndTime)
 
+	// An explicit step is the caller's sampling interval and outranks the one derived
+	// from the range: the rightsizing strategy samples at 75s, and a percentile taken
+	// over 5-minute averages is a different number. Kept in the "<N>s" form, which is
+	// the only shape esUtilStepSeconds and datadogRollupSeconds parse.
+	if req.Step > 0 {
+		meta.Step = fmt.Sprintf("%ds", req.Step)
+	}
+
+	// Validated once, at the door, so no builder has to interpret the string or guess
+	// what an unknown value means.
+	meta.Aggregate, err = parseAggregate(req.Aggregate)
+	if err != nil {
+		return OutputMetricQuery{}, err
+	}
+	meta.PodNames, meta.PodNamesSupplied = req.PodNames, req.PodNames != nil
+
+	// A collapse answers with one point per series, so the range/instant distinction
+	// does not apply — and it cannot be honoured uniformly anyway: Elasticsearch's
+	// utilisation path takes no instant parameter and Datadog's source reads neither
+	// instant nor step.
+	if meta.Aggregate.Name != "" {
+		instant = true
+	}
+
 	// The helper functions return a fully initialized map, so we don't need to allocate one here.
 	var queries map[string]string
 	// swRequest carries SolarWinds-specific filter/groupBy params passed as FetchMetricsRequest.Request.
@@ -3443,6 +3467,15 @@ type RequestMetadata struct {
 	RangeWindow string
 	Step        string
 	RateWindow  string
+	// Aggregate is the validated collapse requested for every key in this request;
+	// the zero value means "leave each key as it is". Parsed once in
+	// parseRequestMetadata so no builder has to interpret the string.
+	Aggregate ParsedAggregate
+	// PodNames is the caller's exact pod list. Nil means "not supplied"; an empty
+	// non-nil slice means "there are none", which is a different answer.
+	PodNames []string
+	// PodNamesSupplied distinguishes those two cases after the slice is copied.
+	PodNamesSupplied bool
 	// APMOperation is the Datadog trace operation the workload's HTTP spans are
 	// recorded under (http.server.request, servlet.request, ...). Datadog names trace
 	// metrics after it and it differs by tracer, so it is probed per request; empty
