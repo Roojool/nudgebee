@@ -57,21 +57,12 @@ class Consumer:
         except Exception as e:
             LOG.error(f"Connection attempt to rabbitmq failed: {e}")
 
-    async def on_reconnect(self, connection: aio_pika.RobustConnection):
-        LOG.info("Reconnected to RabbitMQ! Re-establishing channel and consumers...")
-        try:
-            self._channel = None
-            await self.open_channel()
-            LOG.info("Successfully re-established channel and consumers after reconnect")
-        except Exception as e:
-            LOG.error(f"Failed to re-establish channel after reconnect: {e}")
-            # Retry after delay
-            await asyncio.sleep(5)
-            try:
-                await self.open_channel()
-                LOG.info("Retry successful - channel and consumers re-established")
-            except Exception as retry_error:
-                LOG.error(f"Retry failed to re-establish channel: {retry_error}")
+    @staticmethod
+    async def on_reconnect(connection: aio_pika.RobustConnection):
+        # The robust connection has already reopened the channel and restored the
+        # queues, bindings and consumer before this fires; re-subscribing here would
+        # register a second consumer on every reconnect.
+        LOG.info("Reconnected to RabbitMQ; channel and consumers restored")
 
     @staticmethod
     def on_connection_closed(connection: aio_pika.RobustConnection, exc: Exception = None):
