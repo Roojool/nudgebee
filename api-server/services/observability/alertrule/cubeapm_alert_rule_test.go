@@ -457,11 +457,16 @@ func TestParseCubeAPMRulesResponse(t *testing.T) {
 // An install with no rules yet returns an empty list, not a parse failure. The
 // length test this replaced could not distinguish "key absent" from "key present
 // and empty", so a fresh CubeAPM broke alert-rule sync entirely.
+//
+// The empty-body cases are the same failure one input further out: a live CubeAPM
+// with no rules answers 200 with zero bytes rather than any JSON at all.
 func TestParseCubeAPMRulesResponseAcceptsEmptyListings(t *testing.T) {
 	for name, body := range map[string]string{
 		"bare empty array": `[]`,
 		"empty data wrap":  `{"data": []}`,
 		"empty rules wrap": `{"rules": []}`,
+		"empty body":       ``,
+		"whitespace only":  "\n  \t",
 	} {
 		t.Run(name, func(t *testing.T) {
 			rules, err := parseCubeAPMRulesResponse([]byte(body))
