@@ -249,10 +249,7 @@ def query_metrics_via_api_server(
 
         url = f"{ApiServerMetricsConfigs.url}/rpc/metrics"
         try:
-            # No retries: these queries are expensive and api-server already retries the
-            # relay leg internally. A retry here would double the cost of the slowest
-            # scans without making them more likely to succeed.
-            response = get_http_session_with_retry(retry_attempts=0).request(
+            response = get_http_session_with_retry().request(
                 "POST",
                 url,
                 headers=headers,
