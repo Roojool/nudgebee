@@ -13,12 +13,9 @@ export async function openTaskRunner(page: Page): Promise<TaskRunnerLocators> {
   await loginPage.doFullLogin();
   console.log("Login complete");
 
-  await locators.automationSidenavBtn.waitFor({ state: "visible", timeout: 30000 });
-  await locators.automationSidenavBtn.click();
-  await page.waitForURL(/\/(auto-pilot|automation)/, { timeout: 30000 });
-
-  await locators.taskRunnerTab.waitFor({ state: "visible", timeout: 30000 });
-  await locators.taskRunnerTab.click();
+  // Direct URL nav instead of sidenav+tab clicks — resolves against the env's
+  // baseURL (playwright.config.ts), so nothing here is tied to a specific env.
+  await page.goto("/automation#task-runner", { waitUntil: "commit", timeout: 30000 });
 
   await locators.runnerBox.waitFor({ state: "visible", timeout: 30000 });
   await expect(locators.searchInput).toBeVisible({ timeout: 30000 });

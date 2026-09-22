@@ -81,11 +81,12 @@ export class TaskRunnerLocators extends CommonLocators {
     // Scoped to the result row, not the panel: the parameter form sits in the
     // same panel and still holds the values that were just submitted.
     this.runResultSection = this.runResultHeading.locator("xpath=../..");
-    // The result status is a MUI Chip; the per-category counts are ds Chips
-    // (plain spans), so this cannot collide with them.
-    this.runResultStatusChip = this.runnerBox
-      .locator(".MuiChip-label")
-      .filter({ hasText: /^(COMPLETED|FAILED|SUCCESS|ERROR)$/ })
+    // Status renders as plain text next to the "Run Task Result:" heading, not a
+    // MUI Chip (dev DOM checked 2026-09-22) — match by position, not markup, so a
+    // future Chip/Typography swap doesn't break this again.
+    this.runResultStatusChip = this.runResultHeading
+      .locator("xpath=..")
+      .getByText(/^(COMPLETED|FAILED|SUCCESS|ERROR)$/)
       .first();
 
     // The app renders no id on the picker's own search box, so placeholder is the
@@ -142,6 +143,29 @@ export class TaskRunnerLocators extends CommonLocators {
   // in the form and `.or().first()` would silently return the wrong field.
   fieldControl(label: string): Locator {
     return this.fieldRow(label).locator("input, textarea, .cm-content").first();
+  }
+
+  // Testids are keyed by schema field name; no fallback because a text match on "Examples:" would resolve to the first field's row.
+  fieldGuidance(fieldName: string): Locator {
+    return this.runnerBox.getByTestId(`field-guidance-${fieldName}`);
+  }
+
+  fieldSyntaxHelp(fieldName: string): Locator {
+    return this.runnerBox.getByTestId(`field-help-${fieldName}`);
+  }
+
+  fieldExampleChip(fieldName: string, index: number): Locator {
+    return this.runnerBox.getByTestId(`field-example-${fieldName}-${index}`);
+  }
+
+  // The inline error renders as plain text under the editor, outside the label's row.
+  get invalidJsonError(): Locator {
+    return this.runnerBox.getByText(/must be valid JSON/i).first();
+  }
+
+  // MUI renders tooltips in a portal at body level, so this is page-scoped.
+  get openTooltip(): Locator {
+    return this.page.getByRole("tooltip").first();
   }
 
   // The trigger is sometimes an input and sometimes a button, and the row also
