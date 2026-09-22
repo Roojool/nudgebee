@@ -143,6 +143,16 @@ func Init() error {
 				return
 			}
 		}
+		// The shim address is a per-process constant, so this belongs here rather
+		// than in getOrCreateAccess, which used to re-set the same value on every
+		// cluster build. os.Setenv writes process-global state: doing it per
+		// build is safe today only because the engine map's write lock happens to
+		// serialize builds, which is a nasty thing for a future change to have to
+		// know. Setting it once removes that coupling.
+		if err := os.Setenv(promenv.PrometheusServerEndpointEnvVar, "http://"+GetPrometheusShimAddr()); err != nil {
+			initErr = fmt.Errorf("opencostengine: setenv %s: %w", promenv.PrometheusServerEndpointEnvVar, err)
+			return
+		}
 		db, err := NewDB(GetNudgebeeDbConnectionString())
 		if err != nil {
 			initErr = fmt.Errorf("opencostengine: db: %w", err)
@@ -209,9 +219,9 @@ func getOrCreateAccess(clusterID string) (*costmodel.Accesses, error) {
 	// between the two relay facades and their two auth schemes (see promshim.go).
 	// By default it proxies straight through to each cluster's Prometheus; with
 	// observability-backed metrics enabled it answers queries from
-	// services-server instead.
+	// services-server instead. The matching env var is set once in Init, which is
+	// what NewOpenCostPrometheusConfigFromEnv reads.
 	promEndpoint := "http://" + GetPrometheusShimAddr()
-	_ = os.Setenv(promenv.PrometheusServerEndpointEnvVar, promEndpoint)
 	prometheusConfig, err := prom.NewOpenCostPrometheusConfigFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("prometheus config: %w", err)
