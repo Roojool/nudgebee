@@ -2836,12 +2836,12 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		}
 	}
 
-	// Step 4: synthesize. Skip when COMPLETED unless Regenerate — without
-	// this gate every re-dispatch inserts a duplicate user message (#31422).
+	// Step 4: assemble the report. Skip when COMPLETED unless Regenerate so a
+	// re-dispatch does not rewrite a report that is already stored and fresh.
 	existingDR, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
 	if existingDR != nil && existingDR.Status == string(events.AnalysisStatusCompleted) && existingDR.Summary != "" && !request.Regenerate &&
 		!eventAnalysisRepo.IsAnalysisStale(existingDR.UpdatedAt) {
-		ctx.GetLogger().Info("analyzer: detailed response already completed, skipping synth", "event_id", request.EventId)
+		ctx.GetLogger().Info("analyzer: detailed response already completed, skipping assembly", "event_id", request.EventId)
 		response.DetailedResponse = existingDR.Summary
 		if response.Investigation == "" {
 			response.Investigation = investigationText
@@ -2849,30 +2849,33 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		return response, nil
 	}
 
-	var detailedResponse string
-	var hasSynth bool
-	if shouldRecoverStageFromConversation(eventAnalysisRepo, existingDR, request.Regenerate) {
-		detailedResponse, hasSynth = getAgentResponseFromConversation(ctx, parentConversationId, request.AccountId, "event_detailed_response", request.EventId)
+	// #38925: the report is a view of the investigation, so with no
+	// investigation there is nothing to report. This used to fall back to the
+	// initial summary and write the row COMPLETED, which is how an AWS run
+	// whose investigation timed out still produced a confident write-up.
+	if strings.TrimSpace(investigationText) == "" {
+		inv, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeInvestigation)
+		reason := detailedResponseFailureReason(inv)
+		ctx.GetLogger().Warn("analyzer: no investigation to report on, failing detailed response", "event_id", request.EventId, "reason", reason)
+		if dbErr := eventAnalysisRepo.UpsertEventAnalysisStatus(ctx, request.EventId, eventFingerprint, request.AccountId, eventAggregationKey, string(events.AnalysisStatusFailed), reason, events.AnalysisTypeDetailedResponse, true); dbErr != nil {
+			ctx.GetLogger().Warn("analyzer: failed to record detailed response failure", "error", dbErr, "event_id", request.EventId)
+		}
+		response.Status = string(events.AnalysisStatusFailed)
+		response.StatusReason = reason
+		return response, errors.New("detailed response not produced: " + reason)
 	}
 
-	if hasSynth && strings.TrimSpace(detailedResponse) != "" {
-		ctx.GetLogger().Info("analyzer: recovered detailed response from conversation history", "session_id", parentConversationId)
-	} else {
-		ctx.GetLogger().Info("analyzer: synthesizing detailed response", "event_id", request.EventId)
-		synthResp, synthErr := synthesizeDetailedResponse(ctx, request, parentConversationId, initialSummary, investigationText, codeFixText)
-		if synthErr != nil {
-			ctx.GetLogger().Warn("analyzer: failed to synthesize detailed response, falling back to initial summary", "error", synthErr, "event_id", request.EventId)
-			detailedResponse = initialSummary
-		} else {
-			detailedResponse = synthResp
-		}
-	}
-	// Cite the resolved runbook so its source stays visible in the UI.
-	detailedResponse = appendRunbookReference(detailedResponse, runbookRef)
+	// #38925: composed in Go from the investigation, the Step 3 code findings
+	// and the event's own columns — no second LLM pass. Cite the resolved
+	// runbook so its source stays visible in the UI.
+	detailedResponse := appendRunbookReference(composeDetailedResponse(investigationText, initialSummary, codeFixText, eventData), runbookRef)
 	if err := eventAnalysisRepo.UpsertEventAnalysis(ctx, response.EventId, "", detailedResponse, string(events.AnalysisStatusCompleted), eventFingerprint, request.AccountId, eventAggregationKey, events.AnalysisTypeDetailedResponse); err != nil {
 		ctx.GetLogger().Warn("analyzer: failed to save detailed response", "error", err, "event_id", request.EventId)
 	}
 	response.DetailedResponse = detailedResponse
+	if response.Investigation == "" {
+		response.Investigation = investigationText
+	}
 
 	return response, nil
 }
@@ -4134,109 +4137,4 @@ func markAllAnalysisSkipped(ctx *security.RequestContext, repo *events.EventAnal
 			ctx.GetLogger().Warn("failed to mark analysis skipped", "error", updateErr, "analysis_type", aType)
 		}
 	}
-}
-
-// synthesizeDetailedResponse calls the LLM directly to produce a consolidated markdown analysis
-// from the initial summary, investigation findings, and log analysis. It is a soft step — callers
-// should fall back to the initial summary on failure rather than failing the whole analysis.
-func synthesizeDetailedResponse(ctx *security.RequestContext, request EventAnalysisRequest, parentSessionId string, summary, investigation, logAnalysis string) (string, error) {
-	if summary == "" {
-		return "", errors.New("synthesizeDetailedResponse: summary is empty")
-	}
-
-	// Short-circuit: if there is nothing to enrich beyond the initial summary, return it directly
-	// to avoid an unnecessary LLM call (latency + cost).
-	if investigation == "" && !events.HasStoredAnalysisContent(logAnalysis) {
-		return summary, nil
-	}
-
-	// When the investigation reports insufficient/partial evidence, the synthesis
-	// prompt's "Evidence Discipline" section keeps this path honest (no fabricated
-	// root cause) — we intentionally do not try to detect that verdict in Go by
-	// scraping the model's prose, which is brittle and drifts with wording.
-
-	// Resolve the conversation UUID from the parent session so token usage can be
-	// tracked with valid FK references. The conversation was already created during
-	// Steps 1-2 (summary / investigation).
-	if parentSessionId == "" {
-		return "", errors.New("synthesizeDetailedResponse: parentSessionId is empty")
-	}
-	conv, err := core.GetConversationDao().GetConversationBySession(request.AccountId, parentSessionId)
-	if err != nil {
-		return "", fmt.Errorf("synthesizeDetailedResponse: unable to resolve conversation from session %s: %w", parentSessionId, err)
-	}
-	if conv.ID == uuid.Nil {
-		return "", fmt.Errorf("synthesizeDetailedResponse: conversation not found for session %s", parentSessionId)
-	}
-	conversationId := conv.ID.String()
-
-	// Create a message record so the token usage FK to llm_conversation_messages is valid.
-	messageId, err := core.GetConversationDao().SaveConversationMessage(
-		"", conversationId, request.AccountId, request.UserId,
-		core.MessageRoleHuman, core.MessageTypeGeneration,
-		"synthesize detailed response", "", "event_detailed_response",
-		uuid.Nil, nil, "", "", "",
-		core.ConversationStatusInProgress,
-	)
-	if err != nil {
-		return "", fmt.Errorf("synthesizeDetailedResponse: unable to create message record: %w", err)
-	}
-
-	systemPrompt, promptErr := prompts.GetPromptStrict(ctx.GetContext(), prompts.PromptEventDetailedResponseSynthesis, request.AccountId)
-	if promptErr != nil {
-		return "", fmt.Errorf("synthesizeDetailedResponse: loading prompt: %w", promptErr)
-	}
-
-	userPrompt := fmt.Sprintf("## Event Summary\n%s", summary)
-	if investigation != "" {
-		userPrompt += fmt.Sprintf("\n\n## Investigation Findings\n%s", investigation)
-	}
-	if events.HasStoredAnalysisContent(logAnalysis) {
-		userPrompt += fmt.Sprintf("\n\n## Log Analysis\n%s", logAnalysis)
-	}
-	userPrompt += "\n\nProduce a consolidated markdown analysis combining all of the above." +
-		" If the investigation findings include a 'Related Alerts Check' section, carry it into the final" +
-		" report verbatim (same section heading), naming each related alert as confirmed, ruled out or not" +
-		" assessed — do not summarize it away."
-
-	messages := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, systemPrompt),
-		llms.TextParts(llms.ChatMessageTypeHuman, userPrompt),
-	}
-
-	completion, llmErr := core.GenerateAndTrackLLMContent(
-		ctx,
-		request.UserId,
-		request.AccountId,
-		conversationId,
-		messageId.String(),
-		"event_detailed_response",
-		false,
-		messages,
-		false,
-	)
-
-	// Update message status regardless of outcome
-	if llmErr != nil {
-		_ = core.GetConversationDao().UpdateConversationMessage(messageId.String(), "", core.ConversationStatusFailed)
-		return "", fmt.Errorf("synthesizeDetailedResponse: LLM call failed: %w", llmErr)
-	}
-
-	responseText := ""
-	if len(completion.Choices) > 0 {
-		responseText = completion.Choices[0].Content
-	}
-
-	if responseText == "" {
-		if err := core.GetConversationDao().UpdateConversationMessage(messageId.String(), "", core.ConversationStatusFailed); err != nil {
-			ctx.GetLogger().Warn("synthesizeDetailedResponse: failed to update message status to failed", "error", err)
-		}
-		return "", errors.New("synthesizeDetailedResponse: empty response from LLM")
-	}
-
-	if err := core.GetConversationDao().UpdateConversationMessage(messageId.String(), responseText, core.ConversationStatusCompleted); err != nil {
-		ctx.GetLogger().Warn("synthesizeDetailedResponse: failed to update message status to completed", "error", err)
-	}
-
-	return responseText, nil
 }

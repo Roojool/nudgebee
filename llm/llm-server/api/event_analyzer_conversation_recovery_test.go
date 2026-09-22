@@ -55,6 +55,8 @@ func TestShouldRecoverStageFromConversation(t *testing.T) {
 // Keep the three automatic-analysis stages on the freshness-aware recovery
 // path. The remaining direct call is RCA, whose user-triggered regeneration
 // semantics are intentionally separate from the automatic freshness window.
+// The detailed-response stage no longer appears here: #38925 replaced its LLM
+// pass with deterministic assembly, so there is no model answer to recover.
 func TestAutomaticStageRecoveryUsesFreshnessGuard(t *testing.T) {
 	source, err := os.ReadFile("event_analyzer.go")
 	if !assert.NoError(t, err) {
@@ -62,13 +64,13 @@ func TestAutomaticStageRecoveryUsesFreshnessGuard(t *testing.T) {
 	}
 
 	directCalls := regexp.MustCompile(`(?i)getAgentResponseFromConversation\s*\(\s*ctx\s*,`).FindAll(source, -1)
-	require.GreaterOrEqual(t, len(directCalls), 5, "conversation recovery call pattern must still match the expected sites")
-	assert.Len(t, directCalls, 5,
-		"RCA and the four guarded automatic-stage lookups (summary, investigation, code analysis, synthesis) must remain the only direct recovery sites")
+	require.GreaterOrEqual(t, len(directCalls), 4, "conversation recovery call pattern must still match the expected sites")
+	assert.Len(t, directCalls, 4,
+		"RCA and the three guarded automatic-stage lookups (summary, investigation, code analysis) must remain the only direct recovery sites")
 	guardSites := regexp.MustCompile(`(?i)shouldRecoverStageFromConversation\s*\(`).FindAll(source, -1)
-	require.GreaterOrEqual(t, len(guardSites), 5, "freshness guard pattern must still match the helper and automatic stages")
-	assert.Len(t, guardSites, 5,
-		"the helper definition plus summary, investigation, code-analysis, and synthesis gates must remain present")
+	require.GreaterOrEqual(t, len(guardSites), 4, "freshness guard pattern must still match the helper and automatic stages")
+	assert.Len(t, guardSites, 4,
+		"the helper definition plus summary, investigation and code-analysis gates must remain present")
 }
 
 // Reproduces event a1ffed9c: the debug agent paused on a tool-approval
@@ -222,7 +224,7 @@ func TestAutomaticStageRecoveryIsScopedToEvent(t *testing.T) {
 	require.NoError(t, err)
 
 	calls := regexp.MustCompile(`getAgentResponseFromConversation\(ctx, [^\n]*\)`).FindAll(source, -1)
-	require.Len(t, calls, 5)
+	require.Len(t, calls, 4)
 	unscoped := 0
 	for _, c := range calls {
 		if regexp.MustCompile(`, ""\)$`).Match(c) {

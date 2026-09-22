@@ -18,6 +18,7 @@ import EventRaisePrPanel from './EventRaisePrPanel';
 import { FiArrowRight } from 'react-icons/fi';
 import { useConversationSuggestions } from '@hooks/useConversationSuggestions';
 import { safeJSONParse } from '@utils/common';
+import { reportContainsInvestigation } from '@utils/investigationReport';
 
 // The model returns prose with single newlines between paragraphs, which markdown
 // collapses into one run-on paragraph, so a blank line is inserted between them.
@@ -631,9 +632,14 @@ class AskAiCard {
         analysis = parsedAnalysis.analysis || '';
       }
 
-      // detailed_response is the enriched synthesis of summary + investigation + log analysis.
-      // Fall back to initial summary while it is still being generated.
+      // detailed_response is the report assembled from the investigation + event facts + code
+      // findings. Fall back to initial summary while it is still being generated.
       const summaryContent = detailed_response || summary;
+
+      // Fold the Investigation section away once the report carries it. While the report is still
+      // pending, and on older analyses where it was a separate rewrite, the two differ and both
+      // sections stay.
+      const investigationIsInReport = reportContainsInvestigation(summaryContent, investigation);
 
       let sections = [];
       const isTerminal = ['completed', 'failed', 'killed'].includes(localAiData?.status?.toLowerCase());
@@ -660,7 +666,7 @@ class AskAiCard {
             content: summaryContent,
           });
         }
-        if (task_statuses.investigation !== undefined || investigation) {
+        if (!investigationIsInReport && (task_statuses.investigation !== undefined || investigation)) {
           sections.push({
             id: 'investigation',
             label: 'Investigation',
@@ -685,7 +691,7 @@ class AskAiCard {
             content: summaryContent,
           });
         }
-        if (investigation || !isTerminal) {
+        if (!investigationIsInReport && (investigation || !isTerminal)) {
           sections.push({
             id: 'investigation',
             label: 'Investigation',

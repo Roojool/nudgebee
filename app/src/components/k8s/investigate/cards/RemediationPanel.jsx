@@ -14,6 +14,7 @@ import apiRecommendations from '@api1/recommendation';
 import apiTriage from '@api1/triage';
 import apiKubernetes1 from '@api1/kubernetes1';
 import { getBrandTitle } from '@hooks/useTenantBranding';
+import { reportContainsInvestigation } from '@utils/investigationReport';
 import AlertRuleChangeAction from './AlertRuleChangeAction';
 import { buildAlertRuleContext, isAlertRuleChangeApplied } from './remediationAlertRule';
 
@@ -648,7 +649,10 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
           const fix = extractCodeFix(rec);
           if (mountedRef.current) setCodeFix(fix);
           if (fix) artifacts.push('code_fix');
-          context = [rec.summary, rec.investigation, rec.detailed_response, rec.root_cause_analysis]
+          // #38925: passing the investigation and the report that already opens with it sends the
+          // model the same text twice, crowding the prompt with no added evidence.
+          const investigationInReport = reportContainsInvestigation(rec.detailed_response, rec.investigation);
+          context = [rec.summary, investigationInReport ? '' : rec.investigation, rec.detailed_response, rec.root_cause_analysis]
             .filter((part) => typeof part === 'string' && part.trim())
             .join('\n\n');
           // Code analysis may already have produced the actual fix (file list + diff) on this same
