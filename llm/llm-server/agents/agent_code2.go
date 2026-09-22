@@ -1694,14 +1694,27 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 	latency := time.Since(startTime).Seconds()
 	if err != nil {
 		ctx.GetLogger().Error("code: failed to execute via workspace", "error", err.Error())
-		// Write the message-scoped guard on failure too. A poll timeout here
-		// usually means the analysis is STILL RUNNING server-side (the workspace
-		// pod does not cancel it when polling stops) — without the guard, the
-		// planner's natural "tool errored, retry" reaction dispatches a second
-		// /analyze and two full analyses run for one message.
-		if guardKey, ok := codeAgentGuardKey(query.ConversationId, query.MessageId); ok {
-			_ = common.CacheSet(codeAgentFailuresCacheNS, guardKey,
-				[]byte(fmt.Sprintf("previous attempt failed and may still be running server-side: %v", err)))
+		// Write the message-scoped guard on failure too. An ordinary poll
+		// timeout here usually means the analysis is STILL RUNNING
+		// server-side (the workspace pod does not cancel it when polling
+		// stops) — without the guard, the planner's natural "tool errored,
+		// retry" reaction dispatches a second /analyze and two full analyses
+		// run for one message.
+		//
+		// ErrWorkspaceRunLost is the one case where that assumption is known
+		// to be false: the pod that owned the analysis is confirmed gone
+		// (terminal k8s phase, or a fresh pod 404s the analysis id), so
+		// there is nothing left for a retry to collide with. Skipping the
+		// guard here lets the planner's existing, already-bounded retry
+		// redispatch against the replacement pod instead of the run being
+		// silently lost until the caller gives up on the whole message
+		// (#38994) — 80% of code-agent failures on 2026-09-21 were this
+		// exact case.
+		if !shouldSkipRetryGuard(err) {
+			if guardKey, ok := codeAgentGuardKey(query.ConversationId, query.MessageId); ok {
+				_ = common.CacheSet(codeAgentFailuresCacheNS, guardKey,
+					[]byte(fmt.Sprintf("previous attempt failed and may still be running server-side: %v", err)))
+			}
 		}
 		return core.NBAgentResponse{}, err
 	}
@@ -1774,6 +1787,18 @@ func handleAnalysisResult(ctx *security.RequestContext, conversationId, messageI
 		_ = common.CacheDelete(codeAgentFailuresCacheNS, guardKey)
 	}
 	return responseStr
+}
+
+// shouldSkipRetryGuard reports whether a workspace failure should NOT set the
+// message-scoped "may still be running" guard. Normally a poll failure is
+// ambiguous — the workspace pod could still be working on it — so the guard
+// blocks the planner from redispatching. workspace.ErrWorkspaceRunLost is the
+// one signal that removes the ambiguity: it is only returned when the pod
+// that owned the run is confirmed gone (terminal k8s phase, or a fresh pod
+// 404s the run's id), so a redispatch has nothing left to collide with
+// (#38994).
+func shouldSkipRetryGuard(err error) bool {
+	return errors.Is(err, workspace.ErrWorkspaceRunLost)
 }
 
 // codeAgentGuardKey builds the message-scoped guard cache key and reports whether
