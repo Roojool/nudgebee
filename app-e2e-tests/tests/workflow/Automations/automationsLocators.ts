@@ -1,4 +1,3 @@
-// Not for OSS
 import { Page, Locator } from "@playwright/test";
 import { CommonLocators } from "../../GlobalLocators";
 
@@ -57,6 +56,19 @@ export class AutomationsLocators extends CommonLocators {
   readonly builderBackBtn: Locator;
   readonly exitConfirmDialog: Locator;
   readonly exitLeaveBtn: Locator;
+
+  readonly workflowSettingsBtn: Locator;
+  readonly settingsModal: Locator;
+  readonly aiInvocableCheckbox: Locator;
+  readonly aiAutoApproveCheckbox: Locator;
+  readonly llmDescriptionInput: Locator;
+  readonly settingsApplyBtn: Locator;
+  readonly settingsCancelBtn: Locator;
+
+  readonly workflowSaveBtn: Locator;
+  readonly workflowPublishBtn: Locator;
+  readonly publishDialog: Locator;
+  readonly publishConfirmBtn: Locator;
 
   readonly toastRegion: Locator;
 
@@ -165,6 +177,41 @@ export class AutomationsLocators extends CommonLocators {
     // an automation the test never edited, so leaving has to handle either.
     this.exitConfirmDialog = page.getByRole("dialog", { name: /^(Unsaved|Unpublished) changes$/ });
     this.exitLeaveBtn = this.exitConfirmDialog.getByRole("button", { name: "Leave page" }).or(page.locator("#workflow-unsaved-leave-btn")).first();
+
+    // WorkflowBuilderNotebook's toolbar Settings icon-button; carries its own
+    // aria-label, so role+name is reachable ahead of the id it also renders.
+    this.workflowSettingsBtn = page
+      .getByRole("button", { name: "Automation Settings" })
+      .or(page.locator("#workflow-settings-btn"))
+      .first();
+    // ds/Modal points aria-labelledby at its title paragraph only (the subtitle
+    // sits outside it), so the dialog's accessible name is the title alone.
+    this.settingsModal = page.getByRole("dialog", { name: "Automation Settings" });
+    // Native <input type=checkbox> wrapped in its own <label>text</label> (ds/Checkbox),
+    // so role+name resolves off that label rather than FormField's separate heading above it.
+    this.aiInvocableCheckbox = this.settingsModal.getByRole("checkbox", {
+      name: "Allow the AI assistant to run this automation",
+    });
+    this.aiAutoApproveCheckbox = this.settingsModal.getByRole("checkbox", {
+      name: "Run without asking the user to confirm",
+    });
+    this.llmDescriptionInput = this.settingsModal.getByPlaceholder("Describe when the assistant should reach for this automation");
+    // Scoped to the modal: "Cancel" alone is too generic a name to match page-wide.
+    this.settingsApplyBtn = this.settingsModal.getByRole("button", { name: "Apply Settings" }).or(page.locator("#wf-settings-apply-btn")).first();
+    this.settingsCancelBtn = this.settingsModal.getByRole("button", { name: "Cancel", exact: true }).or(page.locator("#wf-settings-cancel-btn")).first();
+
+    // Label reads "Save draft" once the automation exists (isNewWorkflow is
+    // false for every automation these tests open), "Publish" only pre-creation.
+    this.workflowSaveBtn = page.getByRole("button", { name: "Save draft" }).or(page.locator("#workflow-save-btn")).first();
+    // WorkflowStateStrip renders this trigger with its own data-testid.
+    this.workflowPublishBtn = page.getByTestId("workflow-publish-btn").or(page.locator("#workflow-publish-btn")).first();
+    this.publishDialog = page.getByRole("dialog", { name: "Publish automation version" });
+    // Scoped to the dialog: its own "Publish" button would otherwise also match
+    // WorkflowStateStrip's "Publish" trigger that opened this dialog.
+    this.publishConfirmBtn = this.publishDialog
+      .getByRole("button", { name: "Publish", exact: true })
+      .or(page.locator("#workflow-publish-confirm-btn"))
+      .first();
 
     // SnackbarComponent renders its stack as a labelled region; items inside are
     // role=status (success) or role=alert (error). No fallback: this is asserted

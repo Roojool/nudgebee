@@ -1,4 +1,3 @@
-// Not for OSS
 import { Page, Locator, expect } from "@playwright/test";
 import { LoginPage } from "../../../pages/LoginPage";
 import { AutomationsLocators } from "./automationsLocators";
@@ -167,6 +166,38 @@ export async function deleteAutomationByName(locators: AutomationsLocators, name
 // search, so this is read after searchByName rather than off a stale table.
 export async function countNamed(locators: AutomationsLocators, name: string): Promise<number> {
   return locators.nameLink(name).count();
+}
+
+// Deletes a fixed-name automation if one is already listed, tolerating both a
+// prior interrupted run (needs deleting before a fresh create) and a creation
+// that never finished (nothing to delete is the normal outcome then).
+export async function deleteIfExists(page: Page, locators: AutomationsLocators, name: string): Promise<void> {
+  await page.goto("/automation#automations");
+  await expect(locators.listingBox).toBeVisible({ timeout: 30000 });
+  await searchByName(locators, name);
+  // searchByName's own settle check only waits for *some* row or the empty state,
+  // which the pre-search listing can already satisfy - wait for this exact name
+  // (or the empty state) too, so the count below reads the post-search result.
+  await expect(locators.nameLink(name).first().or(locators.emptyState)).toBeVisible({ timeout: 15000 });
+  if ((await countNamed(locators, name)) > 0) {
+    await deleteAutomationByName(locators, name);
+  }
+}
+
+// The AI Assistant section only renders once WorkflowSettingsModal resolves the
+// AI_WORKFLOW_TOOLS feature flag for the automation's account, so a tenant where
+// it is off would otherwise fail these tests on a plain timeout with no clue why.
+const AI_ASSISTANT_HINT =
+  "The AI Assistant section never rendered in Automation Settings. It only appears once the " +
+  "AI_WORKFLOW_TOOLS feature flag is enabled for this automation's account — verify that flag " +
+  "before assuming the checkbox wiring itself is broken.";
+
+// Opens Automation Settings from the builder toolbar and waits for the AI
+// Assistant section specifically, since that part renders behind a feature flag.
+export async function openSettingsModal(locators: AutomationsLocators): Promise<void> {
+  await locators.workflowSettingsBtn.click();
+  await expect(locators.settingsModal).toBeVisible({ timeout: 30000 });
+  await expect(locators.aiAutoApproveCheckbox, AI_ASSISTANT_HINT).toBeVisible({ timeout: 30000 });
 }
 
 // The account whose automation configs the Configs modal is opened against. Same
