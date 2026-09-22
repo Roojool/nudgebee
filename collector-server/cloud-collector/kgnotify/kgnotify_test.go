@@ -5,10 +5,50 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	"nudgebee/collector/cloud/config"
 )
 
+// enableNotifications turns the gate on for one test and restores it after.
+func enableNotifications(t *testing.T) {
+	t.Helper()
+	prev := config.Config.KGUpdateNotificationsEnabled
+	config.Config.KGUpdateNotificationsEnabled = true
+	t.Cleanup(func() { config.Config.KGUpdateNotificationsEnabled = prev })
+}
+
+// Nothing reaches the broker unless the environment turns notifications on.
+func TestNotificationsGate(t *testing.T) {
+	prev := config.Config.KGUpdateNotificationsEnabled
+	t.Cleanup(func() { config.Config.KGUpdateNotificationsEnabled = prev })
+
+	sent := &[]Message{}
+	prevPublish := publish
+	publish = func(_ context.Context, msg Message) error {
+		*sent = append(*sent, msg)
+		return nil
+	}
+	t.Cleanup(func() { publish = prevPublish })
+
+	config.Config.KGUpdateNotificationsEnabled = false
+	PublishAccountUpdate(context.Background(), "tenant", "account")
+	PublishResourceUpdate(context.Background(), "tenant", "account", "i-0abc", OpUpsert)
+	if len(*sent) != 0 {
+		t.Fatalf("published %d messages with notifications disabled, want 0", len(*sent))
+	}
+
+	config.Config.KGUpdateNotificationsEnabled = true
+	PublishAccountUpdate(context.Background(), "tenant", "account")
+	if len(*sent) != 1 {
+		t.Fatalf("published %d messages with notifications enabled, want 1", len(*sent))
+	}
+}
+
+// capture swaps the publisher and opens the notification gate, which is off by
+// default; TestNotificationsGate covers the closed case.
 func capture(t *testing.T, err error) *[]Message {
 	t.Helper()
+	enableNotifications(t)
 	sent := &[]Message{}
 	prev := publish
 	publish = func(_ context.Context, msg Message) error {

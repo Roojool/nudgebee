@@ -99,6 +99,18 @@ func OpFor(active bool) string {
 }
 
 func send(ctx context.Context, msg Message) {
+	// One gate for every notification this package sends. With it off this
+	// collector tells the graph nothing, but the graph does not stop moving:
+	// the api-server's inventory change detector re-derives the same creates
+	// and deletes from the inventory tables every 10 minutes (see the package
+	// comment), so updates lag by up to that cycle instead of arriving with
+	// the event. Switch that detector off too and only the hourly build is left.
+	if !config.Config.KGUpdateNotificationsEnabled {
+		slog.Debug("kg_update: notifications disabled, not published",
+			"tenant_id", msg.TenantID, "account_ids", msg.AccountIDs, "resources", len(msg.Resources))
+		return
+	}
+
 	msg.Source = messageSource
 	msg.RequestedAt = time.Now().UTC()
 	msg.CorrelationID = uuid.New().String()

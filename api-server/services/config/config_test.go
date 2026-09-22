@@ -68,3 +68,17 @@ func TestResourcePatchEnabledByDefault(t *testing.T) {
 		t.Error("default kg_resource_patch_enabled = false, want true")
 	}
 }
+
+// Event-driven graph updates are opt-in. This is the api-server half of the
+// pair: the detector that re-derives changes from the inventory tables every 10
+// minutes, alongside the collectors' KG_UPDATE_NOTIFICATIONS_ENABLED. With both
+// off the graph is driven only by the hourly build_knowledge_graph cron, so
+// flipping this default back on silently would resume that traffic everywhere.
+func TestInventoryChangeDetectionDisabledByDefault(t *testing.T) {
+	if v, ok := os.LookupEnv("KG_INVENTORY_CHANGE_DETECTION_ENABLED"); ok {
+		t.Skipf("KG_INVENTORY_CHANGE_DETECTION_ENABLED=%q is set in the environment; the compiled-in default is not observable here", v)
+	}
+	if Config.KGInventoryChangeDetectionEnabled {
+		t.Error("default kg_inventory_change_detection_enabled = true, want false")
+	}
+}

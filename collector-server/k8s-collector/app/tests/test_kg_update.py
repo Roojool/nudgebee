@@ -8,6 +8,47 @@ TENANT = "11111111-1111-4111-8111-111111111111"
 ACCOUNT = "22222222-2222-4222-8222-222222222222"
 
 
+def setUpModule():
+    """These tests assert what gets published, so they need the gate open.
+
+    KG_UPDATE_NOTIFICATIONS_ENABLED is off by default; TestNotificationsGate
+    below covers the closed case.
+    """
+    global _gate_before
+    _gate_before = kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED
+    kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED = True
+
+
+def tearDownModule():
+    kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED = _gate_before
+
+
+class TestNotificationsGate(unittest.TestCase):
+    """The flag decides whether anything reaches the broker at all."""
+
+    def setUp(self):
+        self._before = kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED
+        self.addCleanup(setattr, kg_update.Configs, "KG_UPDATE_NOTIFICATIONS_ENABLED", self._before)
+
+    def test_disabled_publishes_nothing(self):
+        kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED = False
+        with mock.patch.object(kg_update, "publish_message") as publish:
+            kg_update.publish_kg_update(TENANT, ACCOUNT)
+            kg_update.publish_kg_update(
+                TENANT, resources=[{"account_id": ACCOUNT, "provider_resource_id": "wl-1", "op": "delete"}]
+            )
+            with kg_update.deletion_scope(TENANT, ACCOUNT):
+                kg_update.record_deleted_workloads([("wl-1", "Deployment")])
+        publish.assert_not_called()
+
+    def test_enabled_publishes(self):
+        kg_update.Configs.KG_UPDATE_NOTIFICATIONS_ENABLED = True
+        with mock.patch.object(kg_update, "publish_message") as publish:
+            kg_update.publish_kg_update(TENANT, ACCOUNT)
+        publish.assert_called_once()
+        self.assertEqual(publish.call_args.kwargs["message"]["account_ids"], [ACCOUNT])
+
+
 class TestDeletionScope(unittest.TestCase):
     def test_publishes_recorded_deletions_once(self):
         with mock.patch.object(kg_update, "publish_message") as publish:

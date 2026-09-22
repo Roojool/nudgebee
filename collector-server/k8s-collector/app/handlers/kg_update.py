@@ -42,9 +42,27 @@ def publish_kg_update(
     rollouts are not published from here: the api-server detects them from the
     inventory tables every 10 minutes.
 
+    Nothing is published unless KG_UPDATE_NOTIFICATIONS_ENABLED is set; the
+    api-server's detector then picks the same deletions up within 10 minutes.
+
     Failures are logged but never raised -- KG updates are best-effort and must not
     break the discovery pipeline.
     """
+    # One gate for every notification this module sends. With it off this
+    # collector tells the graph nothing, but the graph does not stop moving:
+    # the api-server's inventory change detector re-derives the same deletions
+    # from k8s_workloads every 10 minutes, so updates lag by up to that cycle
+    # instead of arriving with the discovery run. Switch that detector off too
+    # and only the hourly build is left.
+    if not Configs.KG_UPDATE_NOTIFICATIONS_ENABLED:
+        logger.debug(
+            "kg_update: notifications disabled, not published for tenant %s account %s (%d resources)",
+            tenant_id,
+            cloud_account_id,
+            len(resources or []),
+        )
+        return
+
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
     message: Dict[str, Any] = {

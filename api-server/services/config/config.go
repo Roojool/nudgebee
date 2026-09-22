@@ -586,7 +586,10 @@ func init() {
 	// marks it saved and requests account rebuilds / per-resource updates. The cap
 	// bounds how many new rows or rolled-out workloads one account may produce in
 	// a run before the detector stops inspecting them and rebuilds the account.
-	viper.SetDefault("kg_inventory_change_detection_enabled", true)
+	// Off by default, like the collectors' KG_UPDATE_NOTIFICATIONS_ENABLED: an
+	// environment opts into event-driven graph updates by turning both on. With
+	// both off nothing drives the graph but the hourly build_knowledge_graph cron.
+	viper.SetDefault("kg_inventory_change_detection_enabled", false)
 	viper.SetDefault("kg_inventory_change_candidate_cap", 5000)
 	// When false, a new resource of a creatable type rebuilds its account like
 	// any other new resource instead of being added on its own.

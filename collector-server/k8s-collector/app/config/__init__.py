@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     RABBIT_MQ_KG_UPDATE_EXCHANGE: str = "kg_update_exchange"
     RABBIT_MQ_KG_UPDATE_QUEUE: str = "kg_update"
+    # Gates every knowledge-graph update this collector publishes: workload and
+    # node deletions, and any per-resource refs. Off unless an environment turns
+    # it on, so the graph falls back to its scheduled build.
+    KG_UPDATE_NOTIFICATIONS_ENABLED: bool = False
 
     RABBIT_MQ_EVENT_POST_PROCESS_EXCHANGE: str = "event_post_process_exchange"
     RABBIT_MQ_EVENT_POST_PROCESS_QUEUE: str = "event_post_process"
