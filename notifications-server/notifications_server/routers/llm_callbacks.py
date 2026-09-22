@@ -13,6 +13,7 @@ from notifications_server.services.events import Events
 from notifications_server.services.cache import Cache
 from notifications_server.models.models import MessagingPlatform
 from notifications_server.utils.feature_flag_utils import is_feature_enabled
+from notifications_server.services.bot_messages import is_conversation_in_progress_error
 
 LOG = logging.getLogger(__name__)
 
@@ -257,12 +258,20 @@ async def handle_llm_response(request: Request, background_tasks: BackgroundTask
             if payload.type == "error":
                 # The upstream error text stays server-side; the thread only ever
                 # sees the generic copy the error handlers post.
-                LOG.error(
-                    "LLM run failed: conversation_id=%s, platform=%s, error=%s",
-                    payload.conversation_id,
-                    platform,
-                    payload.response,
-                )
+                if is_conversation_in_progress_error(payload.response):
+                    LOG.warning(
+                        "LLM run rejected (conversation in progress): conversation_id=%s, platform=%s, error=%s",
+                        payload.conversation_id,
+                        platform,
+                        payload.response,
+                    )
+                else:
+                    LOG.error(
+                        "LLM run failed: conversation_id=%s, platform=%s, error=%s",
+                        payload.conversation_id,
+                        platform,
+                        payload.response,
+                    )
 
             platform_handlers = handlers.get(platform)
             if not platform_handlers:
