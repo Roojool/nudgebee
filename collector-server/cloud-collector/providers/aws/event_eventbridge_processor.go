@@ -12,6 +12,7 @@ import (
 	"nudgebee/collector/cloud/providers" // Assuming config is needed for AWS provider instantiation
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -245,15 +246,26 @@ func (p *TemplatedEventBridgeProcessor) Eligible(ev EventBridgeEvent) bool {
 	return false
 }
 
+// CloudTrailLookupQuery is one CloudTrail LookupEvents query: an
+// AttributeKey/AttributeValue pair (CloudTrail's API allows only one per
+// call) plus an optional client-side EventName allow-list, since
+// LookupEvents has no EventName-list filter of its own.
+type CloudTrailLookupQuery struct {
+	AttributeKey   string   `json:"AttributeKey"`
+	AttributeValue string   `json:"AttributeValue"`
+	EventNames     []string `json:"event_names,omitempty"`
+}
+
 // GetCloudTrailEventsActionParams defines parameters for the aws_get_cloudtrail_events action.
 type GetCloudTrailEventsActionParams struct {
 	StartTimeOffset string `json:"start_time_offset,omitempty"` // e.g., "-15m", "-1h"
 	EndTimeOffset   string `json:"end_time_offset,omitempty"`   // e.g., "+5m", "0m"
 	Region          string `json:"region,omitempty"`            // AWS Region (defaults to event region)
-	// LookupAttributes is a list of key-value pairs to filter events.
-	// Keys should match cloudtrail.LookupAttributeKey constants (e.g., "EventSource", "EventName").
-	LookupAttributes []map[string]string `json:"lookup_attributes,omitempty"` // List of {AttributeKey: "...", AttributeValue: "..."}
-	MaxResults       int64               `json:"max_results,omitempty"`       // Max number of events to return (defaults to 100)
+	// LookupAttributes is a list of CloudTrail lookup queries. CloudTrail's
+	// LookupEvents accepts only one attribute per call, so each entry runs
+	// as its own call; results across all entries are merged and deduped by EventId.
+	LookupAttributes []CloudTrailLookupQuery `json:"lookup_attributes,omitempty"`
+	MaxResults       int64                   `json:"max_results,omitempty"` // Max total events returned across all queries (capped at 50, the API max)
 }
 
 // UpdateCloudResourceActionParams defines parameters for updating cloud_resourses table
@@ -1531,67 +1543,87 @@ func (p *TemplatedEventBridgeProcessor) executeAction(
 			}
 			return fmt.Sprintf("RunningCountLow alarm created for %s/%s (desired: %d)", clusterName, serviceName, desiredCount), nil
 
-		case "aws_get_cloudtrail_events":
-			paramsCT := GetCloudTrailEventsActionParams{}
-			if err := mapToStruct(renderedParams, &paramsCT); err != nil {
-				return nil, fmt.Errorf("eventprocessor: parsing aws_get_cloudtrail_events params for action '%s': %w", actionDef.Name, err)
-			}
-
-			region := paramsCT.Region
-			if region == "" {
-				region = ebEvent.Region // Default to event region
-			}
-
-			startTimeCT, endTimeCT, err := parseTimeOffsets(ebEvent.Time, paramsCT.StartTimeOffset, paramsCT.EndTimeOffset)
-			if err != nil {
-				return nil, fmt.Errorf("eventprocessor: parsing time offsets for aws_get_cloudtrail_events: %w", err)
-			}
-
-			maxResults := paramsCT.MaxResults
-			if maxResults == 0 {
-				maxResults = 100 // Default limit for CloudTrail lookup
-			}
-
-			lookupAttributes := []trailtypes.LookupAttribute{}
-			for _, attrMap := range paramsCT.LookupAttributes {
-				key, keyOk := attrMap["AttributeKey"]
-				value, valueOk := attrMap["AttributeValue"]
-				if keyOk && valueOk && key != "" {
-					lookupAttributes = append(lookupAttributes, trailtypes.LookupAttribute{
-						AttributeKey:   trailtypes.LookupAttributeKey(key),
-						AttributeValue: ptr.String(value),
-					})
-				} else {
-					logger.Warn("eventprocessor: skipping invalid lookup_attribute in params for aws_get_cloudtrail_events", "attribute", attrMap)
-				}
-			}
-
-			// Default to ReadOnly=false unless explicitly overridden
-			readOnlyFilterExists := false
-			for _, attr := range lookupAttributes {
-				if attr.AttributeKey == trailtypes.LookupAttributeKeyReadOnly { // Using string literal as per previous fix
-					readOnlyFilterExists = true
-					break
-				}
-			}
-			if !readOnlyFilterExists {
-				lookupAttributes = append(lookupAttributes, trailtypes.LookupAttribute{AttributeKey: trailtypes.LookupAttributeKeyReadOnly, AttributeValue: ptr.String("false")})
-			}
-
-			cloudtrailEvents, err := p.awsAPI.LookupCloudTrailEvents(pCtx, awsAccount, region, &cloudtrail.LookupEventsInput{
-				StartTime:        ptr.Time(startTimeCT),
-				EndTime:          ptr.Time(endTimeCT),
-				LookupAttributes: lookupAttributes,
-				MaxResults:       ptr.Int32(int32(maxResults)),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("eventprocessor: failed to lookup cloudtrail events for action '%s': %w", actionDef.Name, err)
-			}
-			return cloudtrailEvents, nil
-
 		default:
 			return nil, fmt.Errorf("eventprocessor: unsupported alarm_type '%s' for aws_create_alarm action", alarmType)
 		}
+
+	case "aws_get_cloudtrail_events":
+		paramsCT := GetCloudTrailEventsActionParams{}
+		if err := mapToStruct(renderedParams, &paramsCT); err != nil {
+			return nil, fmt.Errorf("eventprocessor: parsing aws_get_cloudtrail_events params for action '%s': %w", actionDef.Name, err)
+		}
+
+		region := paramsCT.Region
+		if region == "" {
+			region = ebEvent.Region // Default to event region
+		}
+
+		startTimeCT, endTimeCT, err := parseTimeOffsets(ebEvent.Time, paramsCT.StartTimeOffset, paramsCT.EndTimeOffset)
+		if err != nil {
+			return nil, fmt.Errorf("eventprocessor: parsing time offsets for aws_get_cloudtrail_events: %w", err)
+		}
+
+		maxResults := paramsCT.MaxResults
+		if maxResults <= 0 || maxResults > 50 {
+			maxResults = 50 // LookupEvents caps MaxResults at 50
+		}
+
+		if len(paramsCT.LookupAttributes) == 0 {
+			return nil, fmt.Errorf("eventprocessor: aws_get_cloudtrail_events requires at least one lookup_attributes entry for action '%s'", actionDef.Name)
+		}
+
+		// CloudTrail's LookupEvents accepts only one LookupAttribute per call,
+		// so each configured query runs as its own call. Results are merged,
+		// deduped by EventId, an optional per-query EventName allow-list is
+		// applied client-side, and read-only (non-mutating) events are
+		// dropped, matching the prior single-call ReadOnly=false default.
+		seen := map[string]bool{}
+		var merged []trailtypes.Event
+		for _, q := range paramsCT.LookupAttributes {
+			if q.AttributeKey == "" || q.AttributeValue == "" {
+				logger.Warn("eventprocessor: skipping invalid lookup_attributes entry for aws_get_cloudtrail_events", "entry", q)
+				continue
+			}
+			events, err := p.awsAPI.LookupCloudTrailEvents(pCtx, awsAccount, region, &cloudtrail.LookupEventsInput{
+				StartTime: ptr.Time(startTimeCT),
+				EndTime:   ptr.Time(endTimeCT),
+				LookupAttributes: []trailtypes.LookupAttribute{
+					{AttributeKey: trailtypes.LookupAttributeKey(q.AttributeKey), AttributeValue: ptr.String(q.AttributeValue)},
+				},
+				MaxResults: ptr.Int32(int32(maxResults)),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("eventprocessor: failed to lookup cloudtrail events for action '%s' (%s=%s): %w", actionDef.Name, q.AttributeKey, q.AttributeValue, err)
+			}
+
+			allowedNames := map[string]bool{}
+			for _, n := range q.EventNames {
+				allowedNames[n] = true
+			}
+			for _, ev := range events {
+				if len(allowedNames) > 0 && !allowedNames[ptr.ToString(ev.EventName)] {
+					continue
+				}
+				if ptr.ToString(ev.ReadOnly) == "true" {
+					continue
+				}
+				id := ptr.ToString(ev.EventId)
+				if id != "" && seen[id] {
+					continue
+				}
+				seen[id] = true
+				merged = append(merged, ev)
+			}
+		}
+
+		sort.Slice(merged, func(i, j int) bool {
+			return ptr.ToTime(merged[i].EventTime).After(ptr.ToTime(merged[j].EventTime))
+		})
+		if len(merged) > int(maxResults) {
+			merged = merged[:maxResults]
+		}
+
+		return merged, nil
 
 	case "update_cloud_resource":
 		logger.Info("eventprocessor: executing update_cloud_resource action", "actionName", actionDef.Name, "renderedParams", renderedParams)

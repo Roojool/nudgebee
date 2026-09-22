@@ -473,9 +473,7 @@ rules:
           end_time_offset: "+5m"
           region: "{{ (index .Event \"region\") }}"
           lookup_attributes:
-            - AttributeKey: "EventSource"
-              AttributeValue: "ecs.amazonaws.com"
-            - AttributeKey: "ResourceName" # Service ARN or Name
+            - AttributeKey: "ResourceName" # Service ARN or Name; already scopes to this specific ECS service
               AttributeValue: |
                 {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
           max_results: 20
@@ -552,9 +550,7 @@ rules:
           end_time_offset: "+5m"
           region: "{{ (index .Event \"region\") }}"
           lookup_attributes:
-            - AttributeKey: "EventSource"
-              AttributeValue: "ecs.amazonaws.com"
-            - AttributeKey: "ResourceName" # Service ARN or Name
+            - AttributeKey: "ResourceName" # Service ARN or Name; already scopes to this specific ECS service
               AttributeValue: |
                 {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
           max_results: 20
@@ -945,12 +941,10 @@ rules:
           lookup_attributes:
             - AttributeKey: "EventSource"
               AttributeValue: "ecr.amazonaws.com"
-            - AttributeKey: "EventName"
-              AttributeValue: "BatchCheckLayerAvailability" # Common ECR pull API calls
-            - AttributeKey: "EventName"
-              AttributeValue: "GetDownloadUrlForLayer"
-            - AttributeKey: "EventName"
-              AttributeValue: "GetAuthorizationToken" # Related to login
+              event_names: # Common ECR pull API calls; filtered client-side since LookupEvents allows only one AttributeKey per call
+                - "BatchCheckLayerAvailability"
+                - "GetDownloadUrlForLayer"
+                - "GetAuthorizationToken" # Related to login
             - AttributeKey: "EventSource"
               AttributeValue: "iam.amazonaws.com" # Look for IAM errors around this time
           max_results: 50
