@@ -8,6 +8,15 @@ export function generateWorkflowName(baseName: string): string {
   return `${baseName} ${suffix}`;
 }
 
+export async function leaveWorkflowEditor(page: Page, locators: WorkflowLocators): Promise<void> {
+  await locators.backBtn.click();
+  const leavePageBtn = page.getByRole("button", { name: "Leave page" });
+  await leavePageBtn
+    .waitFor({ state: "visible", timeout: 3000 })
+    .then(() => leavePageBtn.click())
+    .catch(() => {});
+}
+
 export async function deleteCreatedWorkflow(
   page: Page,
   locators: WorkflowLocators,
@@ -20,12 +29,7 @@ export async function deleteCreatedWorkflow(
     workflowId = undefined;
   }
 
-  await locators.backBtn.click();
-  const leavePageBtn = page.getByRole("button", { name: "Leave page" });
-  await leavePageBtn
-    .waitFor({ state: "visible", timeout: 3000 })
-    .then(() => leavePageBtn.click())
-    .catch(() => {});
+  await leaveWorkflowEditor(page, locators);
 
   await locators.nameSearchInput
     .waitFor({ state: "visible", timeout: 15000 })

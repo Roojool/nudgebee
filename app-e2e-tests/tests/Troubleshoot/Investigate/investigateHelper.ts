@@ -112,6 +112,15 @@ export async function dismissMenu(page: Page): Promise<void> {
   await page.keyboard.press("Escape");
 }
 
+// investigate.jsx resets tabValue while RCA is still generating, snapping a just-selected Remediation tab back — retries the click+select+panel check together.
+export async function openRemediationTab(locators: InvestigateLocators): Promise<void> {
+  await expect(async () => {
+    await locators.tab(InvestigateTabs.remediation).click();
+    await expect(locators.tab(InvestigateTabs.remediation)).toHaveAttribute("aria-selected", "true", { timeout: 3000 });
+    await expect(locators.runAutomationBtn).toBeVisible({ timeout: 3000 });
+  }).toPass({ timeout: 200000 });
+}
+
 // Reads the count investigate.jsx renders beside the Tasks label. Returns null
 // when the label carries no count, which is itself a fact a test can assert on.
 export function parseTaskCount(label: string): number | null {

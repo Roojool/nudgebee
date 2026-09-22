@@ -11,10 +11,21 @@ import {
   openFirstInvestigation,
   openInvestigateTab,
   openMoreActions,
+  openRemediationTab,
   parseInvestigateParams,
   parseTaskCount,
   revealInvestigationCard,
 } from "./investigateHelper";
+import { WorkflowLocators } from "../../workflow/workflowlocators";
+import {
+  deleteCreatedWorkflow,
+  generateWorkflowName,
+  leaveWorkflowEditor,
+  loginAndNavigateToNewWorkflow,
+  pasteAndApplyWorkflowJson,
+  saveNewWorkflow,
+} from "../../workflow/workflowHelper";
+import { waitForGraphQLAndValidate } from "../../utils/GraphQLNetworkWatcher";
 
 // Troubleshoot > Investigate — the per-event investigation dashboard
 // (app/src/pages/investigate.jsx), reached from an event's Investigate link.
@@ -288,5 +299,142 @@ test(
       await openInvestigateTab(investigate, InvestigateTabs.tasks);
       await expectSelectedTab(investigate, InvestigateTabs.tasks);
     });
+  }
+);
+
+test(
+  "Investigate - open an investigation, open the Remediation tab, verify the Run an automation card shows either its past runs or a clean empty state",
+  { tag: ["@dev", "@test", "@regression", "@functional"] },
+  async ({ page }) => {
+    // openRemediationTab alone can take up to 200s while Root Cause / Investigation is still generating.
+    test.setTimeout(300000);
+
+    const investigate = await openFirstInvestigation(page);
+
+    await openRemediationTab(investigate);
+
+    // EventAutomationRunsList fetches its own runs asynchronously after the tab opens — wait for that fetch to
+    // settle (a row or the empty-state text) before reading the count, or an in-flight fetch reads as 0 rows.
+    const emptyStateText = page.getByText("Your saved workflows, run against this event");
+    await expect(investigate.automationRunRows.first().or(emptyStateText)).toBeVisible({ timeout: 15000 });
+    const rowCount = await investigate.automationRunRows.count();
+
+    if (rowCount === 0) {
+      // EventAutomationRunsList renders null when there's nothing to show — no empty-state placeholder.
+      await expect(emptyStateText).toBeVisible();
+      await expect(investigate.automationRunRows).toHaveCount(0);
+    } else {
+      const firstRow = investigate.automationRunRows.first();
+      await expect(firstRow).toBeVisible();
+      await expect(firstRow).toHaveAttribute("href", /\/automation\/[0-9a-fA-F-]{36}\?accountId=.*&executionId=.*#executions/);
+      const rowText = (await firstRow.textContent())?.trim() ?? "";
+      expect(rowText.length, "Automation run row rendered with no visible name").toBeGreaterThan(0);
+    }
+  }
+);
+
+test(
+  "Investigate - trigger a fresh automation from an event's Remediation tab, verify the run appears and updates live, then opens its execution detail in a new tab",
+  { tag: ["@dev", "@test", "@regression", "@functional", "@crud"] },
+  async ({ page, context }) => {
+    // Building the automation, waiting out RCA generation (up to 200s), and waiting for the run to settle (up to 180s) can add up.
+    test.setTimeout(600000);
+
+    const wfLocators = new WorkflowLocators(page);
+    const workflowName = generateWorkflowName("QA Event Run");
+    // llm.investigate is an internal LLM call with no external side effects, so it's safe to trigger for real.
+    const workflowJson = {
+      name: workflowName,
+      definition: {
+        version: "v1",
+        timeout: "",
+        inputs: [],
+        output: {},
+        tasks: [
+          {
+            id: "llm_investigate",
+            type: "llm.investigate",
+            params: { message: "Hi" },
+            timeout: "10m",
+          },
+        ],
+        triggers: [{ type: "manual", params: {} }],
+        retry_policy: { maximum_attempts: 3, initial_interval: "1s", maximum_interval: "", backoff_coefficient: 2 },
+      },
+      tags: {},
+      status: "ACTIVE",
+    };
+
+    await loginAndNavigateToNewWorkflow(page, wfLocators);
+    await pasteAndApplyWorkflowJson(page, wfLocators, workflowJson);
+    await saveNewWorkflow(page, wfLocators, workflowName);
+    const workflowUrl = page.url();
+    console.log(`[investigate-remediation] Created throwaway automation "${workflowName}"`);
+
+    try {
+      // The sidenav is inert on the workflow editor canvas, so navigateToTroubleshoot's sidebar click can't work until we're back on a normal page.
+      await leaveWorkflowEditor(page, wfLocators);
+
+      const investigate = await openFirstInvestigation(page);
+      const triggerDialog = investigate.dialog(`Trigger Automation: ${workflowName}`);
+
+      // Retries the whole sequence since RunAutomationMenu unmounts on a tabValue reset while RCA is still generating; no Refresh click needed since the mount fetch already includes this automation.
+      await expect(async () => {
+        await openRemediationTab(investigate);
+        await investigate.runAutomationBtn.click();
+        await expect(investigate.automationDropdownMenu).toBeVisible({ timeout: 5000 });
+        await expect(investigate.automationDropdownMenu.getByText("Loading automations")).toBeHidden({ timeout: 20000 });
+        await investigate.automationDropdownMenu.getByPlaceholder("Search automation").fill(workflowName);
+        await investigate.menuItem(workflowName, investigate.automationDropdownMenu).click();
+        await expect(triggerDialog).toBeVisible({ timeout: 5000 });
+      }).toPass({ timeout: 60000 });
+
+      await waitForGraphQLAndValidate(
+        page,
+        async () => {
+          await triggerDialog.getByRole("button", { name: "Trigger Automation" }).click();
+        },
+        {
+          testName: "Investigate Remediation - trigger automation for event",
+          operationNames: ["triggerWorkflow"],
+          timeoutMs: 30000,
+        }
+      );
+      await expect(triggerDialog).toBeHidden({ timeout: 15000 });
+      console.log("[investigate-remediation] Automation triggered for the event");
+
+      const triggeredRow = investigate.automationRunRows.filter({ hasText: workflowName }).first();
+
+      await test.step("The new run appears inline in the Run an automation card", async () => {
+        // EventAutomationRunsList only refetches on mount or on a refreshKey bump — if the backend hasn't
+        // indexed the new execution by the one post-trigger refetch, it never polls again. Switching tabs
+        // away and back remounts the panel and forces a fresh fetch, the same recovery a real user has.
+        await expect(async () => {
+          await investigate.tab(InvestigateTabs.tasks).click();
+          await openRemediationTab(investigate);
+          await expect(triggeredRow).toBeVisible({ timeout: 8000 });
+        }).toPass({ timeout: 60000 });
+      });
+
+      await test.step("The workflow resolution status updates live, without a reload, to a settled state", async () => {
+        await expect(investigate.workflowResolutionBtn).toBeVisible({ timeout: 30000 });
+        await expect(investigate.workflowResolutionBtn).toHaveText(/Resolved via Workflow|Workflow Failed/, { timeout: 180000 });
+        const settledText = (await investigate.workflowResolutionBtn.textContent()) ?? "";
+        expect(settledText, `Automation execution did not settle successfully: "${settledText}"`).toContain("Resolved via Workflow");
+      });
+
+      await test.step("Clicking the run row opens that execution's detail in a new tab", async () => {
+        const [executionTab] = await Promise.all([context.waitForEvent("page"), triggeredRow.click()]);
+        await executionTab.waitForLoadState("domcontentloaded");
+        await expect(executionTab).toHaveURL(/\/automation\/[0-9a-fA-F-]{36}\?accountId=.*&executionId=.*#executions/);
+        await executionTab.close();
+      });
+    } finally {
+      // Cleanup needs the automation's own page; the investigate detour above left us on /investigate.
+      await page.goto(workflowUrl).catch(() => {});
+      await deleteCreatedWorkflow(page, wfLocators, workflowName).catch((err) =>
+        console.error(`[investigate-remediation] cleanup failed to delete "${workflowName}": ${err}`)
+      );
+    }
   }
 );
