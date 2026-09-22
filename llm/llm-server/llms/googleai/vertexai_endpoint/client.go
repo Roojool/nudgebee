@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"nudgebee/llm/common"
+
 	"github.com/tmc/langchaingo/callbacks"
 	"github.com/tmc/langchaingo/llms"
 	"golang.org/x/oauth2/google"
@@ -179,7 +181,9 @@ func (v *VertexEndpoint) callPredict(
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, common.WithRateLimitHeaders(
+			fmt.Errorf("endpoint returned status %d: %s", httpResp.StatusCode, string(respBody)),
+			httpResp.StatusCode, httpResp.Header)
 	}
 
 	// Parse the Vertex AI :predict response

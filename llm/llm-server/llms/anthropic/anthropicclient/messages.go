@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"nudgebee/llm/common"
 )
 
 // ChatMessage represents a single message in the Anthropic conversation.
@@ -179,9 +181,13 @@ func (c *Client) CreateMessage(ctx context.Context, req *MessageRequest) (*Messa
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errResp errorResponse
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("anthropic: API error (%d %s): %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+			return nil, common.WithRateLimitHeaders(
+				fmt.Errorf("anthropic: API error (%d %s): %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message),
+				resp.StatusCode, resp.Header)
 		}
-		return nil, fmt.Errorf("anthropic: API returned status code %d: %s", resp.StatusCode, string(respBody))
+		return nil, common.WithRateLimitHeaders(
+			fmt.Errorf("anthropic: API returned status code %d: %s", resp.StatusCode, string(respBody)),
+			resp.StatusCode, resp.Header)
 	}
 
 	var msgResp MessageResponse
@@ -246,9 +252,13 @@ func (c *Client) createMessageStream(ctx context.Context, req *MessageRequest) (
 		respBody, _ := io.ReadAll(resp.Body)
 		var errResp errorResponse
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("anthropic: API error (%d %s): %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message)
+			return nil, common.WithRateLimitHeaders(
+				fmt.Errorf("anthropic: API error (%d %s): %s", resp.StatusCode, errResp.Error.Type, errResp.Error.Message),
+				resp.StatusCode, resp.Header)
 		}
-		return nil, fmt.Errorf("anthropic: API returned status code %d: %s", resp.StatusCode, string(respBody))
+		return nil, common.WithRateLimitHeaders(
+			fmt.Errorf("anthropic: API returned status code %d: %s", resp.StatusCode, string(respBody)),
+			resp.StatusCode, resp.Header)
 	}
 
 	reader := bufio.NewReader(resp.Body)

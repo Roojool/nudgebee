@@ -1858,7 +1858,13 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		errorMsg := fmt.Sprintf("[%s] %s", rc.currentModel, safeError(err))
 		rc.errorHistory = append(rc.errorHistory, errorMsg)
 
-		rc.ctx.GetLogger().Warn("Failed to generate content", "error", err, "model", rc.currentModel, "agent", rc.agentName, "agentId", rc.agentId)
+		// Rate-limit headers, when the provider sent any, are appended here rather
+		// than logged at the client: this is the first site with the request's
+		// account, conversation and trace attached, so a throttling event is
+		// attributable to the turn that caused it.
+		logAttrs := []any{"error", err, "model", rc.currentModel, "agent", rc.agentName, "agentId", rc.agentId}
+		logAttrs = append(logAttrs, common.RateLimitLogAttrs(err)...)
+		rc.ctx.GetLogger().Warn("Failed to generate content", logAttrs...)
 		return nil, err
 	}
 	if completion == nil || completion.Choices == nil {
@@ -2504,6 +2510,15 @@ const (
 	fallbackCauseUnavailable
 )
 
+// circuitOpenError maps a breaker trip cause to the user-facing sentinel. Kept
+// beside fallbackCause so the two stay in step: every cause needs an answer here.
+func circuitOpenError(cause fallbackCause, detail common.RateLimitDetail) error {
+	if cause == fallbackCauseQuota {
+		return RateLimitedError(detail)
+	}
+	return ErrLLMServiceUnavailable
+}
+
 func (c fallbackCause) reason() string {
 	switch c {
 	case fallbackCauseUnavailable:
@@ -2525,7 +2540,7 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 	// circuit is already open — in those cases the model had timeouts rather than
 	// quota issues, and tripping the circuit would give it an inaccurate label.
 	if recordPrimaryHit {
-		RecordModelRateLimitHit(rc.currentProvider, rc.currentModel)
+		RecordModelRateLimitHit(rc.currentProvider, rc.currentModel, rc.lastErr)
 		common.MetricsLLMRateLimitHitsTotal(rc.currentProvider, rc.currentModel, rc.accountId)
 	}
 
@@ -2542,7 +2557,7 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 	if len(fallbackModels) == 0 {
 		ctx.GetLogger().Warn("No fallback models configured for this tier",
 			"model", rc.currentModel, "provider", rc.currentProvider, "cause", cause.reason())
-		wrapped := ensureLastErr(rc)
+		wrapped := ensureLastErr(rc, cause)
 		if cause == fallbackCauseUnavailable {
 			return nil, buildCallMetadata(rc, false),
 				fmt.Errorf("model %s (%s) is currently unavailable and no fallback model is configured for this tier: %w",
@@ -2584,7 +2599,7 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 		if isQuotaError(err) {
 			// Record rate limit hit for the fallback model too
 			fallbackProvider := GetLLMProvider(rc.ctx, rc.accountId, rc.agentName, false, rc.conversationId, rc.resolution)
-			RecordModelRateLimitHit(fallbackProvider, model)
+			RecordModelRateLimitHit(fallbackProvider, model, err)
 			common.MetricsLLMRateLimitHitsTotal(fallbackProvider, model, rc.accountId)
 			ctx.GetLogger().Warn("Fallback model also has quota issues, trying next",
 				"model", model,
@@ -2631,7 +2646,7 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 
 	// rc.triedModels is seeded with the primary at line 2664, so its length is
 	// (1 + fallback attempts) — reporting fallback count uses len(fallbackModels).
-	wrapped := ensureLastErr(rc)
+	wrapped := ensureLastErr(rc, cause)
 	if cause == fallbackCauseUnavailable {
 		return nil, buildCallMetadata(rc, false),
 			fmt.Errorf("model %s (%s) and all %d fallback model(s) are currently unavailable: %w",
@@ -2643,7 +2658,7 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 }
 
 // ensureLastErr returns a non-nil error for wrapping in the terminal message
-// (rc.lastErr if set, otherwise the ErrLLMServiceUnavailable sentinel) AND
+// (rc.lastErr if set, otherwise the sentinel matching `cause`) AND
 // assigns it back to rc.lastErr when it started nil. Two failure modes solved
 // together:
 //
@@ -2657,9 +2672,9 @@ func handleQuotaError(rc *retryContext, fallbackModels []string, recordPrimaryHi
 //
 // Only assigns when nil so an already-captured, more-descriptive error from an
 // earlier fallback attempt is preserved.
-func ensureLastErr(rc *retryContext) error {
+func ensureLastErr(rc *retryContext, cause fallbackCause) error {
 	if rc.lastErr == nil {
-		rc.lastErr = ErrLLMServiceUnavailable
+		rc.lastErr = circuitOpenError(cause, common.UnknownRateLimitDetail())
 	}
 	return rc.lastErr
 }
@@ -2948,19 +2963,21 @@ func generateLLMContentWithRetry(ctx *security.RequestContext, llm llms.Model, p
 	// ============================================================================
 
 	// Check circuit breaker before trying primary model
-	if IsModelCircuitOpen(rc.currentProvider, rc.currentModel) {
+	if status := modelCircuitStatus(rc.currentProvider, rc.currentModel); status.Open {
 		ctx.GetLogger().Warn("Circuit breaker open for primary model, skipping to fallbacks",
-			"provider", rc.currentProvider, "model", rc.currentModel)
+			append([]any{"provider", rc.currentProvider, "model", rc.currentModel}, status.logAttrs()...)...)
 
 		if len(fallbackModels) > 0 {
-			return handleQuotaError(rc, fallbackModels, false, fallbackCauseUnavailable) // circuit already open — do not extend cooldown
+			return handleQuotaError(rc, fallbackModels, false, status.Cause) // circuit already open — do not extend cooldown
 		}
 		// No fallback: fail fast rather than hammer a known-down endpoint. Cooldown is
-		// still active here — IsModelCircuitOpen half-opens once it expires, so a later
-		// request probes recovery.
+		// still active here — modelCircuitStatus half-opens once it expires, so a later
+		// request probes recovery. The sentinel follows the trip cause: a caller
+		// throttled by a 429 must be told it was a rate limit, not a network fault,
+		// and which limit it was so "wait a moment" isn't offered for a daily cap.
 		ctx.GetLogger().Warn("Circuit open and no fallback configured — failing fast",
-			"provider", rc.currentProvider, "model", rc.currentModel)
-		return nil, buildCallMetadata(rc, false), ErrLLMServiceUnavailable
+			append([]any{"provider", rc.currentProvider, "model", rc.currentModel}, status.logAttrs()...)...)
+		return nil, buildCallMetadata(rc, false), circuitOpenError(status.Cause, status.Detail)
 	}
 
 	ctx.GetLogger().Info("Starting LLM content generation",
@@ -3401,11 +3418,35 @@ func classifyUserFacingLLMError(err error) error {
 	// context-window overflow, so it must be classified as rate-limited —
 	// otherwise the user is wrongly told to shorten a request that was the
 	// right size.
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
-	case isQuotaError(err):
+	}
+
+	// Idempotence: an error this function already produced is returned unchanged
+	// rather than re-derived from its own message text. The detectors below match
+	// on wording, and our own wording collides with them — isTokenLimitError
+	// matches "token limit", so the rate-limit message "per-minute token limit"
+	// reads back as a context-window overflow and the user is told to shorten a
+	// correctly-sized request. The plain sentinels only round-tripped before by
+	// accident of their phrasing; this stops depending on that.
+	var rateLimited RateLimitedLLMError
+	switch {
+	case errors.As(err, &rateLimited):
+		return rateLimited
+	case errors.Is(err, ErrLLMRateLimited):
 		return ErrLLMRateLimited
+	case errors.Is(err, ErrLLMRequestTooLarge):
+		return ErrLLMRequestTooLarge
+	case errors.Is(err, ErrLLMServiceUnavailable):
+		return ErrLLMServiceUnavailable
+	}
+
+	switch {
+	case isQuotaError(err):
+		// Specialised by which limit the provider named, so a daily cap isn't
+		// answered with "wait a moment". Falls back to the plain sentinel when
+		// the provider said nothing usable.
+		return RateLimitedError(common.RateLimitDetailFromError(err))
 	case isTokenLimitError(err):
 		return ErrLLMRequestTooLarge
 	case isTransientError(err):
