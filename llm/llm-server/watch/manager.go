@@ -485,8 +485,7 @@ func (m *Manager) MarkTerminal(ctx context.Context, tenantID uuid.UUID, id uuid.
 	// that actually ended the watch was never counted: a watch that met its
 	// predicate on the first poll reported poll_count = 0 in the API and the
 	// WatchesTab. Only set on ticks that genuinely observed (or attempted to
-	// observe) — an expiry transition short-circuits before Source.Observe
-	// and must not inflate the count.
+	// observe) — cancel touches no counters.
 	// Polled and Observation are deliberately independent clauses rather than
 	// nested ones. Nesting the observation write inside `if t.Polled` would
 	// make "a non-nil Observation is always persisted" an invariant held by

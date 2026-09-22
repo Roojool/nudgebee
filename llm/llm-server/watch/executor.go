@@ -95,9 +95,9 @@ func (e *Executor) SetSummarizerTimeout(d time.Duration) { e.summarizerTimeoutOv
 // transient state needed across polls lives in the DB row.
 //
 // Lifecycle:
-//  1. expiry check     — if past expires_at, mark EXPIRED + notify
-//  2. observe          — run the configured Source.Observe()
-//  3. predicate eval   — terminate / reschedule / record failure
+//  1. observe          — run the configured Source.Observe()
+//  2. predicate eval   — terminate / reschedule / record failure
+//  3. expiry check     — if still unmet and past expires_at, mark EXPIRED + notify
 //  4. terminal notify  — single message to the conversation, no per-poll noise
 //
 // Budget enforcement is intentionally delegated: any LLM-backed call made
@@ -131,10 +131,6 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 		slog.String("source_kind", string(w.SourceKind)),
 		slog.String("predicate_kind", string(w.PredicateKind)),
 	)
-
-	if e.handleExpiry(rctx, logger, w) {
-		return
-	}
 
 	src, ok := GetSource(w.SourceKind)
 	if !ok {
@@ -179,6 +175,13 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 		return
 	}
 
+	// Expire only on an observation that missed: checking first left the last
+	// poll interval unobserved -> a late success reported EXPIRED (#39021).
+	// A failing poll past expiry expires too — see recordFailure.
+	if e.handleExpiry(rctx, logger, w, obs.Data) {
+		return
+	}
+
 	// Reschedule; reset failure_count since the source itself was healthy.
 	next := time.Now().Add(time.Duration(w.PollIntervalSec) * time.Second)
 	writeCtx, writeCancel := context.WithTimeout(rctx.GetContext(), managerWriteTimeout)
@@ -188,18 +191,19 @@ func (e *Executor) RunOnePoll(parent context.Context, w Watch) {
 	}
 }
 
-// handleExpiry returns true if the watch should stop polling due to
-// expires_at. The notification carries whatever summary we can produce
-// from the most recent state.
-func (e *Executor) handleExpiry(rctx *security.RequestContext, logger *slog.Logger, w Watch) bool {
+// handleExpiry returns true if the watch should stop polling due to expires_at.
+// observation is this tick's unmet observation, recorded on the terminal row.
+func (e *Executor) handleExpiry(rctx *security.RequestContext, logger *slog.Logger, w Watch, observation string) bool {
 	if !time.Now().After(w.ExpiresAt) {
 		return false
 	}
 	summary := "watch expired before condition was met"
-	if w.LastPollResult != nil && *w.LastPollResult != "" {
-		summary = "expired; last observation: " + truncate(*w.LastPollResult, 500)
+	if observation != "" {
+		summary = "expired; last observation: " + truncate(observation, 500)
 	}
-	e.terminate(rctx, logger, w, TerminalUpdate{Status: StatusExpired, Final: summary})
+	e.terminate(rctx, logger, w, TerminalUpdate{
+		Status: StatusExpired, Final: summary, Polled: true, Observation: &observation,
+	})
 	return true
 }
 
@@ -212,6 +216,19 @@ func (e *Executor) recordFailure(rctx *security.RequestContext, logger *slog.Log
 	if maxFailures <= 0 {
 		maxFailures = 3
 	}
+	// Past expires_at a transient failure must not buy more time: poll_interval_sec
+	// has no upper clamp, so rescheduling here runs the watch up to 3x that interval
+	// beyond its deadline and ends FAILED, breaking the max_duration_sec contract.
+	if time.Now().After(w.ExpiresAt) {
+		logger.Warn("watch.executor: poll failed past expiry, expiring", "phase", phase, "msg", msg)
+		recordPollFailure(rctx.GetContext(), phase, true)
+		e.terminate(rctx, logger, w, TerminalUpdate{
+			Status: StatusExpired, Final: "expired; last poll failed: " + msg,
+			Polled: true, Observation: observation,
+		})
+		return
+	}
+
 	terminal := w.FailureCount+1 >= maxFailures
 	logger.Warn("watch.executor: poll failed", "failure_count", w.FailureCount+1, "phase", phase, "terminal", terminal, "msg", msg)
 	recordPollFailure(rctx.GetContext(), phase, terminal)

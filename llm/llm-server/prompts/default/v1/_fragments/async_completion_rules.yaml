@@ -33,3 +33,8 @@ body: |2
   `completed`, `^0$`) — never a made-up sentinel, and never a word copied from log or
   command output you were reading.
   poll_interval_sec 10–15 (fast) or 30 (slow); max_duration_sec 600 rollout / 1800 job / 3600 stack.
+
+  When the user asks whether something you backgrounded has finished ("is it done?",
+  "did that work?"), call `watch_list` and answer from the row — never from the fact
+  that you registered a watch earlier. It also gives you the `watch_id` needed to
+  cancel one on request.
