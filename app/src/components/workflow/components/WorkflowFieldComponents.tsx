@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Typography, TextField, Chip, Autocomplete } from '@mui/material';
+import { Box, Typography, TextField, Autocomplete } from '@mui/material';
+import { Chip } from '@ui/Chip';
 import { Switch } from '@ui/Switch';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import { Add, DragIndicator, Visibility, VisibilityOff, ExpandMore, ExpandLess, Code, ViewList, WrapText } from '@mui/icons-material';
@@ -387,9 +388,7 @@ export const ArrayEditor: React.FC<ArrayEditorProps> = ({
             <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)', color: 'var(--ds-brand-500)' }}>
               Item {index + 1}
             </Typography>
-            {configuredCount > 0 && (
-              <Chip label={`${configuredCount} fields`} size='small' variant='outlined' sx={{ height: '18px', fontSize: 'var(--ds-text-caption)' }} />
-            )}
+            {configuredCount > 0 && <Chip size='xs'>{`${configuredCount} fields`}</Chip>}
             {isExpanded ? (
               <ExpandLess sx={{ fontSize: 18, color: 'var(--ds-gray-600)', ml: 'auto' }} />
             ) : (
@@ -1046,21 +1045,9 @@ export const MultiSelectChips: React.FC<MultiSelectChipsProps> = ({
         }}
       >
         {options.map((option) => (
-          <Chip
-            key={option}
-            label={option}
-            onClick={() => !disabled && handleToggle(option)}
-            color={value.includes(option) ? 'primary' : 'default'}
-            variant={value.includes(option) ? 'filled' : 'outlined'}
-            size='small'
-            disabled={disabled}
-            sx={{
-              cursor: disabled ? 'default' : 'pointer',
-              '&:hover': {
-                backgroundColor: value.includes(option) ? undefined : 'var(--ds-brand-150)',
-              },
-            }}
-          />
+          <Chip key={option} selected={value.includes(option)} onClick={() => !disabled && handleToggle(option)} disabled={disabled}>
+            {option}
+          </Chip>
         ))}
         {options.length === 0 && (
           <Typography variant='body2' sx={{ color: 'var(--ds-gray-400)', fontSize: 'var(--ds-text-body)' }}>
@@ -1427,17 +1414,7 @@ export const NestedSchemaEditor: React.FC<NestedSchemaEditorProps> = ({
             {title}
           </Typography>
         }
-        meta={
-          configuredCount > 0 ? (
-            <Chip
-              label={`${configuredCount} configured`}
-              size='small'
-              color='primary'
-              variant='outlined'
-              sx={{ height: '20px', fontSize: 'var(--ds-text-caption)' }}
-            />
-          ) : undefined
-        }
+        meta={configuredCount > 0 ? <Chip tone='info'>{`${configuredCount} configured`}</Chip> : undefined}
         sx={error ? { border: '1px solid var(--ds-red-500)' } : undefined}
       >
         {Object.entries(schema).map(([fieldName, fieldSchema]) => {

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Box, Typography, Chip } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Chip, type ChipHue } from '@ui/Chip';
 import { Button } from '@ui/Button';
 import { Add, ExpandMore, ExpandLess } from '@mui/icons-material';
 import { Input } from '@ui/Input';
@@ -28,9 +29,9 @@ interface HooksFieldProps {
 }
 
 const HOOK_TYPES = [
-  { label: 'On Success', key: 'success' as const, color: 'var(--ds-teal-500)' },
-  { label: 'On Failure', key: 'failure' as const, color: 'var(--ds-red-500)' },
-  { label: 'On Complete', key: 'always' as const, color: 'var(--ds-purple-400)' },
+  { label: 'On Success', key: 'success' as const, color: 'var(--ds-teal-500)', hue: 'teal' as ChipHue },
+  { label: 'On Failure', key: 'failure' as const, color: 'var(--ds-red-500)', hue: 'red' as ChipHue },
+  { label: 'On Complete', key: 'always' as const, color: 'var(--ds-purple-400)', hue: 'violet' as ChipHue },
 ];
 
 const HookActionEditor: React.FC<{
@@ -105,10 +106,11 @@ const HookActionEditor: React.FC<{
 const HookSection: React.FC<{
   label: string;
   color: string;
+  hue: ChipHue;
   actions: HookAction[];
   onChange: (actions: HookAction[]) => void;
   disabled?: boolean;
-}> = ({ label, color, actions, onChange, disabled }) => {
+}> = ({ label, color, hue, actions, onChange, disabled }) => {
   const [expanded, setExpanded] = useState(actions.length > 0);
 
   const handleAddAction = () => {
@@ -152,7 +154,9 @@ const HookSection: React.FC<{
             {label}
           </Typography>
           {actions.length > 0 && (
-            <Chip label={actions.length} size='small' sx={{ height: 18, fontSize: 'var(--ds-text-caption)', bgcolor: color, color: 'white' }} />
+            <Chip size='xs' hue={hue}>
+              {actions.length}
+            </Chip>
           )}
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -231,6 +235,7 @@ const HooksField: React.FC<HooksFieldProps> = ({ value, onChange, disabled = fal
               key={hook.key}
               label={hook.label}
               color={hook.color}
+              hue={hook.hue}
               actions={value?.[hook.key] || []}
               onChange={(actions) => handleHookChange(hook.key, actions)}
               disabled={disabled}

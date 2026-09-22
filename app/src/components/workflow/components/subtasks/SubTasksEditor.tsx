@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Autocomplete, Box, Chip, IconButton, InputAdornment, TextField, Typography } from '@mui/material';
+import { Autocomplete, Box, IconButton, InputAdornment, TextField, Typography } from '@mui/material';
+import { Label } from '@ui/Label';
 import { Add, DragIndicator } from '@mui/icons-material';
 import { DeleteIconRed } from '@assets';
 import { Button } from '@ui/Button';
@@ -488,18 +489,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
             ),
             meta: (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={(e) => e.stopPropagation()}>
-                {errorCount > 0 && (
-                  <Chip
-                    label={`${errorCount} ${errorCount === 1 ? 'issue' : 'issues'}`}
-                    size='small'
-                    sx={{
-                      height: 18,
-                      fontSize: 'var(--ds-text-caption)',
-                      backgroundColor: 'var(--ds-red-200)',
-                      color: 'var(--ds-red-700)',
-                    }}
-                  />
-                )}
+                {errorCount > 0 && <Label tone='critical'>{`${errorCount} ${errorCount === 1 ? 'issue' : 'issues'}`}</Label>}
                 {!viewOnlyMode && (
                   <IconButton
                     size='small'

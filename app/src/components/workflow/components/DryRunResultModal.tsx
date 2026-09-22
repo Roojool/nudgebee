@@ -1,4 +1,5 @@
-import { Box, Typography, Chip } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Label } from '@ui/Label';
 import { Modal } from '@ui/Modal';
 import { Button } from '@ui/Button';
 import SafeIcon from '@shared/icons/SafeIcon';
@@ -45,15 +46,7 @@ const DryRunResultModal: React.FC<DryRunResultModalProps> = ({ open, onClose, re
           <Typography variant='subtitle2' sx={{ fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-brand-500)' }}>
             Status:
           </Typography>
-          <Chip
-            label={result.status}
-            size='small'
-            sx={{
-              backgroundColor: isSuccess ? 'var(--ds-green-100)' : isFailed ? 'var(--ds-red-100)' : 'var(--ds-gray-200)',
-              color: isSuccess ? 'var(--ds-green-700)' : isFailed ? 'var(--ds-red-700)' : 'var(--ds-gray-600)',
-              fontWeight: 'var(--ds-font-weight-semibold)',
-            }}
-          />
+          <Label tone={isSuccess ? 'success' : isFailed ? 'critical' : 'neutral'}>{result.status}</Label>
         </Box>
 
         {/* Error Message */}
@@ -113,17 +106,7 @@ const DryRunResultModal: React.FC<DryRunResultModalProps> = ({ open, onClose, re
                     <Typography variant='body2' sx={{ fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-brand-500)' }}>
                       {task.id}
                     </Typography>
-                    <Chip
-                      label={task.status}
-                      size='small'
-                      sx={{
-                        backgroundColor:
-                          task.status === 'COMPLETED' ? 'var(--ds-green-100)' : task.status === 'FAILED' ? 'var(--ds-red-100)' : 'var(--ds-gray-200)',
-                        color:
-                          task.status === 'COMPLETED' ? 'var(--ds-green-700)' : task.status === 'FAILED' ? 'var(--ds-red-700)' : 'var(--ds-gray-600)',
-                        fontSize: 'var(--ds-text-caption)',
-                      }}
-                    />
+                    <Label tone={task.status === 'COMPLETED' ? 'success' : task.status === 'FAILED' ? 'critical' : 'neutral'}>{task.status}</Label>
                     {(() => {
                       const sid = getLlmSessionId(task);
                       if (!sid) return null;

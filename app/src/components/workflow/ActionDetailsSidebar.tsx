@@ -1,6 +1,8 @@
 import React, { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Box, Typography, Dialog, Chip, Tabs, Tab, Autocomplete, TextField } from '@mui/material';
+import { Box, Typography, Dialog, Tabs, Tab, Autocomplete, TextField } from '@mui/material';
 import { Callout } from '@ui/Callout';
+import { Chip } from '@ui/Chip';
+import { Label } from '@ui/Label';
 import { Switch } from '@ui/Switch';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
@@ -213,6 +215,21 @@ const DEFAULT_FORM_FIELD_PROPS = {
 };
 
 // Status color mapping for dry-run results
+/** The same status axis as getStatusColor, expressed as a ds/Label tone. */
+const getStatusTone = (status: string): 'success' | 'critical' | 'info' | 'neutral' => {
+  switch (status?.toUpperCase()) {
+    case 'COMPLETED':
+      return 'success';
+    case 'FAILED':
+      return 'critical';
+    case 'RUNNING':
+    case 'IN_PROGRESS':
+      return 'info';
+    default:
+      return 'neutral';
+  }
+};
+
 const getStatusColor = (status: string) => {
   switch (status?.toUpperCase()) {
     case 'COMPLETED':
@@ -1576,20 +1593,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                       <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
                         {task.name || task.id}
                       </Typography>
-                      {statusColors && (
-                        <Chip
-                          label={taskOutput.status}
-                          size='small'
-                          sx={{
-                            height: 18,
-                            fontSize: 'var(--ds-text-caption)',
-                            fontWeight: 'var(--ds-font-weight-semibold)',
-                            bgcolor: statusColors.bg,
-                            color: statusColors.text,
-                            border: `1px solid ${statusColors.border}`,
-                          }}
-                        />
-                      )}
+                      {statusColors && <Label tone={getStatusTone(taskOutput.status)}>{taskOutput.status}</Label>}
                     </Box>
                     <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mb: ds.space[2] }}>{task.type}</Typography>
                     {renderTaskOutputFields(task, taskOutput)}
@@ -1697,20 +1701,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             <Typography sx={{ fontSize: 'var(--ds-text-caption)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
               {title}:
             </Typography>
-            {statusColors && (
-              <Chip
-                label={result.status}
-                size='small'
-                sx={{
-                  height: 18,
-                  fontSize: 'var(--ds-text-caption)',
-                  fontWeight: 'var(--ds-font-weight-semibold)',
-                  bgcolor: statusColors.bg,
-                  color: statusColors.text,
-                  border: `1px solid ${statusColors.border}`,
-                }}
-              />
-            )}
+            {statusColors && <Label tone={getStatusTone(result.status)}>{result.status}</Label>}
           </Box>
 
           {/* Output */}
@@ -3509,11 +3500,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 )}
                 {showDefaultProviderChip && (
                   <Box sx={{ mt: 0.75 }}>
-                    <Chip
-                      size='small'
-                      label={`${defaultProviderChipLabel}: ${defaultProvider}`}
-                      sx={{ fontSize: 'var(--ds-text-caption)', height: '20px', bgcolor: ds.green[200], color: ds.gray[700] }}
-                    />
+                    <Chip tone='success'>{`${defaultProviderChipLabel}: ${defaultProvider}`}</Chip>
                   </Box>
                 )}
               </Box>
