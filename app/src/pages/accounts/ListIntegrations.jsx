@@ -45,7 +45,7 @@ const getDisplayName = (name) => {
     return 'SSH';
   }
   if (name === 'llm_gateway') {
-    return 'LLM Gateway';
+    return 'AI Gateway';
   }
   return snakeToTitleCase(name);
 };

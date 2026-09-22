@@ -406,7 +406,7 @@ func validateTenantModelClientNames(currentConfigName, models string, existing [
 		}
 		for _, name := range names {
 			if wanted[name] {
-				return fmt.Errorf("client model name %q is already used by LLM Gateway account %q; choose a unique name", name, integration.Name)
+				return fmt.Errorf("client model name %q is already used by AI Gateway account %q; choose a unique name", name, integration.Name)
 			}
 		}
 	}
