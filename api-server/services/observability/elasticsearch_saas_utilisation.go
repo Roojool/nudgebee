@@ -205,6 +205,10 @@ type esUtilMetric struct {
 	// one stats_bucket the query always carries, so asking for the busiest pod costs
 	// no extra search — it shares the usage key's body and therefore its response.
 	Series esUtilSeriesRead
+	// PerPod returns one series per pod and container rather than the workload
+	// total. With an Aggregate it collapses to one statistic per pod, computed by
+	// Elasticsearch over the raw samples; without one it is the per-pod time series.
+	PerPod bool
 }
 
 // esUtilSeriesRead names the per-bucket reading. The zero value is the summed total,
@@ -491,6 +495,25 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 			return esUtilMetric{}, false
 		}
 		return esUtilMetric{Sources: memUsage, Series: esSeriesCount}, true
+	// The rightsizing keys: one number per pod and container, not one per workload.
+	// Same scope rule as the companions above, since GroupBy[0] is the pod only at
+	// workload and pod scope.
+	//
+	// container_memory_max_usage_by_pod is deliberately absent: the cgroup
+	// high-water mark has no field in any Elasticsearch layout we read, so it falls
+	// through to esUtilUnsupportedNote rather than being answered with the working
+	// set, which is a different number and would size a limit too low.
+	case "container_cpu_usage_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: cpuUsage, PerPod: true}, true
+	case "container_memory_working_set_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: memUsage, PerPod: true}, true
+
 	case "cpu_usage_max_pod":
 		if nodeScope {
 			return esUtilMetric{}, false
@@ -609,6 +632,20 @@ func esSourceScopeFilters(src esMetricSource, meta RequestMetadata, scope esUtil
 		if src.Fields.Workload != "" {
 			filters = append(filters, map[string]any{"term": map[string]any{src.Fields.Workload: meta.Name}})
 		}
+	} else if meta.PodNamesSupplied && src.Fields.Pod != "" && !src.WorkloadScoped {
+		// An exact list beats the prefix, which is wrong twice over: it misses pods
+		// that no longer exist, and "services-server-" also prefixes
+		// "services-server-worker-...", so one workload gets sized on another's pods.
+		//
+		// An empty list is the caller saying it resolved the pods and found none,
+		// which is an answer rather than a missing parameter, so the filter matches
+		// nothing.
+		//
+		// Workload-scoped sources are excluded: replica counts come from the
+		// deployment/replicaset dataset, whose documents carry no pod field, so a
+		// pod filter there matches nothing and would zero the count rather than
+		// leave it unfiltered.
+		filters = append(filters, map[string]any{"terms": map[string]any{src.Fields.Pod: esPodNameValues(meta.PodNames)}})
 	} else if meta.Name != "" && src.Fields.Pod != "" {
 		if scope == esScopePod {
 			filters = append(filters, map[string]any{"term": map[string]any{src.Fields.Pod: meta.Name}})
@@ -836,7 +873,14 @@ func buildESUtilisationAggQuery(m esUtilMetric, meta RequestMetadata, scope esUt
 		if esSourceUnusableAtScope(src, meta, scope) {
 			continue
 		}
-		agg := esSourceAgg(src, meta, scope, stepSec)
+		var agg map[string]any
+		if m.PerPod && meta.Aggregate.Name != "" {
+			// One bucket per pod and no histogram: the statistic over the pod's raw
+			// samples is cheaper than, and more exact than, one over step averages.
+			agg = esPerPodCollapsedAgg(src, meta, scope)
+		} else {
+			agg = esSourceAgg(src, meta, scope, stepSec)
+		}
 		if agg == nil {
 			continue
 		}
@@ -1088,6 +1132,10 @@ func parseESUtilisationAggs(bodyBytes []byte, m esUtilMetric, meta RequestMetada
 // response and differ only in the reduction they read back, so the outer envelope is
 // decoded once per search rather than once per key — four times over for the CPU keys.
 func parseESUtilisationResponse(resp *esUtilAggResponse, m esUtilMetric, meta RequestMetadata) (esUtilOutcome, error) {
+	if m.PerPod && meta.Aggregate.Name != "" {
+		return parseESPerPodResponse(resp, m, meta)
+	}
+
 	// Decode every candidate first: the winner is chosen on coverage, which cannot be
 	// judged before they have all been read.
 	var matched int64
@@ -1118,6 +1166,17 @@ func parseESUtilisationResponse(resp *esUtilAggResponse, m esUtilMetric, meta Re
 
 		if m.Breakdown {
 			if series := esUtilBreakdownSeries(sr, src, labels); len(series) > 0 {
+				return esUtilOutcome{Series: series, SourceIdx: i, DocsMatched: matched,
+					TruncatedDocs: esUtilTruncatedDocs(sr)}, nil
+			}
+			continue
+		}
+
+		if m.PerPod {
+			// No Aggregate, so no collapse - but the grouping still holds. Falling
+			// through to the summed path below would return one workload line under
+			// a key whose name promises one series per pod.
+			if series := esPerPodHistogramSeries(sr, esPerPodScale(src, meta), labels); len(series) > 0 {
 				return esUtilOutcome{Series: series, SourceIdx: i, DocsMatched: matched,
 					TruncatedDocs: esUtilTruncatedDocs(sr)}, nil
 			}

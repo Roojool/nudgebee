@@ -3189,6 +3189,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	// Cluster utilisation aggregations follow the picker range instead of a hardcoded
 	// 24h window. Harmless for other providers/kinds, which ignore these fields.
 	meta.RangeWindow, meta.Step, meta.RateWindow = promAggWindow(req.StartTime, req.EndTime)
+	meta.EndMs = req.EndTime
 
 	// An explicit step is the caller's sampling interval and outranks the one derived
 	// from the range: the rightsizing strategy samples at 75s, and a percentile taken
@@ -3471,6 +3472,10 @@ type RequestMetadata struct {
 	RangeWindow string
 	Step        string
 	RateWindow  string
+	// EndMs is the end of the requested window, in epoch milliseconds. Carried
+	// because a collapsed answer has one point and no bucket to take its time from:
+	// the value describes the whole window, so the window's end is its timestamp.
+	EndMs int64
 	// Aggregate is the validated collapse requested for every key in this request;
 	// the zero value means "leave each key as it is". Parsed once in
 	// parseRequestMetadata so no builder has to interpret the string.
