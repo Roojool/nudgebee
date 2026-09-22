@@ -228,6 +228,11 @@ rabbitmq_messages_dropped_disabled_total = meter.create_counter(
     description="Total number of messages dropped because their cloud account is disabled",
 )
 
+rabbitmq_publish_failures_total = meter.create_counter(
+    "rabbitmq_publish_failures_total",
+    description="Total number of messages that could not be published to RabbitMQ",
+)
+
 rabbitmq_message_processing_duration_seconds = meter.create_histogram(
     "rabbitmq_message_processing_duration_seconds",
     unit="s",
@@ -447,6 +452,17 @@ def record_message_failed(queue_name: str, reason: str):
     """Record message processing failure"""
     rabbitmq_messages_failed_total.add(1, {"queue_name": queue_name, "reason": reason})
     logger.debug(f"Metrics: Message failed from {queue_name}: {reason}")
+
+
+def record_publish_failed(routing_key: str, reason: str):
+    """Record a publish that never reached the broker.
+
+    The only producer-side signal this service has: every other rabbitmq_*
+    metric is recorded by the consumer, so a broker outage on the ingestion
+    path used to be invisible except as generic HTTP 5xx.
+    """
+    rabbitmq_publish_failures_total.add(1, {"routing_key": routing_key, "reason": reason})
+    logger.debug(f"Metrics: Publish failed to {routing_key}: {reason}")
 
 
 def record_message_dlq(queue_name: str):

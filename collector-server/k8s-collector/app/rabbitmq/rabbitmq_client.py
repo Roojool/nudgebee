@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 
 from amqp.exceptions import PreconditionFailed
 from kombu import Connection, Exchange, Queue, Message
+from kombu.exceptions import OperationalError
 from kombu.mixins import ConsumerMixin
 from kombu.pools import producers
 from opentelemetry import trace
@@ -17,6 +18,21 @@ from metrics import otel_metrics
 logger = logging.getLogger(__name__)
 LARGE_MESSAGE_THRESHOLD_BYTES = 100 * 1024 * 1024
 MAX_CONSUMER_RESTART_BACKOFF = 60.0
+
+# How long one TCP connect to the broker may hang, and how many times a publish
+# may re-establish the connection before giving up. Both sit on the HTTP request
+# path (publish_message is called inline from the ingestion controllers), so
+# their product is the worst case an agent waits before it gets an answer:
+# roughly PUBLISH_CONNECT_TIMEOUT * (PUBLISH_MAX_RETRIES + 1) plus sub-second
+# backoff sleeps -- about 4s today, deliberately under the 5s P95 alert
+# threshold. Raise either one and that budget grows with it.
+PUBLISH_CONNECT_TIMEOUT = 2.0
+PUBLISH_MAX_RETRIES = 1
+# Guards a socket that connected and then went quiet (broker wedged, node
+# dropped off the network) rather than one that never connected. Longer than the
+# connect budget on purpose: a slow publish of a 100 MB discovery payload is
+# healthy, an unanswered one is not.
+PUBLISH_SOCKET_TIMEOUT = 30
 
 # Interpreter-shutdown hook ordering is load-bearing here -- see the
 # _register_atexit call at the bottom of this module for why.
@@ -48,17 +64,21 @@ def get_connection() -> Connection:
     global _shared_connection
     with _connection_lock:
         if _shared_connection is None:
+            # transport_options is forwarded verbatim into amqp.Connection(**opts),
+            # whose signature ends in **kwargs -- so anything it does not name is
+            # accepted and silently discarded. `socket_timeout`, `max_retries` and
+            # the `interval_*` keys that used to sit here were all in that bucket:
+            # they read like a 30s timeout and a retry policy and enforced neither.
+            # The keys below are the ones amqp actually honours. Retry policy is
+            # not a connection property at all; it belongs on publish() and lives
+            # in publish_message.
             _shared_connection = Connection(
                 _get_connection_string(),
                 heartbeat=60,  # Increased from 30s for better stability
+                connect_timeout=PUBLISH_CONNECT_TIMEOUT,
                 transport_options={
-                    "max_retries": 3,
-                    "interval_start": 0,
-                    "interval_step": 0.2,
-                    "interval_max": 0.5,
-                    "socket_timeout": 30,  # Socket read/write timeout
-                    "read_timeout": 30,  # Read timeout for blocking operations
-                    "write_timeout": 30,  # Write timeout
+                    "read_timeout": PUBLISH_SOCKET_TIMEOUT,
+                    "write_timeout": PUBLISH_SOCKET_TIMEOUT,
                 },
             )
             logger.info("Created shared RabbitMQ connection for producer pool")
@@ -105,7 +125,7 @@ def publish_message(
                 declare=[exchange],
                 retry=True,
                 retry_policy={
-                    "max_retries": 3,
+                    "max_retries": PUBLISH_MAX_RETRIES,
                     "interval_start": 0,
                     "interval_step": 0.2,
                     "interval_max": 0.5,
@@ -113,8 +133,18 @@ def publish_message(
                 **properties,
             )
             logger.debug("Published message to %s/%s", exchange_name, routing_key)
+    except OperationalError as e:
+        # The broker is unreachable -- it moved node, restarted, or the network
+        # to it is down. Not a bug in this service and not worth a traceback:
+        # during the 2026-09-19 broker reschedule this path alone wrote over a
+        # thousand ERROR lines with full stacks in three minutes. Callers on the
+        # HTTP path turn this into a 503 so the agent knows to retry.
+        logger.warning("Broker unavailable, dropped publish to %s/%s: %s", exchange_name, routing_key, e)
+        otel_metrics.record_publish_failed(routing_key, "broker_unavailable")
+        raise
     except Exception as e:
         logger.exception("Failed to publish to %s/%s: %s", exchange_name, routing_key, e)
+        otel_metrics.record_publish_failed(routing_key, type(e).__name__)
         raise
     # DO NOT close connection - let the pool manage it
 
@@ -186,15 +216,16 @@ class RabbitConsumer(ConsumerMixin):
     def _new_connection() -> Connection:
         from config import Configs
 
+        # No transport_options: the `max_retries` / `interval_*` keys that used
+        # to be here were discarded by amqp.Connection's **kwargs (see
+        # get_connection). Removing them changes nothing at runtime -- reconnect
+        # behaviour on this path has always come from ConsumerMixin's own loop,
+        # which retries indefinitely and is what a background consumer wants.
+        # No connect_timeout either, for the same reason: nothing is waiting on
+        # a consumer the way an HTTP request waits on a publish.
         return Connection(
             _get_connection_string(),
             heartbeat=Configs.K8S_COLLECTOR_CONSUMER_HEARTBEAT,
-            transport_options={
-                "max_retries": 3,
-                "interval_start": 0,
-                "interval_step": 0.2,
-                "interval_max": 0.5,
-            },
         )
 
     def _queue_arguments(self) -> dict[str, Any]:
