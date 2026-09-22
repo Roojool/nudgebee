@@ -519,6 +519,8 @@ When two components could fit, this is which to pick.
 | Single date + time field in a form                                                                 | `@shared/widgets/CustomDateTimePicker`                             | (no `ds/DateRangePicker` exists)                                       |
 | Inline navigation link                                                                             | `ds/Link`                                                          | a raw `<a>` (loses DS color/font token + external-icon)                |
 | "Ticket - {id}" inline link pattern                                                                | inline `<Link href={url} openInNew>{id}</Link>`                    | `common/CustomTicketLink` (removed)                                    |
+| An Edit action's icon                                                                              | `@assets` `EditIcon` in a `SafeIcon`                               | a MUI `Edit`/`EditOutlined`, a react-icons pencil, `writeIcon`         |
+| A Delete action's icon                                                                             | `@assets` `DeleteIconRed` in a `SafeIcon`                          | a MUI `Delete`/`DeleteOutline` (see the note below the table)          |
 | Download action button                                                                             | `@shared/buttons/DownloadButton`                                   | a raw `ds/Button` + manual `saveAs`                                    |
 | Copy-to-clipboard icon button                                                                      | `@shared/buttons/CopyButton`                                       | a raw `ds/Button` + manual clipboard wiring                            |
 | Show a static code snippet / shell command with copy (read-only)                                   | `ds/CodeBlock`                                                     | a hand-rolled `<pre>` + copy button                                    |
@@ -528,6 +530,14 @@ When two components could fit, this is which to pick.
 | Read-only code needing syntax highlighting / line numbers / folding                                | `ds/CodeEditor` with `readOnly`                                    | `ds/CodeBlock` (structural mono only, no highlighting)                 |
 | Show **what changed** between two versions                                                         | `ds/DiffViewer`                                                    | `ds/CodeBlock` (single version)                                        |
 | New DS-clean button                                                                                | `ds/Button`                                                        | `common/NewCustomButton` (removed)                                     |
+
+**Edit / Delete icons.** One of each, app-wide: `EditIcon` (pencil over a box) and `DeleteIconRed` (red outline
+trash), both exported from `@assets` and rendered through `SafeIcon`. Size them to the button's icon slot —
+`ds/Button` resizes an `svg` but not an `<img>`, so pass `width`/`height` matching `size` (xs 13 · sm 14 ·
+md 16 · lg 18). Both assets carry a fixed colour, so they disappear on a matching fill: on a `tone='danger'`
+(red) or `tone='primary'` (navy) button, either drop the fill — `tone='ghost'` is what row deletes use — or keep
+a contrasting icon behind a `// ds-imports-allow:` marker. `npm run lint2` blocks new MUI / react-icons edit and
+delete icons; see [`app/CLAUDE.md`](CLAUDE.md) → Design System.
 
 ---
 

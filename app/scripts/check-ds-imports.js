@@ -4,7 +4,8 @@
  *
  * Fails when a change ADDS an import that `app/design-system.md` says has a
  * design-system replacement — a raw MUI component with a `ds/*` primitive, or
- * a legacy component a DS V2 superseded. Existing imports are never flagged:
+ * a legacy component a DS V2 superseded. It also covers the one Edit and
+ * one Delete icon the app standardised on (`@assets` + `SafeIcon`). Existing imports are never flagged:
  * each changed file is compared with its own version at the merge base, so
  * ~300 files of pre-existing drift don't block anyone, but a file that has
  * been cleaned up cannot quietly regress (optimise-new/DetailsPanel went back
@@ -88,6 +89,36 @@ const LEGACY_REPLACEMENTS = {
   'components/common/navigation/VerticalStepNavigation': '@ui/Stepper',
 };
 
+// Edit / Delete action icons. The app standardised on one of each, both in
+// `@assets` and rendered through `SafeIcon` (#16046 → #28615 → #38774 — three
+// passes over the same drift, so the fourth is blocked here instead).
+const EDIT_ICON = '@assets EditIcon via <SafeIcon src={EditIcon} />';
+const DELETE_ICON = '@assets DeleteIconRed via <SafeIcon src={DeleteIconRed} />';
+// Base names × MUI's theme suffixes (DeleteRounded, EditTwoTone, ModeEditOutlineSharp, …).
+// Deliberately NOT here: DeleteSweep, EditCalendar, EditLocation, EditNote…s, EditOff, EditRoad,
+// EditAttributes — different icons with their own meanings, not this app's edit/delete action.
+const MUI_ICON_BASES = {
+  Delete: DELETE_ICON,
+  DeleteForever: DELETE_ICON,
+  DeleteOutline: DELETE_ICON,
+  Edit: EDIT_ICON,
+  EditNote: EDIT_ICON,
+  ModeEdit: EDIT_ICON,
+  ModeEditOutline: EDIT_ICON,
+  DriveFileRenameOutline: EDIT_ICON,
+};
+const MUI_ICON_SUFFIXES = ['', 'Outlined', 'Rounded', 'Sharp', 'TwoTone'];
+const MUI_ICON_REPLACEMENTS = Object.fromEntries(
+  Object.entries(MUI_ICON_BASES).flatMap(([base, replacement]) => MUI_ICON_SUFFIXES.map((suffix) => [base + suffix, replacement]))
+);
+
+// Superseded `@assets` exports. `writeIconLight` is the same drawing in a lighter
+// gray; it survives only on filled surfaces where the standard icon has no contrast.
+const LEGACY_ICON_EXPORTS = { writeIcon: EDIT_ICON, writeIconLight: EDIT_ICON, EditNewIcon: EDIT_ICON };
+
+// react-icons ships a dozen edit/trash glyphs (LiaEditSolid, FiTrash2, …); match by name.
+const REACT_ICON_NAME = /(Edit|Pencil|Trash|Delete)/;
+
 // The primitives themselves, and the compositions design-system.md sanctions
 // that are built on the very MUI components they stand in for.
 const EXEMPT_PREFIXES = [
@@ -148,6 +179,30 @@ function findRestrictedImports(source, file) {
     if (sub) {
       if (sub[1] === 'Autocomplete') importsAutocomplete = true;
       if (MUI_REPLACEMENTS[sub[1]]) add(node, `@mui/material:${sub[1]}`, MUI_REPLACEMENTS[sub[1]]);
+      return;
+    }
+    if (specifier === '@mui/icons-material') {
+      for (const { name, element } of names) {
+        if (MUI_ICON_REPLACEMENTS[name]) add(element, `@mui/icons-material:${name}`, MUI_ICON_REPLACEMENTS[name]);
+      }
+      return;
+    }
+    const iconSub = specifier.match(/^@mui\/icons-material\/([A-Za-z]+)$/);
+    if (iconSub) {
+      if (MUI_ICON_REPLACEMENTS[iconSub[1]]) add(node, `@mui/icons-material:${iconSub[1]}`, MUI_ICON_REPLACEMENTS[iconSub[1]]);
+      return;
+    }
+    if (specifier === '@assets') {
+      for (const { name, element } of names) {
+        if (LEGACY_ICON_EXPORTS[name]) add(element, `@assets:${name}`, LEGACY_ICON_EXPORTS[name]);
+      }
+      return;
+    }
+    if (specifier.startsWith('react-icons/')) {
+      for (const { name, element } of names) {
+        if (REACT_ICON_NAME.test(name))
+          add(element, `react-icons:${name}`, name.includes('Trash') || name.includes('Delete') ? DELETE_ICON : EDIT_ICON);
+      }
       return;
     }
     const mod = resolveModule(specifier, file);

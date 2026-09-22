@@ -49,6 +49,49 @@ describe('check-ds-imports', () => {
       expect(keys(findRestrictedImports(src, 'src/x.tsx'))).toEqual(['@mui/material:Chip']);
     });
 
+    it('flags MUI edit/delete icons, the superseded @assets exports and react-icons pencils', () => {
+      const src = [
+        "import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';",
+        "import { Edit as EditIcon, DragIndicator, Close } from '@mui/icons-material';",
+        "import { writeIconLight, K8sIcon } from '@assets';",
+        "import { LiaEditSolid } from 'react-icons/lia';",
+      ].join('\n');
+      expect(keys(findRestrictedImports(src, 'src/x.tsx'))).toEqual([
+        '@mui/icons-material:DeleteOutline',
+        '@mui/icons-material:Edit',
+        '@assets:writeIconLight',
+        'react-icons:LiaEditSolid',
+      ]);
+    });
+
+    it('leaves icons that are not edit or delete alone', () => {
+      const src = [
+        "import { MoreVert, Close, Add, DragIndicator } from '@mui/icons-material';",
+        "import CheckIcon from '@mui/icons-material/Check';",
+      ].join('\n');
+      expect(findRestrictedImports(src, 'src/x.tsx')).toEqual([]);
+    });
+
+    it('flags the MUI theme variants of those icons', () => {
+      const src = [
+        "import { DeleteRounded, EditTwoTone, ModeEditOutlineSharp, DeleteOutlineRounded } from '@mui/icons-material';",
+        "import DeleteTwoToneIcon from '@mui/icons-material/DeleteTwoTone';",
+      ].join('\n');
+      expect(keys(findRestrictedImports(src, 'src/x.tsx'))).toEqual([
+        '@mui/icons-material:DeleteRounded',
+        '@mui/icons-material:EditTwoTone',
+        '@mui/icons-material:ModeEditOutlineSharp',
+        '@mui/icons-material:DeleteOutlineRounded',
+        '@mui/icons-material:DeleteTwoTone',
+      ]);
+    });
+
+    it('leaves similarly named icons that mean something else alone', () => {
+      const src =
+        "import { DeleteSweep, EditCalendar, EditLocationAlt, EditNotifications, EditOff, EditRoad, EditAttributes } from '@mui/icons-material';";
+      expect(findRestrictedImports(src, 'src/x.tsx')).toEqual([]);
+    });
+
     it('honours the ds-imports-allow marker on or above the import', () => {
       const src = [
         '// ds-imports-allow: ds/Modal cannot host a fullScreen drawer',
