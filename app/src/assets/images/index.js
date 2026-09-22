@@ -221,7 +221,6 @@ export const NotificationIcon1 = NotificationIcon1Comp;
  * @OUmanagement
  */
 export const menuShow = require('@assets/ou-management/g_show.svg');
-export const menuDelete = require('@assets/ou-management/g_delete.svg');
 export const menuUser = require('@assets/ou-management/g_user.svg');
 export const menuOU = require('@assets/ou-management/g_OU.svg');
 export const archiveImg = require('@assets/ou-management/archive.svg');
@@ -258,7 +257,6 @@ export const ouNoProjects = require('@assets/ou-management/no-project.svg');
 /***
  * @ProjectManagement
  */
-export const pencilIcon = require('@assets/ou-management/g_pencil.svg');
 export const unLoackIcon = require('@assets/ou-management/unlock-cloud.svg');
 export const cloudBlackIcon = require('@assets/ou-management/cloud_black.svg');
 export const ArrowBarICon = require('@assets/ou-management/arrow_drop_down_black.svg');
@@ -324,8 +322,6 @@ export const calenderDataIcon = require('@assets/calendar_today.svg');
 
 export const mfilterSvg = require('@assets/m_filter.svg');
 export const mshowSvg = require('@assets/m_show.svg');
-export const pencilSvg = require('@assets/m_pencil.svg');
-export const mdeleteSvg = require('@assets/m_delete.svg');
 export const mblockSvg = require('@assets/m_block.svg');
 export const maddUserSvg = require('@assets/m_adduser.svg');
 export const mloginSvg = require('@assets/m_login.svg');
@@ -367,12 +363,7 @@ export const addIconWhite = require('@assets/ou-management/plus-circle-white.svg
 export const fourSquaresIcon = require('@assets/ou-management/four-square-icon.svg');
 export const peopleGroupIcon = require('@assets/ou-management/people-group-icon.svg');
 
-export const deleteIcon = require('@assets/ou-management/delete_icon1.svg');
-
 export const TicketsIcon = require('@assets/sidebar-icon/tickets-icon.svg');
-
-export const NewDelete = require('@assets/new_delete.svg');
-export const NewDeleteLight = require('@assets/new_delete_light.svg');
 
 export const CloudUploadIcon = require('@assets/cloud-upload.svg');
 
