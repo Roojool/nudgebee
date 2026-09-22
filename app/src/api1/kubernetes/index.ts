@@ -537,28 +537,34 @@ query MetricsGroupings($limit:Int!, $dateUnit: String!) {
 }
 `;
 
+// Each column is a separate metric the backend reads from cloud_resource_metrics
+// (one row per metric per timestamp), so requesting fewer reads proportionally fewer rows.
+const K8S_METRIC_COLUMNS = [
+  'cost',
+  'avg_efficiency',
+  'max_efficiency',
+  'avg_cpu_used',
+  'max_cpu_used',
+  'avg_memory_used',
+  'max_memory_used',
+  'avg_cpu_request',
+  'max_cpu_request',
+  'avg_memory_request',
+  'max_memory_request',
+  'avg_cpu_efficiency',
+  'max_cpu_efficiency',
+  'avg_ram_efficiency',
+  'max_ram_efficiency',
+  'sum_ingress',
+  'sum_egress',
+];
+
 export const K8S_POD_GROUPINGS = `
 query PodGroupings($limit:Int!, $dateUnit: String!) {
   k8s_pod_groupings: k8s_metrics_groupings_v2(where:__WHERE__, limit:$limit, column_transformations: [{name: "timestamp", expr: "date_unit", args:[$dateUnit]}]){
     rows {
       tenant_id
-      cost
-      avg_efficiency
-      max_efficiency
-      avg_cpu_used
-      max_cpu_used
-      avg_memory_used
-      max_memory_used
-      avg_cpu_request
-      max_cpu_request
-      avg_memory_request
-      max_memory_request
-      avg_cpu_efficiency
-      max_cpu_efficiency
-      avg_ram_efficiency
-      max_ram_efficiency
-      sum_ingress
-      sum_egress
+      __METRIC_COLUMNS__
       __ADDITIONAL_COLUMNS__
     }
   }
@@ -3514,6 +3520,7 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     isTrend = false,
     limit = 100,
     dateUnit = 'day',
+    columns,
   }: {
     accountId?: string;
     workloadFqdn?: string | string[];
@@ -3527,6 +3534,7 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     isTrend?: boolean;
     limit: number;
     dateUnit: string;
+    columns?: string[];
   }) {
     try {
       if (accountId === 'demo') {
@@ -3611,7 +3619,9 @@ query k8s_event_groupings($limit:Int,$offset:Int){
         where['timestamp'] = { _lte: endDate.toISOString() };
       }
 
+      const metricColumns = Array.isArray(columns) && columns.length ? K8S_METRIC_COLUMNS.filter((c) => columns.includes(c)) : K8S_METRIC_COLUMNS;
       let query = K8S_POD_GROUPINGS.replaceAll('__WHERE__', gqlStringify(where));
+      query = query.replaceAll('__METRIC_COLUMNS__', metricColumns.join(' '));
       query = query.replaceAll('__GROUPBY__', gqlStringify(`{${groupBy.join(',')}}`));
       query = query.replaceAll('__ADDITIONAL_COLUMNS__', `${groupBy.join(' ')}`);
       const response = await queryGraphQL(query, 'PodGroupings', {

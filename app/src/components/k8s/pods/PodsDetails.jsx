@@ -128,6 +128,7 @@ const PodDetailsPage = ({ pod }) => {
         endDate: new Date(selectedDateRange.endDate),
         limit: 1,
         dateUnit: 'day',
+        columns: ['avg_cpu_used', 'avg_memory_used', 'avg_cpu_request', 'avg_memory_request'],
       })
       .then((res) => {
         const rows = res?.data?.k8s_pod_groupings;

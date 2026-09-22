@@ -385,6 +385,7 @@ const KubernetesNodesTable = ({ accountId, heading = 'All Nodes' }) => {
         startDate: new Date(selectedDateRange?.startDate),
         endDate: new Date(selectedDateRange?.endDate),
         isActive: isActiveValue,
+        columns: ['cost'],
       })
       .then((res) => {
         if (cancelled) return;

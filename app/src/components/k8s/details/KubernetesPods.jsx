@@ -453,6 +453,7 @@ const KubernetesPodsTable = ({ accountId, defaultQuery = {}, enableFilters = tru
         podFqdn: podFqdn,
         startDate: new Date(selectedDateRange.startDate),
         endDate: new Date(selectedDateRange.endDate),
+        columns: ['cost', 'avg_cpu_used', 'avg_memory_used', 'avg_cpu_request', 'avg_memory_request'],
       })
       .then((res) => {
         for (const itemData of data) {
