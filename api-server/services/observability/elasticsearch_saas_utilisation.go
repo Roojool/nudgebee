@@ -403,6 +403,8 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 
 	cpuUsage := esWorkloadCPUSources(containerNamed)
 	memUsage := esWorkloadMemSources(containerNamed)
+	perContainerCPU := cpuUsage
+	perContainerMem := memUsage
 	if nodeScope {
 		cpuUsage = esNodeCPUUsageSources()
 		memUsage = esNodeMemUsageSources()
@@ -503,16 +505,52 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// high-water mark has no field in any Elasticsearch layout we read, so it falls
 	// through to esUtilUnsupportedNote rather than being answered with the working
 	// set, which is a different number and would size a limit too low.
+	// Per-container keys answer at workload and pod scope only.
+	//
+	// Not at node or cluster scope, and the reason is the grouping rather than the
+	// data: every per-container source groups by pod (and container), never by
+	// namespace — esPerPodCollapsedAgg does not even accept a third level. At
+	// workload and pod scope a namespace term filter makes that safe, because every
+	// document already comes from one namespace. Without that filter, two namespaces
+	// each running a pod called `worker-0` — an ordinary StatefulSet name — land in
+	// the SAME terms bucket and are reported as one series, with no error.
+	//
+	// Prometheus and Datadog group by namespace natively, so they do answer here.
+	// Elasticsearch will too once the per-pod aggregation carries a namespace level;
+	// that lands with the consumer that needs it, rather than shipping a silent merge.
 	case "container_cpu_usage_by_pod":
 		if nodeScope {
 			return esUtilMetric{}, false
 		}
-		return esUtilMetric{Sources: cpuUsage, PerPod: true}, true
+		return esUtilMetric{Sources: perContainerCPU, PerPod: true}, true
 	case "container_memory_working_set_by_pod":
 		if nodeScope {
 			return esUtilMetric{}, false
 		}
-		return esUtilMetric{Sources: memUsage, PerPod: true}, true
+		return esUtilMetric{Sources: perContainerMem, PerPod: true}, true
+
+	// Requests and limits in the same per-container shape as the usage keys, so a
+	// consumer can join the two on (pod, container) within a namespace.
+	case "container_cpu_request_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request"), PerPod: true}, true
+	case "container_cpu_limit_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.limit.cores", "k8s.container.cpu_limit"), PerPod: true}, true
+	case "container_memory_request_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.request.bytes", "k8s.container.memory_request"), PerPod: true}, true
+	case "container_memory_limit_by_pod":
+		if nodeScope {
+			return esUtilMetric{}, false
+		}
+		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.limit.bytes", "k8s.container.memory_limit"), PerPod: true}, true
 
 	case "cpu_usage_max_pod":
 		if nodeScope {

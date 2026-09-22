@@ -33,7 +33,7 @@ func TestBuildDatadogPerPodQuery_PlainAggregateRollsUpTheWholeWindow(t *testing.
 	meta.PodNames, meta.PodNamesSupplied = nil, false
 	got := buildDatadogPerPodQuery(datadogPerPodMetricMemory, meta, "kube_namespace:nudgebee", 1209600)
 	assert.Equal(t,
-		"avg:kubernetes.memory.working_set{kube_namespace:nudgebee} by {pod_name,kube_container_name}.rollup(max, 1209600)",
+		"avg:kubernetes.memory.working_set{kube_namespace:nudgebee} by {kube_namespace,pod_name,kube_container_name}.rollup(max, 1209600)",
 		got)
 }
 
@@ -127,27 +127,39 @@ func TestPercentileOverTime_IgnoresGaps(t *testing.T) {
 
 // Only the per-pod keys collapse; a chart key asked for in the same request keeps its
 // series, and a plain aggregate is already collapsed by the rollup.
-func TestDatadogCollapseOverTime_LeavesOtherKeysAlone(t *testing.T) {
+// Which keys the collapse touches, and why it is not the per-pod ones for a plain
+// aggregate.
+//
+// This used to assert that only per-pod keys collapse. That was the bug: Datadog's
+// source reads neither `instant` nor `step`, so a key without a rollup of its own came
+// back at full resolution however the caller asked — cpu_total returned 119 points for
+// aggregate=max against Prometheus's 1, and a consumer reading payload[0] got the
+// oldest point in the window.
+func TestDatadogCollapseOverTime_TouchesEveryKeyThatStillNeedsIt(t *testing.T) {
 	p99, err := parseAggregate("p99")
 	require.NoError(t, err)
 	max, err := parseAggregate("max")
 	require.NoError(t, err)
 
-	series := func() []QueryResult {
-		return []QueryResult{{QueryKey: "cpu_usage", Payload: []Result{
+	series := func(key string) []QueryResult {
+		return []QueryResult{{QueryKey: key, Payload: []Result{
 			{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 2, 3}},
 		}}}
 	}
 
-	other := series()
-	datadogCollapseOverTime(other, p99)
-	assert.Len(t, other[0].Payload[0].Values, 3, "cpu_usage is not a per-pod key")
+	scalar := series("cpu_usage")
+	datadogCollapseOverTime(scalar, p99)
+	assert.Len(t, scalar[0].Payload[0].Values, 1, "a scalar key has no rollup of its own, so it collapses here")
 
-	perPod := []QueryResult{{QueryKey: "container_cpu_usage_by_pod", Payload: []Result{
-		{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 2, 3}},
-	}}}
+	perPod := series("container_cpu_usage_by_pod")
 	datadogCollapseOverTime(perPod, max)
-	assert.Len(t, perPod[0].Payload[0].Values, 3, "a plain aggregate was already collapsed by the rollup")
+	assert.Len(t, perPod[0].Payload[0].Values, 3,
+		"a plain aggregate on a per-pod key was already pushed down as a rollup")
+
+	perPodQuantile := series("container_cpu_usage_by_pod")
+	datadogCollapseOverTime(perPodQuantile, p99)
+	assert.Len(t, perPodQuantile[0].Payload[0].Values, 1,
+		"a percentile cannot be pushed down, so it is computed here")
 }
 
 // The pod list must reach the query, or Datadog answers with every pod under the

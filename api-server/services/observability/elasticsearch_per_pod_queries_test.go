@@ -214,15 +214,69 @@ func TestESPerPod_HighWaterMarkIsUnsupported(t *testing.T) {
 	assert.Contains(t, note, "container_memory_max_usage_by_pod")
 }
 
-// Node and cluster scope group by node, not pod, so answering there would count
-// nodes and call them pods.
-func TestESPerPod_NotAnsweredAtNodeScope(t *testing.T) {
-	for _, scope := range []esUtilScope{esScopeNode, esScopeCluster} {
-		_, ok := esUtilisationMetric("container_cpu_usage_by_pod", scope, false)
-		assert.False(t, ok, string(scope))
+// Per-container keys answer at workload and pod scope, and are REFUSED at node and
+// cluster scope — because of the grouping, not the data.
+//
+// Every per-container source groups by pod (and container), never by namespace. At
+// workload and pod scope a namespace term filter makes that safe: every document
+// already comes from one namespace. Without it, two namespaces each running a pod
+// called `worker-0` land in the same terms bucket and are reported as one series,
+// silently. Refusing is the honest answer until the aggregation carries a namespace
+// level; Prometheus and Datadog group by namespace natively and do answer there.
+func TestESPerPod_RefusedWhereNamespaceWouldCollide(t *testing.T) {
+	perContainerKeys := []string{
+		"container_cpu_usage_by_pod", "container_memory_working_set_by_pod",
+		"container_cpu_request_by_pod", "container_cpu_limit_by_pod",
+		"container_memory_request_by_pod", "container_memory_limit_by_pod",
 	}
-	_, ok := esUtilisationMetric("container_cpu_usage_by_pod", esScopePod, false)
-	assert.True(t, ok, "pod scope groups by pod, so it answers")
+
+	for _, key := range perContainerKeys {
+		for _, scope := range []esUtilScope{esScopeNode, esScopeCluster} {
+			_, ok := esUtilisationMetric(key, scope, false)
+			assert.False(t, ok, "%s must not answer at %s scope while it cannot group by namespace", key, scope)
+		}
+
+		for _, scope := range []esUtilScope{esScopeWorkload, esScopePod} {
+			plan, ok := esUtilisationMetric(key, scope, false)
+			require.True(t, ok, "%s at %s scope", key, scope)
+			require.True(t, plan.PerPod, "%s at %s scope is per-pod", key, scope)
+			require.NotEmpty(t, plan.Sources)
+			// GroupBy[0] is what the per-pod parser keys each series on. It has to be
+			// the pod — a node-grouped source here would count nodes and call them pods.
+			assert.Equal(t, esECSFields.Pod, plan.Sources[0].GroupBy[0],
+				"%s at %s scope groups by pod first", key, scope)
+		}
+	}
+}
+
+// The guard above is only sound while the aggregation really cannot express a
+// namespace level. If that changes, the refusal should be revisited rather than
+// silently outliving its reason.
+func TestESPerPod_CollapsedAggStillCannotGroupByNamespace(t *testing.T) {
+	src := esWorkloadCPUSources(true)[0]
+	assert.LessOrEqual(t, len(src.GroupBy), 2,
+		"esPerPodCollapsedAgg accepts at most two grouping levels")
+	assert.NotContains(t, src.GroupBy, esECSFields.Namespace,
+		"no per-container source groups by namespace yet")
+}
+
+// The spec keys answer in the same per-container shape as the usage keys, so usage
+// and its request or limit can be joined on (pod, container) within a namespace.
+func TestESPerPod_SpecKeysMatchTheUsageShape(t *testing.T) {
+	usage, ok := esUtilisationMetric("container_memory_working_set_by_pod", esScopeWorkload, true)
+	require.True(t, ok)
+
+	for _, key := range []string{
+		"container_cpu_request_by_pod", "container_cpu_limit_by_pod",
+		"container_memory_request_by_pod", "container_memory_limit_by_pod",
+	} {
+		plan, ok := esUtilisationMetric(key, esScopeWorkload, true)
+		require.True(t, ok, key)
+		assert.True(t, plan.PerPod, "%s is per-pod", key)
+		require.NotEmpty(t, plan.Sources)
+		assert.Equal(t, usage.Sources[0].GroupBy, plan.Sources[0].GroupBy,
+			"%s groups the same way the usage key does, or the two cannot be joined", key)
+	}
 }
 
 // Without an aggregate the key keeps the ordinary histogram body. Only the collapse

@@ -38,6 +38,7 @@ var canonicalMetricLabels = map[string]map[string]string{
 		"kube_container_name": CanonicalContainer,
 		"kube_namespace":      CanonicalNamespace,
 		"host":                CanonicalNode,
+		"kube_node":           CanonicalNode,
 		// Datadog names the workload tag after its kind; all of them answer the same
 		// question. Spellings are taken from controllerFacets
 		// (integrations/datadog_webhook.go:763), which is this repo's authoritative

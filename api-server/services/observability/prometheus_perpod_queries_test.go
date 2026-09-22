@@ -25,7 +25,7 @@ func TestBuildPrometheusWorkloadQueries_PerPodCPUPercentile(t *testing.T) {
 	queries := buildPrometheusWorkloadQueries(perPodMeta(t, "p92"), []string{"container_cpu_usage_by_pod"})
 
 	assert.Equal(t,
-		`quantile_over_time(0.92, (max by (container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"api-.*", container="api", job="kubelet"}[75s])) or max by (container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"api-.*", container="api"}[75s])))[14d:75s])`,
+		`quantile_over_time(0.92, (max by (namespace, container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"api-.*", container="api", job="kubelet"}[75s])) or max by (namespace, container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__  namespace="shop", pod=~"api-.*", container="api"}[75s])))[14d:75s])`,
 		queries["container_cpu_usage_by_pod"])
 }
 
@@ -36,7 +36,7 @@ func TestBuildPrometheusWorkloadQueries_PerPodWithoutAggregateIsASeries(t *testi
 
 	got := queries["container_memory_working_set_by_pod"]
 	assert.NotContains(t, got, "_over_time(", "no collapse was asked for")
-	assert.Contains(t, got, `max by (container, pod) (container_memory_working_set_bytes{`)
+	assert.Contains(t, got, `max by (namespace, container, pod) (container_memory_working_set_bytes{`)
 }
 
 // The 2x bug this work already chased once: a cluster running two cAdvisor scrapers
@@ -57,7 +57,7 @@ func TestBuildPrometheusWorkloadQueries_PerPodPrefersKubeletSeries(t *testing.T)
 			assert.Contains(t, got, `job="kubelet"`, "the kubelet copy is preferred")
 			// Both arms group the same way, or the fallback would answer a different
 			// question than the arm it replaces.
-			assert.Equal(t, 2, strings.Count(got, `max by (container, pod)`))
+			assert.Equal(t, 2, strings.Count(got, `max by (namespace, container, pod)`))
 		})
 	}
 }

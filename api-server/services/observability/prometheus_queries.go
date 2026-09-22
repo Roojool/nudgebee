@@ -25,8 +25,57 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 	meta.NodeName = escapePromQLString(meta.NodeName)
 	meta.NodeIP = escapePromQLString(meta.NodeIP)
 
+	// The node identity as a selector. A cluster can label cAdvisor series with
+	// either `node` or `instance` depending on how it scrapes, so every per-container
+	// key below asks both ways — see promPerContainerOnNode.
+	node := meta.NodeName
+
 	for _, metricKey := range metrics {
 		switch metricKey {
+		// --- Per-container metrics, narrowed to one node ---
+		//
+		// Same key names and the same {namespace, pod, container} series shape as the
+		// workload builder produces; only the narrowing differs. That is the point of
+		// the family: a caller asks the same question and says where to look.
+		case "container_cpu_usage_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promPerContainerOnNode(promRateSeries("container_cpu_usage_seconds_total", meta.RateWindow), node,
+					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
+				meta.RangeWindow, meta.Step)
+		case "container_memory_working_set_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promPerContainerOnNode(promGaugeSeries("container_memory_working_set_bytes"), node,
+					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
+				meta.RangeWindow, meta.Step)
+		case "container_memory_max_usage_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promPerContainerOnNode(promGaugeSeries("container_memory_max_usage_bytes"), node,
+					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
+				meta.RangeWindow, meta.Step)
+
+		// Spec keys come from kube-state-metrics, which labels by `node` only — no
+		// `instance` variant to fall back to, so these do not need the two-armed form.
+		case "container_cpu_request_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promSpecOnNode("kube_pod_container_resource_requests", node, "cpu"), meta.RangeWindow, meta.Step)
+		case "container_cpu_limit_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promSpecOnNode("kube_pod_container_resource_limits", node, "cpu"), meta.RangeWindow, meta.Step)
+		case "container_memory_request_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promSpecOnNode("kube_pod_container_resource_requests", node, "memory"), meta.RangeWindow, meta.Step)
+		case "container_memory_limit_by_pod":
+			queries[metricKey] = promQLOverTime(meta.Aggregate,
+				promSpecOnNode("kube_pod_container_resource_limits", node, "memory"), meta.RangeWindow, meta.Step)
+
+		// What the node can give out, as opposed to what it is using. The workload
+		// builder answers these cluster-wide; at node scope they are the denominator
+		// a caller needs to turn per-container usage into a percentage.
+		case "cpu_total":
+			queries[metricKey] = promNodeAllocatable(node, "cpu")
+		case "mem_total":
+			queries[metricKey] = promNodeAllocatable(node, "memory")
+
 		case "cpu_usage":
 			queries[metricKey] = fmt.Sprintf(`sum(irate(node_cpu_seconds_total{mode!="idle", instance=~"%s.*"}[5m])) OR sum(irate(node_resources_cpu_usage_seconds_total{mode!="idle", instance=~"%s.*"}[5m]))`, meta.InternalIP, meta.NodeName)
 		case "memory_usage":
@@ -179,7 +228,11 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			if safeMeta.ContainerName != "" {
 				containerFilter = fmt.Sprintf(`%s, container="%s"`, basePodFilter, safeMeta.ContainerName)
 			} else {
-				containerFilter = basePodFilter // Direct assignment since basePodFilter is string
+				// container!="" for the same reason the workload branch above sets it:
+				// cAdvisor emits a pod-level cgroup rollup series with an empty
+				// container label alongside the per-container ones. Summing both
+				// counts every container twice — a namespace row read ~2x the truth.
+				containerFilter = fmt.Sprintf(`%s, container!=""`, basePodFilter)
 			}
 			containerIDFilter = fmt.Sprintf(` container_id=~"/k8s/%s/.*"`, safeMeta.Namespace)
 		}
@@ -265,12 +318,12 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// empty leaves a time series, so these keys are chartable too.
 		case "container_cpu_usage_by_pod":
 			expr := promKubeletPreferred(
-				`max by (container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[`+rateW+`]))`,
+				`max by (namespace, container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[`+rateW+`]))`,
 				containerFilter)
 			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
 		case "container_memory_working_set_by_pod":
 			expr := promKubeletPreferred(
-				`max by (container, pod) (container_memory_working_set_bytes{__CLUSTER__ %s})`,
+				`max by (namespace, container, pod) (container_memory_working_set_bytes{__CLUSTER__ %s})`,
 				containerFilter)
 			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
 		case "container_memory_max_usage_by_pod":
@@ -278,9 +331,32 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			// No other provider carries it, so they return nothing and say so; the
 			// strategy already treats it as optional.
 			expr := promKubeletPreferred(
-				`max by (container, pod) (container_memory_max_usage_bytes{__CLUSTER__ %s})`,
+				`max by (namespace, container, pod) (container_memory_max_usage_bytes{__CLUSTER__ %s})`,
 				containerFilter)
 			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+
+		// Requests and limits for the SAME series shape as the usage keys above, so a
+		// consumer can join usage against its spec on (namespace, pod, container)
+		// without a second request shape to reason about.
+		//
+		// No promKubeletPreferred: these come from kube-state-metrics, which is a
+		// single series per container, not a per-scraper cAdvisor series.
+		case "container_cpu_request_by_pod":
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
+				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
+					promSelector(containerFilter, `resource="cpu"`)), rangeW, stepW)
+		case "container_cpu_limit_by_pod":
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
+				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
+					promSelector(containerFilter, `resource="cpu"`)), rangeW, stepW)
+		case "container_memory_request_by_pod":
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
+				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
+					promSelector(containerFilter, `resource="memory"`)), rangeW, stepW)
+		case "container_memory_limit_by_pod":
+			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
+				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
+					promSelector(containerFilter, `resource="memory"`)), rangeW, stepW)
 
 		// --- PVC Metrics ---
 		case "pvc_usage":
@@ -494,6 +570,74 @@ func promPodNameAlternation(pods []string) string {
 // is expressed here in the query, where it belongs, because it is a property of a
 // Prometheus deployment and not of the contract. The fallback arm answers clusters
 // whose kubelet series are labelled with some other job name.
+// promGaugeSeries / promRateSeries name a cAdvisor series given a selector body.
+// Split out so promPerContainerOnNode can build the same series twice, once per node
+// label convention, without knowing whether it is a gauge or a counter.
+func promGaugeSeries(metric string) func(string) string {
+	return func(selector string) string {
+		return fmt.Sprintf(`%s{__CLUSTER__ %s}`, metric, selector)
+	}
+}
+
+func promRateSeries(metric, rateWindow string) func(string) string {
+	return func(selector string) string {
+		return fmt.Sprintf(`rate(%s{__CLUSTER__ %s}[%s])`, metric, selector, rateWindow)
+	}
+}
+
+// promPerContainerOnNode returns one series per {namespace, pod, container} on a node.
+//
+// A cluster labels cAdvisor series with `node` or with `instance` depending on how it
+// scrapes, and some carry both, so the query asks both ways and unions the results.
+// Aggregating BEFORE the `or` is deliberate: `or` is a set union on label sets, so
+// once both arms group to the same {namespace, pod, container} the left arm wins per
+// series and a container present in both is counted once, not twice.
+//
+// `max by`, not `sum by`, for the same reason the workload keys use it: a cluster with
+// two cAdvisor scrapers emits the same container twice, and summing would double every
+// number silently.
+func promPerContainerOnNode(series func(string) string, nodeName string, extraFilters ...string) string {
+	const groupBy = `max by (namespace, pod, container)`
+	return fmt.Sprintf(`%s (%s) or %s (%s)`,
+		groupBy, series(promSelector(fmt.Sprintf(`node="%s"`, nodeName), extraFilters...)),
+		groupBy, series(promSelector(fmt.Sprintf(`instance="%s"`, nodeName), extraFilters...)))
+}
+
+// promNodeAllocatable is what one node can hand out, as one series.
+//
+// `max by (node)` rather than a bare selector for two reasons, both observed on the
+// dev cluster: a cluster running more than one kube-state-metrics emits the series
+// once per instance, and each copy carries that instance's OWN namespace/pod labels.
+// Without the grouping a caller gets two identical series labelled by whichever
+// namespace kube-state-metrics happens to run in — and anything that sums them reads
+// double the node's real capacity.
+func promNodeAllocatable(nodeName, resource string) string {
+	return fmt.Sprintf(`max by (node) (kube_node_status_allocatable{__CLUSTER__ %s})`,
+		promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
+}
+
+// promSpecOnNode is the kube-state-metrics request/limit series for one node.
+func promSpecOnNode(metric, nodeName, resource string) string {
+	return fmt.Sprintf(`max by (namespace, pod, container) (%s{__CLUSTER__ %s})`,
+		metric, promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
+}
+
+// promSelector joins a scope filter with extra matchers into one selector body.
+//
+// The scope filters are built with a leading space and sometimes a trailing comma so
+// callers can concatenate them; at CLUSTER scope the filter is empty entirely. Either
+// edge produces `{__CLUSTER__ , resource="cpu"}` or `{__CLUSTER__ ,}` if the parts are
+// pasted together naively, and Prometheus rejects both. Joining explicitly means a key
+// renders the same whether it was asked at workload, namespace or cluster scope.
+func promSelector(filter string, extra ...string) string {
+	parts := make([]string, 0, len(extra)+1)
+	if f := strings.Trim(strings.TrimSpace(filter), ","); f != "" {
+		parts = append(parts, f)
+	}
+	parts = append(parts, extra...)
+	return strings.Join(parts, ", ")
+}
+
 func promKubeletPreferred(expr, filter string) string {
 	// The shared filters are built with a trailing comma so callers can append to
 	// them; both arms here append, so trim it first or the selector gets `,,` and

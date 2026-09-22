@@ -23,8 +23,13 @@ import (
 //     is therefore picked from how many pods the caller asked about.
 const (
 	// datadogPerPodMetricCPU and friends are the gauges Datadog's agent reports.
-	datadogPerPodMetricCPU       = "kubernetes.cpu.usage.total"
-	datadogPerPodMetricMemory    = "kubernetes.memory.working_set"
+	datadogPerPodMetricCPU           = "kubernetes.cpu.usage.total"
+	datadogPerPodMetricMemory        = "kubernetes.memory.working_set"
+	datadogPerPodMetricCPURequest    = "kubernetes.cpu.requests"
+	datadogPerPodMetricCPULimit      = "kubernetes.cpu.limits"
+	datadogPerPodMetricMemoryRequest = "kubernetes.memory.requests"
+	datadogPerPodMetricMemoryLimit   = "kubernetes.memory.limits"
+
 	datadogPerPodPointBudget     = 200_000
 	datadogFinestRollupSeconds   = 300
 	datadogCoarsestRollupSeconds = 3600
@@ -34,6 +39,10 @@ const (
 var datadogPerPodKeys = map[string]string{
 	"container_cpu_usage_by_pod":          datadogPerPodMetricCPU,
 	"container_memory_working_set_by_pod": datadogPerPodMetricMemory,
+	"container_cpu_request_by_pod":        datadogPerPodMetricCPURequest,
+	"container_cpu_limit_by_pod":          datadogPerPodMetricCPULimit,
+	"container_memory_request_by_pod":     datadogPerPodMetricMemoryRequest,
+	"container_memory_limit_by_pod":       datadogPerPodMetricMemoryLimit,
 }
 
 // datadogPerPodUnanswerable are per-pod keys Datadog reports no metric for, and why.
@@ -72,7 +81,7 @@ func datadogRollupSecondsForPods(windowSeconds int64, pods int) int {
 // the wire. A percentile cannot be pushed down, so the query asks for the finest
 // resolution the budget allows and datadogCollapseOverTime does the arithmetic.
 func buildDatadogPerPodQuery(metric string, meta RequestMetadata, filterStr string, windowSeconds int64) string {
-	query := fmt.Sprintf("avg:%s{%s} by {pod_name,kube_container_name}", metric, datadogPerPodFilter(filterStr, meta))
+	query := fmt.Sprintf("avg:%s{%s} by {kube_namespace,pod_name,kube_container_name}", metric, datadogPerPodFilter(filterStr, meta))
 	switch {
 	case meta.Aggregate.Name == "":
 		return query
@@ -157,11 +166,17 @@ func datadogPodNameClause(pods []string) string {
 // axis ooPercentile implements for OpenObserve, and the one rightsizing means: how
 // hot did THIS pod get.
 func datadogCollapseOverTime(results []QueryResult, aggregate ParsedAggregate) {
-	if !aggregate.IsQuantile() {
+	if aggregate.Name == "" {
 		return
 	}
 	for i := range results {
-		if _, isPerPod := datadogPerPodKeys[results[i].QueryKey]; !isPerPod {
+		_, isPerPod := datadogPerPodKeys[results[i].QueryKey]
+		// A plain aggregate on a per-pod key was already pushed into the query as
+		// `.rollup(<agg>, window)`, so the response holds one point and there is
+		// nothing left to do. Everything else arrives as a range: Datadog's source
+		// reads neither `instant` nor `step`, so a key with no rollup of its own
+		// comes back at full resolution however the caller asked for it.
+		if isPerPod && !aggregate.IsQuantile() {
 			continue
 		}
 		for j := range results[i].Payload {
@@ -169,7 +184,7 @@ func datadogCollapseOverTime(results []QueryResult, aggregate ParsedAggregate) {
 			if len(series.Timestamps) == 0 {
 				continue
 			}
-			value, ok := percentileOverTime(series.Values, aggregate.Quantile)
+			value, ok := datadogReduceOverTime(series.Values, aggregate)
 			if !ok {
 				// Every sample was a gap — normal for a pod that lived through part
 				// of the window. Still exactly one point, because that is what
@@ -182,6 +197,63 @@ func datadogCollapseOverTime(results []QueryResult, aggregate ParsedAggregate) {
 			series.Timestamps, series.Values = []int64{last}, []float64{value}
 		}
 	}
+}
+
+// datadogReduceOverTime applies the requested aggregate to one series' own values.
+//
+// Datadog can push a plain aggregate down as a rollup, and does so for the per-pod
+// keys where the response would otherwise be enormous. Every other key arrives as a
+// range whatever was asked for, so the collapse happens here — otherwise `aggregate`
+// silently means nothing on Datadog for those keys, and a consumer reading payload[0]
+// gets the oldest point in the window instead of the statistic it asked for.
+//
+// Reports false when the series holds no finite value, which the caller turns into a
+// single NaN rather than a zero.
+func datadogReduceOverTime(values []float64, aggregate ParsedAggregate) (float64, bool) {
+	if aggregate.IsQuantile() {
+		return percentileOverTime(values, aggregate.Quantile)
+	}
+
+	finite := make([]float64, 0, len(values))
+	for _, v := range values {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			finite = append(finite, v)
+		}
+	}
+	if len(finite) == 0 {
+		return 0, false
+	}
+
+	switch aggregate.Name {
+	case AggregateMax:
+		out := finite[0]
+		for _, v := range finite[1:] {
+			if v > out {
+				out = v
+			}
+		}
+		return out, true
+	case AggregateMin:
+		out := finite[0]
+		for _, v := range finite[1:] {
+			if v < out {
+				out = v
+			}
+		}
+		return out, true
+	case AggregateSum, AggregateAvg:
+		total := 0.0
+		for _, v := range finite {
+			total += v
+		}
+		if aggregate.Name == AggregateSum {
+			return total, true
+		}
+		return total / float64(len(finite)), true
+	case AggregateCount:
+		return float64(len(finite)), true
+	}
+	return 0, false
 }
 
 // percentileOverTime is linear interpolation over one series' own values, matching

@@ -15,11 +15,31 @@ func buildDatadogNodeQueries(meta RequestMetadata, metrics []string) map[string]
 		return queries // Or return error if strict validation is needed
 	}
 
-	filterStr := fmt.Sprintf("host:%s", meta.NodeName)
-	groupBy := " by {host}"
+	// kube_node, not host. Datadog's `host` tag is the cloud instance's fully
+	// qualified name — on GKE `gke-…-fiik.us-central1-a.c.<project>.internal` — while
+	// NodeName is the Kubernetes node name Prometheus and the API server use. An
+	// exact `host:` match on the short name therefore matches nothing, silently: the
+	// whole node scope returned zero series on a node with 69 running containers.
+	// `kube_node` carries the Kubernetes name and is present on every metric this
+	// function reads, including the Datadog agent's own system.* host metrics.
+	filterStr := fmt.Sprintf("kube_node:%s", meta.NodeName)
+	groupBy := " by {kube_node}"
+
+	// Per-pod keys narrow to the node through the same filter, but group by the
+	// container rather than the host — the node is the scope, not the answer.
+	windowSeconds := int64(datadogRollupSeconds(meta.RangeWindow))
 
 	for _, metricKey := range metrics {
+		if metric, perPod := datadogPerPodKeys[metricKey]; perPod {
+			queries[metricKey] = buildDatadogPerPodQuery(metric, meta, filterStr, windowSeconds)
+			continue
+		}
+
 		switch metricKey {
+		case "cpu_total":
+			queries[metricKey] = fmt.Sprintf("avg:kubernetes_state.node.cpu_allocatable{%s}%s", filterStr, groupBy)
+		case "mem_total":
+			queries[metricKey] = fmt.Sprintf("avg:kubernetes_state.node.memory_allocatable{%s}%s", filterStr, groupBy)
 		case "cpu_usage":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.cpu.usage.total{%s}%s", filterStr, groupBy)
 		case "memory_usage":
