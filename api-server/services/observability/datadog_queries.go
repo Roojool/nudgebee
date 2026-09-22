@@ -48,6 +48,11 @@ func buildDatadogNodeQueries(meta RequestMetadata, metrics []string) map[string]
 }
 
 func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[string]string {
+	// Per-pod keys roll up over the window, so they need its width in seconds.
+	// datadogRollupSeconds parses the "<N>s" form promAggWindow (or an explicit
+	// Step) produces.
+	windowSeconds := int64(datadogRollupSeconds(meta.RangeWindow))
+
 	queries := make(map[string]string)
 
 	var tagKey string
@@ -95,6 +100,15 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 	}
 
 	for _, metricKey := range metrics {
+		// Per-pod keys group by pod and container instead of the workload tag, and
+		// carry their own rollup. One Datadog has no metric for builds no query;
+		// datadogNoteUnanswerablePerPodKeys puts it back in the response with the
+		// reason, so it is not mistaken for a workload that used nothing.
+		if metric, perPod := datadogPerPodKeys[metricKey]; perPod {
+			queries[metricKey] = buildDatadogPerPodQuery(metric, meta, filterStr, windowSeconds)
+			continue
+		}
+
 		switch metricKey {
 		// (Cases remain identical, they just use the updated filterStr)
 		case "network_receive_packet":
