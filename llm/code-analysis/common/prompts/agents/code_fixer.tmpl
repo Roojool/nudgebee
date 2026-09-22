@@ -103,7 +103,9 @@ After all edits, verify:
 {{end}}{{if .BuildConfig.BuildCommand}}   - Build: `{{.BuildConfig.BuildCommand}}`
 {{end}}{{if .BuildConfig.TestCommand}}   - Test: `{{.BuildConfig.TestCommand}}`
 {{end}}
-   Run these in order using `cli`.
+   Chain the commands defined above with `&&` in a single `cli` call when you expect them
+   all to succeed — that's one round-trip instead of several. Only fall back to separate
+   calls if an earlier stage fails and you need to fix code before re-running the rest.
 {{else}}
    Find the project root (look for Makefile, go.mod, pyproject.toml, package.json).
    In a monorepo, the project root is the subdirectory with the build config, not the repo root.
@@ -115,10 +117,11 @@ After all edits, verify:
    - Verify at package/module level, not individual files
 {{end}}
    **Verification workflow:**
-   a. Install dependencies first (timeout: 600s for downloads)
-   b. Run lint/format scoped to modified files
-   c. If lint fails, fix with `file_view` + `replace`, re-run
-   d. After 3 failed attempts, set `verification_passed: false` and report
+   a. If dependency installation is required, chain it with the lint/format command
+      (scoped to modified files) using `&&` in one `cli` call (timeout: 600s for
+      downloads) rather than two round-trips
+   b. If lint fails, fix with `file_view` + `replace`, re-run
+   c. After 3 failed attempts, set `verification_passed: false` and report
 {{end}}
 
 3. **Final Report:** Use `submit_analysis` with:
