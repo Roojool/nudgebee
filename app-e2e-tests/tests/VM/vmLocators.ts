@@ -110,14 +110,19 @@ export class VmLocators extends CommonLocators {
     return this.page.locator(`#${tableId}-body ${DATA_ROW}`);
   }
 
-  // All three VM tables pass `showUpdatedEmptyData`, and that branch of CustomTable
-  // renders a fixed `<EmptyData heading='All good here!'>` — it forwards neither the
-  // table `id` nor the `emptyHeading` the caller supplied. So there is no
-  // `#<tableId>-no-data` node to key off, and the module's own empty copy
-  // ("No virtual machines yet", "No open vulnerabilities") never reaches the DOM.
-  // Scoped to the listing root because the string is identical on every table.
+  // EmptyData always renders its heading as `<h2 id="${id}-no-data">`, so the id suffix is
+  // there whatever copy the table asks for — and whether or not CustomTable's
+  // showUpdatedEmptyData branch has started forwarding the table id on the deployed build.
+  // Matching the suffix rather than the words is deliberate: each VM table supplies
+  // different copy ("No virtual machines yet", "No open vulnerabilities", and a separate
+  // filtered variant), and pinning to any of it is what broke the sibling Vulnerabilities
+  // suite when the wording was corrected. Scoped to the listing root, which is what keeps
+  // one table's empty panel from answering for another's.
   emptyIn(root: Locator): Locator {
-    return root.getByRole("heading", { name: "All good here!" });
+    return root
+      .locator('[id$="-no-data"]')
+      .or(root.getByRole("heading", { name: "All good here!", exact: true }))
+      .first();
   }
 
   // Waits out the fetch. While `loading` is true CustomTable swaps in a skeleton

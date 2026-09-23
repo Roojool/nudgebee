@@ -113,12 +113,13 @@ export class SecurityLocators extends OptimizeModuleLocators {
 
   // An empty table renders one of two different EmptyData shapes, and which one is not a
   // property of this module but of each caller's props, so both have to be reachable.
-  // CustomTable.jsx renderEmptyState: the default branch is `EmptyData id={id}`, whose
-  // heading carries `${id}-no-data`; the showUpdatedEmptyData branch renders a fixed
-  // "All good here!" EmptyData and forwards NO id, so no `-no-data` anchor exists at all.
-  // The Image Scan tables take the second branch — both KubernetesSecurityApps and
-  // KubernetesSecurityImages pass showUpdatedEmptyData={tableData?.length == 0} — which a
-  // CI run caught. Scoped to the view so the heading fallback cannot match another table's.
+  // CustomTable.jsx renderEmptyState: both branches now render `EmptyData id={id}`, whose
+  // heading carries `${id}-no-data`, so the id rung resolves on either. It did not always —
+  // the showUpdatedEmptyData branch forwarded no id, which is why the heading rung exists
+  // and why the sibling Vulnerabilities suite, which had only that rung, went down when the
+  // copy changed. The Image Scan tables take that branch: both KubernetesSecurityApps and
+  // KubernetesSecurityImages pass showUpdatedEmptyData={tableData?.length == 0}. Scoped to
+  // the view so the heading fallback cannot match another table's.
   emptyStateFor(tableId: string, scope: Locator): Locator {
     return scope
       .locator(`#${tableId}-no-data`)
