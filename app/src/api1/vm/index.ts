@@ -25,7 +25,11 @@ export const VM_VULNERABILITY_RULE = 'vm_package_vulnerability';
 /** Statuses that count as an unresolved finding. */
 export const OPEN_STATUSES = ['Open', 'InProgress'];
 
-export const SEVERITY_ORDER = ['Critical', 'High', 'Medium', 'Low', 'Negligible', 'Unknown'];
+// The scan pipeline's mapSeverity (services/vmpackage/persist.go) only ever
+// writes these five — negligible/unknown/blank all collapse to Info — so a
+// filter offering Negligible or Unknown matched zero rows while Info, a real
+// value, was unfilterable.
+export const SEVERITY_ORDER = ['Critical', 'High', 'Medium', 'Low', 'Info'];
 
 export interface VmResource {
   id: string;
