@@ -83,6 +83,7 @@ import DSTooltip from '@ui/Tooltip';
 import { FiArrowRight } from 'react-icons/fi';
 import useCurrencySymbol from '@hooks/useCurrencySymbol';
 import PendingFollowUps from '@components/home/PendingFollowUps';
+import VmOverviewCard from '@components/home/VmOverviewCard';
 
 const replaceCurrencyInText = (text, targetCurrencySymbol) => {
   if (!text || targetCurrencySymbol === '$') return text;
@@ -2334,6 +2335,11 @@ const Home = () => {
           accountId={selectedCluster?.value || ''}
           onManage={(id) => window.open(`/automation?accountId=${id}&status=Active`, '_blank')}
           onViewWorkflows={(query) => router.push({ pathname: '/automation', query })}
+        />
+        <VmOverviewCard
+          accountId={selectedCluster?.value || ''}
+          cloudProvider={selectedCluster?.cloud_provider || ''}
+          onViewAll={(id) => router.push({ pathname: '/vm', query: { accountId: id }, hash: 'summary' })}
         />
         <PendingFollowUps accountId={cluster} />
         <HomeWidgets selectedCluster={selectedCluster} cluster={cluster} />
