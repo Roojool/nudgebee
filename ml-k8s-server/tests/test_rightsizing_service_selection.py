@@ -1,0 +1,116 @@
+"""Which metrics service a scan gets, and why.
+
+The flag exists because this switch changes where every number in a recommendation
+comes from, and the numbers are the product. Turning it off has to put the account
+back on exactly the service it had, so both directions are asserted here rather than
+only the new one.
+"""
+
+from unittest.mock import patch
+
+import pytest
+
+from server.recommendation.vertical_rightsizing.models.config import Config
+from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import DatadogMetricsService
+from server.recommendation.vertical_rightsizing.services.metrics_elasticsearch_service import (
+    ElasticsearchMetricsService,
+)
+from server.recommendation.vertical_rightsizing.services.metrics_prometheus_service import PrometheusMetricsService
+from server.recommendation.vertical_rightsizing.services.metrics_utilisation_service import UtilisationMetricsService
+from server.recommendation.vertical_rightsizing.services.service import RecommendationService
+
+
+def _config():
+    return Config(
+        namespaces=None,
+        resources="*",
+        selector=None,
+        max_workers=1,
+        cpu_min_value=10,
+        memory_min_value=100,
+        strategy="nudgebee",
+        other_args={},
+    )
+
+
+def _service(via_utilisation, **kwargs):
+    with patch("server.recommendation.vertical_rightsizing.services.service.ApiServerMetricsConfigs") as configs, patch(
+        "server.recommendation.vertical_rightsizing.services.nudgebee_cluster_service.ClusterService.__init__",
+        return_value=None,
+    ):
+        configs.rightsizing_via_utilisation = via_utilisation
+        configs.via_api_server = True
+        service = RecommendationService("acct-1", _config(), tenant_id="tenant-1", **kwargs)
+    try:
+        yield_service = service._metrics_service_loaders
+    finally:
+        service.close()
+    return yield_service
+
+
+@pytest.mark.parametrize(
+    "metrics_provider, expected",
+    [
+        (None, PrometheusMetricsService),
+        ("prometheus", PrometheusMetricsService),
+        ("datadog", DatadogMetricsService),
+        ("ES", ElasticsearchMetricsService),
+    ],
+)
+def test_the_flag_off_is_exactly_todays_behaviour(metrics_provider, expected):
+    loaders = _service(False, metrics_provider=metrics_provider, elasticsearch={"url": "https://es:9200"})
+    assert isinstance(loaders, expected)
+
+
+@pytest.mark.parametrize("metrics_provider", [None, "prometheus", "ES", "newrelic", "dynatrace"])
+def test_the_flag_on_is_one_service_for_every_provider_but_datadog(metrics_provider):
+    loaders = _service(True, metrics_provider=metrics_provider, elasticsearch={"url": "https://es:9200"})
+    assert isinstance(loaders, UtilisationMetricsService)
+
+
+def test_datadog_stays_on_its_own_service_until_the_executor_can_carry_the_traffic():
+    """`aggregate` applies to a whole request, so four CPU percentiles cannot share
+    one: 7 Datadog GETs per workload against the 2 the Python service makes.
+
+    That multiplier would be tolerable on its own. It is not tolerable against
+    api-server's Datadog metrics executor as it stands — the key loop is sequential,
+    one key's failure discards the whole request's results, and the metrics path has
+    no 429 retry. Unblock by fixing those, not by editing this test.
+    """
+    loaders = _service(True, metrics_provider="datadog")
+    assert isinstance(loaders, DatadogMetricsService)
+    assert not isinstance(loaders, UtilisationMetricsService)
+
+
+def test_a_prometheus_account_is_not_caught_by_the_datadog_carve_out():
+    """The carve-out is one provider, not "anything with credentials"."""
+    assert isinstance(_service(True, metrics_provider="prometheus"), UtilisationMetricsService)
+    assert isinstance(_service(True, metrics_provider=None), UtilisationMetricsService)
+
+
+def test_a_prometheus_family_account_keeps_its_pod_inventory_walk():
+    """kube_pod_owner attributes pod incarnations that no longer exist; a pod-name
+    prefix does not. Keeping it means the switch changes the numbers and not the
+    population they are computed over."""
+    loaders = _service(True, metrics_provider="prometheus")
+    assert isinstance(loaders._inventory, PrometheusMetricsService)
+
+    es = _service(True, metrics_provider="ES", elasticsearch={"url": "https://es:9200"})
+    assert es._inventory is None, "Elasticsearch has no owner-chain walk to keep"
+
+
+def test_the_hint_reaches_the_service_that_forwards_it():
+    loaders = _service(
+        True,
+        metrics_provider="newrelic",
+        metric_provider="prometheus",
+        metric_provider_source="agent",
+    )
+    assert loaders.metric_provider == "prometheus"
+    assert loaders.metric_provider_source == "agent"
+
+
+def test_no_hint_means_the_accounts_own_default_resolves():
+    loaders = _service(True, metrics_provider="prometheus")
+    assert loaders.metric_provider == ""
+    assert loaders.metric_provider_source == ""

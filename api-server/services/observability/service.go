@@ -3188,16 +3188,8 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 
 	// Cluster utilisation aggregations follow the picker range instead of a hardcoded
 	// 24h window. Harmless for other providers/kinds, which ignore these fields.
-	meta.RangeWindow, meta.Step, meta.RateWindow = promAggWindow(req.StartTime, req.EndTime)
+	meta.RangeWindow, meta.Step, meta.RateWindow = resolveAggWindows(req.StartTime, req.EndTime, req.Step)
 	meta.EndMs = req.EndTime
-
-	// An explicit step is the caller's sampling interval and outranks the one derived
-	// from the range: the rightsizing strategy samples at 75s, and a percentile taken
-	// over 5-minute averages is a different number. Kept in the "<N>s" form, which is
-	// the only shape esUtilStepSeconds and datadogRollupSeconds parse.
-	if req.Step > 0 {
-		meta.Step = fmt.Sprintf("%ds", req.Step)
-	}
 
 	// Validated once, at the door, so no builder has to interpret the string or guess
 	// what an unknown value means.

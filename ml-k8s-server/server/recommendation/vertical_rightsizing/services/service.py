@@ -19,7 +19,9 @@ from server.recommendation.vertical_rightsizing.models.result import (
     Result,
     StrategyData,
 )
+from server.recommendation.vertical_rightsizing.services.metric_base_service import MetricsService
 from server.recommendation.vertical_rightsizing.services.metrics_prometheus_service import PrometheusMetricsService
+from server.recommendation.vertical_rightsizing.services.metrics_utilisation_service import UtilisationMetricsService
 
 # from server.recommendation.vertical_rightsizing.services.cluster_service import ClusterService
 from server.recommendation.vertical_rightsizing.services.nudgebee_cluster_service import ClusterService
@@ -48,6 +50,8 @@ class RecommendationService:
         datadog_site: Optional[str] = None,
         elasticsearch: Optional[dict] = None,
         tenant_id: str = "",
+        metric_provider: str = "",
+        metric_provider_source: str = "",
     ) -> None:
         self._config = config
         # Named so a leaked pool is identifiable in `py-spy dump` and in
@@ -61,7 +65,56 @@ class RecommendationService:
         # only read when the rollback flag sends the queries straight to the provider.
         via_api_server = ApiServerMetricsConfigs.via_api_server
         elasticsearch = elasticsearch or {}
-        if metrics_provider == "ES":
+        # Annotated because there are now four branches: without it the field's type is
+        # whichever service the first branch builds, and the other three read as
+        # assignment errors.
+        self._metrics_service_loaders: MetricsService
+        # Datadog stays on its own service even with the flag on, until api-server's
+        # Datadog metrics executor can carry the traffic this would send it.
+        #
+        # `aggregate` applies to a whole request, so four CPU percentiles cannot share
+        # one. For the default strategy that is 7 Datadog GETs per workload against
+        # the 2 this service makes, which fetches the raw series once and takes the
+        # percentiles locally. Three properties of observability/datadog.go make that
+        # multiplier expensive rather than merely larger: the key loop runs
+        # sequentially, any one key's failure returns and discards the other keys'
+        # results, and the metrics path issues a plain HttpGet with no 429 retry —
+        # the Retry-After handling next to it belongs to the traces API.
+        #
+        # Unblock this by fixing those three, not by changing anything here.
+        via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation and metrics_provider != "datadog"
+
+        if via_utilisation:
+            # One service for every provider: it asks api-server for metric keys and
+            # never names a provider. The account's default decides, except where the
+            # trigger said otherwise because that default cannot answer these keys at
+            # all (RightsizingMetricsHint, api-server side).
+            #
+            # Which pods a workload HAD over the window is a separate question, and on
+            # a Prometheus-family account the existing walk over kube_pod_owner
+            # answers it better than a pod-name prefix does. Keeping it means this
+            # switch changes the numbers and not the population they are computed
+            # over, which is what makes a before/after diff readable.
+            inventory = (
+                None
+                if metrics_provider == "ES"
+                else PrometheusMetricsService(config, account_id, self._executor, tenant_id=tenant_id)
+            )
+            self._metrics_service_loaders = UtilisationMetricsService(
+                config,
+                account_id,
+                self._executor,
+                tenant_id=tenant_id,
+                metric_provider=metric_provider or "",
+                metric_provider_source=metric_provider_source or "",
+                inventory=inventory,
+            )
+            logger.info(
+                f"rightsizing via utilisation keys for account {account_id} "
+                f"(default provider {metrics_provider or 'unset'}, "
+                f"hint {metric_provider or 'none'}/{metric_provider_source or 'none'})"
+            )
+        elif metrics_provider == "ES":
             # An ES account has no Prometheus to fall back to, so a missing connection
             # has to fail loudly. Falling through to PrometheusMetricsService is what
             # made rightsizing silently produce nothing for these accounts.

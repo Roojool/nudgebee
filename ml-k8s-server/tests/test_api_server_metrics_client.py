@@ -215,3 +215,138 @@ class TestErrorMapping:
         with patch("server.metrics.api_server_metrics.get_http_session_with_retry", return_value=session):
             with pytest.raises(ApiServerMetricsError, match="connection refused"):
                 query_metrics_via_api_server(account_id="a", tenant_id="t", query="up", start_time=START, end_time=END)
+
+
+# --- asking for metric keys rather than for a provider's query language ------------
+
+
+def _utilisation(response, **kwargs):
+    from server.metrics.api_server_metrics import query_utilisation_via_api_server
+
+    session = MagicMock()
+    session.request.return_value = response
+    with patch("server.metrics.api_server_metrics.get_http_session_with_retry", return_value=session):
+        params = {
+            "account_id": "acct-1",
+            "tenant_id": "tenant-1",
+            "request": {
+                "kind": "deployment",
+                "workload_namespace": "ns",
+                "workload_name": "app",
+                "metrics": ["container_cpu_usage_by_pod"],
+            },
+            "start_time": START,
+            "end_time": END,
+        }
+        params.update(kwargs)
+        result = query_utilisation_via_api_server(**params)
+    return result, session.request.call_args
+
+
+def test_the_utilisation_envelope_names_data_and_never_a_provider():
+    """The whole point of the action: the account's default decides who answers."""
+    _, call = _utilisation(_response(body={"results": []}), aggregate="p99", step=75)
+    sent = json.loads(call.kwargs["data"])
+
+    assert sent["action"]["name"] == "metrics_aggregate_utilisation"
+    request = sent["input"]["request"]
+    assert request["request"]["metrics"] == ["container_cpu_usage_by_pod"]
+    assert request["aggregate"] == "p99"
+    # api-server reads the bucket and the resolution from two fields; for a collapsed
+    # answer they are the same number.
+    assert request["step"] == 75
+    assert request["step_interval"] == 75
+    assert "metric_provider" not in request
+    assert "metric_provider_source" not in request
+
+
+def test_an_empty_pod_list_is_sent_and_an_absent_one_is_not():
+    """`[]` means "there are no pods", which is a different answer from "every pod"."""
+    _, call = _utilisation(_response(body={"results": []}), pod_names=[])
+    assert json.loads(call.kwargs["data"])["input"]["request"]["pod_names"] == []
+
+    _, call = _utilisation(_response(body={"results": []}))
+    assert "pod_names" not in json.loads(call.kwargs["data"])["input"]["request"]
+
+
+def test_the_provider_hint_travels_as_a_pair_or_not_at_all():
+    """api-server defaults an empty source to the agent, so naming the provider alone
+    would pin an HTTP-connected Prometheus onto the agent path."""
+    _, call = _utilisation(
+        _response(body={"results": []}), metric_provider="prometheus", metric_provider_source="agent"
+    )
+    request = json.loads(call.kwargs["data"])["input"]["request"]
+    assert request["metric_provider"] == "prometheus"
+    assert request["metric_provider_source"] == "agent"
+
+    _, call = _utilisation(_response(body={"results": []}), metric_provider="prometheus")
+    request = json.loads(call.kwargs["data"])["input"]["request"]
+    assert "metric_provider" not in request
+    assert "metric_provider_source" not in request
+
+
+def test_results_come_back_keyed_so_two_keys_in_one_call_cannot_be_crossed():
+    body = {
+        "results": [
+            {
+                "query_key": "container_memory_working_set_by_pod",
+                "payload": [{"metric": {"pod": "app-1"}, "timestamps": [1], "values": [100]}],
+            },
+            {
+                "query_key": "container_memory_max_usage_by_pod",
+                "payload": [{"metric": {"pod": "app-1"}, "timestamps": [1], "values": [999]}],
+            },
+        ]
+    }
+    result, _ = _utilisation(_response(body=body))
+    # Values stay in the relay's wire shape — Prometheus-formatted strings — because
+    # every existing consumer of this transport parses them that way.
+    assert result["container_memory_working_set_by_pod"][0]["values"] == ["100"]
+    assert result["container_memory_max_usage_by_pod"][0]["values"] == ["999"]
+
+
+def test_one_key_failing_does_not_lose_the_others():
+    """A per-key error is an answer about that key. Raising would discard every real
+    measurement that came back in the same response."""
+    body = {
+        "results": [
+            {"query_key": "container_oomkilled_limit_by_pod", "error": "no such metric"},
+            {
+                "query_key": "container_cpu_usage_by_pod",
+                "payload": [{"metric": {"pod": "app-1"}, "timestamps": [1], "values": [0.4]}],
+            },
+        ]
+    }
+    result, _ = _utilisation(_response(body=body))
+    assert "container_oomkilled_limit_by_pod" not in result
+    assert "container_cpu_usage_by_pod" in result
+
+
+def test_a_disconnected_agent_is_still_its_own_error():
+    body = {"results": [{"query_key": "container_cpu_usage_by_pod", "error": "agent not connected"}]}
+    with pytest.raises(AgentNotConnectedError):
+        _utilisation(_response(body=body))
+
+    with pytest.raises(AgentNotConnectedError):
+        _utilisation(_response(status=503, body={"message": "agent not connected"}))
+
+
+def test_a_noted_key_is_absent_rather_than_zero():
+    """A note is how a provider says it has no such metric. An empty payload must not
+    become a key with no data, which downstream reads as a measured nothing."""
+    body = {
+        "results": [
+            {
+                "query_key": "container_memory_max_usage_by_pod",
+                "note": "Datadog reports no cgroup high-water mark",
+                "payload": [],
+            }
+        ]
+    }
+    result, _ = _utilisation(_response(body=body))
+    assert result == {}
+
+
+def test_no_tenant_is_refused_before_the_call():
+    with pytest.raises(ApiServerMetricsError):
+        _utilisation(_response(body={"results": []}), tenant_id="")

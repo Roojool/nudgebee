@@ -162,7 +162,7 @@ class PrometheusMetricsService(MetricsService):
         period: timedelta,
         *,
         step: timedelta = timedelta(minutes=30),
-    ) -> PodsTimeData:
+    ) -> Dict[str, PodsTimeData]:
         """
         Gathers data from Prometheus for a specified object and resource.
 

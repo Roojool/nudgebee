@@ -280,6 +280,15 @@ class ApiServerMetricsConfigs:
         "0",
         "no",
     )
+    # Rightsizing asks api-server for metric KEYS instead of writing each provider's
+    # query language here. Default off for its first release: it changes where every
+    # number in a recommendation comes from, and the numbers are the product. Turning
+    # it off is the rollback, and needs no deploy of anything but this service.
+    rightsizing_via_utilisation = os.environ.get("ML_RIGHTSIZING_VIA_UTILISATION", "false").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    )
 
 
 class OTELConfig:

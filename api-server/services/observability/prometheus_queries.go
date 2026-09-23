@@ -232,6 +232,34 @@ func promAggWindow(startMs, endMs int64) (rangeStr, stepStr, rateStr string) {
 	return fmt.Sprintf("%ds", rangeSec), fmt.Sprintf("%ds", stepSec), fmt.Sprintf("%ds", rateSec)
 }
 
+// resolveAggWindows derives the range, step and rate windows for one request.
+//
+// An explicit step is the caller's sampling interval and outranks the one derived
+// from the range: the rightsizing strategy samples at 75s, and a percentile taken
+// over 5-minute averages is a different number.
+//
+// The rate window moves WITH it. A counter has no instantaneous value -- a usage
+// figure is the rise between two readings divided by the gap between them, so that
+// gap is half the definition of the number, not a performance knob. Honouring the
+// step while leaving the rate window at promAggWindow's 300s floor answers a
+// different question at the requested resolution: measured on dev, p99 CPU came back
+// 26% low across 88 pods, because a 15-second burst was diluted by five minutes of
+// idle either side of it, and rightsizing sizes containers on exactly that peak.
+// With both set, the per-pod keys reproduce the PromQL they replace to the decimal.
+//
+// No floor is applied to an explicit step. The caller's step IS its statement of how
+// finely it samples; the PromQL these keys replace has always used it unfloored; and
+// any floor chosen here would be a guess about a cluster's scrape interval. A step
+// finer than that interval yields no samples -- exactly what the old query does.
+func resolveAggWindows(startMs, endMs int64, explicitStep int) (rangeW, stepW, rateW string) {
+	rangeW, stepW, rateW = promAggWindow(startMs, endMs)
+	if explicitStep > 0 {
+		stepW = fmt.Sprintf("%ds", explicitStep)
+		rateW = stepW
+	}
+	return rangeW, stepW, rateW
+}
+
 func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[string]string {
 	queries := make(map[string]string)
 

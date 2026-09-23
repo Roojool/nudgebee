@@ -324,3 +324,136 @@ def query_metrics_via_api_server(
         entries = _to_vector_entries(payload_series) if instant else _to_series_entries(payload_series)
         span.set_attribute("series_count", len(entries))
         return entries
+
+
+def query_utilisation_via_api_server(
+    account_id: str,
+    tenant_id: str,
+    request: Dict[str, Any],
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    aggregate: str = "",
+    step: Union[str, int, None] = None,
+    pod_names: Optional[List[str]] = None,
+    metric_provider: str = "",
+    metric_provider_source: str = "",
+    timeout: Optional[int] = None,
+) -> Dict[str, List[dict]]:
+    """Ask api-server for metric KEYS, and let it decide which provider answers.
+
+    The difference from ``query_metrics_via_api_server`` is the whole point: that one
+    sends a query written in a provider's language, so the caller has to know which
+    provider the account uses and how to write for it. This one sends the names of the
+    metrics it wants — ``container_cpu_usage_by_pod`` — and api-server resolves the
+    account's default provider and builds the native query. Adding a provider stops
+    being a change here.
+
+    ``aggregate`` collapses each series to ONE point over the window ("max", "count",
+    "p99"); leaving it empty returns the time series. ``pod_names`` scopes to an exact
+    list — note that ``[]`` means "no pods", a different answer from omitting it.
+
+    ``metric_provider``/``metric_provider_source`` override the account's default and
+    are forwarded exactly as given, both or neither: api-server defaults an empty
+    source to the agent, so naming a provider alone would pin an HTTP-connected
+    Prometheus onto the agent path. They exist for the accounts whose default cannot
+    answer these keys at all (``RightsizingMetricsHint`` in api-server decides that).
+
+    Returns ``{query_key: [series]}`` in the relay's ``series_list_result`` shape, with
+    one entry per key that came back with data. A key the provider cannot answer is
+    absent and its reason is logged, so "unsupported" cannot be read as "measured
+    zero".
+
+    Raises the same three error classes as ``query_metrics_via_api_server``.
+    """
+    if not tenant_id:
+        raise ApiServerMetricsError(f"no tenant for account {account_id}; cannot call api-server")
+
+    metrics = list(request.get("metrics") or [])
+
+    with get_trace(__name__).start_as_current_span("query_utilisation_via_api_server") as span:
+        span.set_attribute("metric_keys", ",".join(metrics))
+        span.set_attribute("aggregate", aggregate or "")
+
+        inner: Dict[str, Any] = {
+            "account_id": str(account_id),
+            "start_time": _epoch_millis(start_time),
+            "end_time": _epoch_millis(end_time),
+            "request": request,
+        }
+        if aggregate:
+            inner["aggregate"] = aggregate
+        if step is not None and step != "":
+            inner["step"] = _step_seconds(step)
+            # The bucket and the resolution are the same thing for a collapsed answer,
+            # and api-server reads them from different fields.
+            inner["step_interval"] = _step_seconds(step)
+        if pod_names is not None:
+            inner["pod_names"] = pod_names
+        # Both or neither: see the docstring.
+        if metric_provider and metric_provider_source:
+            inner["metric_provider"] = metric_provider
+            inner["metric_provider_source"] = metric_provider_source
+
+        payload = {
+            "action": {"name": "metrics_aggregate_utilisation"},
+            "input": {"request": inner},
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-ACTION-TOKEN": ApiServerMetricsConfigs.token,
+            "x-tenant-id": str(tenant_id),
+        }
+        current_context = context.get_current()
+        if current_context:
+            inject(headers, current_context)
+
+        url = f"{ApiServerMetricsConfigs.url}/rpc/metrics"
+        try:
+            response = get_http_session_with_retry(retry_attempts=0).request(
+                "POST",
+                url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=timeout or ApiServerMetricsConfigs.timeout,
+            )
+        except Exception as e:
+            raise ApiServerMetricsError(f"utilisation request failed for keys {metrics}: {e}") from e
+
+        if response.status_code != 200:
+            message = _error_message(response)
+            if "agent not connected" in message.lower() or response.status_code == 503:
+                raise AgentNotConnectedError(message, response.status_code)
+            raise ApiServerMetricsError(
+                f"utilisation failed with status {response.status_code}: {message}", response.status_code
+            )
+
+        try:
+            body = response.json()
+        except ValueError as e:
+            raise ApiServerMetricsError(f"utilisation returned a non-JSON body for keys {metrics}: {e}") from e
+
+        out: Dict[str, List[dict]] = {}
+        for result in (body or {}).get("results") or []:
+            key = result.get("query_key") or ""
+            error = result.get("error")
+            if error:
+                if "agent not connected" in str(error).lower():
+                    raise AgentNotConnectedError(str(error), 200)
+                # One key failing is not the request failing: the others are real
+                # answers, and the caller decides whether it can proceed without this
+                # one. Raising here would lose them.
+                logger.warning(f"utilisation key '{key}' failed: {error}")
+                continue
+            note = result.get("note")
+            if note:
+                # The note is how a provider says "I have no such metric". Without it
+                # in the log, an absent key and a genuinely idle workload look alike.
+                logger.info(f"utilisation note for '{key}': {note}")
+            entries = _to_series_entries(result.get("payload") or [])
+            if entries:
+                out[key] = entries
+
+        span.set_attribute("keys_answered", len(out))
+        return out
