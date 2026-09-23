@@ -82,6 +82,38 @@ func TestBackgroundExecTool_StartReadKill_HappyPath(t *testing.T) {
 	}
 }
 
+func TestBackgroundExecTool_RunningForStopsAtExit(t *testing.T) {
+	tool := NewBackgroundExecTool(t.TempDir())
+	startedAt := time.Now().Add(-10 * time.Second)
+	finishedAt := time.Now().Add(-5 * time.Second)
+	sess := &backgroundSession{
+		id:         "bg-exited",
+		command:    "sleep",
+		workingDir: t.TempDir(),
+		startedAt:  startedAt,
+		finishedAt: finishedAt,
+		stdout:     newBoundedWriter(backgroundOutputCap),
+		stderr:     newBoundedWriter(backgroundOutputCap),
+		exited:     true,
+		exitCode:   0,
+	}
+	tool.sessions[sess.id] = sess
+
+	read := func() string {
+		resp := tool.Execute(context.Background(), map[string]any{"action": "read", "session_id": sess.id})
+		if resp.Status != "success" {
+			t.Fatalf("read failed: %+v", resp)
+		}
+		return resp.Data.(backgroundExecOutput).RunningFor
+	}
+
+	first := read()
+	time.Sleep(1100 * time.Millisecond)
+	if second := read(); second != first {
+		t.Fatalf("RunningFor changed after session exit: first=%q second=%q", first, second)
+	}
+}
+
 func TestBackgroundExecTool_KillStopsARunningProcess(t *testing.T) {
 	workspace := t.TempDir()
 	tool := NewBackgroundExecTool(workspace)

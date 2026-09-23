@@ -92,6 +92,7 @@ type backgroundSession struct {
 	command    string
 	workingDir string
 	startedAt  time.Time
+	finishedAt time.Time
 	cmd        *exec.Cmd
 	stdout     *boundedWriter
 	stderr     *boundedWriter
@@ -390,6 +391,7 @@ func (t *BackgroundExecTool) start(ctx context.Context, params backgroundExecInp
 		waitErr := cmd.Wait()
 		sess.mu.Lock()
 		defer sess.mu.Unlock()
+		sess.finishedAt = time.Now()
 		sess.exited = true
 		if waitErr != nil {
 			sess.exitErr = waitErr.Error()
@@ -444,6 +446,13 @@ func (t *BackgroundExecTool) lookup(sessionID string) (*backgroundSession, bool)
 	return sess, ok
 }
 
+func runningDuration(startedAt, finishedAt time.Time, exited bool) time.Duration {
+	if exited && !finishedAt.IsZero() {
+		return finishedAt.Sub(startedAt)
+	}
+	return time.Since(startedAt)
+}
+
 func (t *BackgroundExecTool) read(params backgroundExecInput) core.NBToolResponse {
 	sessionID := strings.TrimSpace(params.SessionID)
 	if sessionID == "" {
@@ -459,6 +468,7 @@ func (t *BackgroundExecTool) read(params backgroundExecInput) core.NBToolRespons
 
 	sess.mu.Lock()
 	exited := sess.exited
+	finishedAt := sess.finishedAt
 	exitCode := sess.exitCode
 	exitErr := sess.exitErr
 	sess.mu.Unlock()
@@ -472,7 +482,7 @@ func (t *BackgroundExecTool) read(params backgroundExecInput) core.NBToolRespons
 		StdoutDroppedBytes: stdoutDropped,
 		StderrDroppedBytes: stderrDropped,
 		StartedAt:          sess.startedAt.Format(time.RFC3339),
-		RunningFor:         time.Since(sess.startedAt).Round(time.Second).String(),
+		RunningFor:         runningDuration(sess.startedAt, finishedAt, exited).Round(time.Second).String(),
 	}
 
 	observation := fmt.Sprintf("Session %s: %s", sess.id, sess.command)

@@ -793,8 +793,13 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 			return '_'
 		}, sessionKey)
 		tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("code-analysis-%s", sanitizedID))
-		if err := os.MkdirAll(tempDir, 0755); err != nil {
+		if err := os.MkdirAll(tempDir, 0700); err != nil {
 			return nil, fmt.Errorf("failed to create session workspace directory: %w", err)
+		}
+		// MkdirAll leaves an existing workspace's permissions unchanged. Tighten
+		// it as well, since this directory can contain a private repository clone.
+		if err := os.Chmod(tempDir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to secure session workspace directory: %w", err)
 		}
 		repositoryPath = tempDir
 
