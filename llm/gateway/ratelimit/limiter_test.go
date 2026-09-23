@@ -11,7 +11,9 @@ import (
 
 type fakeSource struct{ limits []Limit }
 
-func (f fakeSource) LimitsFor(tenant, user string) []Limit { return f.limits }
+// fakeSource ignores the scope arguments and returns a fixed set; the Limiter's own
+// model guard is what these tests exercise.
+func (f fakeSource) LimitsFor(tenant, user, apiKey, model string) []Limit { return f.limits }
 
 func fixedNow(l *Limiter, t time.Time) { l.now = func() time.Time { return t } }
 
@@ -84,6 +86,61 @@ func TestLimiter_UserScopeLabel(t *testing.T) {
 	ex := l.Check(context.Background(), Scope{TenantID: "t", UserID: "u"})
 	require.NotNil(t, ex)
 	assert.Equal(t, "user", ex.Scope)
+}
+
+func TestLimiter_KeyScopedCap(t *testing.T) {
+	l := New(NewMemStore(), fakeSource{[]Limit{
+		{TenantID: "t", UserID: "u", APIKeyID: "k1", Metric: MetricRequests, Period: PeriodMinute, Value: 1, Enabled: true},
+	}})
+	fixedNow(l, time.Date(2026, 7, 10, 14, 30, 0, 0, time.UTC))
+	ctx := context.Background()
+
+	assert.Nil(t, l.Check(ctx, Scope{TenantID: "t", UserID: "u", APIKeyID: "k1"}))
+	ex := l.Check(ctx, Scope{TenantID: "t", UserID: "u", APIKeyID: "k1"})
+	require.NotNil(t, ex)
+	assert.Equal(t, "key", ex.Scope)
+}
+
+func TestLimiter_ModelScopedCapOnlyAppliesToThatModel(t *testing.T) {
+	l := New(NewMemStore(), fakeSource{[]Limit{
+		{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "gpt-5", Metric: MetricRequests, Period: PeriodMinute, Value: 1, Enabled: true},
+	}})
+	fixedNow(l, time.Date(2026, 7, 10, 14, 30, 0, 0, time.UTC))
+	ctx := context.Background()
+	gpt5 := Scope{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "gpt-5"}
+	haiku := Scope{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "claude-haiku-4-5-20251001"}
+
+	assert.Nil(t, l.Check(ctx, gpt5))
+	ex := l.Check(ctx, gpt5)
+	require.NotNil(t, ex)
+	assert.Equal(t, "key+model", ex.Scope)
+	// The other model shares the key but not the cap.
+	assert.Nil(t, l.Check(ctx, haiku))
+	assert.Nil(t, l.Check(ctx, haiku))
+}
+
+func TestLimiter_KeyCountersAreSeparate(t *testing.T) {
+	l := New(NewMemStore(), fakeSource{[]Limit{
+		{TenantID: "t", UserID: "u", Metric: MetricRequests, Period: PeriodMinute, Value: 10, Enabled: true},
+	}})
+	fixedNow(l, time.Date(2026, 7, 10, 14, 30, 0, 0, time.UTC))
+	ctx := context.Background()
+	// A user-scoped limit (APIKeyID == "") counts every key against one bucket.
+	assert.Nil(t, l.Check(ctx, Scope{TenantID: "t", UserID: "u", APIKeyID: "k1"}))
+	assert.Nil(t, l.Check(ctx, Scope{TenantID: "t", UserID: "u", APIKeyID: "k2"}))
+}
+
+func TestLimiter_ReconcileRespectsModelGuard(t *testing.T) {
+	l := New(NewMemStore(), fakeSource{[]Limit{
+		{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "gpt-5", Metric: MetricCost, Period: PeriodDay, Value: 1.0, Enabled: true},
+	}})
+	fixedNow(l, time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC))
+	ctx := context.Background()
+	other := Scope{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "claude-haiku-4-5-20251001"}
+
+	// Spend on another model must not fill the gpt-5 bucket.
+	l.Reconcile(ctx, other, 100, 5.00)
+	assert.Nil(t, l.Check(ctx, Scope{TenantID: "t", UserID: "u", APIKeyID: "k1", Model: "gpt-5"}))
 }
 
 func TestLimiter_DisabledAllowsAll(t *testing.T) {

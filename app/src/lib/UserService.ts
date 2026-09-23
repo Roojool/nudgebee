@@ -58,6 +58,7 @@ query GetUserByProviderAndAccountId($username: String!, $provider: String!) {
       credential
       auth_tenant_id
       expires_at
+      kind
       auth_status
       provider
       user_id
@@ -459,6 +460,7 @@ export async function getUserByUsernameAndAccountProviderAndCredential({
           tenant_id: row.auth_tenant_id,
           credential: row.credential,
           expires_at: row.expires_at,
+          kind: row.kind,
           user: {
             id: row.id,
             display_name: row.display_name,

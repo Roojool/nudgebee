@@ -239,6 +239,51 @@ func handleUserAction(actionPayload *ActionRequest, c *gin.Context, tracer *trac
 			ctx.GetLogger().Error("failed to publish audit event", "error", err)
 		}
 		return
+	case "users_update_token":
+		var request user.UserTokenUpdateRequest
+		var err error
+		// Comma-ok rather than a bare assertion: `user` is caller-supplied, so a string
+		// or array there would panic the handler instead of returning 400.
+		if tenantRequest["user"] == nil {
+			err = common.UnmarshalMapToStruct(tenantRequest, &request)
+		} else if userMap, ok := tenantRequest["user"].(map[string]any); ok {
+			err = common.UnmarshalMapToStruct(userMap, &request)
+		} else {
+			c.JSON(400, common.ErrorActionBadRequest("user must be an object"))
+			return
+		}
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		resp, err := user.UpdateUserAuthToken(ctx, request)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		c.JSON(200, resp)
+		if err := audit.PublishAuditEvent(ctx, audit.Audit{
+			TenantId:      ctx.GetSecurityContext().GetTenantId(),
+			UserId:        ctx.GetSecurityContext().GetUserId(),
+			EventTime:     time.Now(),
+			EventCategory: audit.EventCategoryUser,
+			EventType:     audit.EventTypeUserUpdate,
+			EventState:    request,
+			EventActor:    audit.EventActorApiService,
+			EventTarget:   "user_auth_token",
+			EventAction:   audit.EventActionUpdate,
+			EventStatus:   audit.EventStatusSuccess,
+		}); err != nil {
+			ctx.GetLogger().Error("failed to publish audit event", "error", err)
+		}
+		return
 	case "users_list_token":
 		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
 		if err != nil {

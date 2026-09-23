@@ -54,6 +54,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
+    // A gateway key authenticates LLM traffic only. Exchanging it for a session JWT
+    // would hand app-API access to a credential minted for model calls.
+    if (userAccount.kind === 'gateway') {
+      res
+        .status(401)
+        .json({ message: 'this is an AI Gateway key and cannot be exchanged for a session; use it as a bearer token against the gateway' });
+      return;
+    }
+
+    // expires_at is nullable (never expires). Enforced here as well as at the gateway —
+    // this path previously checked status only.
+    if (userAccount.expires_at && new Date(userAccount.expires_at).getTime() <= Date.now()) {
+      res.status(401).json({ message: 'token has expired; generate a new one in Settings → API Tokens' });
+      return;
+    }
+
     if (userAccount.user.status != 'active' || userAccount.status != 'active') {
       console.warn('user account is suspended', userAccount.id);
       res.status(401).json({ message: 'user is not active' });

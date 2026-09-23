@@ -53,9 +53,9 @@ func TestDBSink_RecordInsertsRow(t *testing.T) {
 	// One row → one multi-row INSERT into llm_gateway_usage with all columns.
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO llm_gateway_usage")).
 		WithArgs(
-			sqlmock.AnyArg(), // id
-			sqlmock.AnyArg(), // created_at
-			"", "", "", "",   // identity (empty until auth)
+			sqlmock.AnyArg(),   // id
+			sqlmock.AnyArg(),   // created_at
+			"", "", "", "", "", // identity (empty until auth)
 			"", sqlmock.AnyArg(), // session_id, attributes (JSON document)
 			"anthropic", "claude-haiku-4-5", // provider, model (resolved)
 			"", "", "", "", "", // requested_provider, requested_model, responded_model, routing_reason, routing_rule
@@ -164,4 +164,16 @@ func TestDBSink_ConnectAbortsOnClose(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close blocked — async connect did not abort on done")
 	}
+}
+
+func TestNewEvent_CarriesAPIKeyID(t *testing.T) {
+	ev := NewEvent(EventInput{
+		Provider: "openai", Model: "gpt-5", Method: "POST", Path: "/v1/chat/completions",
+		TenantID: "t", UserID: "u", TokenID: "claude-code", APIKeyID: "key-uuid-1",
+	})
+	assert.Equal(t, "key-uuid-1", ev.APIKeyID)
+}
+
+func TestUsageColumnsIncludeAPIKeyID(t *testing.T) {
+	assert.Contains(t, usageColumns, "api_key_id")
 }

@@ -67,7 +67,18 @@ func (s ratelimitStage) Handle(rc *RequestContext) (bool, error) {
 	if !s.limiter.Enabled() {
 		return false, nil
 	}
-	ex := s.limiter.Check(rc.Ctx, ratelimit.Scope{TenantID: rc.Identity.TenantID, UserID: rc.Identity.UserID})
+	// Quotas match the model the CLIENT asked for, as Reconcile does: routeStage has
+	// already rewritten rc.Model to the resolved one when a rule or alias matched.
+	model := rc.Decision.RequestedModel
+	if model == "" {
+		model = rc.Model
+	}
+	ex := s.limiter.Check(rc.Ctx, ratelimit.Scope{
+		TenantID: rc.Identity.TenantID,
+		UserID:   rc.Identity.UserID,
+		APIKeyID: rc.Identity.APIKeyID,
+		Model:    model,
+	})
 	if ex == nil {
 		return false, nil
 	}

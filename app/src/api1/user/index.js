@@ -224,27 +224,42 @@ query ListUserTokens {
       id
       name
       provider
+      kind
       status
       created_at
       accessed_at
+      expires_at
+      limits { metric period value model }
+      usage { requests tokens cost_usd }
     }
   }
 }
 `;
 
 const CREATE_USER_TOKEN = `
-mutation CreateUserToken($name: String!) {
-  users_create_token(user: {name: $name}) {
+mutation CreateUserToken($name: String!, $kind: String, $expires_at: String, $limits: [TokenLimitInput!]) {
+  users_create_token(user: {name: $name, kind: $kind, expires_at: $expires_at, limits: $limits}) {
     token
     name
+    kind
+    expires_at
   }
 }
 `;
 
 const DELETE_USER_TOKEN = `
-mutation DeleteUserToken($name: String!) {
-  users_delete_token(user: {name: $name}) {
+mutation DeleteUserToken($id: String, $name: String) {
+  users_delete_token(user: {id: $id, name: $name}) {
     name
+  }
+}
+`;
+
+const UPDATE_USER_TOKEN = `
+mutation UpdateUserToken($id: String!, $expires_at: String, $limits: [TokenLimitInput!]) {
+  users_update_token(user: {id: $id, expires_at: $expires_at, limits: $limits}) {
+    id
+    status
   }
 }
 `;
@@ -741,32 +756,47 @@ const apiUser = {
       };
     }
   },
-  createUserToken: async function (name) {
+  createUserToken: async function ({ name, kind, expiresAt = null, limits = [] }) {
     try {
-      const response = await queryGraphQL(CREATE_USER_TOKEN, 'CreateUserToken', { name: name });
+      const response = await queryGraphQL(CREATE_USER_TOKEN, 'CreateUserToken', {
+        name,
+        kind,
+        expires_at: expiresAt,
+        limits,
+      });
       return {
         data: response?.data?.data?.users_create_token,
         errors: response?.data?.errors,
       };
     } catch (err) {
-      return {
-        data: null,
-        errors: [err],
-      };
+      return { data: null, errors: [err] };
     }
   },
-  deleteUserToken: async function (name) {
+  deleteUserToken: async function ({ id = null, name = null }) {
     try {
-      const response = await queryGraphQL(DELETE_USER_TOKEN, 'DeleteUserToken', { name: name });
+      const response = await queryGraphQL(DELETE_USER_TOKEN, 'DeleteUserToken', { id, name });
       return {
         data: response?.data?.data?.users_delete_token,
         errors: response?.data?.errors,
       };
     } catch (err) {
+      return { data: null, errors: [err] };
+    }
+  },
+  // Leave expiresAt/limits undefined to keep them; '' clears the expiry, [] clears the limits.
+  updateUserToken: async function ({ id, expiresAt, limits }) {
+    try {
+      const response = await queryGraphQL(UPDATE_USER_TOKEN, 'UpdateUserToken', {
+        id,
+        expires_at: expiresAt,
+        limits,
+      });
       return {
-        data: null,
-        errors: [err],
+        data: response?.data?.data?.users_update_token,
+        errors: response?.data?.errors,
       };
+    } catch (err) {
+      return { data: null, errors: [err] };
     }
   },
 };

@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import ApiTokens from '@shared/settings/ApiTokens';
 
@@ -7,12 +8,22 @@ jest.mock('@utils/colors');
 
 jest.mock('@ui/Modal', () => ({
   __esModule: true,
-  Modal: ({ open, onClose: _onClose, title, children, actionButtons }) =>
+  Modal: ({ open, onClose, onConfirm, confirmText, title, children, actionButtons }) =>
     open ? (
       <div data-testid='modal'>
         <h2>{title}</h2>
         {children}
         {actionButtons}
+        {!actionButtons && confirmText && (
+          <>
+            <button onClick={onClose} data-testid='btn-Cancel'>
+              Cancel
+            </button>
+            <button onClick={onConfirm} data-testid={`btn-${confirmText}`}>
+              {confirmText}
+            </button>
+          </>
+        )}
       </div>
     ) : null,
 }));
@@ -36,6 +47,52 @@ jest.mock('@ui/Input', () => ({
       onChange={(e) => onChange(e.target.value)}
       data-testid={`field-${label}`}
     />
+  ),
+}));
+
+jest.mock('@ui/Select', () => ({
+  __esModule: true,
+  Select: ({ label, value, onChange, options }) => (
+    <select aria-label={label} value={value ?? ''} onChange={(e) => onChange(e.target.value)} data-testid={`select-${label}`}>
+      {options.map((o) => {
+        const opt = typeof o === 'string' ? { value: o, label: o } : o;
+        return (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        );
+      })}
+    </select>
+  ),
+}));
+
+jest.mock('@ui/Banner', () => ({
+  __esModule: true,
+  Banner: ({ tone, title, message }) => (
+    <div data-testid={`banner-${tone}`}>
+      {title}
+      {message}
+    </div>
+  ),
+}));
+
+jest.mock('@ui/EmptyState', () => ({
+  __esModule: true,
+  EmptyState: ({ title }) => <div data-testid='empty-state'>{title}</div>,
+}));
+
+jest.mock('@shared/navigation/Tabs', () => ({
+  __esModule: true,
+  default: ({ options, value, onChange }) => (
+    <div role='tablist'>
+      {(options?.tabOptions || [])
+        .filter((o) => !o.hidden)
+        .map((o) => (
+          <button key={o.value} role='tab' aria-selected={o.value === value} onClick={() => onChange(o.value)}>
+            {o.text}
+          </button>
+        ))}
+    </div>
   ),
 }));
 
@@ -74,12 +131,16 @@ jest.mock('@lib/externalUrls', () => ({
   getAppBaseUrl: () => 'http://localhost:3000',
 }));
 
+const mockListUserTokens = jest.fn().mockResolvedValue({ data: [] });
+const mockCreateUserToken = jest.fn().mockResolvedValue({ data: { token: 'new-token-value-xyz' } });
+const mockDeleteUserToken = jest.fn().mockResolvedValue({ data: {} });
+
 jest.mock('@api1/user/', () => ({
   __esModule: true,
   default: {
-    listUserTokens: jest.fn().mockResolvedValue({ data: [] }),
-    createUserToken: jest.fn().mockResolvedValue({ data: { token: 'new-token-value-xyz' } }),
-    deleteUserToken: jest.fn().mockResolvedValue({ data: {} }),
+    listUserTokens: (...args) => mockListUserTokens(...args),
+    createUserToken: (...args) => mockCreateUserToken(...args),
+    deleteUserToken: (...args) => mockDeleteUserToken(...args),
   },
 }));
 
@@ -96,6 +157,9 @@ describe('ApiTokens', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'new-token-value-xyz' } });
+    mockDeleteUserToken.mockResolvedValue({ data: {} });
   });
 
   it('renders modal when open is true', async () => {
@@ -111,54 +175,202 @@ describe('ApiTokens', () => {
     expect(screen.queryByTestId('modal')).not.toBeInTheDocument();
   });
 
-  it('shows empty state message when no tokens', async () => {
+  it('shows empty state when no tokens', async () => {
     render(<ApiTokens {...defaultProps} />);
     await waitFor(() => {
-      expect(screen.getByText('No API tokens found. Create your first token to get started.')).toBeInTheDocument();
+      expect(screen.getByTestId('empty-state')).toBeInTheDocument();
+    });
+    expect(screen.getByText('No platform keys yet')).toBeInTheDocument();
+  });
+
+  it('shows Create Token button initially', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /create token/i })).toBeInTheDocument();
     });
   });
 
-  it('shows Create New Token button initially', async () => {
-    render(<ApiTokens {...defaultProps} />);
+  it('splits keys into platform, gateway and all-access tabs', async () => {
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        {
+          id: '1',
+          name: 'nbctl',
+          kind: 'platform',
+          status: 'active',
+          created_at: '2026-09-01T00:00:00Z',
+          accessed_at: null,
+          expires_at: null,
+          limits: [],
+        },
+        {
+          id: '2',
+          name: 'claude-code',
+          kind: 'gateway',
+          status: 'active',
+          created_at: '2026-09-02T00:00:00Z',
+          accessed_at: null,
+          expires_at: '2026-12-21T00:00:00Z',
+          limits: [{ metric: 'cost', period: 'month', value: 20, model: '' }],
+        },
+        {
+          id: '3',
+          name: 'old',
+          kind: 'platform',
+          status: 'active',
+          created_at: '2025-01-01T00:00:00Z',
+          accessed_at: null,
+          expires_at: null,
+          limits: [],
+        },
+      ],
+    });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    expect(await screen.findByRole('tab', { name: /platform keys/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /ai gateway keys/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /all-access keys/i })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: /legacy/i })).not.toBeInTheDocument();
+  });
+
+  it('an all-access key create sends kind=all and carries limits', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'shared', kind: 'all' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    // The active tab is the kind Create mints, so 'all' is only reachable deliberately.
+    await userEvent.click(await screen.findByRole('tab', { name: /all-access keys/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'shared');
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    await userEvent.type(screen.getByLabelText(/value/i), '20');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
     await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
+      expect(mockCreateUserToken).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'shared',
+          kind: 'all',
+          limits: [expect.objectContaining({ metric: 'cost', period: 'month', value: 20 })],
+        })
+      );
     });
   });
 
-  it('shows create token form when Create New Token is clicked', async () => {
-    render(<ApiTokens {...defaultProps} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByTestId('btn-Create New Token'));
-    expect(screen.getByTestId('field-Token Name')).toBeInTheDocument();
-    expect(screen.getByTestId('btn-Create Token')).toBeInTheDocument();
+  it('a platform key create sends no limits', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'nbctl', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ name: 'nbctl', kind: 'platform', limits: [] }));
   });
 
-  it('calls createUserToken and shows success on token creation', async () => {
-    const { toast } = require('@ui/Toast');
-    const apiUser = require('@api1/user/').default;
-    render(<ApiTokens {...defaultProps} />);
-    await waitFor(() => {
-      expect(screen.getByTestId('btn-Create New Token')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByTestId('btn-Create New Token'));
-    fireEvent.change(screen.getByTestId('field-Token Name'), { target: { value: 'My Token' } });
-    fireEvent.click(screen.getByTestId('btn-Create Token'));
-    await waitFor(() => {
-      expect(apiUser.createUserToken).toHaveBeenCalledWith('My Token');
-      expect(toast.success).toHaveBeenCalledWith('API Token created successfully');
-    });
+  it('a custom expiry in hours sends an expires_at roughly that far ahead', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'nbctl', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.selectOptions(screen.getByLabelText(/^expires$/i), 'custom');
+    await userEvent.selectOptions(screen.getByLabelText(/^unit$/i), 'hours');
+    await userEvent.type(screen.getByLabelText(/^duration$/i), '1');
+    const before = Date.now();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    const after = Date.now();
+    expect(mockCreateUserToken).toHaveBeenCalledTimes(1);
+    const [payload] = mockCreateUserToken.mock.calls[0];
+    const expiresAtMs = new Date(payload.expiresAt).getTime();
+    const oneHourMs = 60 * 60 * 1000;
+    // Range, not an exact string — this test must not flake on clock drift between
+    // `before`/`after` and the component's own `Date.now()` call.
+    expect(expiresAtMs).toBeGreaterThanOrEqual(before + oneHourMs - 5000);
+    expect(expiresAtMs).toBeLessThanOrEqual(after + oneHourMs + 5000);
   });
 
-  it('displays tokens in a table when tokens exist', async () => {
-    const apiUser = require('@api1/user/').default;
-    apiUser.listUserTokens.mockResolvedValue({
-      data: [{ id: 'tok-1', name: 'My Token', created_at: '2024-01-01T00:00:00Z', accessed_at: null }],
+  it('leaves Create disabled when the custom expiry is empty or zero', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
+    await userEvent.selectOptions(screen.getByLabelText(/^expires$/i), 'custom');
+    // Empty custom value.
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+    // Zero is just as invalid as empty.
+    await userEvent.type(screen.getByLabelText(/^duration$/i), '0');
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+  });
+
+  it('a gateway key create filters out zero-value limit rows', async () => {
+    mockListUserTokens.mockResolvedValue({ data: [] });
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-gw-xyz', name: 'claude-code', kind: 'gateway' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    // Switch to the AI Gateway tab before creating so the dialog opens for kind='gateway'.
+    await userEvent.click(await screen.findByRole('tab', { name: /ai gateway keys/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'claude-code');
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    // Leave the value at '' (invalid, filtered out) and add a second, valid limit.
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    const valueInputs = screen.getAllByLabelText(/value/i);
+    await userEvent.type(valueInputs[1], '20');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'claude-code',
+        kind: 'gateway',
+        limits: [expect.objectContaining({ value: 20 })],
+      })
+    );
+  });
+
+  it('each tab lists only its own kind', async () => {
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        {
+          id: '1',
+          name: 'nbctl',
+          kind: 'platform',
+          status: 'active',
+          created_at: '2026-09-01T00:00:00Z',
+          accessed_at: null,
+          expires_at: null,
+          limits: [],
+        },
+        {
+          id: '2',
+          name: 'shared',
+          kind: 'all',
+          status: 'active',
+          created_at: '2026-09-02T00:00:00Z',
+          accessed_at: null,
+          expires_at: null,
+          limits: [],
+        },
+      ],
+    });
+    render(<ApiTokens {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText('nbctl')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('shared')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('tab', { name: /all-access keys/i }));
+    expect(await screen.findByText('shared')).toBeInTheDocument();
+    expect(screen.queryByText('nbctl')).not.toBeInTheDocument();
+  });
+
+  it('revokes a key by id', async () => {
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        { id: 'tok-1', name: 'My Token', kind: 'platform', created_at: '2024-01-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [] },
+      ],
     });
     render(<ApiTokens {...defaultProps} />);
     await waitFor(() => {
       expect(screen.getByText('My Token')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /revoke/i }));
+    fireEvent.click(screen.getByTestId('btn-Delete'));
+    await waitFor(() => {
+      expect(mockDeleteUserToken).toHaveBeenCalledWith({ id: 'tok-1' });
     });
   });
 

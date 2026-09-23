@@ -2396,6 +2396,12 @@ type Mutation {
 }
 
 type Mutation {
+  users_update_token(
+    user: UserTokenUpdateRequest
+  ): UserTokenUpdateResponse
+}
+
+type Mutation {
   users_create(
     user: users_insert_one_input!
   ): users_insert_one_output
@@ -4719,10 +4725,27 @@ input FetchLogLabelValuesRequest {
 
 input UserTokenCreateRequest {
   name: String!
+  kind: String
+  expires_at: String
+  limits: [TokenLimitInput!]
 }
 
 input UserTokenDeleteRequest {
-  name: String!
+  id: String
+  name: String
+}
+
+input UserTokenUpdateRequest {
+  id: String!
+  expires_at: String
+  limits: [TokenLimitInput!]
+}
+
+input TokenLimitInput {
+  metric: String!
+  period: String!
+  value: Float!
+  model: String
 }
 
 input TraceServiceMapRequest {
@@ -8322,10 +8345,18 @@ type OutputLogLabelValue {
 type UserTokenCreateResponse {
   name: String!
   token: String!
+  kind: String
+  expires_at: String
 }
 
 type UserTokenDeleteResponse {
-  name: String!
+  name: String
+  status: String
+}
+
+type UserTokenUpdateResponse {
+  id: String!
+  status: String!
 }
 
 type UserAuthTokenResponse {
@@ -8336,9 +8367,26 @@ type UserAuthToken {
   id: String
   name: String
   provider: String
+  kind: String
   status: String
   created_at: timestamp
   accessed_at: timestamp
+  expires_at: timestamp
+  limits: [TokenLimit]
+  usage: TokenUsage
+}
+
+type TokenLimit {
+  metric: String
+  period: String
+  value: Float
+  model: String
+}
+
+type TokenUsage {
+  requests: Int
+  tokens: Int
+  cost_usd: Float
 }
 
 type ServiceApplicationId {

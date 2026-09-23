@@ -25,14 +25,25 @@ type UserDeleteResponse struct {
 
 type UserTokenCreateRequest struct {
 	Name string `json:"name" mapstructure:"name"`
+	// Kind is platform | gateway | all; empty defaults to all.
+	Kind string `json:"kind" mapstructure:"kind"`
+	// ExpiresAt is RFC3339; nil or "" means the key never expires.
+	ExpiresAt *string `json:"expires_at" mapstructure:"expires_at"`
+	// Limits need a gateway-reaching key; 400 on a platform key.
+	Limits []TokenLimit `json:"limits" mapstructure:"limits"`
 }
 
 type UserTokenCreateResponse struct {
-	Name  string `json:"name" mapstructure:"name"`
-	Token string `json:"token" mapstructure:"token"`
+	Name      string  `json:"name" mapstructure:"name"`
+	Token     string  `json:"token" mapstructure:"token"`
+	Kind      string  `json:"kind" mapstructure:"kind"`
+	ExpiresAt *string `json:"expires_at" mapstructure:"expires_at"`
 }
 
 type UserTokenDeleteRequest struct {
+	// Id is preferred. Name is kept for back-compat with clients that predate the
+	// kind column, which made (user, name) ambiguous.
+	Id   string `json:"id" mapstructure:"id"`
 	Name string `json:"name" mapstructure:"name"`
 }
 
@@ -41,17 +52,39 @@ type UserTokenDeleteResponse struct {
 	Status string `json:"status" mapstructure:"status"`
 }
 
+type UserTokenUpdateRequest struct {
+	Id        string       `json:"id" mapstructure:"id"`
+	ExpiresAt *string      `json:"expires_at" mapstructure:"expires_at"`
+	Limits    []TokenLimit `json:"limits" mapstructure:"limits"`
+}
+
+type UserTokenUpdateResponse struct {
+	Id     string `json:"id" mapstructure:"id"`
+	Status string `json:"status" mapstructure:"status"`
+}
+
 type UserAuthTokenResponse struct {
 	Tokens []UserAuthToken `json:"tokens" mapstructure:"tokens"`
 }
 
 type UserAuthToken struct {
-	Id         string  `json:"id" db:"id"`
-	Name       string  `json:"name" db:"name"`
-	Provider   string  `json:"provider" db:"provider"`
-	Status     string  `json:"status" db:"status"`
-	CreatedAt  string  `json:"created_at" db:"created_at"`
-	AccessedAt *string `json:"accessed_at" db:"accessed_at"`
+	Id         string       `json:"id" db:"id"`
+	Name       string       `json:"name" db:"name"`
+	Provider   string       `json:"provider" db:"provider"`
+	Kind       string       `json:"kind" db:"kind"`
+	Status     string       `json:"status" db:"status"`
+	CreatedAt  string       `json:"created_at" db:"created_at"`
+	AccessedAt *string      `json:"accessed_at" db:"accessed_at"`
+	ExpiresAt  *string      `json:"expires_at" db:"expires_at"`
+	Limits     []TokenLimit `json:"limits"`
+	Usage      *TokenUsage  `json:"usage"`
+}
+
+// TokenUsage is a gateway key's consumption in the current calendar month.
+type TokenUsage struct {
+	Requests int64   `json:"requests"`
+	Tokens   int64   `json:"tokens"`
+	CostUsd  float64 `json:"cost_usd"`
 }
 
 type UserTenantRolesRequest struct {

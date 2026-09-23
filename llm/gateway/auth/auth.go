@@ -35,6 +35,9 @@ type Identity struct {
 	AccountID string
 	UserID    string
 	TokenID   string // opaque id/name of the token used (not the secret)
+	// APIKeyID is the user_auths row id of the key that authenticated. Stable across
+	// renames, unlike TokenID, so quotas and per-key usage key on it.
+	APIKeyID string
 }
 
 // Validator resolves a raw bearer token to an identity. ok=false means the token
