@@ -188,7 +188,7 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
         open={isTicketFormOpen}
         handleClose={closeTicketForm}
         onClose={closeTicketForm}
-        onSuccess={({ ticketId }: any = {}) => snackbar.success(`Ticket ${ticketId || ''} created`)}
+        onSuccess={() => {}}
         onFailure={(res: any) => snackbar.error(`Failed! ${res}.`)}
         ticketData={{
           subject: `Cloud Posture - ${cloudRuleTitle(ticketTarget?.rule?.ruleName || '', undefined)}`,

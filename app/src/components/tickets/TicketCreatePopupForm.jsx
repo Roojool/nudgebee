@@ -6,6 +6,11 @@ import TicketFormSection from './TicketFormSection';
 import apiTickets from '@api1/tickets';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from '@utils/colors';
+import { useBrandingConfig } from '@hooks/useTenantBranding';
+
+// The ticket URL comes from an external tool's API response; only http(s) links
+// are safe to render as an href (blocks javascript: and similar schemes).
+const isHttpUrl = (url) => typeof url === 'string' && /^https?:\/\//i.test(url);
 
 // Severity is sourced from the meta field tagged group === 'severity' and
 // removed from additional_fields so a duplicate can't shadow the typed slot
@@ -92,6 +97,7 @@ const AddModalForm = ({
   const [ticketState, setTicketState] = useState({});
   const [error, setError] = useState(false);
   const [forceValidate, setForceValidate] = useState(false);
+  const { title: brandTitle } = useBrandingConfig();
 
   const createTicket = async function () {
     setForceValidate(true);
@@ -148,6 +154,25 @@ const AddModalForm = ({
             );
           } else {
             snackbar.warning(responseData?.message);
+          }
+        } else if (responseData?.action == 'created_unlinked') {
+          // Created in the external tool but couldn't be saved locally.
+          // Treated as a warning, not a failure, so the user isn't tempted to
+          // retry — a retry would create a second real ticket upstream, since
+          // there's no local row here for the next attempt's dedup check to find.
+          handleCancel();
+          const ticketUrl = responseData?.url;
+          if (isHttpUrl(ticketUrl)) {
+            snackbar.warning(
+              <span>
+                {responseData?.message}{' '}
+                <a href={ticketUrl} target='_blank' rel='noopener noreferrer' style={{ color: 'inherit', textDecoration: 'underline' }}>
+                  View ticket
+                </a>
+              </span>
+            );
+          } else {
+            snackbar.warning(responseData?.message || `Ticket created upstream but could not be linked in ${brandTitle}.`);
           }
         } else {
           onFailure(responseData?.message || extractCreateErrorMessage(res) || 'Failed to create ticket');
