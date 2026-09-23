@@ -515,6 +515,29 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// read the node-agent's eBPF metrics, so they answer only where that agent runs.
 		case "workload_http_latency_p99":
 			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s"}[5m])))`, safeMeta.Name, safeMeta.Namespace)
+		// Request rate and mean latency for the whole workload, probes excluded.
+		//
+		// Siblings of workload_http_latency_p99 above: one series, no path or method
+		// dimension, at the request's own resolution. The per-path http_throughput /
+		// http_latency_sum keys answer a different question — they shape the latency
+		// TABLE, where the path is the point.
+		//
+		// The probe exclusion is part of the key's meaning, not a caller's filter; see
+		// metrics_health_endpoints.go for the measurement that forced it.
+		case "workload_http_request_rate":
+			queries[metricKey] = fmt.Sprintf(
+				`sum(rate(container_http_requests_total{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`]))`,
+				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex())
+		case "workload_http_latency_mean":
+			// sum/count, not a quantile: the mean is what a capacity model wants, and
+			// it is the one statistic a histogram gives exactly rather than by
+			// interpolation. Division is guarded by `> 0` on the denominator so an
+			// idle window is absent rather than +Inf.
+			queries[metricKey] = fmt.Sprintf(
+				`sum(rate(container_http_requests_duration_seconds_total_sum{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`]))`+
+					` / (sum(rate(container_http_requests_duration_seconds_total_count{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`])) > 0)`,
+				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex(),
+				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex())
 		case "cpu_throttling":
 			queries[metricKey] = fmt.Sprintf(`sum by (container_id) (rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__ container_id=~".*%s/%s.*"}[5m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request":

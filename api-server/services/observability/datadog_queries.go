@@ -158,6 +158,19 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 			if meta.Name != "" {
 				queries[metricKey] = fmt.Sprintf("p99:trace.http.server.request{service:%s}", meta.Name)
 			}
+		// The same two concepts, from APM rather than from eBPF counters. Datadog's
+		// trace metrics already exclude what the probe list excludes on Prometheus:
+		// kubelet probes and /metrics scrapes are not traced, because nothing
+		// instruments them. So the definition holds without a path filter, which is
+		// the point of naming the metric rather than the query.
+		case "workload_http_request_rate":
+			if meta.Name != "" {
+				queries[metricKey] = fmt.Sprintf("sum:trace.http.server.request.hits{service:%s}.as_rate()", meta.Name)
+			}
+		case "workload_http_latency_mean":
+			if meta.Name != "" {
+				queries[metricKey] = fmt.Sprintf("avg:trace.http.server.request{service:%s}", meta.Name)
+			}
 		case "cpu_request":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.cpu.requests{%s}%s", filterStr, groupBy)
 		case "cpu_limit":
