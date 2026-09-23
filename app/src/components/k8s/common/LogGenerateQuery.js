@@ -8,7 +8,9 @@ export const generateQuery = (logProvider, chips, operations, metricName = '', a
     (logProvider === 'newrelic' && providerType === 'logs') ||
     (logProvider === 'dynatrace' && providerType === 'logs') ||
     logProvider === 'ES' ||
-    (logProvider === 'solarwinds' && providerType === 'logs');
+    (logProvider === 'solarwinds' && providerType === 'logs') ||
+    (logProvider === 'openobserve' && providerType === 'logs') ||
+    (logProvider === 'cubeapm' && providerType === 'logs');
 
   const hasValidOperations = isLogsProvider && operations?.some((op) => op.value && op.value.trim() !== '');
 
@@ -150,6 +152,8 @@ export const generateQuery = (logProvider, chips, operations, metricName = '', a
     logProvider == 'prometheus' ||
     logProvider == 'chronosphere' ||
     logProvider == 'victoria-metrics' ||
+    (logProvider === 'openobserve' && providerType === 'metrics') ||
+    (logProvider === 'cubeapm' && providerType === 'metrics') ||
     (logProvider === 'newrelic' && providerType === 'traces')
   ) {
     const promFilters = chips.map((chip) => {
@@ -219,7 +223,9 @@ export const generateQuery = (logProvider, chips, operations, metricName = '', a
     (logProvider === 'newrelic' && providerType == 'logs') ||
     (logProvider === 'dynatrace' && providerType == 'logs') ||
     logProvider === 'ES' ||
-    (logProvider === 'solarwinds' && providerType == 'logs')
+    (logProvider === 'solarwinds' && providerType == 'logs') ||
+    (logProvider === 'openobserve' && providerType == 'logs') ||
+    (logProvider === 'cubeapm' && providerType == 'logs')
   ) {
     const operatorMap = {
       // Legacy UI values (kept for persisted state + providers still emitting them)
