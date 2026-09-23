@@ -153,6 +153,16 @@ query ListAccountIntegrations {
     }
   }
 }`;
+/** One vm_scan_status row — see #38466. status is 'started' | 'completed' | 'failed'. */
+export interface VmScanStatus {
+  cloudResourceId: string;
+  status: string;
+  error: string;
+  packageCount: number;
+  findingCount: number;
+  scannedAt: string;
+  updatedAt: string;
+}
 
 const LIST_VMS = `
 query ListVms($limit: Int, $offset: Int) {
@@ -311,6 +321,15 @@ mutation ScanVm($accountId: String!, $datasourceId: String!, $cloudResourceId: S
 const SCAN_VM_ACCOUNT = `
 mutation ScanVmAccount($accountId: String!) {
   security_scan_vm_account(object: {
+    account_id: $accountId
+  }) {
+    data
+  }
+}`;
+
+const LIST_VM_SCAN_STATUSES = `
+query ListVmScanStatuses($accountId: String!) {
+  security_list_vm_scan_statuses(object: {
     account_id: $accountId
   }) {
     data
@@ -741,6 +760,29 @@ const apiVm = {
       throw new Error(errors[0]?.message || 'Failed to start account scan');
     }
     return response?.data?.data?.security_scan_vm_account?.data || [];
+  },
+
+  /**
+   * Each VM's most recent scan outcome for the account, so a row can show
+   * "Scanning…" / "Scan failed" instead of just an ageing Last Scan
+   * timestamp with no explanation (see #38466).
+   */
+  async getScanStatuses(accountId: string): Promise<VmScanStatus[]> {
+    const response = await queryGraphQL(LIST_VM_SCAN_STATUSES, 'ListVmScanStatuses', { accountId });
+    const errors = response?.data?.errors;
+    if (errors?.length) {
+      throw new Error(errors[0]?.message || 'Failed to load VM scan statuses');
+    }
+    const rows = response?.data?.data?.security_list_vm_scan_statuses?.data || [];
+    return rows.map((row: any) => ({
+      cloudResourceId: row.cloud_resource_id,
+      status: row.status,
+      error: row.error,
+      packageCount: row.package_count,
+      findingCount: row.finding_count,
+      scannedAt: row.scanned_at,
+      updatedAt: row.updated_at,
+    }));
   },
 };
 

@@ -1933,6 +1933,12 @@ type Mutation {
   ): security_scan_vm_account_output
 }
 
+type Query {
+  security_list_vm_scan_statuses(
+    object: security_list_vm_scan_statuses_input!
+  ): security_list_vm_scan_statuses_output
+}
+
 type Mutation {
   slo_config_create(
     request: SLOCreateRequest!
@@ -3458,6 +3464,10 @@ input security_scan_vm_input {
 }
 
 input security_scan_vm_account_input {
+  account_id: String!
+}
+
+input security_list_vm_scan_statuses_input {
   account_id: String!
 }
 
@@ -6922,6 +6932,10 @@ type security_scan_vm_output {
 }
 
 type security_scan_vm_account_output {
+  data: [jsonb]!
+}
+
+type security_list_vm_scan_statuses_output {
   data: [jsonb]!
 }
 

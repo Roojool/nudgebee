@@ -62,7 +62,10 @@ type AgentStore interface {
 	UpdateAgentVersion(ctx context.Context, accountID, agentType, version, commit, buildTime, protocolVersion string) error
 	UpdateDatasourceHealth(ctx context.Context, accountID, agentType string, datasources map[string]any) error
 	UpsertAgentDatasources(ctx context.Context, accountID, agentType string, datasources []AgentDatasource) error
-	UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error
+	// UpdateDatasourceMetadata returns the metadata keys whose UPDATE
+	// matched zero rows, so the caller can retry a metadata message that
+	// raced the matching datasource_inventory INSERT (see #38718).
+	UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) ([]string, error)
 	QueryProxyDatasources(ctx context.Context, accountID string) ([]ProxyDatasource, error)
 	// GetWorkspaceToolConfig returns integration config values for the given account + integration type.
 	// If configName is non-empty, only configs whose name matches (case-insensitive) are returned.
@@ -666,9 +669,18 @@ func (p *pgStore) removeStaleAgentDatasources(ctx context.Context, accountID, te
 
 // UpdateDatasourceMetadata persists version and metadata from proxy agent datasources
 // into the integrations.labels JSONB column.
-func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error {
+//
+// Returns the metadata keys (dsID, not the derived dsName) whose UPDATE
+// matched zero rows — the integrations row for that datasource doesn't
+// exist yet, most often because this metadata message raced the
+// corresponding datasource_inventory message on first connect (see
+// register.go's dispatch and #38718). The caller retries those keys; a
+// later datasource_inventory INSERT never overwrites labels on conflict
+// (see UpsertAgentDatasources), so once the row exists a retried UPDATE
+// here still lands correctly.
+func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) ([]string, error) {
 	if len(metadata) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Look up tenant_id from agent table
@@ -677,9 +689,10 @@ func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agent
 		SELECT tenant FROM agent WHERE cloud_account_id = $1 AND "type" = $2
 	`, accountID, agentType)
 	if err != nil {
-		return fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
+		return nil, fmt.Errorf("failed to get tenant for account %s: %w", accountID, err)
 	}
 
+	var notFound []string
 	for dsID, meta := range metadata {
 		// Extract datasource name from ID (e.g., "local:my-postgres" → "my-postgres")
 		dsName := dsID
@@ -692,17 +705,20 @@ func (p *pgStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agent
 			continue
 		}
 
-		_, err = p.db.ExecContext(ctx, `
+		res, err := p.db.ExecContext(ctx, `
 			UPDATE integrations
 			SET labels = $1::jsonb, updated_at = NOW()
 			WHERE name = $2 AND source = 'agent' AND tenant_id = $3
 		`, string(metaJSON), dsName, tenantID)
 		if err != nil {
-			return fmt.Errorf("failed to update metadata for datasource %s: %w", dsName, err)
+			return notFound, fmt.Errorf("failed to update metadata for datasource %s: %w", dsName, err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			notFound = append(notFound, dsID)
 		}
 	}
 
-	return nil
+	return notFound, nil
 }
 
 // proxyTypeToIntegrationType maps proxy type + datasource type to the integration type name

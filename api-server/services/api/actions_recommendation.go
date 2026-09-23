@@ -227,6 +227,51 @@ func handleRecommendationAction(actionPayload *ActionRequest, c *gin.Context, tr
 
 		c.JSON(200, resp)
 		return
+	case "security_list_vm_scan_statuses":
+		var request vmpackage.ListScanStatusesRequest
+		var err error
+		if mlRequest["object"] == nil {
+			err = common.UnmarshalMapToStruct(mlRequest, &request)
+		} else if objMap, ok := mlRequest["object"].(map[string]interface{}); ok {
+			err = common.UnmarshalMapToStruct(objMap, &request)
+		} else {
+			c.JSON(400, common.ErrorActionBadRequest("invalid object format"))
+			return
+		}
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+
+		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		if !ctx.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeRead) {
+			c.JSON(400, common.ErrorActionBadRequest("unauthorized"))
+			return
+		}
+
+		rows, err := vmpackage.ListScanStatusesForAccount(request.AccountId)
+		if err != nil {
+			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
+			return
+		}
+		data := make([]map[string]any, 0, len(rows))
+		for _, r := range rows {
+			data = append(data, map[string]any{
+				"cloud_resource_id": r.CloudResourceID,
+				"status":            r.Status,
+				"error":             r.Error,
+				"package_count":     r.PackageCount,
+				"finding_count":     r.FindingCount,
+				"scanned_at":        r.ScannedAt,
+				"updated_at":        r.UpdatedAt,
+			})
+		}
+		c.JSON(200, vmpackage.ListScanStatusesResponse{Data: data})
+		return
 	case "recommendation_job_create":
 		var request recommendation.RecommendationJobCreateRequest
 		var err error
@@ -614,11 +659,20 @@ func scanVmAccount(ctx *security.RequestContext, req vmpackage.ScanAccountReques
 		return vmpackage.ScanAccountResponse{}, err
 	}
 
-	datasources, err := vmpackage.ListDiscoveryDatasourcesForAccount(dbManager, req.AccountId)
+	datasources, ineligible, err := vmpackage.ListDiscoveryDatasourcesForAccount(dbManager, req.AccountId)
 	if err != nil {
 		return vmpackage.ScanAccountResponse{}, err
 	}
 	if len(datasources) == 0 {
+		if ineligible > 0 {
+			// An agent is connected (integration exists, enabled) but its
+			// labels haven't synced yet — a different problem than "no
+			// agent configured", and one a restart usually self-heals. See
+			// #38718: the old single error string sent users hunting for a
+			// nonexistent missing-integration problem.
+			return vmpackage.ScanAccountResponse{}, common.ErrorBadRequest(
+				"a discovery agent is connected but hasn't yet reported scan targets — try again shortly, or restart the proxy agent")
+		}
 		return vmpackage.ScanAccountResponse{}, common.ErrorBadRequest("no discovery agent is configured to scan this account")
 	}
 

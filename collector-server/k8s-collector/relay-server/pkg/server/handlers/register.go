@@ -812,8 +812,27 @@ func handleDatasourceInventory(ctx context.Context, store db.AgentStore, account
 	logger.Info("agent datasources registered", "account_id", accountID, "datasource_count", len(msg.Datasources))
 }
 
+// metadataRetryDelays are the backoffs between retries of a metadata update
+// that raced its datasource_inventory counterpart (see
+// datasourceMetadataRetryLimit's doc comment). Sums to ~7.5s; the dispatch
+// in handleAgentMessage runs datasource_inventory and datasource_metadata
+// as independent goroutines with no ordering guarantee, so inventory's
+// INSERT usually lands within a few hundred ms of metadata's UPDATE losing
+// the race.
+var metadataRetryDelays = []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second}
+
 // handleDatasourceMetadata processes metadata messages from proxy agents
 // and persists version/connection info to the integrations table.
+//
+// datasource_inventory and datasource_metadata are two independent
+// unsolicited messages with no ordering guarantee (see handleAgentMessage's
+// dispatch below): if metadata arrives before inventory's INSERT has
+// created the integrations row, the UPDATE here matches zero rows and the
+// labels are lost — the row that inventory then INSERTs keeps its default
+// '{}' labels until the agent happens to send metadata again on a future
+// reconnect (see #38718). This retries only the keys that raced, narrowing
+// that window; it does not eliminate it; a metadata message that fully
+// stops racing would need the two paths to synchronize by contract.
 func handleDatasourceMetadata(ctx context.Context, store db.AgentStore, accountID, agentType string, raw []byte, logger *slog.Logger) {
 	var msg struct {
 		Action   string                    `json:"action"`
@@ -828,10 +847,35 @@ func handleDatasourceMetadata(ctx context.Context, store db.AgentStore, accountI
 		return
 	}
 
-	if err := store.UpdateDatasourceMetadata(ctx, accountID, agentType, msg.Metadata); err != nil {
-		logger.Error("failed to persist datasource metadata", "account_id", accountID, "err", err)
-		return
+	pending := msg.Metadata
+	var notFound []string
+	var err error
+	for attempt := 0; ; attempt++ {
+		notFound, err = store.UpdateDatasourceMetadata(ctx, accountID, agentType, pending)
+		if err != nil {
+			logger.Error("failed to persist datasource metadata", "account_id", accountID, "err", err)
+			return
+		}
+		if len(notFound) == 0 || attempt >= len(metadataRetryDelays) {
+			break
+		}
+		logger.Warn("datasource metadata raced its integration row, retrying",
+			"account_id", accountID, "datasources", notFound, "attempt", attempt+1)
+		select {
+		case <-time.After(metadataRetryDelays[attempt]):
+		case <-ctx.Done():
+			return
+		}
+		pending = make(map[string]map[string]any, len(notFound))
+		for _, dsID := range notFound {
+			pending[dsID] = msg.Metadata[dsID]
+		}
 	}
 
-	logger.Info("datasource metadata updated", "account_id", accountID, "datasource_count", len(msg.Metadata))
+	if len(notFound) > 0 {
+		logger.Warn("datasource metadata still unmatched after retries, giving up",
+			"account_id", accountID, "datasources", notFound)
+	}
+
+	logger.Info("datasource metadata updated", "account_id", accountID, "datasource_count", len(msg.Metadata)-len(notFound))
 }

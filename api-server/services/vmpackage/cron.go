@@ -162,7 +162,13 @@ func ListDiscoveryDatasources(dbms *database.DatabaseManager) ([]DiscoveryDataso
 // must match a scan request for B, never one for A — matching it for A would
 // both mis-scan (A left untouched, B's findings rewritten) and let a caller
 // with access to A only trigger a scan on B.
-func ListDiscoveryDatasourcesForAccount(dbms *database.DatabaseManager, accountID string) ([]DiscoveryDatasource, error) {
+// The second return value is how many enabled discovery integrations
+// matched the account but were filtered out by eligibleDiscoveryLabels
+// (empty/malformed labels) — distinct from zero rows matching at all. See
+// #38718: an agent that has connected but hasn't yet reported labels looks
+// identical to "no agent configured" without this count, which sends
+// whoever hits the resulting error down the wrong debugging path.
+func ListDiscoveryDatasourcesForAccount(dbms *database.DatabaseManager, accountID string) ([]DiscoveryDatasource, int, error) {
 	var rows []struct {
 		IntegrationID   string         `db:"integration_id"`
 		TenantID        string         `db:"tenant_id"`
@@ -187,13 +193,15 @@ func ListDiscoveryDatasourcesForAccount(dbms *database.DatabaseManager, accountI
 		  AND (target.cloud_account_id = $1
 		       OR (target.cloud_account_id IS NULL AND own.cloud_account_id = $1))`, accountID)
 	if err != nil {
-		return nil, fmt.Errorf("vmpackage: list discovery datasources for account %s: %w", accountID, err)
+		return nil, 0, fmt.Errorf("vmpackage: list discovery datasources for account %s: %w", accountID, err)
 	}
 
 	datasources := make([]DiscoveryDatasource, 0, len(rows))
+	ineligible := 0
 	for _, r := range rows {
 		labels, ok := eligibleDiscoveryLabels(r.Labels)
 		if !ok {
+			ineligible++
 			continue
 		}
 		datasources = append(datasources, DiscoveryDatasource{
@@ -204,7 +212,7 @@ func ListDiscoveryDatasourcesForAccount(dbms *database.DatabaseManager, accountI
 			Labels:          labels,
 		})
 	}
-	return datasources, nil
+	return datasources, ineligible, nil
 }
 
 // GetDiscoveryDatasourceByID re-resolves a single discovery datasource by
@@ -422,7 +430,12 @@ func scanTargetSafely(tenantCtx *security.RequestContext, dbms *database.Databas
 		resolvedAccountID = ds.AccountID
 	}
 
-	if err := runScan(tenantCtx, resolvedAccountID, ds.TenantID, cloudResourceID, target); err != nil {
+	attemptID := startScanAttempt(ds.TenantID, resolvedAccountID, cloudResourceID)
+	result, err := runScan(tenantCtx, resolvedAccountID, ds.TenantID, cloudResourceID, target)
+	if err != nil {
 		tenantCtx.GetLogger().Error("vmpackage: scan failed", "cloud_resource_id", cloudResourceID, "host", target.Host, "error", err)
+		finishScanAttempt(cloudResourceID, attemptID, ScanStatusFailed, err, result.PackageCount, result.FindingCount)
+		return
 	}
+	finishScanAttempt(cloudResourceID, attemptID, ScanStatusCompleted, nil, result.PackageCount, result.FindingCount)
 }

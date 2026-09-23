@@ -753,6 +753,20 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 			}
 			ctx.GetLogger().Info("cron: vm vulnerability scan queued", "queued", queued, "failed", failed)
 			c.JSON(200, gin.H{"status": "ok", "queued": queued, "failed": failed})
+		case "VM Scan Status Sweep":
+			// Deliberately its own, independently-scheduled (every 5
+			// minutes, see cron_triggers.yaml) job rather than riding on
+			// "VM Vulnerability Scan" above (once daily): a scan stuck in
+			// "started" — process evicted/restarted mid-scan, or a path
+			// that somehow skipped a terminal write — must be caught
+			// within the scan timeout, not up to a day later. See #38466
+			// and the review that flagged the daily cadence as too slow.
+			if err := vmpackage.SweepStaleScanStatuses(); err != nil {
+				ctx.GetLogger().Error("cron: failed to sweep stale vm scan statuses", "error", err)
+				c.JSON(500, gin.H{"status": "error", "message": "Failed to sweep stale vm scan statuses"})
+				return
+			}
+			c.JSON(200, gin.H{"status": "ok"})
 		default:
 			common.MetricsApiRequestsFailedTotal(c.Request.Context(), "rpc_cron", "invalid_cron_job")
 			c.JSON(400, common.ErrorActionBadRequest("Invalid cron job"))

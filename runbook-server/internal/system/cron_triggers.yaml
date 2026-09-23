@@ -289,6 +289,17 @@
     timeout_seconds: 600
     tolerance_seconds: 21600
   comment: Daily sweep of every forager discovery datasource's network for VMs, inventoried and matched against CVEs, at 10:45 AM UTC (4:15 PM IST)
+- name: VM Scan Status Sweep
+  webhook: '{{SERVICE_API_SERVER_URL}}/rpc-cron'
+  schedule: '*/5 * * * *'
+  payload: {}
+  headers:
+    - name: X-ACTION-TOKEN
+      value_from_env: ACTION_API_SERVER_TOKEN
+  retry_conf:
+    num_retries: 0
+    timeout_seconds: 180
+  comment: Fail any vm_scan_status row stuck in "started" past the scan timeout, every 5 minutes — independent of the once-daily VM Vulnerability Scan job, so a stuck scan surfaces promptly instead of up to a day later
 - name: cloud-account-webhook-sync
   webhook: '{{CLOUD_COLLECTOR_SERVER_URL}}/rpc/rpc-cron'
   schedule: '0 2 * * *'

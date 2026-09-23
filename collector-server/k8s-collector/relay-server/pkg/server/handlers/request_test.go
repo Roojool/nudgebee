@@ -33,6 +33,7 @@ type fakeStore struct {
 	prometheuClusterLabel string
 	err                   error
 	touched               atomic.Int64
+	metadataNotFound      []string
 }
 
 func (f *fakeStore) IsWSEnabled(ctx context.Context, acct, agentType string) (bool, string, error) {
@@ -79,8 +80,8 @@ func (f *fakeStore) GetWorkspaceToolConfig(ctx context.Context, accountID, integ
 	return nil, f.err
 }
 
-func (f *fakeStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) error {
-	return f.err
+func (f *fakeStore) UpdateDatasourceMetadata(ctx context.Context, accountID, agentType string, metadata map[string]map[string]any) ([]string, error) {
+	return f.metadataNotFound, f.err
 }
 
 func (f *fakeStore) QueryProxyDatasources(ctx context.Context, accountID string) ([]db.ProxyDatasource, error) {
