@@ -131,12 +131,13 @@ class TestDiscoveryCleanupScoping(unittest.TestCase):
 class TestWorkloadRecoveryClose(unittest.TestCase):
     """The recovery close is DEFAULT ON (see Configs.EVENT_CLOSE_ON_WORKLOAD_RECOVERY).
 
-    The readiness signal it uses is a single sample and closes some live crashloops:
-    measured on dev, 39 of the 43 events it closed went within ten minutes of being
-    raised and 17 re-fired within two hours. It is on anyway, by product decision --
-    without it the agent's findings have no resolve path at all. These tests pin the
-    scoping that keeps the damage bounded, and stay valid for the sound signal
-    (ready AND no restart since the previous snapshot) when it replaces the sample.
+    Readiness on its own is a single sample and closed live crashloops: measured on
+    dev, 39 of the 43 events it closed went within ten minutes of being raised and 17
+    re-fired within two hours. It is on anyway, by product decision -- without it the
+    agent's findings have no resolve path at all. These tests pin the three checks
+    that bound that: the workload counts, the per-pod readiness (a stuck rollout),
+    and the restart delta against the previous snapshot (a live crashloop, which the
+    first two cannot see because both read the same snapshot).
     """
 
     def setUp(self):
@@ -257,6 +258,46 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
             dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 2, 2)])
         closer.assert_called_once()
 
+    def test_recent_restart_keeps_a_ready_workload_open(self):
+        """The crashloop-between-restarts case: every single-snapshot check says healthy.
+
+        Counts read 1/1, the pod row from the same batch reads all containers ready,
+        and only the restart delta against the previous snapshot says otherwise.
+        """
+        with mock.patch.object(dh, "close_events_with_history") as closer:
+            dh.close_events_for_recovered_workloads(
+                ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], {("default", "web")}
+            )
+        closer.assert_not_called()
+
+    def test_restart_in_one_workload_does_not_hold_another(self):
+        with mock.patch.object(dh, "close_events_with_history") as closer:
+            dh.close_events_for_recovered_workloads(
+                ACCOUNT,
+                [
+                    self._workload(LIVE_RESOURCE, 1, 1),
+                    self._workload(GONE_RESOURCE, 1, 1, name="api"),
+                ],
+                {("default", "web")},
+            )
+        closer.assert_called_once()
+        self.assertEqual(closer.call_args.kwargs["params"][0], [GONE_RESOURCE])
+
+    def test_restart_in_another_namespace_does_not_block(self):
+        with mock.patch.object(dh, "close_events_with_history") as closer:
+            dh.close_events_for_recovered_workloads(
+                ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], {("staging", "web")}
+            )
+        closer.assert_called_once()
+
+    def test_no_restart_view_keeps_the_previous_behaviour(self):
+        """A caller with no previous-snapshot view still closes on readiness alone."""
+        for restarts in (None, set()):
+            with self.subTest(restarts=restarts):
+                with mock.patch.object(dh, "close_events_with_history") as closer:
+                    dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], restarts)
+                closer.assert_called_once()
+
     def test_scaled_to_zero_is_not_recovered(self):
         with mock.patch.object(dh, "close_events_with_history") as closer:
             dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 0, 0)])
@@ -277,6 +318,111 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
         from config import Settings
 
         self.assertTrue(Settings.model_fields["EVENT_CLOSE_ON_WORKLOAD_RECOVERY"].default)
+
+
+class TestWorkloadsWithNewPodRestarts(unittest.TestCase):
+    """The only check in the recovery close that spans two snapshots."""
+
+    def _pod(self, name, restart_count, namespace="default", workload_name="web"):
+        p = mock.Mock()
+        p.name = name
+        p.namespace = namespace
+        p.workload_name = workload_name
+        p.restart_count = restart_count
+        return p
+
+    def _run(self, pods, stored_rows):
+        with mock.patch.object(dh.database, "run_query", return_value=stored_rows):
+            return dh._workloads_with_new_pod_restarts(ACCOUNT, pods)
+
+    def test_restart_count_increase_flags_the_workload(self):
+        got = self._run([self._pod("web-0", {"app": 4})], [("default", "web-0", {"app": 3})])
+        self.assertEqual(got, {("default", "web")})
+
+    def test_unchanged_count_does_not_flag(self):
+        got = self._run([self._pod("web-0", {"app": 3})], [("default", "web-0", {"app": 3})])
+        self.assertEqual(got, set())
+
+    def test_sums_across_containers(self):
+        """A sidecar restarting is still a restart of the pod."""
+        got = self._run(
+            [self._pod("web-0", {"app": 2, "sidecar": 5})],
+            [("default", "web-0", {"app": 2, "sidecar": 4})],
+        )
+        self.assertEqual(got, {("default", "web")})
+
+    def test_lower_count_does_not_flag(self):
+        """A removed container takes its count out of the sum; that is not a restart."""
+        got = self._run(
+            [self._pod("web-0", {"app": 2})],
+            [("default", "web-0", {"app": 2, "sidecar": 7})],
+        )
+        self.assertEqual(got, set())
+
+    def test_first_sighting_with_restarts_flags(self):
+        """No stored row means no way to date the restarts, so assume they are recent.
+
+        Costs one snapshot of the event staying open; the next snapshot compares
+        normally. Holding an event open too long is the recoverable direction.
+        """
+        got = self._run([self._pod("web-0", {"app": 2})], [])
+        self.assertEqual(got, {("default", "web")})
+
+    def test_first_sighting_without_restarts_does_not_flag(self):
+        got = self._run([self._pod("web-0", {"app": 0})], [])
+        self.assertEqual(got, set())
+
+    def test_bare_pods_are_skipped(self):
+        """A pod with no workload gates no workload's close."""
+        got = self._run([self._pod("loose", {"app": 9}, workload_name=None)], [])
+        self.assertEqual(got, set())
+
+    def test_unusable_restart_counts_are_ignored(self):
+        for value in (None, "3", {"app": "3"}, {"app": None}):
+            with self.subTest(value=value):
+                self.assertEqual(self._run([self._pod("web-0", value)], []), set())
+
+    def test_unusable_stored_count_falls_back_to_first_sighting(self):
+        got = self._run([self._pod("web-0", {"app": 1})], [("default", "web-0", None)])
+        self.assertEqual(got, {("default", "web")})
+
+    def test_no_pods_makes_no_query(self):
+        with mock.patch.object(dh.database, "run_query") as q:
+            self.assertEqual(dh._workloads_with_new_pod_restarts(ACCOUNT, []), set())
+        q.assert_not_called()
+
+    def test_query_is_scoped_to_the_account_and_the_incoming_pods(self):
+        with mock.patch.object(dh.database, "run_query", return_value=[]) as q:
+            dh._workloads_with_new_pod_restarts(ACCOUNT, [self._pod("web-0", {"app": 0})])
+        query, params = q.call_args.args
+        self.assertIn("FROM k8s_pods", query)
+        self.assertIn("restart_count", query)
+        self.assertEqual(params[0], ACCOUNT)
+        self.assertEqual(params[1], ["default"])
+        self.assertEqual(params[2], ["web-0"])
+
+    def test_runs_before_the_pod_upsert(self):
+        """Ordering is the whole correctness argument: the upsert overwrites the
+        counts this reads, so reading after it would compare a value with itself and
+        never see a restart."""
+        calls = []
+        pod = self._pod("web-0", {"app": 1})
+        workload = mock.Mock(tenant_id=TENANT, namespace="default", name="web", total_pods=1, ready_pods=1)
+        with mock.patch.object(
+            dh, "_workloads_with_new_pod_restarts", side_effect=lambda *a: calls.append("read")
+        ), mock.patch.object(
+            dh.database, "insert_data", side_effect=lambda table, *a, **k: calls.append(table)
+        ), mock.patch.object(
+            dh, "asdict", return_value={}
+        ), mock.patch.object(
+            dh, "_clean_stale_workloads"
+        ), mock.patch.object(
+            dh, "_deduplicate_workloads_by_identity", return_value=[workload]
+        ), mock.patch.object(
+            dh, "close_events_for_recovered_workloads"
+        ):
+            dh.process_services_updates(ACCOUNT, [pod], [workload])
+        self.assertEqual(calls[:2], ["read", "k8s_pods"])
 
 
 class TestLegacyStatusUpdate(unittest.TestCase):

@@ -1207,6 +1207,9 @@ def handle_full_load_deleted_resources(cloud_account_id, active_resources, tenan
 
 
 def process_services_updates(cloud_account_id, pods, workloads):
+    # Must run BEFORE the k8s_pods upsert: the comparison is against the restart
+    # counts of the PREVIOUS snapshot, and the upsert below overwrites them.
+    restarted = _workloads_with_new_pod_restarts(cloud_account_id, pods)
     if len(pods) > 0:
         logging.debug("inserting k8s_pods for account_id {}".format(cloud_account_id))
         database.insert_data("k8s_pods", [asdict(p) for p in pods], on_conflict=pods_on_conflict)
@@ -1215,10 +1218,12 @@ def process_services_updates(cloud_account_id, pods, workloads):
         deduped_workloads = _deduplicate_workloads_by_identity(workloads)
         _clean_stale_workloads(cloud_account_id, deduped_workloads[0].tenant_id, deduped_workloads)
         database.insert_data("k8s_workloads", [asdict(p) for p in deduped_workloads], on_conflict=workload_on_conflict)
-        close_events_for_recovered_workloads(cloud_account_id, deduped_workloads)
+        close_events_for_recovered_workloads(cloud_account_id, deduped_workloads, restarted)
 
 
-def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[Any]):
+def close_events_for_recovered_workloads(
+    cloud_account_id: str, workloads: List[Any], workloads_with_new_restarts: Optional[set] = None
+):
     """Close the agent's open events for workloads whose pods are all ready again.
 
     This is the only recovery signal the agent's own findings have. Matchers like
@@ -1230,18 +1235,35 @@ def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[
     "Recovered" is `ready_pods == total_pods` on the workload the event is linked to,
     with `total_pods > 0` so a scaled-to-zero workload does not read as healthy,
     AND none of the workload's live pods is unready (see _workloads_with_unready_pods:
-    the counts alone read a stuck rollout as healthy).
+    the counts alone read a stuck rollout as healthy),
+    AND no pod of the workload restarted since the previous snapshot
+    (`workloads_with_new_restarts`, computed by _workloads_with_new_pod_restarts).
     Deliberately NOT the pod phase: a pod stuck in CrashLoopBackOff reports
     `status.phase = Running` between restarts, which is what made the legacy
     status-diff path (run_status_update) close crashloop events on a live crashloop.
 
-    Readiness is narrower than phase but NOT immune to the same defect, and the
-    comment above should not be read as claiming otherwise: a crashlooping pod is
-    genuinely Ready for the seconds its container runs, and a change-driven snapshot
-    lands on that flip often. Measured on dev, 17 of the 43 events this closed had
-    the same alert fire again within two hours. The signal that actually fixes it is
-    ready AND no pod restart since the previous snapshot (k8s_pods.restart_count is
-    already collected); see the flag's comment in config/__init__.py.
+    Readiness is narrower than phase but was NOT immune to the same defect: a
+    crashlooping pod is genuinely Ready for the seconds its container runs, and a
+    change-driven snapshot lands on that flip often. Measured on dev, 17 of the 43
+    events this closed had the same alert fire again within two hours.
+
+    The unready-pod check does not help there. It compares the workload's counts
+    against the pod rows from the SAME batch, so it only catches a disagreement
+    between them -- a stuck rollout, where old pods carry the ready count while the
+    new pod is down. A single-replica crashlooping pod sampled between restarts makes
+    both agree: observed on production, a workload row reading `total_pods=1,
+    ready_pods=1` and its pod row reading 1 of 1 containers ready, while the pod was
+    mid-crashloop. Nothing WITHIN one snapshot separates "healthy" from "sixty seconds
+    into a crash cycle".
+
+    The restart delta is the signal that does, because it spans two snapshots. It is
+    why this function takes `workloads_with_new_restarts` from its caller instead of
+    querying for it: by the time this runs the k8s_pods upsert has already overwritten
+    the previous counts, so the comparison has to happen before that write.
+
+    Passing None (the default) skips the restart filter, for callers that have no
+    previous-snapshot view to offer. That is the pre-existing behaviour, not a
+    recommendation.
 
     Scoped to `kubernetes_api_server`, the source whose findings are derived from
     workload health and which has no resolve delivery of its own. Every other source
@@ -1281,6 +1303,10 @@ def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[
     recovered = [w for w in recovered if (w.namespace, w.name) not in unready]
     if not recovered:
         return
+    if workloads_with_new_restarts:
+        recovered = [w for w in recovered if (w.namespace, w.name) not in workloads_with_new_restarts]
+        if not recovered:
+            return
 
     observed_at = None
     for w in recovered:
@@ -1322,6 +1348,74 @@ def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[
         closing_reason="workload_recovered",
         metadata={"method": "discovery", "trigger": "all_pods_ready"},
     )
+
+
+def _pod_restart_total(restart_count: Any) -> Optional[int]:
+    """Sum of a pod's per-container restart counts, or None when unusable.
+
+    The agent sends `restart_count` as {container_name: count}. A container removed
+    from the pod spec takes its count out of the sum, so the total can legitimately
+    fall; only an increase is read as a restart.
+    """
+    if not isinstance(restart_count, dict):
+        return None
+    total = 0
+    for value in restart_count.values():
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        total += value
+    return total
+
+
+def _workloads_with_new_pod_restarts(cloud_account_id: str, pods: List[Any]) -> set:
+    """(namespace, workload_name) of workloads owning a pod that restarted since the last snapshot.
+
+    MUST be called before the k8s_pods upsert, which overwrites the counts this reads.
+
+    A pod we have never stored is counted as restarted when it arrives with a non-zero
+    total: there is no earlier count to date those restarts against, so they could have
+    happened a second ago. This costs one extra snapshot of an event staying open --
+    the next snapshot has a stored row and compares normally -- and keeping an event
+    open too long is the recoverable direction, unlike closing one that is still live.
+
+    Matched on namespace + workload_name, the same identity
+    _workloads_with_unready_pods uses, so the two filters compose over the same keys.
+    Pods with no workload_name (bare pods) are skipped: they own no workload row and
+    so can gate no close.
+    """
+    if not pods:
+        return set()
+    wanted = {(p.namespace, p.name): p for p in pods if getattr(p, "workload_name", None)}
+    if not wanted:
+        return set()
+    rows = database.run_query(
+        "SELECT namespace, name, restart_count FROM k8s_pods "
+        "WHERE cloud_account_id = %s AND namespace = ANY(%s) AND name = ANY(%s)",
+        [
+            cloud_account_id,
+            list({ns for ns, _ in wanted}),
+            list({name for _, name in wanted}),
+        ],
+    )
+    previous: Dict[Any, int] = {}
+    for row in rows or []:
+        total = _pod_restart_total(row[2])
+        if total is not None:
+            previous[(row[0], row[1])] = total
+
+    restarted: set = set()
+    for key, pod in wanted.items():
+        current = _pod_restart_total(pod.restart_count)
+        if current is None:
+            continue
+        before = previous.get(key)
+        if before is None:
+            # First time we are storing this pod -- see the docstring.
+            if current > 0:
+                restarted.add((pod.namespace, pod.workload_name))
+        elif current > before:
+            restarted.add((pod.namespace, pod.workload_name))
+    return restarted
 
 
 def _workloads_with_unready_pods(cloud_account_id: str, workloads: List[Any]) -> set:
