@@ -1,4 +1,4 @@
-import { Page, Locator } from "@playwright/test";
+import { Page, Locator, expect } from "@playwright/test";
 import { CommonLocators } from "../../GlobalLocators";
 
 export class UserLocators extends CommonLocators {
@@ -15,6 +15,8 @@ export class UserLocators extends CommonLocators {
   readonly successUpdateMsg: Locator;
   readonly statusButton: Locator;
   readonly nameSearchInput: Locator;
+  readonly accessUsersTab: Locator;
+  readonly tabMenuBackdrop: Locator;
 
   constructor(page: Page) {
     super(page);
@@ -32,6 +34,10 @@ export class UserLocators extends CommonLocators {
     this.successUpdateMsg = page.getByText("User updated");
     this.statusButton = page.locator('#auto-complete-all-users-status-filter');
     this.nameSearchInput = page.locator('#all-users-name-search');
+    // AnchorComponent renders no data-testid; the id is pinned to "AccessUsers" in user-management/index.jsx.
+    this.accessUsersTab = page.locator("#anchor-tab-AccessUsers").or(page.getByRole("link", { name: "Access & Users" })).first();
+    // MUI renders the tab dropdown's invisible backdrop with no testid, id or role.
+    this.tabMenuBackdrop = page.locator(".MuiModal-backdrop").first();
   }
 
   async selectRole(role: string): Promise<void> {
@@ -49,6 +55,12 @@ export class UserLocators extends CommonLocators {
       await this.page.keyboard.press("Escape");
     }
     await option.waitFor({ state: "detached", timeout: 5000 });
+  }
+
+  // Cancel stays disabled until the Add modal's listUsers call returns, which can be slow on dev.
+  async cancel(): Promise<void> {
+    await expect(this.cancelBtn).toBeEnabled({ timeout: 30000 });
+    await this.cancelBtn.click();
   }
 
   getRoleOption(role: string): Locator {

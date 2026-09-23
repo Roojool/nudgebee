@@ -9,9 +9,20 @@ export async function setup(page: Page): Promise<UserLocators> {
   await locators.homeBtn.click();
   await locators.adminBtn.click();
   await page.waitForURL("**/user-management**", { timeout: 15000 });
-  // Admin now defaults to the Overview tab; the Users controls live under the
-  // Access & Users tab, so land there explicitly before using them.
-  await page.goto("/user-management#access-users");
+  // Admin defaults to Overview; the Access & Users tab opens on its default Users sub-tab.
+  await locators.accessUsersTab.click();
+  // Not landing is the expected trigger for the URL fallback below.
+  const landed = await locators.addNewUserBtn.waitFor({ state: "visible", timeout: 10000 }).then(() => true).catch(() => false);
+  if (!landed) {
+    // Tab didn't redirect: fall back to the URL; reload because a hash-only goto doesn't re-render the body.
+    await page.goto("/user-management#access-users", { waitUntil: "domcontentloaded" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+  }
+  // The tab dropdown opens on hover, so move the mouse off it and let its backdrop close before any click.
+  await page.mouse.move(600, 600);
+  await page.keyboard.press("Escape");
+  // No dropdown was open, so there is no backdrop to wait for.
+  await locators.tabMenuBackdrop.waitFor({ state: "detached", timeout: 5000 }).catch(() => {});
   await locators.addNewUserBtn.waitFor({ state: "visible", timeout: 15000 });
   return locators;
 }
