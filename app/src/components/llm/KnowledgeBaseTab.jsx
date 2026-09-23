@@ -1027,7 +1027,21 @@ const KBLoadHistoryModal = ({ open, onClose, accountId, kbId, kbName }) => {
           </Typography>
         ) : (
           <CustomTable
-            headers={[{ name: 'Date' }, { name: 'Trigger' }, { name: 'Status' }, { name: 'Documents' }, { name: 'Duration' }, { name: 'Error' }]}
+            headers={[
+              { name: 'Date' },
+              { name: 'Trigger' },
+              { name: 'Status' },
+              {
+                // Not "Documents": ingestion splits a long document into
+                // several chunks so the reranker can score all of it, and this
+                // ledger counts what was embedded — chunks. The KB's own Docs
+                // column and its drilldown stay in documents.
+                name: 'Chunks',
+                info: 'Embedding units. A long document is split into several chunks so retrieval can score all of it, so this counts chunks, not documents. Shown as embedded / submitted when a load did not embed everything it scraped.',
+              },
+              { name: 'Duration' },
+              { name: 'Error' },
+            ]}
             tableData={history.map((entry) => [
               { text: formatDate(entry.created_at) },
               { text: formatTrigger(entry) },
