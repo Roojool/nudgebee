@@ -3,13 +3,20 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
+	"strings"
 	"time"
 )
+
+// errMsgAgentNotConnected matches the message api-server's relay client and the
+// relay server itself use for this condition, so downstream string matching on
+// either side keeps working regardless of which client short-circuited.
+const errMsgAgentNotConnected = "agent not connected"
 
 func Execute(ctx context.Context, body ActionExecuteBody) (map[string]any, error) {
 
@@ -21,6 +28,32 @@ func Execute(ctx context.Context, body ActionExecuteBody) (map[string]any, error
 	relayRequest.Body.Origin = "llm-server"
 
 	data := make(map[string]any)
+
+	// Skip the round-trip when the account's k8s agent is not registered: the
+	// relay would answer 503 "agent not connected" anyway. Gating here rather
+	// than at the event or account level is deliberate — the account is not
+	// disabled, only its agent is unreachable, so everything that does NOT
+	// route through the agent (user-configured metric/log integrations, event
+	// storage, the investigation itself) must keep working.
+	//
+	// Only the k8s agent is gated. An empty AgentType means k8s (the relay
+	// defaults the missing X-NB-Agent-Type header); other agent types are
+	// separate registrations this lookup says nothing about.
+	//
+	// EqualFold because AgentType is not a constant here — callers read it from
+	// tool config (`getConfigValue(..., "agent_type")` in tools/common_relay.go
+	// and tool_mongodb.go), so a config written "K8s" must still gate. Note the
+	// value is deliberately NOT trimmed: line ~60 sends it as the
+	// X-NB-Agent-Type header verbatim, and trimming only here would let the
+	// guard classify a padded value as k8s while the relay routed it as a
+	// different agent type.
+	if body.AgentType == "" || strings.EqualFold(body.AgentType, k8sAgentType) {
+		if !AgentConnected(body.AccountID) {
+			slog.Debug("relay: skipping request, k8s agent not connected",
+				"account_id", body.AccountID, "action", body.ActionName)
+			return data, errors.New(errMsgAgentNotConnected)
+		}
+	}
 
 	timeout := time.Duration(config.Config.LlmServerRelayCommandExecutionTimeoutSeconds) * time.Second
 	if body.Timeout > 0 {

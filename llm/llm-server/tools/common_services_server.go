@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
+	"nudgebee/llm/relay"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools/core"
@@ -662,29 +663,20 @@ func cloudProviderToObservabilityFallback(cloudProvider string) string {
 // connected-agent probe in tools/core/tool_config.go. Fails closed (treats a DB
 // error as "agent present") so a transient error never silently enables the
 // hijack this guard exists to prevent.
-type queryGetter interface {
-	Get(dest any, query string, args ...any) error
-}
-
+//
+// Delegates to relay.AgentConnected for the lookup rather than running its own
+// query: that is the same lookup gating relay calls, so two copies could drift
+// into answering differently about the same account. It also adds the per-account
+// cache this had none of — every call used to hit the metastore.
 func hasConnectedK8sAgent(accountId string) bool {
+	// This caller's own precondition, not the relay gate's: an account id that
+	// is not a uuid cannot name a cloud account, and for the hijack guard the
+	// safe answer is "no k8s agent". relay.AgentConnected deliberately lets a
+	// malformed id fall through and fail open, which is the wrong default here.
 	if _, err := uuid.Parse(accountId); err != nil {
 		return false
 	}
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		slog.Warn("observability: could not check k8s agent presence; assuming present", "error", err, "accountId", accountId)
-		return true
-	}
-	return hasConnectedK8sAgentInDb(dbms.Db, accountId)
-}
-
-func hasConnectedK8sAgentInDb(db queryGetter, accountId string) bool {
-	var connectedCount int
-	if err := db.Get(&connectedCount, "select count(*) from agent where status = 'CONNECTED' and lower(type) = 'k8s' and cloud_account_id = $1", accountId); err != nil {
-		slog.Warn("observability: k8s agent presence query failed; assuming present", "error", err, "accountId", accountId)
-		return true
-	}
-	return connectedCount > 0
+	return relay.AgentConnected(accountId)
 }
 
 // logProviderCacheNS caches the resolved observability log provider per account.

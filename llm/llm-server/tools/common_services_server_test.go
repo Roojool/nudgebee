@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -244,54 +242,4 @@ func TestHasConnectedK8sAgent_IgnoresCloudCollectorAgent(t *testing.T) {
 		assert.True(t, hasConnectedK8sAgent(k8sAccountID),
 			"an account with a connected K8s agent (type=k8s) must report hasConnectedK8sAgent=true")
 	}
-}
-
-func TestHasConnectedK8sAgentInDb_Sqlmock(t *testing.T) {
-	t.Run("returns false when no connected k8s agent exists", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		require.NoError(t, err)
-		defer func() { _ = db.Close() }()
-
-		accountID := "00666e9f-3774-4f5d-b86c-60b201ae18c5"
-		mock.ExpectQuery(`select count\(\*\) from agent where status = 'CONNECTED' and lower\(type\) = 'k8s' and cloud_account_id = \$1`).
-			WithArgs(accountID).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-
-		sqlxDb := sqlx.NewDb(db, "sqlmock")
-		got := hasConnectedK8sAgentInDb(sqlxDb, accountID)
-		assert.False(t, got, "expected false when connected k8s agent count is 0")
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("returns true when connected k8s agent exists", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		require.NoError(t, err)
-		defer func() { _ = db.Close() }()
-
-		accountID := "21a3b9a9-8d4e-4a8f-9744-dcd61d828344"
-		mock.ExpectQuery(`select count\(\*\) from agent where status = 'CONNECTED' and lower\(type\) = 'k8s' and cloud_account_id = \$1`).
-			WithArgs(accountID).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-
-		sqlxDb := sqlx.NewDb(db, "sqlmock")
-		got := hasConnectedK8sAgentInDb(sqlxDb, accountID)
-		assert.True(t, got, "expected true when connected k8s agent count is > 0")
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("fails closed on database error", func(t *testing.T) {
-		db, mock, err := sqlmock.New()
-		require.NoError(t, err)
-		defer func() { _ = db.Close() }()
-
-		accountID := "00666e9f-3774-4f5d-b86c-60b201ae18c5"
-		mock.ExpectQuery(`select count\(\*\) from agent where status = 'CONNECTED' and lower\(type\) = 'k8s' and cloud_account_id = \$1`).
-			WithArgs(accountID).
-			WillReturnError(assert.AnError)
-
-		sqlxDb := sqlx.NewDb(db, "sqlmock")
-		got := hasConnectedK8sAgentInDb(sqlxDb, accountID)
-		assert.True(t, got, "must fail closed (return true) when db query fails")
-		assert.NoError(t, mock.ExpectationsWereMet())
-	})
 }
