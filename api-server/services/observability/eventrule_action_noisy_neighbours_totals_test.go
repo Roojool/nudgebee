@@ -28,7 +28,7 @@ func TestNoisyNeighbours_NodeTotalsAreTheSumOfItsContainers(t *testing.T) {
 		"node_cpu_alloc": {{Value: 4}},
 	}
 
-	data, err := buildNoisyNeighbourData("node-1", results, true)
+	data, err := buildNoisyNeighbourData("node-1", "subject-pod", "subject-ns", results, true)
 	require.NoError(t, err)
 
 	assert.InDelta(t, 350, data.NodeUsed, 1e-9, "100 + 250, the containers the card lists")
@@ -51,7 +51,7 @@ func TestNoisyNeighbours_NodeTotalCountsContainersTheCardDoesNotList(t *testing.
 		})
 	}
 
-	data, err := buildNoisyNeighbourData("node-1", results, false)
+	data, err := buildNoisyNeighbourData("node-1", "subject-pod", "subject-ns", results, false)
 	require.NoError(t, err)
 
 	assert.Len(t, data.Neighbours, noisyNeighboursTopN, "the card lists the top fifteen")
@@ -72,7 +72,7 @@ func TestNoisyNeighbours_NodeTotalStaysWithinItsOwnNode(t *testing.T) {
 		"top_pods":   {{Metric: map[string]string{"namespace": "a", "pod": "p1", "container": "c"}, Value: 8e9}},
 		"node_alloc": {{Value: 12.9e9}},
 	}
-	data, err := buildNoisyNeighbourData("node-1", results, false)
+	data, err := buildNoisyNeighbourData("node-1", "subject-pod", "subject-ns", results, false)
 	require.NoError(t, err)
 	assert.Less(t, data.NodeUsed, data.NodeAllocatable,
 		"one node's containers cannot outweigh its own allocatable")

@@ -114,7 +114,7 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
 
 	start, end := playbooks.RangeQueryWindow(ctx.GetEvent(), noisyNeighboursLookbackMinutes, time.Now().UTC())
-	data, err := fetchNoisyNeighbourMetrics(requestCtx, accountID, nodeName, start, end)
+	data, err := fetchNoisyNeighbourMetrics(requestCtx, accountID, nodeName, podName, namespace, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +123,14 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		// the card is honest; an empty card would claim the node is idle.
 		return nil, nil
 	}
+
+	// The neighbours that died alongside. This cannot come from metrics: a pod
+	// killed between two scrapes has no sample to rank, and one that landed on the
+	// node moments before the kill has no history there at all — which is exactly
+	// what hid the second victim in the case this was reported for. The events
+	// table is the only record that it happened. See #39083.
+	data.CoKilled = coLocatedOOMKills(ctx, nodeName, podName, end)
+
 	return noisyNeighboursResponse(podName, namespace, rawParams, data)
 }
 
@@ -131,7 +139,11 @@ type noisyNeighbourData struct {
 	NodeUsed        float64
 	NodeAllocatable float64
 	TotalRequested  float64
-	Neighbours      []map[string]any
+	// TotalLimits is the sum of every container's memory limit on the node. Above
+	// allocatable the node is oversubscribed: the pods may collectively take more
+	// than the machine has, and the kernel settles it by killing one.
+	TotalLimits float64
+	Neighbours  []map[string]any
 
 	// CPUMeasured is set only when at least one container reported CPU usage.
 	// Left false, the renderer omits the CPU keys entirely rather than reporting
@@ -141,6 +153,20 @@ type noisyNeighbourData struct {
 	NodeCPUUsed     float64
 	NodeCPUCapacity float64
 	CPUNeighbours   []map[string]any
+
+	// PodsOnNode is how many distinct pods the node actually reported, counted
+	// before the list is trimmed. Zero means it could not be counted, and the card
+	// omits the figure rather than claiming a node with no pods on it.
+	PodsOnNode int
+
+	// SubjectMeasured records whether the pod the card is about reported anything
+	// at all. False is a finding, not a gap: no sample for it on this node in the
+	// window is what a kill between two scrapes looks like.
+	SubjectMeasured bool
+
+	// CoKilled are the other pods this node killed in the same window, read from
+	// the events table because metrics cannot see them. See #39083.
+	CoKilled []coKilledPod
 }
 
 // noisyNeighbourKeys are the two families the card ranks, each fetched with the
@@ -176,7 +202,7 @@ var (
 // on a node-pressure event — the peak is what caused the pressure. The PromQL
 // implementation took the latest sample instead, so Prometheus numbers move slightly
 // and the two providers now agree, which they did not before.
-func fetchNoisyNeighbours(ctx *security.RequestContext, accountID, nodeName string, start, end time.Time) (*noisyNeighbourData, error) {
+func fetchNoisyNeighbours(ctx *security.RequestContext, accountID, nodeName, podName, namespace string, start, end time.Time) (*noisyNeighbourData, error) {
 	ask := func(keys []string, aggregate string) (map[string][]latestSample, error) {
 		output, err := FetchMetricUtilisation(ctx, GetUtilisationTrendRequest{
 			AccountId: accountID,
@@ -227,13 +253,13 @@ func fetchNoisyNeighbours(ctx *security.RequestContext, accountID, nodeName stri
 	// measure" and "nothing is using CPU" stay distinguishable in the card.
 	cpuMeasured := len(results["top_pods_cpu"]) > 0 || len(results["node_cpu_alloc"]) > 0
 
-	return buildNoisyNeighbourData(nodeName, results, cpuMeasured)
+	return buildNoisyNeighbourData(nodeName, podName, namespace, results, cpuMeasured)
 }
 
 // buildNoisyNeighbourData ranks and trims what the layer returned. Provider-agnostic
 // by construction: it reads canonical namespace / pod / container labels, which every
 // builder now emits.
-func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample, cpuMeasured bool) (*noisyNeighbourData, error) {
+func buildNoisyNeighbourData(nodeName, podName, namespace string, results map[string][]latestSample, cpuMeasured bool) (*noisyNeighbourData, error) {
 	// Index requests / limits by (namespace, pod, container) for O(1)
 	// lookup while iterating top_pods. kube-state-metrics emits one
 	// series per (pod, container) per resource — no aggregation needed.
@@ -242,6 +268,18 @@ func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample,
 	totalRequested := 0.0
 	for _, v := range memRequests {
 		totalRequested += v
+	}
+	// The sum of every container's memory limit on the node. Requests are what the
+	// scheduler reserved; limits are what the pods are allowed to actually take,
+	// and a node whose limits exceed its allocatable is oversubscribed — the pods
+	// can collectively ask for more than the machine has, and the kernel resolves
+	// that by killing one. `kubectl describe node` reports both for this reason;
+	// the card reported only requests, so the condition that explains the kill was
+	// the one number missing. Measured on the node from #39083: requests 50% of
+	// allocatable, limits 145%.
+	totalLimits := 0.0
+	for _, v := range memLimits {
+		totalLimits += v
 	}
 
 	neighbours := []map[string]any{}
@@ -267,11 +305,7 @@ func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample,
 			vj, _ := neighbours[j]["memory_used"].(float64)
 			return vi > vj
 		})
-		// topk(15) over a range can yield >15 distinct series across steps;
-		// keep only the top N by latest value to match the instant semantics.
-		if len(neighbours) > noisyNeighboursTopN {
-			neighbours = neighbours[:noisyNeighboursTopN]
-		}
+		neighbours = trimKeepingSubject(neighbours, podName, namespace)
 	}
 
 	// Same shape for CPU, ranked on its own. Kept as a separate list rather
@@ -301,9 +335,7 @@ func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample,
 			vj, _ := cpuNeighbours[j]["cpu_used"].(float64)
 			return vi > vj
 		})
-		if len(cpuNeighbours) > noisyNeighboursTopN {
-			cpuNeighbours = cpuNeighbours[:noisyNeighboursTopN]
-		}
+		cpuNeighbours = trimKeepingSubject(cpuNeighbours, podName, namespace)
 	}
 
 	// The node totals are the sum of the containers on it, not a node-level gauge.
@@ -335,17 +367,88 @@ func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample,
 		return nil, fmt.Errorf("noisy_neighbours_enricher: no metrics for node %q — it does not look like a node this cluster's Prometheus knows", nodeName)
 	}
 
-	return &noisyNeighbourData{
+	data := &noisyNeighbourData{
 		NodeName:        nodeName,
 		NodeUsed:        nodeUsed,
 		NodeAllocatable: nodeAlloc,
 		TotalRequested:  totalRequested,
+		TotalLimits:     totalLimits,
 		Neighbours:      neighbours,
 		CPUMeasured:     cpuMeasured,
 		NodeCPUUsed:     nodeCPUUsed,
 		NodeCPUCapacity: nodeCPUCapacity,
 		CPUNeighbours:   cpuNeighbours,
-	}, nil
+		// Counted from every container the layer returned, not from the trimmed
+		// rows — the same full set the node totals above are summed from.
+		PodsOnNode: distinctPods(results["top_pods"]),
+	}
+	// Which rows are the reader's own pod. The ranking answers "who is biggest",
+	// which is a different question from "where does the pod I am looking at sit".
+	data.SubjectMeasured = markNoisyNeighboursSubject(data, podName, namespace)
+	return data, nil
+}
+
+// trimKeepingSubject cuts a ranked list to the top N but never drops the pod the
+// card is about.
+//
+// The plain truncation this replaces is why the subject was missing from its own
+// card: the list is ranked by usage, and the pod that just died is frequently not
+// in the top fifteen. The subject is appended after the cut rather than sorted in,
+// so the rows above it still read as "the biggest consumers" and the extra row is
+// plainly the one the reader asked about.
+func trimKeepingSubject(rows []map[string]any, podName, namespace string) []map[string]any {
+	if len(rows) <= noisyNeighboursTopN {
+		return rows
+	}
+	kept := rows[:noisyNeighboursTopN]
+	for _, row := range kept {
+		if row["pod_name"] == podName && row["namespace"] == namespace {
+			return kept
+		}
+	}
+	// One row per container of the subject, matching how the ranked list is built:
+	// a pod that died because a sidecar grew is a case the reader has to see.
+	trimmed := append([]map[string]any{}, kept...)
+	for _, row := range rows[noisyNeighboursTopN:] {
+		if row["pod_name"] == podName && row["namespace"] == namespace {
+			trimmed = append(trimmed, row)
+		}
+	}
+	return trimmed
+}
+
+// markNoisyNeighboursSubject flags the subject's own rows in both lists so the UI
+// can pin and highlight them, and reports whether the subject was measured at all.
+//
+// A false return is a real answer, not a failure: it means the node reported no
+// sample for this pod in the window, which is what a kill between two scrapes
+// looks like. The card says so rather than leaving the reader to conclude the pod
+// was idle when it died.
+func markNoisyNeighboursSubject(d *noisyNeighbourData, podName, namespace string) bool {
+	found := false
+	mark := func(rows []map[string]any) {
+		for _, row := range rows {
+			if row["pod_name"] == podName && row["namespace"] == namespace {
+				row["is_subject"] = true
+				found = true
+			}
+		}
+	}
+	mark(d.Neighbours)
+	mark(d.CPUNeighbours)
+	return found
+}
+
+// distinctPods counts pods, not container series — a pod with three containers is
+// one pod on the node.
+func distinctPods(samples []latestSample) int {
+	seen := map[string]struct{}{}
+	for _, s := range samples {
+		if pod := s.Metric["pod"]; pod != "" {
+			seen[s.Metric["namespace"]+"/"+pod] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // noisyNeighboursResponse renders the card. Both providers go through it so the payload
@@ -358,8 +461,24 @@ func noisyNeighboursResponse(podName, namespace string, rawParams map[string]any
 		"memory_used":        d.NodeUsed,
 		"memory_allocatable": d.NodeAllocatable,
 		"memory_requested":   d.TotalRequested,
-		"total_pods":         len(d.Neighbours),
+		"memory_limits":      d.TotalLimits,
 		"neighbours":         d.Neighbours,
+		// What the list actually is, named for what it actually is. The old
+		// `total_pods` held this same number while claiming to be the node's pod
+		// count: it read 15 on 720 of 730 cards measured over 14 days, because that
+		// is the truncation limit, and the evidence-analysis agent repeated it to
+		// the model as "Number of pods in node".
+		"neighbours_shown": len(d.Neighbours),
+		"subject_pod":      podName,
+		"subject_measured": d.SubjectMeasured,
+	}
+	// Omitted rather than zeroed when unknown: "we could not count the pods" and
+	// "this node has no pods" must not look the same.
+	if d.PodsOnNode > 0 {
+		data["pods_on_node"] = d.PodsOnNode
+	}
+	if len(d.CoKilled) > 0 {
+		data["co_killed"] = coKilledPayload(d.CoKilled)
 	}
 	// Only when we actually measured CPU. On a provider that cannot report it,
 	// omitting the keys says "unknown"; a zero would say "nothing is using CPU",
@@ -386,7 +505,87 @@ func noisyNeighboursResponse(podName, namespace string, rawParams map[string]any
 		"query-result-version": "1.0",
 		"query":                rawParams,
 	}
-	return playbooks.NewPlaybookActionResponseJson(payload, additionalInfo, []playbooks.PlaybookActionResponseInsight{}, metadata), nil
+	return playbooks.NewPlaybookActionResponseJson(payload, additionalInfo, noisyNeighboursInsights(d), metadata), nil
+}
+
+// noisyNeighboursInsights says what the numbers mean, so the reader is not left
+// doing the arithmetic. The card shipped with an empty insight list on all 752 of
+// the cards measured over 14 days.
+//
+// Every line states only what was measured. In particular there is no "your pod
+// exceeded its own limit" line: three quarters of these events have no memory
+// limit recorded for the subject at all, so that claim cannot be earned here.
+func noisyNeighboursInsights(d *noisyNeighbourData) []playbooks.PlaybookActionResponseInsight {
+	insights := []playbooks.PlaybookActionResponseInsight{}
+
+	// The strongest signal first: other pods died on this machine, minutes apart.
+	// It is not co-timing — it is the same node killing more than one tenant.
+	if n := len(d.CoKilled); n > 0 {
+		insights = append(insights, playbooks.PlaybookActionResponseInsight{
+			Message: fmt.Sprintf("%s also OOM-killed on this node within %d minutes: %s. One full machine, not %d unrelated faults.",
+				pluralPods(n), coLocatedWindowMinutes, describeCoKilled(d.CoKilled), n+1),
+			Severity: "HIGH",
+		})
+	}
+
+	if d.NodeAllocatable > 0 {
+		requestedPct := d.TotalRequested / d.NodeAllocatable * 100
+		usedPct := d.NodeUsed / d.NodeAllocatable * 100
+		limitsPct := d.TotalLimits / d.NodeAllocatable * 100
+		switch {
+		// Oversubscribed beats every other reading: the pods on this node are
+		// allowed to take more memory than it has, so the kernel settling it with
+		// a kill is the expected outcome, not a surprise. `kubectl describe node`
+		// puts requests and limits side by side for exactly this reason.
+		case limitsPct > 100:
+			insights = append(insights, playbooks.PlaybookActionResponseInsight{
+				Message: fmt.Sprintf("This node is oversubscribed: the memory limits of the pods on it add up to %.0f%% of allocatable (%s of %s). They cannot all use what they are allowed, so the kernel resolves it by killing one.",
+					limitsPct, formatBytesGiB(d.TotalLimits), formatBytesGiB(d.NodeAllocatable)),
+				Severity: "HIGH",
+			})
+		case requestedPct >= 95:
+			insights = append(insights, playbooks.PlaybookActionResponseInsight{
+				Message: fmt.Sprintf("Node memory is committed to %.0f%% of allocatable (%s requested of %s) — there is no headroom on this machine for a pod to grow into.",
+					requestedPct, formatBytesGiB(d.TotalRequested), formatBytesGiB(d.NodeAllocatable)),
+				Severity: "HIGH",
+			})
+		case usedPct >= 85:
+			insights = append(insights, playbooks.PlaybookActionResponseInsight{
+				Message: fmt.Sprintf("Node memory peaked at %.0f%% of allocatable (%s of %s) in the window before the kill.",
+					usedPct, formatBytesGiB(d.NodeUsed), formatBytesGiB(d.NodeAllocatable)),
+				Severity: "MEDIUM",
+			})
+		case len(d.CoKilled) == 0:
+			insights = append(insights, playbooks.PlaybookActionResponseInsight{
+				Message: fmt.Sprintf("The node was not short of memory — it peaked at %.0f%% of allocatable (%s of %s) and no other pod was killed here in the same window. Look at this pod's own limit before its neighbours.",
+					usedPct, formatBytesGiB(d.NodeUsed), formatBytesGiB(d.NodeAllocatable)),
+				Severity: "INFO",
+			})
+		}
+	}
+
+	// Stated plainly, because the alternative is a card that silently omits the
+	// one pod the reader came to look at.
+	if !d.SubjectMeasured {
+		insights = append(insights, playbooks.PlaybookActionResponseInsight{
+			Message:  "This pod reported no memory sample on this node before it was killed, so it is absent from the usage list below — the usual sign of a pod that died between two scrapes, or was scheduled here moments before.",
+			Severity: "INFO",
+		})
+	}
+	return insights
+}
+
+func pluralPods(n int) string {
+	if n == 1 {
+		return "1 other pod was"
+	}
+	return fmt.Sprintf("%d other pods were", n)
+}
+
+// formatBytesGiB matches how the card renders every other memory figure, so an
+// insight and the table beneath it cannot disagree about the same number.
+func formatBytesGiB(bytes float64) string {
+	return fmt.Sprintf("%.2f GiB", bytes/(1024*1024*1024))
 }
 
 // latestSample is one series reduced to its most recent sample.

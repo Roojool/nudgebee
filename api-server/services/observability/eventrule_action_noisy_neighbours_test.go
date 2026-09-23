@@ -61,7 +61,7 @@ func TestNoisyNeighboursRanksAndCutsToTopN(t *testing.T) {
 		})
 	}
 
-	data, err := buildNoisyNeighbourData("node-1", map[string][]latestSample{
+	data, err := buildNoisyNeighbourData("node-1", "subject-pod", "subject-ns", map[string][]latestSample{
 		"top_pods":   usage,
 		"node_alloc": {{Metric: map[string]string{}, Value: 1000}},
 	}, false)
@@ -88,9 +88,15 @@ func TestNoisyNeighboursPayloadShapeIsProviderIndependent(t *testing.T) {
 
 	out, err := json.Marshal(resp)
 	require.NoError(t, err)
-	for _, want := range []string{"node_name", "memory_used", "memory_allocatable", "memory_requested", "total_pods", "neighbours"} {
+	for _, want := range []string{"node_name", "memory_used", "memory_allocatable", "memory_requested", "memory_limits", "neighbours_shown", "neighbours"} {
 		assert.Containsf(t, string(out), want, "payload missing %q", want)
 	}
+	// `total_pods` claimed to be the node's pod count while holding the length of a
+	// list truncated at 15. It read 15 on 720 of 730 cards measured over 14 days,
+	// and the evidence-analysis agent repeated it to the model as "Number of pods
+	// in node" — on a node that kubectl reports as running 46. The name is gone so
+	// nothing can go on reading it that way.
+	assert.NotContains(t, string(out), "total_pods")
 }
 
 // A node with nothing on it must render as an empty list. A nil slice marshals to
