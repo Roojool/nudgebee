@@ -1679,7 +1679,7 @@ const HomeWidgets = React.memo(({ selectedCluster, cluster }) => {
                 <Box className='ql-icon'>
                   <SafeIcon src={link.icon} alt={link.name} width='16px' height='16px' />
                 </Box>
-                <Typography fontSize={'var(--ds-text-small)'} fontWeight={400} color='var(--ds-gray-700)'>
+                <Typography fontSize={'var(--ds-text-small)'} fontWeight={'var(--ds-font-weight-regular)'} color='var(--ds-gray-700)'>
                   {link.name}
                 </Typography>
               </Box>

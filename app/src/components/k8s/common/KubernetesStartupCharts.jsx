@@ -320,7 +320,7 @@ const KubernetesStartupCharts = ({ accountId, workloadName, namespaceName, conta
   if (infoMessage) {
     return (
       <Box sx={{ mt: ds.space[5] }}>
-        <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]} sx={{ mb: ds.space[2] }}>
+        <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]} sx={{ mb: ds.space[2] }}>
           Startup Metrics (first {STARTUP_WINDOW_MINUTES} min after pod creation)
         </Typography>
         <Banner tone='info' message={infoMessage} surface='section' />
@@ -334,7 +334,7 @@ const KubernetesStartupCharts = ({ accountId, workloadName, namespaceName, conta
 
   return (
     <Box sx={{ mt: ds.space[5] }}>
-      <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]} sx={{ mb: ds.space[1] }}>
+      <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]} sx={{ mb: ds.space[1] }}>
         Startup Metrics — {podCount} pod{podCount !== 1 ? 's' : ''} (first {STARTUP_WINDOW_MINUTES} min after creation)
       </Typography>
       {podDetailsSummary && (
@@ -356,7 +356,7 @@ const KubernetesStartupCharts = ({ accountId, workloadName, namespaceName, conta
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-              <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]}>
+              <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]}>
                 Startup CPU (Core)
               </Typography>
               <MetricQueryInfo queries={cpuQueries} labelMap={K8S_METRIC_QUERY_LABELS} />
@@ -377,7 +377,7 @@ const KubernetesStartupCharts = ({ accountId, workloadName, namespaceName, conta
             }}
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-              <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]}>
+              <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]}>
                 Startup Memory (MB)
               </Typography>
               <MetricQueryInfo queries={memoryQueries} labelMap={K8S_METRIC_QUERY_LABELS} />

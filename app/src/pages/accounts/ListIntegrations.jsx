@@ -767,7 +767,7 @@ const ListIntegrations = ({ integrationName }) => {
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               SolarWinds Observability Setup Guide
             </Typography>
           }
@@ -778,7 +778,7 @@ const ListIntegrations = ({ integrationName }) => {
           isCancelRequired={false}
         >
           <Stack spacing={ds.space[4]} sx={{ fontSize: ds.text.bodyLg }}>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Choose your Data Center Region
             </Typography>
             <Typography variant='body2' component='div'>
@@ -799,7 +799,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ul>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create an API Access Token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -825,7 +825,7 @@ const ListIntegrations = ({ integrationName }) => {
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               Splunk Observability Cloud Setup Guide
             </Typography>
           }
@@ -836,7 +836,7 @@ const ListIntegrations = ({ integrationName }) => {
           isCancelRequired={false}
         >
           <Stack spacing={ds.space[4]} sx={{ fontSize: ds.text.bodyLg }}>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Find your Realm
             </Typography>
             <Typography variant='body2' component='div'>
@@ -848,7 +848,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create an Organization Access Token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -873,7 +873,7 @@ const ListIntegrations = ({ integrationName }) => {
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
           title={
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               Splunk Enterprise Setup Guide
             </Typography>
           }
@@ -888,7 +888,7 @@ const ListIntegrations = ({ integrationName }) => {
               This is for Splunk Enterprise and Splunk Cloud Platform, which are queried with SPL. For Splunk Observability Cloud (SignalFx), use the
               separate <strong>Splunk Observability Cloud</strong> integration instead.
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 1: Find your management endpoint
             </Typography>
             <Typography variant='body2' component='div'>
@@ -902,7 +902,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ul>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 2: Create a least-privilege role and user
             </Typography>
             <Typography variant='body2' component='div'>
@@ -919,7 +919,7 @@ const ListIntegrations = ({ integrationName }) => {
                 </li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 3: Create an authentication token
             </Typography>
             <Typography variant='body2' component='div'>
@@ -933,7 +933,7 @@ const ListIntegrations = ({ integrationName }) => {
                 <li>Basic auth with a username and password also works if token auth is unavailable</li>
               </ol>
             </Typography>
-            <Typography variant='subtitle2' fontWeight={600}>
+            <Typography variant='subtitle2' fontWeight={ds.weight.semibold}>
               Step 4: Name the indexes
             </Typography>
             <Typography variant='body2' component='div'>
@@ -966,7 +966,7 @@ const ListIntegrations = ({ integrationName }) => {
       <Modal
         handleClose={isActionLoading ? () => {} : handleConfirmationClose}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             {`${snakeToTitleCase(modalAction || '')} ${getDisplayName(integrationName)} Integration: ${selectedIntegration.name}`}
           </Typography>
         }

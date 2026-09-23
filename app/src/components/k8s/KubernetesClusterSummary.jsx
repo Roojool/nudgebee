@@ -149,10 +149,10 @@ PotentialSavings.propTypes = {
 const ClusterBlock = ({ cluster = {} }) => {
   return (
     <Box>
-      <Typography color='var(--ds-gray-500)' fontSize={'var(--ds-text-small)'} fontWeight={400} mb={'var(--ds-space-0)'}>
+      <Typography color='var(--ds-gray-500)' fontSize={'var(--ds-text-small)'} fontWeight={'var(--ds-font-weight-regular)'} mb={'var(--ds-space-0)'}>
         {cluster.lable}
       </Typography>
-      <Typography color='var(--ds-gray-700)' fontSize={'24px'} lineHeight={'36px'} fontWeight={600}>
+      <Typography color='var(--ds-gray-700)' fontSize={'24px'} lineHeight={'36px'} fontWeight={'var(--ds-font-weight-semibold)'}>
         {formatNumber(cluster.count)}
       </Typography>
     </Box>

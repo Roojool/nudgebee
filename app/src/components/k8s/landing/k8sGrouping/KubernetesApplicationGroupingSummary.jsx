@@ -529,7 +529,7 @@ const KubernetesApplicationGroupingSummary = ({ accountId, applications, setTab,
                 ) : (
                   <Typography
                     variant='h5'
-                    fontWeight={600}
+                    fontWeight={ds.weight.semibold}
                     onClick={() => {
                       if (workloadKindCounts?.Count > 0) {
                         setTab(2);
@@ -621,7 +621,7 @@ const KubernetesApplicationGroupingSummary = ({ accountId, applications, setTab,
                   <Tooltip placement='top' title='Application issues (High Error Critical Logs & API Failures)'>
                     <Typography
                       variant='h5'
-                      fontWeight={600}
+                      fontWeight={ds.weight.semibold}
                       onClick={() => {
                         if (eventSummaryData.applicationEvents > 0) {
                           setEventsFilter({ aggregation_key: ['HighErrorCriticalLogs', 'ApplicationAPIFailures'], finding_type: 'issue' });
@@ -654,7 +654,7 @@ const KubernetesApplicationGroupingSummary = ({ accountId, applications, setTab,
                     <Skeleton shape='rect' height={ds.space[5]} width={ds.space.mul(0, 30)} />
                   ) : clusterSummary?.total_recommendations?.length > 0 ? (
                     <>
-                      <Typography variant='h5' fontWeight={600}>
+                      <Typography variant='h5' fontWeight={ds.weight.semibold}>
                         {clusterSummary?.total_recommendations.reduce((totalCounts, recommendation) => totalCounts + recommendation.count, 0) ?? '-'}
                       </Typography>
                       <Box display='flex' flexWrap='wrap' gap={ds.space[2]} ml={ds.space[2]}>

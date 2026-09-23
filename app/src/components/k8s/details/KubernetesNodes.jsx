@@ -898,13 +898,13 @@ const KubernetesNodesTable = ({ accountId, heading = 'All Nodes' }) => {
                           display={'flex'}
                           alignItems={'center'}
                           justifyContent={'space-between'}
-                          fontSize={'12px'}
-                          fontWeight={400}
+                          fontSize={'var(--ds-text-small)'}
+                          fontWeight={ds.weight.regular}
                           color={ds.gray[600]}
                         >
                           Total Memory{' '}
-                          <Box display={'flex'} alignItems={'center'} gap={'4px'}>
-                            <Typography fontSize={'14px'} fontWeight={500} color={'#374151'}>
+                          <Box display={'flex'} alignItems={'center'} gap={ds.space[1]}>
+                            <Typography fontSize={'var(--ds-text-body-lg)'} fontWeight={ds.weight.medium} color={ds.gray[700]}>
                               {clusterUtilization.totalMemory ? (clusterUtilization.totalMemory / 1024)?.toFixed(0) : '-'}
                             </Typography>
                             GB
@@ -935,13 +935,13 @@ const KubernetesNodesTable = ({ accountId, heading = 'All Nodes' }) => {
                           display={'flex'}
                           alignItems={'center'}
                           justifyContent={'space-between'}
-                          fontSize={'12px'}
-                          fontWeight={400}
+                          fontSize={'var(--ds-text-small)'}
+                          fontWeight={ds.weight.regular}
                           color={ds.gray[600]}
                         >
                           Total CPU
-                          <Box display={'flex'} alignItems={'center'} gap={'4px'}>
-                            <Typography fontSize={'14px'} fontWeight={500} color={'#374151'}>
+                          <Box display={'flex'} alignItems={'center'} gap={ds.space[1]}>
+                            <Typography fontSize={'var(--ds-text-body-lg)'} fontWeight={ds.weight.medium} color={ds.gray[700]}>
                               {clusterUtilization.totalCpu || '-'}
                             </Typography>
                             vCPU

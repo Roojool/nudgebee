@@ -2261,7 +2261,7 @@ const IntegrationDynamicFormModal = ({
         }}
         title={
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-            <Typography component='h2' variant='h6' fontWeight={600}>
+            <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
               {`Set up ${titleCase(integrationName)}`}
             </Typography>
           </Box>

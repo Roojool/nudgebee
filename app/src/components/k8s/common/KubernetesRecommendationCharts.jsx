@@ -134,7 +134,7 @@ const KubernetesRecommendationCharts = ({ memoryData, cpuData, recc, loading, cp
           }}
         >
           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-            <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]}>
+            <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]}>
               CPU(Core)
             </Typography>
             <MetricQueryInfo queries={cpuQueries} labelMap={K8S_METRIC_QUERY_LABELS} />
@@ -156,7 +156,7 @@ const KubernetesRecommendationCharts = ({ memoryData, cpuData, recc, loading, cp
           }}
         >
           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
-            <Typography fontSize={ds.text.bodyLg} fontWeight={600} color={ds.brand[500]}>
+            <Typography fontSize={ds.text.bodyLg} fontWeight={ds.weight.semibold} color={ds.brand[500]}>
               Memory(MB)
             </Typography>
             <MetricQueryInfo queries={memoryQueries} labelMap={K8S_METRIC_QUERY_LABELS} />

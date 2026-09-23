@@ -1112,7 +1112,7 @@ const KubernetesLLMRequestResponse = (props) => {
             wordBreak: 'break-word',
           }}
         >
-          <Box key={'index'} fontSize={'var(--ds-text-small)'} fontWeight={400} color={'var(--ds-gray-700)'}>
+          <Box key={'index'} fontSize={'var(--ds-text-small)'} fontWeight={ds.weight.regular} color={'var(--ds-gray-700)'}>
             <LLMAnswerRenderer
               toolCall={props.toolCall}
               messages={props.messages}

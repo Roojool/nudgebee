@@ -951,7 +951,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         handleClose={envLoading ? () => {} : closeEnvModal}
         open={envModalOpen}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             Change Environment
           </Typography>
         }
@@ -987,7 +987,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         handleClose={isStatusUpdating ? () => {} : () => setUpdateAccountStatus({})}
         open={updateAccountStatus && Object.keys(updateAccountStatus).length > 0}
         title={
-          <Typography component='h2' variant='h6' fontWeight={600}>
+          <Typography component='h2' variant='h6' fontWeight={ds.weight.semibold}>
             {updateAccountStatus.status == 'active' ? 'Enable' : 'Disable'} {cloudProvider} Account
           </Typography>
         }

@@ -160,34 +160,34 @@ const PodDetailsPage = ({ pod }) => {
           <SafeIcon alt='' src={podIcon} width={30} height={30} />
         </Box>
         <Box marginRight={ds.space[5]}>
-          <Typography fontSize={ds.text.small} fontWeight={400} color={ds.gray[400]} lineHeight={'20px'}>
+          <Typography fontSize={ds.text.small} fontWeight={ds.weight.regular} color={ds.gray[400]} lineHeight={'20px'}>
             Type
           </Typography>
-          <Typography fontSize={ds.text.title} fontWeight={500} color={ds.gray[700]}>
+          <Typography fontSize={ds.text.title} fontWeight={ds.weight.medium} color={ds.gray[700]}>
             {podData?.meta?.controllerKind ?? '-'}
           </Typography>
         </Box>
         <Box marginRight={ds.space[5]}>
-          <Typography fontSize={ds.text.small} fontWeight={400} color={ds.gray[400]} lineHeight={'20px'}>
+          <Typography fontSize={ds.text.small} fontWeight={ds.weight.regular} color={ds.gray[400]} lineHeight={'20px'}>
             Cluster
           </Typography>
-          <Typography fontSize={ds.text.title} fontWeight={500} color={ds.gray[700]}>
+          <Typography fontSize={ds.text.title} fontWeight={ds.weight.medium} color={ds.gray[700]}>
             {podData?.cloud_account?.account_name ?? '-'}
           </Typography>
         </Box>
         <Box marginRight={ds.space[5]}>
-          <Typography fontSize={ds.text.small} fontWeight={400} color={ds.gray[400]} lineHeight={'20px'}>
+          <Typography fontSize={ds.text.small} fontWeight={ds.weight.regular} color={ds.gray[400]} lineHeight={'20px'}>
             Namespace
           </Typography>
-          <Typography fontSize={ds.text.title} fontWeight={500} color={ds.gray[700]}>
+          <Typography fontSize={ds.text.title} fontWeight={ds.weight.medium} color={ds.gray[700]}>
             {podData?.meta?.namespace ?? '-'}
           </Typography>
         </Box>
         <Box marginRight={ds.space[5]}>
-          <Typography fontSize={ds.text.small} fontWeight={400} color={ds.gray[400]} lineHeight={'20px'}>
+          <Typography fontSize={ds.text.small} fontWeight={ds.weight.regular} color={ds.gray[400]} lineHeight={'20px'}>
             Controlled by
           </Typography>
-          <Typography fontSize={ds.text.title} fontWeight={500} color={ds.gray[700]}>
+          <Typography fontSize={ds.text.title} fontWeight={ds.weight.medium} color={ds.gray[700]}>
             {podData?.meta?.controller ?? '-'}
           </Typography>
         </Box>

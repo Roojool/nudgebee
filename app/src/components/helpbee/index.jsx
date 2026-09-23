@@ -14,7 +14,7 @@ const HelpBeeModal = ({ isModalVisible, onClose }) => {
     <Modal
       handleClose={onClose}
       title={
-        <Typography component='h2' variant='h5' fontWeight={600} color={ds.gray[700]}>
+        <Typography component='h2' variant='h5' fontWeight={ds.weight.semibold} color={ds.gray[700]}>
           {'How Can We Help You?'}
         </Typography>
       }

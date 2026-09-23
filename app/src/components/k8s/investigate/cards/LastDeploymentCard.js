@@ -714,7 +714,7 @@ class LastDeploymentCard {
       return <DeploymentHistoryContent history={this.deploymentHistory} event={this.event} cardId={this.id} changeChoices={this.rollbackChoices} />;
     }
     return (
-      <Typography marginTop={ds.space.mul(0, 5)} fontSize={ds.text.bodyLg} fontWeight={500}>
+      <Typography marginTop={ds.space.mul(0, 5)} fontSize={ds.text.bodyLg} fontWeight={ds.weight.medium}>
         No diff available.
       </Typography>
     );
