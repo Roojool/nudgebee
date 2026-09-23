@@ -190,12 +190,14 @@ func TestMarshalInvestigationAnalysis(t *testing.T) {
 }
 
 func TestToolEvidenceInMessage_Undeterminable(t *testing.T) {
-	ran, seen, seenInQuery := toolEvidenceInMessage(nil, "3827a6fe-4d43-4423-b470-2acfe26e9c8d", "kubectl_execute", "kubectl get deploy web", "x")
+	ran, ranInQuery, seen, seenInQuery := toolEvidenceInMessage(nil, "3827a6fe-4d43-4423-b470-2acfe26e9c8d", "kubectl_execute", "kubectl get deploy web", "x")
 	assert.Nil(t, ran)
+	assert.Nil(t, ranInQuery)
 	assert.Nil(t, seen)
 	assert.Nil(t, seenInQuery)
-	ran, seen, seenInQuery = toolEvidenceInMessage(nil, "not-a-uuid", "kubectl_execute", "kubectl get deploy web", "x")
+	ran, ranInQuery, seen, seenInQuery = toolEvidenceInMessage(nil, "not-a-uuid", "kubectl_execute", "kubectl get deploy web", "x")
 	assert.Nil(t, ran)
+	assert.Nil(t, ranInQuery)
 	assert.Nil(t, seen)
 	assert.Nil(t, seenInQuery)
 }
@@ -217,10 +219,11 @@ func TestToolEvidenceInMessage_Query(t *testing.T) {
 	mock.ExpectQuery(`COUNT\(\*\) FILTER`).
 		WithArgs(msg, "kubectl_execute", "image: nginx:does-not-exist-9.9.9", pq.Array([]string{"11111111-1111-1111-1111-111111111111"})).
 		WillReturnRows(sqlmock.NewRows([]string{"seen", "seen_in_query"}).AddRow(2, 1))
-	ran, seen, seenInQuery := toolEvidenceInMessage(dbm, msg, "kubectl_execute", query, "Image:         nginx:does-not-exist-9.9.9")
+	ran, ranInQuery, seen, seenInQuery := toolEvidenceInMessage(dbm, msg, "kubectl_execute", query, "Image:         nginx:does-not-exist-9.9.9")
 	require.NotNil(t, ran)
 	require.NotNil(t, seenInQuery)
 	assert.True(t, *ran)
+	assert.True(t, *ranInQuery)
 	assert.True(t, *seen)
 	assert.True(t, *seenInQuery)
 
@@ -231,16 +234,18 @@ func TestToolEvidenceInMessage_Query(t *testing.T) {
 			AddRow("11111111-1111-1111-1111-111111111111", `{"command":"kubectl get deployment payment-worker -n benchmark-scenarios -o yaml"}`))
 	mock.ExpectQuery(`COUNT\(\*\) FILTER`).
 		WillReturnRows(sqlmock.NewRows([]string{"seen", "seen_in_query"}).AddRow(1, 0))
-	ran, seen, seenInQuery = toolEvidenceInMessage(dbm, msg, "kubectl_execute", "kubectl logs -n benchmark-scenarios -l app=payment-worker --tail=50", "FATAL: DB_URL is not set")
+	ran, ranInQuery, seen, seenInQuery = toolEvidenceInMessage(dbm, msg, "kubectl_execute", "kubectl logs -n benchmark-scenarios -l app=payment-worker --tail=50", "FATAL: DB_URL is not set")
 	assert.True(t, *ran)
+	assert.False(t, *ranInQuery, "no call ran the command the check stores")
 	assert.True(t, *seen)
 	assert.False(t, *seenInQuery, "the stored command cannot print that line")
 
 	// No successful call of that tool at all.
 	mock.ExpectQuery(`SELECT id::text AS id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "parameters"}))
-	ran, seen, seenInQuery = toolEvidenceInMessage(dbm, msg, "kubectl_execute", query, "anything")
+	ran, ranInQuery, seen, seenInQuery = toolEvidenceInMessage(dbm, msg, "kubectl_execute", query, "anything")
 	assert.False(t, *ran)
+	assert.False(t, *ranInQuery)
 	assert.False(t, *seen)
 	assert.False(t, *seenInQuery)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -317,4 +322,96 @@ func TestParseConfirmingCheck_VolatileValue(t *testing.T) {
 		require.NotNil(t, check, "rejected a usable expect: %s (%s)", e, reason)
 		assert.False(t, check.VolatileValue, "flagged a stable value: %s", e)
 	}
+}
+
+func TestNormalizeMatchText(t *testing.T) {
+	// A shell_execute result is a JSON document, so the command's own output
+	// reaches the database with its quotes, newlines and tabs escaped. The
+	// investigation writes the same fragment out plainly. Both sides must
+	// normalise to the same string or the check reads "not seen" (#38489).
+	stored := `{"stdout":"{\n  \"name\": \"CLICKHOUSE_HOST\",\n  \"value\": \"nudgebee-agent-clickhouse.nudgebee-agent-dev\"\n}\n"}`
+	expect := `"value": "nudgebee-agent-clickhouse.nudgebee-agent-dev"`
+	assert.Contains(t, normalizeMatchText(stored), normalizeMatchText(expect))
+	assert.NotContains(t, normalizeText(stored), normalizeText(expect),
+		"guards the regression: the raw text never matched")
+
+	// A tab-separated line and a line spanning the output's own newlines.
+	assert.Contains(t, normalizeMatchText(`{"stdout":"nb_audits\ttopic\ttrue\tfalse\n"}`),
+		normalizeMatchText("nb_audits\ttopic\ttrue\tfalse"))
+	assert.Contains(t, normalizeMatchText(`{"stdout":"Reason:  Evicted\nMessage: The node was low on resource: memory\n"}`),
+		normalizeMatchText("Reason: Evicted"))
+
+	// A result that is itself JSON arrives escaped twice; one decoding pass
+	// would leave a backslash before every quote.
+	assert.Contains(t,
+		normalizeMatchText(`{"stdout":"{\\\"reason\\\":\\\"ImagePullBackOff\\\"}"}`),
+		normalizeMatchText(`"reason":"ImagePullBackOff"`))
+
+	// Plain (unwrapped) output still compares as before.
+	assert.Equal(t, "image: nginx:does-not-exist-9.9.9", normalizeMatchText("Image:   nginx:does-not-exist-9.9.9"))
+}
+
+func TestQueryMatchesCall_EscapedParameters(t *testing.T) {
+	// The parameters column is JSON too, so a command carrying quotes arrives
+	// escaped. Matching must not depend on that.
+	assert.True(t, queryMatchesCall(
+		`kubectl get pod nudgebee-agent-oss-runner -n nudgebee-oss -o json | jq '.spec.containers[].env[] | select(.name=="CLICKHOUSE_HOST")'`,
+		`{"command":"kubectl get pod nudgebee-agent-oss-runner -n nudgebee-oss -o json | jq '.spec.containers[].env[] | select(.name==\"CLICKHOUSE_HOST\")'"}`))
+	// The short-query fallback compares by containment, where the escaping
+	// decided the answer outright.
+	assert.True(t, queryMatchesCall(`describe "victoria"`, `{"question":"describe \"victoria\" now"}`))
+}
+
+func TestIsPodSpecific(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		workload string
+		want     bool
+	}{
+		{"replicaset pod of the workload", "kubectl logs llm-server-7566fcdb4-6gvj6 -n nudgebee", "llm-server", true},
+		{"replicaset pod of another workload", "kubectl describe pod rag-server-78fb9bbf5c-ftcqw -n nudgebee", "llm-server", true},
+		{"daemonset-style suffix", "kubectl logs elastic-agent-agent-x4m2p -n elasticsearch", "elastic-agent-agent", true},
+		{"statefulset ordinal", "kubectl logs elasticsearch-es-default-0 -n elasticsearch --tail 50", "elasticsearch-es-default", true},
+		{"statefulset ordinal at end of text", "kubectl exec -it postgres-10", "postgres", true},
+		{"statefulset ordinal named as a pod in an output line", "pod postgres-0 was evicted", "postgres", true},
+		{"image tag is not a pod", "kubectl get deploy -o jsonpath='{..image}' # payment-worker-2.1.0", "payment-worker", false},
+		// The ordinal shape alone is a version as often as it is a pod, so it
+		// counts only where the text is about a pod.
+		{"version reference in prose", "upgrading es-8 cluster compatibility this quarter", "es", false},
+		{"version range in prose", "we are moving from es-7 to es-8 next release", "es", false},
+		{"schema version, not a pod index", "bump to llm-server-2 config schema version", "llm-server", false},
+		{"supported version in prose", "check whether postgres-16 supports this extension", "postgres", false},
+		{"workload itself", "kubectl get deployment llm-server -n nudgebee -o yaml", "llm-server", false},
+		{"no workload resolved", "kubectl get deployment catalog-api -n benchmark-scenarios", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isPodSpecific(tt.text, tt.workload))
+		})
+	}
+}
+
+func TestParseConfirmingCheck_FlagsReadTheExpect(t *testing.T) {
+	const ns, wl = "nudgebee", "llm-server"
+	// A re-runnable query whose expected output pins the check to this firing.
+	check, reason := parseConfirmingCheckBlock(
+		checkBlock("shell_execute", "kubectl get events -n nudgebee --field-selector involvedObject.name=llm-server",
+			"pod llm-server-7566fcdb4-6gvj6 exceeded its memory limit"), ns, wl)
+	require.NotNil(t, check)
+	assert.Empty(t, reason)
+	assert.True(t, check.PodSpecific, "the expect names a pod")
+
+	check, _ = parseConfirmingCheckBlock(
+		checkBlock("logs", "Show error logs for llm-server in namespace nudgebee between {window_start} and {window_end}",
+			"2026-09-22T01:33:49Z scheduler: run-migrations failed for llm-server"), ns, wl)
+	require.NotNil(t, check)
+	assert.True(t, check.FixedTime, "the expect carries a wall-clock timestamp")
+
+	// A unix time in seconds, which only the millisecond form used to catch.
+	check, _ = parseConfirmingCheckBlock(
+		checkBlock("shell_execute", "kubectl logs -n nudgebee job/k6-services-server-api-1789882060",
+			"thresholds on http_req_duration have been crossed"), ns, wl)
+	require.NotNil(t, check)
+	assert.True(t, check.FixedTime, "the job name is pinned to one firing")
 }

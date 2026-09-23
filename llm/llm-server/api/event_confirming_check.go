@@ -30,6 +30,13 @@ type confirmingCheck struct {
 	// that tool in this run — the check was observed, not just described.
 	ToolRanInRun    *bool `json:"tool_ran_in_run,omitempty"`
 	ExpectSeenInRun *bool `json:"expect_seen_in_run,omitempty"`
+	// ToolRanInQuery: a call whose command matches the stored query succeeded.
+	// ToolRanInRun says only that the named tool ran at all, which a run making
+	// thirty shell_execute calls satisfies by construction, so it cannot tell a
+	// check whose command was never run from one whose expected text was wrong.
+	// This one separates them, and is what a false ExpectSeenInQuery must be
+	// read against.
+	ToolRanInQuery *bool `json:"tool_ran_in_query,omitempty"`
 	// ExpectSeenInQuery is the honest version of ExpectSeenInRun: the expected
 	// text appeared in the output of a call whose command matches the query
 	// stored above, not merely somewhere in that tool's output during the run.
@@ -39,7 +46,8 @@ type confirmingCheck struct {
 	// stays comparable; phase 2 must gate on this one.
 	ExpectSeenInQuery *bool `json:"expect_seen_in_query,omitempty"`
 	// PodSpecific / FixedTime mark a check that cannot be re-run for a later
-	// firing as written.
+	// firing as written — a pod name or a fixed timestamp in either the query or
+	// the expected output.
 	PodSpecific bool `json:"pod_specific,omitempty"`
 	FixedTime   bool `json:"fixed_time,omitempty"`
 	// VolatileValue marks an expect that pins a measured reading — a percentage,
@@ -81,10 +89,18 @@ var (
 	// Tokens of a command: names, paths, flags, keys and values.
 	commandTokenPattern = regexp.MustCompile(`[A-Za-z0-9_{}][A-Za-z0-9\-_./:={}]*`)
 
-	fixedTimePattern = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\b1[6-9]\d{11}\b`)
-	// A pod name: workload plus a ReplicaSet hash and pod suffix, or a
-	// DaemonSet/StatefulSet-style suffix.
+	// A wall-clock timestamp, or a unix time in milliseconds or seconds.
+	fixedTimePattern = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\b1[6-9]\d{11}\b|\b1[6-9]\d{8}\b`)
+	// Any pod name carrying a ReplicaSet hash and pod suffix. Pods of the event's
+	// own workload are matched by workloadPodPattern, which also catches the
+	// shapes this one cannot tell from an ordinary name.
 	genericPodPattern = regexp.MustCompile(`\b[a-z0-9]([a-z0-9-]*[a-z0-9])?-[a-z0-9]{8,10}-[a-z0-9]{5}\b`)
+
+	// Text that is talking about a pod. A StatefulSet pod is only a workload name
+	// plus an ordinal, which a version reference has too ("moving from es-7 to
+	// es-8", "llm-server-2 config schema"), so that shape is read as a pod only
+	// here.
+	podContextPattern = regexp.MustCompile(`(?i)\bpods?\b|\bpo/|\bkubectl\s+(logs|exec|describe|delete|get)\b`)
 )
 
 // commandFillerWords appear in most commands of a kind, so they say nothing
@@ -179,8 +195,10 @@ func parseConfirmingCheckBlock(text, namespace, workload string) (*confirmingChe
 	if !isSpecificExpect(check.Expect, namespace, workload) {
 		return nil, confirmingCheckGenericExpect
 	}
-	check.FixedTime = fixedTimePattern.MatchString(check.Query)
-	check.PodSpecific = isPodSpecific(check.Query, workload)
+	// Either field can pin the check to this firing: a query naming a pod, or an
+	// expect quoting an output line that carries the pod name or a timestamp.
+	check.FixedTime = fixedTimePattern.MatchString(check.Query) || fixedTimePattern.MatchString(check.Expect)
+	check.PodSpecific = isPodSpecific(check.Query, workload) || isPodSpecific(check.Expect, workload)
 	check.VolatileValue = volatileValuePattern.MatchString(check.Expect)
 	return check, ""
 }
@@ -213,14 +231,32 @@ func isSpecificExpect(expect, namespace, workload string) bool {
 	return false
 }
 
-func isPodSpecific(query, workload string) bool {
-	if workload != "" {
-		p := regexp.MustCompile(`\b` + regexp.QuoteMeta(strings.ToLower(workload)) + `-([a-z0-9]{8,10}-)?[a-z0-9]{5}\b`)
-		if p.MatchString(strings.ToLower(query)) {
-			return true
-		}
+func isPodSpecific(text, workload string) bool {
+	if genericPodPattern.MatchString(text) {
+		return true
 	}
-	return genericPodPattern.MatchString(query)
+	if workload == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	if workloadPodPattern(workload).MatchString(lower) {
+		return true
+	}
+	return podContextPattern.MatchString(lower) && workloadOrdinalPattern(workload).MatchString(lower)
+}
+
+// workloadPodPattern matches a pod of the named workload by its ReplicaSet hash
+// and pod suffix, or by a DaemonSet-style suffix alone.
+func workloadPodPattern(workload string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(strings.ToLower(workload)) + `-([a-z0-9]{8,10}-)?[a-z0-9]{5}\b`)
+}
+
+// workloadOrdinalPattern matches a StatefulSet pod of the named workload. The
+// ordinal must not run on into a dot or another name character, so an image tag
+// (`payment-worker-2.1.0`) is not read as a pod. Only meaningful alongside
+// podContextPattern — on its own the shape is ambiguous with a version.
+func workloadOrdinalPattern(workload string) *regexp.Regexp {
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(strings.ToLower(workload)) + `-[0-9]{1,3}(\z|[^0-9.a-z-])`)
 }
 
 // stripConfirmingCheckBlock removes the block before the investigation text is
@@ -230,17 +266,18 @@ func stripConfirmingCheckBlock(s string) string {
 }
 
 // toolEvidenceInMessage reports, within this investigation's own message:
-// whether the named tool completed successfully (ran), whether the expected
-// text appeared in any of those results (seen — the week-one definition, kept
-// for comparability), and whether it appeared in the output of a call whose
-// command matches the stored query (seenInQuery — the one phase 2 can trust).
-// All nil when it cannot be determined.
-func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, query, expect string) (ran, seen, seenInQuery *bool) {
+// whether the named tool completed successfully (ran), whether a call whose
+// command matches the stored query did (ranInQuery), whether the expected text
+// appeared in any of that tool's results (seen — the week-one definition, kept
+// for comparability), and whether it appeared in the output of the matching
+// call (seenInQuery — the one phase 2 can trust). All nil when it cannot be
+// determined.
+func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, query, expect string) (ran, ranInQuery, seen, seenInQuery *bool) {
 	if dbManager == nil || tool == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if _, err := uuid.Parse(messageId); err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	// Parameters are bounded here because a shell_execute heredoc can be large;
 	// the command being matched sits at the front. Responses stay in the
@@ -253,12 +290,12 @@ func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, q
 		SELECT id::text AS id, COALESCE(LEFT(parameters, 4000), '') AS parameters
 		FROM llm_conversation_tool_calls
 		WHERE message_id = $1 AND tool_name = $2 AND status = 'success'`, messageId, tool); err != nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	r := len(calls) > 0
 	if !r {
 		f := false
-		return &r, &f, &f
+		return &r, &f, &f, &f
 	}
 	matched := make([]string, 0, len(calls))
 	for _, c := range calls {
@@ -266,6 +303,7 @@ func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, q
 			matched = append(matched, c.Id)
 		}
 	}
+	rq := len(matched) > 0
 	var counts struct {
 		Seen        int `db:"seen"`
 		SeenInQuery int `db:"seen_in_query"`
@@ -274,14 +312,14 @@ func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, q
 		SELECT COUNT(*) FILTER (WHERE found) AS seen,
 		       COUNT(*) FILTER (WHERE found AND id::text = ANY($4)) AS seen_in_query
 		FROM (
-		    SELECT id, position($3 in regexp_replace(lower(COALESCE(response, '')), '\s+', ' ', 'g')) > 0 AS found
+		    SELECT id, position($3 in `+toolResponseMatchSQL+`) > 0 AS found
 		    FROM llm_conversation_tool_calls
 		    WHERE message_id = $1 AND tool_name = $2 AND status = 'success') t`,
-		messageId, tool, normalizeText(expect), pq.Array(matched)); err != nil {
-		return nil, nil, nil
+		messageId, tool, normalizeMatchText(expect), pq.Array(matched)); err != nil {
+		return nil, nil, nil, nil
 	}
 	s, sq := counts.Seen > 0, counts.SeenInQuery > 0
-	return &r, &s, &sq
+	return &r, &rq, &s, &sq
 }
 
 // queryMatchesCall reports whether a stored query names the same command as a
@@ -290,7 +328,7 @@ func toolEvidenceInMessage(dbManager *common.DatabaseManager, messageId, tool, q
 // shortened pipeline — so this matches on distinctive tokens rather than
 // equality. Three quarters of them must appear in the call's parameters.
 func queryMatchesCall(query, parameters string) bool {
-	params := strings.ToLower(parameters)
+	params := normalizeMatchText(parameters)
 	if strings.TrimSpace(query) == "" || params == "" {
 		return false
 	}
@@ -298,8 +336,8 @@ func queryMatchesCall(query, parameters string) bool {
 	if len(tokens) < 3 {
 		// Too little to match on (an agent-style tool given a one-line question).
 		// Fall back to containment either way round.
-		q := normalizeText(query)
-		return strings.Contains(normalizeText(params), q) || strings.Contains(q, normalizeText(params))
+		q := normalizeMatchText(query)
+		return strings.Contains(params, q) || strings.Contains(q, params)
 	}
 	hits := 0
 	for _, t := range tokens {
@@ -333,6 +371,27 @@ func normalizeText(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
+// jsonEscapeReplacer flattens JSON string escaping. shell_execute and
+// kubectl_execute store their result as a JSON document (`{"stdout":"..."}`),
+// so the command's own newlines, tabs and quotes reach the database as `\n`,
+// `\t` and `\"` — and a result that itself contains JSON arrives escaped twice
+// (`\\\"`). The investigation writes the same fragment out plainly, so matching
+// the raw text missed it. Line breaks become a space; every other backslash is
+// dropped rather than decoded, because one decoding pass does not undo two
+// levels of escaping. Applied to both sides, so the comparison stays symmetric.
+// Replaying dev's stored checks, this recovers 35 of 232 (152 seen -> 187).
+var jsonEscapeReplacer = strings.NewReplacer(`\n`, " ", `\r`, " ", `\t`, " ", `\`, "")
+
+// normalizeMatchText is normalizeText with that un-escaping, applied to both
+// sides of a match. toolResponseMatchSQL is its SQL twin, over the stored
+// response column — change the two together.
+func normalizeMatchText(s string) string {
+	return normalizeText(jsonEscapeReplacer.Replace(s))
+}
+
+const toolResponseMatchSQL = `regexp_replace(lower(replace(replace(replace(replace(` +
+	`COALESCE(response, ''), '\n', ' '), '\r', ' '), '\t', ' '), chr(92), '')), '\s+', ' ', 'g')`
+
 // recordConfirmingCheck parses the block from the investigation text, fills the
 // measurement flags, and emits the Phase 1 metric and log line. Returns the
 // check to store, or nil.
@@ -348,12 +407,13 @@ func recordConfirmingCheck(ctx *security.RequestContext, dbManager *common.Datab
 		ctx.GetLogger().Info("analyzer: confirming check rejected", "event_id", eventId, "reason", reason)
 		return nil
 	}
-	check.ToolRanInRun, check.ExpectSeenInRun, check.ExpectSeenInQuery = toolEvidenceInMessage(dbManager, messageId, check.Tool, check.Query, check.Expect)
+	check.ToolRanInRun, check.ToolRanInQuery, check.ExpectSeenInRun, check.ExpectSeenInQuery = toolEvidenceInMessage(dbManager, messageId, check.Tool, check.Query, check.Expect)
 	check.RecordedAt = time.Now().UTC()
 	common.MetricsEventAnalysisOperationsTotal("confirming_check", "produced", accountId)
 	ctx.GetLogger().Info("analyzer: confirming check recorded",
 		"event_id", eventId, "tool", check.Tool,
 		"tool_ran_in_run", boolOrUnknown(check.ToolRanInRun),
+		"tool_ran_in_query", boolOrUnknown(check.ToolRanInQuery),
 		"expect_seen_in_run", boolOrUnknown(check.ExpectSeenInRun),
 		"expect_seen_in_query", boolOrUnknown(check.ExpectSeenInQuery),
 		"volatile_value", check.VolatileValue,
