@@ -14,6 +14,7 @@ class FakeClient:
         self.points = {}
         self.collections = {"parent__source"} if existing else set()
         self.created = []
+        self.payload_indexes = []
         self.deleted_collections = []
 
     def collection_exists(self, name):
@@ -22,6 +23,9 @@ class FakeClient:
     def create_collection(self, collection_name, **kwargs):
         self.collections.add(collection_name)
         self.created.append((collection_name, kwargs))
+
+    def create_payload_index(self, collection_name, field_name, field_schema):
+        self.payload_indexes.append((collection_name, field_name, field_schema))
 
     def delete_collection(self, collection_name):
         self.collections.discard(collection_name)

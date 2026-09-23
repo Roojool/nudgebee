@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,21 +20,29 @@ const (
 	kbDocumentsDefaultLimit = 50
 	kbDocumentsMaxLimit     = 200
 	errKBDocumentNotFound   = "kb: document not found, the knowledge base may have been re-synced"
+
+	// What Content is: one indexed chunk, or the whole document as it was stored.
+	contentSourceFragment = "fragment"
+	contentSourceOriginal = "source"
 )
 
 // KBDocument is one stored document of a knowledge base. Content is only
 // populated when a single document is fetched.
 type KBDocument struct {
-	Id    string  `json:"id"`
-	Title string  `json:"title"`
-	Url   *string `json:"url"`
+	Id      string  `json:"id"`
+	Title   string  `json:"title"`
+	Url     *string `json:"url"`
+	Content *string `json:"content,omitempty"`
+	// Where Content came from: "source" (the document as fetched), "indexed"
+	// (the whole document as stored on the point), or "fragment" (one chunk,
+	// because no source was kept for it). Empty on a listing.
+	ContentSource *string `json:"content_source,omitempty"`
 	// DocumentKey is the handle a Fact/SOP mark is stored against (see
 	// DocumentKey). Empty when the document cannot be marked individually.
 	DocumentKey string `json:"document_key"`
 	// NoteCategory is the mark a user put on this document: "sop", "fact", or
 	// empty when it carries none.
-	NoteCategory string  `json:"note_category"`
-	Content      *string `json:"content,omitempty"`
+	NoteCategory string `json:"note_category"`
 }
 
 // KBDocumentsPage is one page of a knowledge base's documents. NextOffset is
@@ -44,11 +53,12 @@ type KBDocumentsPage struct {
 }
 
 type ragKBDocument struct {
-	Id       string  `json:"id"`
-	Title    *string `json:"title"`
-	Url      *string `json:"url"`
-	Content  *string `json:"content"`
-	SourceId *string `json:"source_id"`
+	Id            string  `json:"id"`
+	Title         *string `json:"title"`
+	Url           *string `json:"url"`
+	Content       *string `json:"content"`
+	ContentSource *string `json:"content_source"`
+	SourceId      *string `json:"source_id"`
 }
 
 // ragDocumentKey is DocumentKey for a document rag-server listed or served.
@@ -86,6 +96,38 @@ func kbDocumentsCollection(sc *security.RequestContext, accountId, kbId string) 
 		return "", "", fmt.Errorf("kb: failed to fetch knowledgebase: %w", err)
 	}
 	return kbMeta.Name, kbCollectionName(kbMeta.KBType, kbMeta.IntegrationID, kbId), nil
+}
+
+// kbStoredText returns a manual knowledge base's own text, which llm-server
+// stored in llm_knowledgebases.data before rag-server ever indexed it. Chunking
+// leaves the index holding only slices, but for these KBs the whole document was
+// never lost — it is still in the database, so it is served from there rather
+// than from a chunk.
+//
+// Plain text only. An uploaded file is kept encoded and is served as a file, not
+// as document text. Returns "" when there is nothing to serve.
+func kbStoredText(ctx context.Context, accountId, kbId string) (string, error) {
+	dbms, err := knowledgeDatabase(common.Metastore)
+	if err != nil {
+		return "", fmt.Errorf("kb: failed to get database manager: %w", err)
+	}
+	var data *string
+	err = dbms.Db.GetContext(
+		ctx,
+		&data,
+		"SELECT data FROM llm_knowledgebases WHERE id = $1 AND account_id = $2 AND kb_type = 'manual' AND data_format = 'text'",
+		kbId, accountId,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("kb: failed to fetch knowledgebase content: %w", err)
+	}
+	if data == nil {
+		return "", nil
+	}
+	return *data, nil
 }
 
 // documentTitle falls back to the KB name for stored documents that carry no
@@ -354,6 +396,18 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 	if !found {
 		return nil, errors.New(errKBDocumentNotFound)
 	}
+	content, contentSource := doc.Content, doc.ContentSource
+	if contentSource != nil && *contentSource == contentSourceFragment {
+		stored, err := kbStoredText(sc.GetContext(), accountId, kbId)
+		if err != nil {
+			return nil, err
+		}
+		if stored != "" {
+			whole := contentSourceOriginal
+			content, contentSource = &stored, &whole
+		}
+	}
+
 	key := ragDocumentKey(collection, doc)
 	var category string
 	if key != "" {
@@ -364,11 +418,12 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 		category = categories[key]
 	}
 	return &KBDocument{
-		Id:           doc.Id,
-		Title:        documentTitle(doc, kbName),
-		Url:          doc.Url,
-		DocumentKey:  key,
-		NoteCategory: category,
-		Content:      doc.Content,
+		Id:            doc.Id,
+		Title:         documentTitle(doc, kbName),
+		Url:           doc.Url,
+		DocumentKey:   key,
+		NoteCategory:  category,
+		Content:       content,
+		ContentSource: contentSource,
 	}, nil
 }

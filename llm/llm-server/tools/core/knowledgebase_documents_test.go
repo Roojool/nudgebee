@@ -1,6 +1,8 @@
 package core
 
 import (
+	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"nudgebee/llm/common"
@@ -141,4 +143,84 @@ func TestGetKBDocumentSourceServesAnUploadedTextFile(t *testing.T) {
 	assert.Equal(t, "text/plain", got.ContentType)
 	assert.Equal(t, "Page the on-call SRE.", got.Content)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestKBStoredTextServesAManualKBFromTheDatabase(t *testing.T) {
+	// Chunking leaves the index holding slices, but a manual KB's whole text was
+	// never lost — llm-server stored it before rag-server indexed anything.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	oldDatabase := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+	whole := "Step 1: drain the node.\n\nStep 2: cordon it.\n\nStep 3: page the on-call."
+	mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+		WithArgs("kb-1", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow(whole))
+
+	got, err := kbStoredText(context.Background(), "account-a", "kb-1")
+	require.NoError(t, err)
+	assert.Equal(t, whole, got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestKBStoredTextIsEmptyWhenTheKBIsNotManualText(t *testing.T) {
+	// The query filters on kb_type/data_format, so an integration KB or an
+	// uploaded file matches no row — and "no row" must read as "nothing to
+	// serve", not as an error that would fail the whole document view.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	oldDatabase := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+	mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+		WithArgs("kb-2", "account-a").
+		WillReturnError(sql.ErrNoRows)
+
+	got, err := kbStoredText(context.Background(), "account-a", "kb-2")
+	require.NoError(t, err)
+	assert.Equal(t, "", got)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestKBStoredTextTreatsEmptyAndNullAsNothingToServe(t *testing.T) {
+	// A manual KB can exist with no text in it — one such row is live on dev, and
+	// the column is nullable. Either way there is nothing better than what the
+	// index already returned, so the caller must keep that rather than blank the
+	// document out.
+	for _, tc := range []struct {
+		name string
+		row  *sqlmock.Rows
+	}{
+		{"empty string", sqlmock.NewRows([]string{"data"}).AddRow("")},
+		{"null", sqlmock.NewRows([]string{"data"}).AddRow(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer func() { _ = db.Close() }()
+			oldDatabase := knowledgeDatabase
+			knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+				return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+			}
+			t.Cleanup(func() { knowledgeDatabase = oldDatabase })
+
+			mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+				WithArgs("kb-3", "account-a").
+				WillReturnRows(tc.row)
+
+			got, err := kbStoredText(context.Background(), "account-a", "kb-3")
+			require.NoError(t, err)
+			assert.Equal(t, "", got)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }

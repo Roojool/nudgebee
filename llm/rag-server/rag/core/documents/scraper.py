@@ -666,7 +666,7 @@ def fetch_servicenow_kb_articles(snow_client, batch_size=50):
         return []
 
 
-def process_servicenow_kb_article(article, base_url, snow_client=None):
+def process_servicenow_kb_article(article, base_url, snow_client=None, sources=None):
     """Process a single ServiceNow KB article into a Document."""
     try:
         sys_id = article.get("sys_id", "")
@@ -727,6 +727,19 @@ def process_servicenow_kb_article(article, base_url, snow_client=None):
             "last_updated": sys_updated_on,
         }
 
+        if sources is not None:
+            # The article body as ServiceNow returned it. What we index is
+            # converted and will be chunked; this is the only copy.
+            sources.append(
+                {
+                    "source_id": str(sys_id),
+                    "title": short_description,
+                    "url": article_url,
+                    "content": html_text,
+                    "content_type": "text/html",
+                }
+            )
+
         return Document(page_content=page_content, metadata=metadata)
 
     except Exception as e:
@@ -734,7 +747,7 @@ def process_servicenow_kb_article(article, base_url, snow_client=None):
         return None
 
 
-def collect_servicenow_kb_documents(snow_client, base_url):
+def collect_servicenow_kb_documents(snow_client, base_url, sources=None):
     """Fetch all published ServiceNow KB articles and return them as documents.
 
     Embedding is done in a single process_documents call per integration so
@@ -743,7 +756,7 @@ def collect_servicenow_kb_documents(snow_client, base_url):
     articles = fetch_servicenow_kb_articles(snow_client)
     documents: List[Document] = []
     for article in articles:
-        doc = process_servicenow_kb_article(article, base_url, snow_client)
+        doc = process_servicenow_kb_article(article, base_url, snow_client, sources=sources)
         if doc:
             documents.append(doc)
     logger.info(f"Collected {len(documents)} ServiceNow KB documents from {len(articles)} articles")
@@ -779,7 +792,9 @@ def _process_servicenow_integration(
         logger.info(f"Connecting to ServiceNow instance: {instance_name}")
         client = pysnow.Client(instance=instance_name, user=username, password=password)
 
-        documents = collect_servicenow_kb_documents(client, instance_url)
+        run_id = str(uuid.uuid4())
+        sources: List[dict] = []
+        documents = collect_servicenow_kb_documents(client, instance_url, sources=sources)
         document_ids: List[str] = []
         if documents:
             logger.info(f"Processing {len(documents)} ServiceNow KB documents into collection {collection_name}...")
@@ -792,6 +807,7 @@ def _process_servicenow_integration(
                 tenant_id=tenant_id,
                 trigger_type=trigger_type,
                 triggered_by=triggered_by,
+                run_id=run_id,
             )
             if not document_ids:
                 # process_documents swallows embedding failures and returns no
@@ -802,6 +818,9 @@ def _process_servicenow_integration(
                     integration_id, "error", error_message="Embedding produced no documents from the ServiceNow scrape"
                 )
                 return []
+            # Only once the embed is known to have produced documents — see the
+            # Confluence path above.
+            source_store.store(collection_name, sources, run_id)
         # Articles, not `document_ids` — see the Confluence path above.
         update_integration_kb_load_result(integration_id, "active", len(documents))
         return document_ids

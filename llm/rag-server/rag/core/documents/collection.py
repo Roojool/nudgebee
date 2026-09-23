@@ -7,6 +7,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException
 
 from rag.qdrant.client import get_qdrant_client
 from rag.qdrant.client import list_collections_optimized
+from rag.core.documents import source_store
 
 logger = logging.getLogger(__name__)
 
@@ -551,6 +552,24 @@ def list_collection_documents(collection_name: str, limit: int = 50, offset: str
     return {"items": items, "next_offset": str(cursor) if cursor is not None else None}
 
 
+# The metadata key each scrape stamps its document id on. Source storage keys every
+# document on that same id, so this is the join between an indexed point and its stored
+# source. A new scrape adds its key here; nothing else needs to know about it.
+_SOURCE_ID_KEYS = ("source_id", "page_id", "sys_id")
+
+
+def _source_identifier(metadata: dict) -> str | None:
+    """The id this document was stored under, or None when the scrape stamped none."""
+    for key in _SOURCE_ID_KEYS:
+        value = metadata.get(key)
+        # 0 is a legitimate id; "" and None are not. Truthiness alone would drop the
+        # first, and `is not None` alone would keep the second and look a blank id up.
+        if value is None or value == "":
+            continue
+        return str(value)
+    return None
+
+
 def get_collection_document(collection_name: str, point_id: str) -> dict | None:
     """Return one document with its full content, or None when the point is gone
     (point ids are content hashes, so a re-sync can replace them)."""
@@ -565,10 +584,28 @@ def get_collection_document(collection_name: str, point_id: str) -> dict | None:
     payload = points[0].payload or {}
     metadata = _point_metadata(payload)
     content = _document_content(payload)
+    content_source = "indexed"
+
+    # A chunked document indexed after `parent_content` was dropped carries only this
+    # chunk's text — a page renders as the ~400 characters of its first fragment. The
+    # verbatim document lives in source storage, keyed by the id the chunk already
+    # carries, so prefer it and say plainly when it is missing.
+    if metadata.get("parent_id") and not metadata.get("parent_content"):
+        source_id = _source_identifier(metadata)
+        stored = source_store.get_by_source_id(collection_name, source_id) if source_id else None
+        if stored and stored.get("content"):
+            content = stored["content"]
+            content_source = "source"
+        else:
+            content_source = "fragment"
+
     return {
         "id": str(points[0].id),
         "title": _document_title(metadata, content),
         "url": _document_url(metadata),
         "source_id": _source_identifier(metadata),
         "content": content,
+        # Which of the three the text above is, so a reader is never shown a fragment
+        # that looks like a whole document.
+        "content_source": content_source,
     }

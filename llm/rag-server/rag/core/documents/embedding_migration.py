@@ -48,6 +48,8 @@ from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tu
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from rag.core.documents.source_store import MODULE as SOURCE_MODULE
+
 logger = logging.getLogger(__name__)
 
 
@@ -262,6 +264,13 @@ def _describe(client: QdrantClient, name: str) -> Optional[Tuple[int, Distance, 
         logger.warning("embedding_migration: %s uses named vectors, skipping", name)
         return None
     metadata = getattr(info.config, "metadata", None) or {}
+    if metadata.get("module") == SOURCE_MODULE:
+        # Source storage keeps verbatim documents behind a 1-dimension placeholder, not
+        # embeddings. Rebuilt at the embedder's dimension it can no longer be written to,
+        # and source_store swallows that upsert failure — so the store silently stays
+        # empty until someone notices documents rendering as fragments.
+        logger.info("embedding_migration: %s is source storage, not an index; skipping", name)
+        return None
     return params.size, params.distance, metadata, info.points_count or 0
 
 

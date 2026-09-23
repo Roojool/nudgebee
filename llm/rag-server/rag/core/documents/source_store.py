@@ -91,7 +91,68 @@ def _client():
 
 def ensure_collection(client, name: str) -> None:
     if client.collection_exists(name):
-        return
+        _heal_wrong_dimension(client, name)
+    else:
+        _create(client, name)
+    # After either path, so a collection that predates the index — or that the heal
+    # declined to touch because it holds points — gets one too. Creating an index that
+    # already exists is a no-op, so this is one cheap call per sync.
+    _ensure_payload_index(client, name)
+
+
+def _ensure_payload_index(client, name: str) -> None:
+    """Index the field both reads filter on.
+
+    ``get_by_source_id`` and the ``_versions`` scroll behind ``prune`` both match on
+    ``source_id``. Unindexed, Qdrant scans every payload, and these payloads are whole
+    documents held on disk.
+    """
+    try:
+        client.create_payload_index(collection_name=name, field_name="source_id", field_schema="keyword")
+    except Exception:
+        # Slower reads are not worth failing an ingest over.
+        logger.warning("source_store: could not ensure the source_id index on %s", name, exc_info=True)
+
+
+def _heal_wrong_dimension(client, name: str) -> None:
+    """Recreate a source collection that something rebuilt at an embedder's dimension.
+
+    Source storage keeps documents behind a 1-dimension placeholder vector. A collection
+    sweep that treats it as an embedding collection leaves it at 384 or 1536, every upsert
+    then fails on vector size, and ``store`` swallows that — so the store stays empty for
+    good. Only an empty collection is replaced: points at another dimension were never
+    written by this module, and dropping someone else's data to fix ours is not a trade
+    this path gets to make.
+    """
+    try:
+        info = client.get_collection(name)
+        params = info.config.params.vectors
+        size = getattr(params, "size", None)
+        if size is None or size == _VECTOR_SIZE:
+            return
+        points = info.points_count or 0
+        if points:
+            logger.error(
+                "source_store: %s has vector size %s (expected %s) and %d point(s); leaving it alone. "
+                "Sources cannot be written until it is rebuilt.",
+                name,
+                size,
+                _VECTOR_SIZE,
+                points,
+            )
+            return
+        client.delete_collection(collection_name=name)
+        logger.warning("source_store: %s was empty at vector size %s; recreating at %s", name, size, _VECTOR_SIZE)
+        _create(client, name)
+    except Exception:
+        # Qdrant has no transaction across drop-and-recreate, so this cannot be made
+        # atomic. Keeping the recreate in here means a failure is reported as a failed
+        # heal rather than surfacing later as an unexplained missing collection; the
+        # next sync calls ensure_collection again and creates it.
+        logger.error("source_store: could not heal %s", name, exc_info=True)
+
+
+def _create(client, name: str) -> None:
     client.create_collection(
         collection_name=name,
         vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
@@ -171,8 +232,17 @@ def store(parent_collection: str, documents: List[Dict[str, Any]], run_id: str, 
         for batch in _upsert_batches(points):
             client.upsert(collection_name=name, points=batch)
         prune(parent_collection, sorted({str((p.payload or {}).get("source_id")) for p in points}), client=client)
-    except Exception as exc:  # losing the source must never fail an ingest
-        logger.warning("source_store: store failed for %s: %s", parent_collection, exc)
+    except Exception:  # losing the source must never fail an ingest
+        # Swallowed on purpose, but not quietly: this is the only signal that a
+        # collection's documents will read as fragments in the UI. The traceback is
+        # what was missing when this failed silently for days on a vector-size
+        # mismatch, so it is logged in full rather than as a one-line message.
+        logger.error(
+            "source_store: store failed for %s (%d document(s) not kept)",
+            parent_collection,
+            len(points),
+            exc_info=True,
+        )
         return 0
     return len(points)
 
@@ -273,6 +343,30 @@ def get(parent_collection: str, digest: str, client=None) -> Optional[Dict[str, 
         with_vectors=False,
     )
     return (points[0].payload or {}) if points else None
+
+
+def get_by_source_id(parent_collection: str, source_id: str, client=None) -> Optional[Dict[str, Any]]:
+    """The newest stored version of one document, by the id its indexed points carry.
+
+    ``get`` needs the content hash, which a caller reading an indexed point does not have;
+    it knows only which document the point came from. Versions are kept per document, so
+    the newest ``fetched_at`` is the one that matches what is currently indexed.
+    """
+    name = source_collection_name(parent_collection)
+    client = client or _client()
+    if not client.collection_exists(name):
+        return None
+    points, _ = client.scroll(
+        collection_name=name,
+        scroll_filter=Filter(must=[FieldCondition(key="source_id", match=MatchValue(value=str(source_id)))]),
+        limit=MAX_VERSIONS,
+        with_payload=True,
+        with_vectors=False,
+    )
+    if not points:
+        return None
+    newest = max(points, key=lambda p: str((p.payload or {}).get("fetched_at") or ""))
+    return newest.payload or {}
 
 
 def documents_for_run(parent_collection: str, run_id: str, limit: int = 100, offset=None, client=None) -> Dict:
