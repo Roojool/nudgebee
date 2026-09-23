@@ -144,7 +144,7 @@ func TestPopulateCompletedEventAnalysis(t *testing.T) {
 	resp := EventAnalysisResponse{
 		EventId: eventID,
 	}
-	populateCompletedEventAnalysis(ctx, repo, eventID, fp, aggKey, acct, &resp)
+	require.NoError(t, populateCompletedEventAnalysis(ctx, repo, eventID, fp, aggKey, acct, &resp))
 
 	assert.Equal(t, "Final synthesized report", resp.DetailedResponse)
 	assert.Equal(t, "Investigation tool findings", resp.Investigation)
@@ -152,6 +152,42 @@ func TestPopulateCompletedEventAnalysis(t *testing.T) {
 	assert.Equal(t, "CrashLoop", resp.Title)
 	assert.Equal(t, eventID, resp.EventId, "EventId must not be overwritten by log analysis JSON")
 	assert.NotEqual(t, "corrupted-fp", resp.EventFingerprint, "EventFingerprint must not be overwritten by log analysis JSON")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPopulateCompletedEventAnalysisRejectsReportReadFailure(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	repo, mock := newTestRepo(t)
+	const eventID, fp, acct, aggKey = "event-report-read-failure", "fingerprint", "account", "alert"
+	for _, stage := range []events.EventAnalysisType{events.AnalysisTypeLog, events.AnalysisTypeSummary, events.AnalysisTypeInvestigation} {
+		mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .*").WithArgs(eventID, stage).
+			WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}).AddRow("row-" + string(stage)))
+		mock.ExpectQuery("SELECT id, analysis, status.* FROM event_log_analysis WHERE id = .*").WithArgs("row-"+string(stage), acct).
+			WillReturnRows(sqlmock.NewRows([]string{"id", "analysis", "status", "event_id", "summary", "status_reason", "updated_at"}).
+				AddRow("row-"+string(stage), "", string(events.AnalysisStatusCompleted), eventID, "stage result", "", time.Now()))
+	}
+	mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .*").WithArgs(eventID, events.AnalysisTypeDetailedResponse).
+		WillReturnError(assert.AnError)
+
+	resp := EventAnalysisResponse{EventId: eventID}
+	require.ErrorIs(t, populateCompletedEventAnalysis(ctx, repo, eventID, fp, aggKey, acct, &resp), assert.AnError)
+	assert.Empty(t, resp.DetailedResponse, "a failed report read must not fall back to the initial summary")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPopulateCompletedEventAnalysisRejectsChangedStage(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	repo, mock := newTestRepo(t)
+	const eventID, fp, acct, aggKey = "event-changed-stage", "fingerprint", "account", "alert"
+	mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .*").WithArgs(eventID, events.AnalysisTypeLog).
+		WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}).AddRow("row-log"))
+	mock.ExpectQuery("SELECT id, analysis, status.* FROM event_log_analysis WHERE id = .*").WithArgs("row-log", acct).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "analysis", "status", "event_id", "summary", "status_reason", "updated_at"}).
+			AddRow("row-log", "", string(events.AnalysisStatusInProgress), eventID, "old result", "", time.Now()))
+
+	resp := EventAnalysisResponse{EventId: eventID}
+	require.ErrorContains(t, populateCompletedEventAnalysis(ctx, repo, eventID, fp, aggKey, acct, &resp), "changed status")
+	assert.Empty(t, resp.DetailedResponse)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -260,6 +296,106 @@ func TestGetConfirmedTerminalAnalysisPartialCompletionReturnsFalse(t *testing.T)
 	assert.False(t, terminal, "partial pipeline completion must NOT be reported as terminal")
 	assert.Empty(t, resp.DetailedResponse)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAllEventAnalysisTypesCompletedRequiresCurrentReport(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reportAge time.Duration
+		completed bool
+	}{
+		{name: "report predates investigation", reportAge: 2 * time.Minute, completed: false},
+		{name: "report follows investigation", reportAge: 30 * time.Second, completed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := security.NewRequestContextForSuperAdmin()
+			repo, mock := newTestRepo(t)
+			const eventID, fp, acct, aggKey = "event-current-report", "fingerprint", "account", "alert"
+			base := time.Now().Add(-time.Minute)
+			for _, stage := range []events.EventAnalysisType{
+				events.AnalysisTypeSummary,
+				events.AnalysisTypeInvestigation,
+				events.AnalysisTypeLog,
+				events.AnalysisTypeDetailedResponse,
+			} {
+				updated := base
+				if stage == events.AnalysisTypeDetailedResponse {
+					updated = time.Now().Add(-tc.reportAge)
+				}
+				mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .*").
+					WithArgs(eventID, stage).
+					WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}))
+				mock.ExpectQuery("SELECT id, analysis, status.* FROM event_log_analysis WHERE event_fingerprint = .*").
+					WithArgs(fp, acct, aggKey, stage).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "analysis", "status", "event_id", "summary", "status_reason", "updated_at"}).
+						AddRow("row-"+string(stage), "{}", string(events.AnalysisStatusCompleted), eventID, "result", "", updated))
+			}
+
+			assert.Equal(t, tc.completed, allEventAnalysisTypesCompleted(ctx, repo, eventID, fp, aggKey, acct))
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestCompleteSkippedEventAnalysisRequiresPersistedStages(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failFirstWrite bool
+		existingReport string
+	}{
+		{name: "all stages persisted"},
+		{name: "stage write fails", failFirstWrite: true},
+		{name: "existing report preserved", existingReport: "Previously generated report"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := security.NewRequestContextForSuperAdmin()
+			repo, mock := newTestRepo(t)
+			const eventID, fp, acct, aggKey = "event-disabled", "fingerprint", "account", "alert"
+			for _, stage := range []events.EventAnalysisType{
+				events.AnalysisTypeSummary,
+				events.AnalysisTypeInvestigation,
+				events.AnalysisTypeLog,
+				events.AnalysisTypeDetailedResponse,
+			} {
+				mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .*").
+					WithArgs(eventID, stage).
+					WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}).AddRow("row-" + string(stage)))
+				summary := ""
+				if stage == events.AnalysisTypeDetailedResponse {
+					summary = tc.existingReport
+				}
+				mock.ExpectQuery("SELECT id, analysis, status.* FROM event_log_analysis WHERE id = .*").
+					WithArgs("row-"+string(stage), acct).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "analysis", "status", "event_id", "summary", "status_reason", "updated_at"}).
+						AddRow("row-"+string(stage), "", string(events.AnalysisStatusInProgress), eventID, summary, "", time.Now()))
+				if stage == events.AnalysisTypeDetailedResponse && tc.existingReport == "" {
+					mock.ExpectBegin()
+					mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .* FOR UPDATE").
+						WithArgs(eventID, stage).
+						WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}).AddRow("row-" + string(stage)))
+					mock.ExpectExec("UPDATE event_log_analysis SET analysis=.*summary=.*status=.*").
+						WithArgs("row-"+string(stage), "", "Analysis skipped because debug analysis is disabled for this account.", string(events.AnalysisStatusCompleted), eventID).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+					mock.ExpectCommit()
+					continue
+				}
+				write := mock.ExpectExec("UPDATE event_log_analysis SET status=.* WHERE id=\\$1").
+					WithArgs("row-"+string(stage), string(events.AnalysisStatusCompleted), "skipped")
+				if tc.failFirstWrite {
+					write.WillReturnError(assert.AnError)
+					break
+				}
+				write.WillReturnResult(sqlmock.NewResult(0, 1))
+			}
+			err := completeSkippedEventAnalysis(ctx, repo, eventID, fp, acct, aggKey, "skipped")
+			if tc.failFirstWrite {
+				require.ErrorIs(t, err, assert.AnError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 // TestRecoveryTransientErrorPreservesTokens validates that transient errors do not

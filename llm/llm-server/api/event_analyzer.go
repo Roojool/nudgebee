@@ -732,6 +732,15 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 			allCompleted = false
 		}
 	}
+	if allCompleted {
+		reportTime := dbAnalyses[events.AnalysisTypeDetailedResponse].UpdatedAt
+		for _, aType := range []events.EventAnalysisType{events.AnalysisTypeSummary, events.AnalysisTypeInvestigation, events.AnalysisTypeLog} {
+			if dbAnalyses[aType].UpdatedAt.After(reportTime) {
+				allCompleted = false
+				break
+			}
+		}
+	}
 	if !latestAnalysisAt.IsZero() {
 		generatedAt := latestAnalysisAt
 		finalResponse.GeneratedAt = &generatedAt
@@ -776,14 +785,9 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 	// the caller doesn't run a duplicate summary → investigation → log →
 	// detailed-response cycle (the observed duplicate-task bug).
 	//
-	// Partial-completion carve-out: when log_analysis is already COMPLETED and fresh
-	// but the pipeline is partial (reached here because some other type is not COMPLETED,
-	// and not regenerating), skip the claim gate and dispatch. Leaving fresh log_analysis
-	// COMPLETED lets Step 3's cache skip it and avoids the redundant log + synthesis
-	// re-run that resetting it would force. (The mark-remaining loop below still
-	// resets the other types to IN_PROGRESS, matching the pre-existing HTTP behavior
-	// of re-running summary/investigation/detailed_response on a partial state; only
-	// log_analysis is preserved.)
+	// Partial-completion carve-out: preserve completed log analysis, but claim
+	// the report row before dispatch. It is both the atomic gate for competing
+	// requests and the durable recovery marker if the worker never starts.
 	logCompleted := dbAnalyses[events.AnalysisTypeLog] != nil &&
 		dbAnalyses[events.AnalysisTypeLog].Status == string(events.AnalysisStatusCompleted) &&
 		!eventAnalysisRepo.IsAnalysisStale(dbAnalyses[events.AnalysisTypeLog].UpdatedAt)
@@ -810,17 +814,33 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 			return
 		}
 		claimedLog = true
+	} else {
+		claimed, claimErr := eventAnalysisRepo.ClaimEventAnalysis(ctx, request.EventId, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, events.AnalysisTypeDetailedResponse, true)
+		if claimErr != nil {
+			ctx.GetLogger().Error("analyzer: failed to claim final report", "error", claimErr, "event_id", request.EventId)
+			c.JSON(500, buildApiResponse(nil, []error{common.Error{Message: "analyzer: failed to claim final report: " + claimErr.Error()}}))
+			return
+		}
+		if !claimed {
+			finalResponse.Status = string(events.AnalysisStatusInProgress)
+			attachEventAnalysisVersions(ctx, eventAnalysisRepo, request.AccountId, &finalResponse)
+			c.JSON(200, buildApiResponse(finalResponse, nil))
+			return
+		}
+		finalResponse.TaskStatuses[string(events.AnalysisTypeDetailedResponse)] = string(events.AnalysisStatusInProgress)
 	}
 
-	// Dispatching. Mark every type IN_PROGRESS so the UI reflects a running
-	// pipeline. log_analysis is IN_PROGRESS only when we actually claimed/reset
-	// it above; in the preserved-COMPLETED partial case it stays COMPLETED, so
-	// reporting IN_PROGRESS here would flicker back to COMPLETED on the next poll.
+	// Dispatching. On a fresh claim, mark the remaining stages IN_PROGRESS for
+	// the UI. On a partial run the worker owns stage transitions; do not rewrite
+	// completed rows from a request that may have raced with another worker.
 	for _, aType := range analysisTypes {
 		if aType == events.AnalysisTypeLog {
 			if claimedLog {
 				finalResponse.TaskStatuses[string(aType)] = string(events.AnalysisStatusInProgress)
 			}
+			continue
+		}
+		if logCompleted {
 			continue
 		}
 		if err := eventAnalysisRepo.UpsertEventAnalysisInProgress(ctx, request.EventId, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, aType); err != nil {
@@ -846,10 +866,8 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 		if err != nil {
 			newCtx.GetLogger().Error("unable to process analysis", "error", err, "event_id", request.EventId)
 			common.MetricsEventAnalysisOperationsTotal("investigation", "fail", request.AccountId)
-			// Mark all analysis types as FAILED to prevent stuck IN_PROGRESS state
-			if newDbManager, dbErr := common.GetDatabaseManager(common.Metastore); dbErr == nil {
-				markAllAnalysisFailed(newCtx, events.NewEventAnalysisRepository(newDbManager), request.EventId, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, err.Error())
-			}
+			// The owning pipeline records terminal failure before releasing its lock.
+			// Errors before ownership leave the claimed row for recovery.
 		} else {
 			newCtx.GetLogger().Info("analysis completed successfully", "event_id", request.EventId)
 			common.MetricsEventAnalysisOperationsTotal("investigation", "success", request.AccountId)
@@ -859,12 +877,8 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 	if err != nil {
 		common.MetricsApiRequestsFailedTotal("event_analyzer", "timedout")
 		common.MetricsEventAnalysisOperationsTotal("investigation", "queue_full", request.AccountId)
-		// Mark tasks as FAILED if submission fails to prevent stuck IN_PROGRESS state
-		for _, aType := range analysisTypes {
-			if statusErr := eventAnalysisRepo.UpdateEventAnalysisStatus(ctx, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, string(events.AnalysisStatusFailed), "unable to queue analysis - "+err.Error(), aType); statusErr != nil {
-				ctx.GetLogger().Warn("failed to update event analysis status on submission failure", "error", statusErr, "analysis_type", aType)
-			}
-		}
+		// Keep the claimed row IN_PROGRESS. Recovery can dispatch it when the
+		// worker pool is available; failing every stage would erase that marker.
 		c.JSON(503, buildApiResponse(finalResponse, []error{common.Error{Message: "analyzer: unable to queue analysis request, please try again later"}}))
 		return
 	}
@@ -935,7 +949,9 @@ func getOrCreateEventAnalysisStatus(ctx *security.RequestContext, request EventA
 				response.Status = string(core.ConversationStatusCompleted)
 			}
 		}
-		populateCompletedEventAnalysis(ctx, eventAnalysisRepo, request.EventId, eventInfo.Fingerprint, eventInfo.AggregationKey, request.AccountId, &response)
+		if err := populateCompletedEventAnalysis(ctx, eventAnalysisRepo, request.EventId, eventInfo.Fingerprint, eventInfo.AggregationKey, request.AccountId, &response); err != nil {
+			return EventAnalysisResponse{}, fmt.Errorf("load completed event analysis: %w", err)
+		}
 		return response, nil
 	}
 
@@ -958,19 +974,22 @@ func getOrCreateEventAnalysisStatus(ctx *security.RequestContext, request EventA
 		// so completed log analysis keeps its cached result and the per-step caches in
 		// analyzeEventUsingAgentsAndUpdateDb still skip finished steps and only re-run
 		// what's missing.
-		// Partial-completion carve-out (non-regenerate only): when log_analysis is
-		// already COMPLETED but the overall pipeline is not (e.g. detailed_response
-		// missing after a Step-4 crash), do NOT reset it to IN_PROGRESS — that would
-		// force Step 3 to re-run log analysis and unconditionally re-run Step 4
-		// synthesis. Proceed to dispatch instead; the per-step caches in
-		// analyzeEventUsingAgentsAndUpdateDb skip the completed steps and only re-run
-		// what's missing. (This narrow path is not atomically gated, but the per-step
-		// caches dedupe it; the fresh-event race below is the one that produced the
-		// observed duplicate-pipeline bug.)
+		// Partial-completion carve-out (non-regenerate only): keep completed log
+		// analysis and atomically claim the final report instead. A second MQ or
+		// HTTP dispatcher then sees IN_PROGRESS, and recovery can find the report
+		// claim even if this worker never reaches the pipeline.
 		// Stale rows do not qualify for the carve-out: preserving a COMPLETED
 		// log_analysis is only worth doing while it is still worth reusing.
 		if !request.Regenerate && existingAnalysis != nil && existingAnalysis.Status == string(events.AnalysisStatusCompleted) &&
 			!eventAnalysisRepo.IsAnalysisStale(existingAnalysis.UpdatedAt) {
+			claimed, claimErr := eventAnalysisRepo.ClaimEventAnalysis(ctx, request.EventId, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, events.AnalysisTypeDetailedResponse, true)
+			if claimErr != nil {
+				return EventAnalysisResponse{}, fmt.Errorf("claim event report: %w", claimErr)
+			}
+			if !claimed {
+				response.Status = string(events.AnalysisStatusInProgress)
+				return response, nil
+			}
 			response.Status = string(events.AnalysisStatusCreated)
 			response.RelatedEventId = request.EventId
 			return response, nil
@@ -1023,44 +1042,74 @@ func copyLogAnalysisFields(target *EventAnalysisResponse, src EventAnalysisRespo
 // populateCompletedEventAnalysis enriches an EventAnalysisResponse with outputs
 // from all four pipeline stages (summary, investigation, log, detailed_response)
 // when an analysis has fully completed.
-func populateCompletedEventAnalysis(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, fingerprint, aggKey, accountId string, response *EventAnalysisResponse) {
+func populateCompletedEventAnalysis(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, fingerprint, aggKey, accountId string, response *EventAnalysisResponse) error {
 	if repo == nil || response == nil {
-		return
+		return fmt.Errorf("completed event analysis repository or response is nil")
 	}
 	// Decode log fields into an intermediate struct and copy specific fields so
 	// identity, status, and authoritative stage outputs are never corrupted.
 	logRow, err := repo.GetEventAnalysis(ctx, eventId, fingerprint, aggKey, accountId, events.AnalysisTypeLog)
-	if err == nil && logRow != nil {
-		if response.Analysis == "" && logRow.Analysis != "" {
-			response.Analysis = logRow.Analysis
-			var logResp EventAnalysisResponse
-			if err := common.UnmarshalJson([]byte(logRow.Analysis), &logResp); err == nil {
-				copyLogAnalysisFields(response, logResp)
-			}
+	if err != nil || logRow == nil {
+		return fmt.Errorf("load completed log analysis: %w", completedStageReadError(err))
+	}
+	if logRow.Status != string(events.AnalysisStatusCompleted) {
+		return fmt.Errorf("completed log analysis changed status to %s", logRow.Status)
+	}
+	if response.Analysis == "" && logRow.Analysis != "" {
+		response.Analysis = logRow.Analysis
+		var logResp EventAnalysisResponse
+		if err := common.UnmarshalJson([]byte(logRow.Analysis), &logResp); err == nil {
+			copyLogAnalysisFields(response, logResp)
 		}
-		if response.Summary == "" {
-			response.Summary = logRow.Summary
-		}
-		if logRow.RelatedEventId != "" {
-			response.RelatedEventId = logRow.RelatedEventId
-		}
+	}
+	if response.Summary == "" {
+		response.Summary = logRow.Summary
+	}
+	if logRow.RelatedEventId != "" {
+		response.RelatedEventId = logRow.RelatedEventId
 	}
 
 	summaryRow, err := repo.GetEventAnalysis(ctx, eventId, fingerprint, aggKey, accountId, events.AnalysisTypeSummary)
-	if err == nil && summaryRow != nil && summaryRow.Summary != "" {
+	if err != nil || summaryRow == nil {
+		return fmt.Errorf("load completed summary: %w", completedStageReadError(err))
+	}
+	if summaryRow.Status != string(events.AnalysisStatusCompleted) {
+		return fmt.Errorf("completed summary changed status to %s", summaryRow.Status)
+	}
+	if summaryRow.Summary != "" {
 		response.Summary = summaryRow.Summary
 	}
 	invRow, err := repo.GetEventAnalysis(ctx, eventId, fingerprint, aggKey, accountId, events.AnalysisTypeInvestigation)
-	if err == nil && invRow != nil && invRow.Summary != "" {
+	if err != nil || invRow == nil {
+		return fmt.Errorf("load completed investigation: %w", completedStageReadError(err))
+	}
+	if invRow.Status != string(events.AnalysisStatusCompleted) {
+		return fmt.Errorf("completed investigation changed status to %s", invRow.Status)
+	}
+	if invRow.Summary != "" {
 		response.Investigation = invRow.Summary
 	}
 	drRow, err := repo.GetEventAnalysis(ctx, eventId, fingerprint, aggKey, accountId, events.AnalysisTypeDetailedResponse)
-	if err == nil && drRow != nil && drRow.Summary != "" {
+	if err != nil || drRow == nil {
+		return fmt.Errorf("load completed report: %w", completedStageReadError(err))
+	}
+	if drRow.Status != string(events.AnalysisStatusCompleted) {
+		return fmt.Errorf("completed report changed status to %s", drRow.Status)
+	}
+	if drRow.Summary != "" {
 		response.DetailedResponse = drRow.Summary
 	}
 	if response.DetailedResponse == "" {
 		response.DetailedResponse = response.Summary
 	}
+	return nil
+}
+
+func completedStageReadError(err error) error {
+	if err != nil {
+		return err
+	}
+	return errors.New("completed stage disappeared")
 }
 
 // getConfirmedTerminalAnalysis verifies whether an event analysis has reached a
@@ -1097,7 +1146,10 @@ func getConfirmedTerminalAnalysis(ctx *security.RequestContext, request EventAna
 			EventAggregationKey: aggKey,
 			Status:              string(events.AnalysisStatusCompleted),
 		}
-		populateCompletedEventAnalysis(ctx, repo, request.EventId, fp, aggKey, request.AccountId, &resp)
+		if err := populateCompletedEventAnalysis(ctx, repo, request.EventId, fp, aggKey, request.AccountId, &resp); err != nil {
+			ctx.GetLogger().Warn("analyzer: unable to load confirmed completed result", "error", err, "event_id", request.EventId)
+			return EventAnalysisResponse{}, false
+		}
 		resp.Status = string(events.AnalysisStatusCompleted)
 		return resp, true
 	}
@@ -1157,6 +1209,7 @@ func getConfirmedTerminalAnalysis(ctx *security.RequestContext, request EventAna
 // so without the staleness term here the freshness bound is never consulted for
 // exactly the events it exists to protect.
 func allEventAnalysisTypesCompleted(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, fingerprint, aggKey, accountId string) bool {
+	var newestInput, reportTime time.Time
 	for _, aType := range []events.EventAnalysisType{
 		events.AnalysisTypeSummary,
 		events.AnalysisTypeInvestigation,
@@ -1172,8 +1225,13 @@ func allEventAnalysisTypesCompleted(ctx *security.RequestContext, repo *events.E
 			repo.IsAnalysisStale(analysis.UpdatedAt) {
 			return false
 		}
+		if aType == events.AnalysisTypeDetailedResponse {
+			reportTime = analysis.UpdatedAt
+		} else if analysis.UpdatedAt.After(newestInput) {
+			newestInput = analysis.UpdatedAt
+		}
 	}
-	return true
+	return !newestInput.After(reportTime)
 }
 
 // eventId, when set, limits recovery to this event's run (see messagesForEvent).
@@ -2380,7 +2438,12 @@ func buildEventSummaryQuery(eventId string) string {
 		"triage rule ids, nb_status internals or deduplication-chain mechanics — they are internal bookkeeping, not " +
 		"incident content. Keep the whole brief under 300 words, in short bullets."
 }
-func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request EventAnalysisRequest) (EventAnalysisResponse, error) {
+
+// A report persistence error leaves the claimed report IN_PROGRESS for the
+// recovery job instead of converting a transient database failure into FAILED.
+var errEventReportPersistence = errors.New("event report persistence requires retry")
+
+func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request EventAnalysisRequest) (result EventAnalysisResponse, runErr error) {
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
 		ctx.GetLogger().Error("unable to get db", "error", err)
@@ -2397,10 +2460,17 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	// read path (getOrCreateEventAnalysisStatus).
 	if disabled, ffErr := common.IsFeatureEnabledForAccount("EVENT_DEBUG_ANALYSIS_DISABLED", ctx.GetSecurityContext().GetTenantId(), request.AccountId); ffErr == nil && disabled {
 		ctx.GetLogger().Info("analyzer: event debug analysis disabled for account, skipping compute before event load", "event_id", request.EventId, "account_id", request.AccountId)
-		if fingerprint, aggKey, idErr := getEventIdentity(dbManager, request); idErr == nil {
-			markAllAnalysisSkipped(ctx, eventAnalysisRepo, request.EventId, fingerprint, request.AccountId, aggKey, "skipped - debug analysis disabled for account")
-		} else {
-			ctx.GetLogger().Warn("analyzer: unable to resolve event identity to mark skipped", "event_id", request.EventId, "error", idErr)
+		fingerprint, aggKey, idErr := getEventIdentity(dbManager, request)
+		if idErr != nil {
+			return EventAnalysisResponse{}, fmt.Errorf("%w: resolve disabled event identity: %w", errEventReportPersistence, idErr)
+		}
+		unlock, acquired, lockErr := tryEventAnalysisLock(ctx.GetContext(), dbManager.Db, request.AccountId, fingerprint)
+		if lockErr != nil || !acquired {
+			return EventAnalysisResponse{Status: string(events.AnalysisStatusInProgress), StatusReason: "event pipeline lock unavailable"}, nil
+		}
+		defer unlock()
+		if err := completeSkippedEventAnalysis(ctx, eventAnalysisRepo, request.EventId, fingerprint, request.AccountId, aggKey, "skipped - debug analysis disabled for account"); err != nil {
+			return EventAnalysisResponse{}, fmt.Errorf("%w: record disabled event stages: %w", errEventReportPersistence, err)
 		}
 		return EventAnalysisResponse{Status: string(events.AnalysisStatusCompleted)}, nil
 	}
@@ -2453,6 +2523,29 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	}
 
 	parentConversationId := events.SessionIdPrefixEvent + eventFingerprint
+	unlock, acquired, err := tryEventAnalysisLock(ctx.GetContext(), dbManager.Db, request.AccountId, eventFingerprint)
+	if err != nil {
+		ctx.GetLogger().Warn("analyzer: unable to acquire event pipeline lock; leaving analysis for recovery", "event_id", request.EventId, "error", err)
+		return EventAnalysisResponse{Status: string(events.AnalysisStatusInProgress), StatusReason: "event pipeline lock unavailable"}, nil
+	}
+	if !acquired {
+		ctx.GetLogger().Info("analyzer: another worker owns the event pipeline", "event_id", request.EventId, "fingerprint", eventFingerprint)
+		return EventAnalysisResponse{Status: string(events.AnalysisStatusInProgress)}, nil
+	}
+	defer unlock()
+	defer func() {
+		failureCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), 10*time.Second)
+		defer cancel()
+		persistCtx := security.NewRequestContext(failureCtx, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+		if p := recover(); p != nil {
+			markAllAnalysisFailed(persistCtx, eventAnalysisRepo, request.EventId, eventFingerprint, request.AccountId, eventAggregationKey, fmt.Sprint(p))
+			panic(p)
+		}
+		if runErr != nil && !errors.Is(runErr, errEventReportPersistence) {
+			markAllAnalysisFailed(persistCtx, eventAnalysisRepo, request.EventId, eventFingerprint, request.AccountId, eventAggregationKey, runErr.Error())
+		}
+	}()
+
 	response := EventAnalysisResponse{
 		RelatedEventId:   request.EventId,
 		EventId:          request.EventId,
@@ -2478,24 +2571,17 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	// (or whichever debug agent) sub-agent and burning LLM tokens on work
 	// whose results already exist.
 	if !request.Regenerate {
-		allCompleted := true
-		for _, aType := range []events.EventAnalysisType{
-			events.AnalysisTypeSummary,
-			events.AnalysisTypeInvestigation,
-			events.AnalysisTypeLog,
-			events.AnalysisTypeDetailedResponse,
-		} {
-			a, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, aType)
-			if a == nil || a.Status != string(events.AnalysisStatusCompleted) || eventAnalysisRepo.IsAnalysisStale(a.UpdatedAt) {
-				allCompleted = false
-				break
-			}
-		}
-		if allCompleted {
+		if allEventAnalysisTypesCompleted(ctx, eventAnalysisRepo, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId) {
 			ctx.GetLogger().Info("analyzer: skipping event analysis, all analysis types already completed",
 				"session_id", parentConversationId, "event_id", request.EventId)
 			return EventAnalysisResponse{Status: string(events.AnalysisStatusCompleted)}, nil
 		}
+	}
+	// Keep the final-report stage visible to syncStuckEventAnalyses throughout
+	// the run. MQ only claims log_analysis at dispatch, so a crash after that
+	// stage completes otherwise leaves no IN_PROGRESS row for recovery to find.
+	if err := eventAnalysisRepo.UpsertEventAnalysisInProgress(ctx, request.EventId, eventFingerprint, request.AccountId, eventAggregationKey, events.AnalysisTypeDetailedResponse); err != nil {
+		return EventAnalysisResponse{}, fmt.Errorf("%w: register pending report for event %s: %w", errEventReportPersistence, request.EventId, err)
 	}
 
 	// If regenerating, or if no conversation exists, or if conversation failed, we might need to delete old conversation
@@ -2578,7 +2664,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			// update status based on current summary
 			err = eventAnalysisRepo.UpsertEventAnalysis(ctx, request.EventId, "", summaryResponseStr, string(events.AnalysisStatusCompleted), eventData.Fingerprint, request.AccountId, eventData.AggregationKey, events.AnalysisTypeSummary)
 			if err != nil {
-				ctx.GetLogger().Error("unable to update status after summarization", "error", err, "eventId", request.EventId)
+				return response, fmt.Errorf("%w: save summary for event %s: %w", errEventReportPersistence, request.EventId, err)
 			}
 		} else {
 			updateAllFailed(ctx, eventAnalysisRepo, eventData, request.AccountId, "empty summary response")
@@ -2608,14 +2694,14 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		// match nothing and leave the pipeline permanently unable to report itself
 		// complete.
 		if err := eventAnalysisRepo.UpsertEventAnalysisStatus(ctx, request.EventId, eventData.Fingerprint, request.AccountId, eventData.AggregationKey, string(events.AnalysisStatusCompleted), debugSkipReason, events.AnalysisTypeInvestigation, false); err != nil {
-			ctx.GetLogger().Warn("failed to update event analysis status on debug skip", "error", err)
+			return response, fmt.Errorf("%w: skip investigation for event %s: %w", errEventReportPersistence, request.EventId, err)
 		}
 		if err := eventAnalysisRepo.UpsertEventAnalysisStatus(ctx, request.EventId, eventData.Fingerprint, request.AccountId, eventData.AggregationKey, string(events.AnalysisStatusCompleted), debugSkipReason, events.AnalysisTypeLog, true); err != nil {
-			ctx.GetLogger().Warn("failed to update event analysis status on debug skip", "error", err)
+			return response, fmt.Errorf("%w: skip log analysis for event %s: %w", errEventReportPersistence, request.EventId, err)
 		}
 		// DetailedResponse = initial summary when debug is disabled (no deeper analysis to enrich with)
 		if err := eventAnalysisRepo.UpsertEventAnalysis(ctx, request.EventId, "", response.Summary, string(events.AnalysisStatusCompleted), eventData.Fingerprint, request.AccountId, eventData.AggregationKey, events.AnalysisTypeDetailedResponse); err != nil {
-			ctx.GetLogger().Warn("failed to upsert detailed_response on debug skip", "error", err)
+			return response, fmt.Errorf("%w: save skipped report for event %s: %w", errEventReportPersistence, request.EventId, err)
 		}
 		response.DetailedResponse = response.Summary
 		return response, nil
@@ -2791,19 +2877,6 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		}
 		ctx.GetLogger().Info("analyzer: using existing log analysis", "event_id", request.EventId)
 
-		// If DetailedResponse is also already done, return immediately.
-		existingDetailed, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
-		if existingDetailed != nil && existingDetailed.Status == string(events.AnalysisStatusCompleted) && !request.Regenerate &&
-			!eventAnalysisRepo.IsAnalysisStale(existingDetailed.UpdatedAt) {
-			response.DetailedResponse = existingDetailed.Summary
-			// Populate Investigation from DB before returning so callers have the full response.
-			if response.Investigation == "" {
-				if existingInv, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeInvestigation); existingInv != nil {
-					response.Investigation = existingInv.Summary
-				}
-			}
-			return response, nil
-		}
 	} else {
 		// #37005: Step 3 no longer investigates. It acts on the <change_plan> the
 		// debug agent produced in Step 2 — handing the localised change to
@@ -2852,7 +2925,10 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 
 	// Step 4: assemble the report. Skip when COMPLETED unless Regenerate so a
 	// re-dispatch does not rewrite a report that is already stored and fresh.
-	existingDR, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
+	existingDR, err := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
+	if err != nil {
+		return response, fmt.Errorf("%w: inspect report for event %s: %w", errEventReportPersistence, request.EventId, err)
+	}
 	if existingDR != nil && existingDR.Status == string(events.AnalysisStatusCompleted) && existingDR.Summary != "" && !request.Regenerate &&
 		!eventAnalysisRepo.IsAnalysisStale(existingDR.UpdatedAt) {
 		ctx.GetLogger().Info("analyzer: detailed response already completed, skipping assembly", "event_id", request.EventId)
@@ -2884,7 +2960,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 	// runbook so its source stays visible in the UI.
 	detailedResponse := appendRunbookReference(composeDetailedResponse(investigationText, initialSummary, codeFixText, eventData), runbookRef)
 	if err := eventAnalysisRepo.UpsertEventAnalysis(ctx, response.EventId, "", detailedResponse, string(events.AnalysisStatusCompleted), eventFingerprint, request.AccountId, eventAggregationKey, events.AnalysisTypeDetailedResponse); err != nil {
-		ctx.GetLogger().Warn("analyzer: failed to save detailed response", "error", err, "event_id", request.EventId)
+		return response, fmt.Errorf("%w: save report for event %s: %w", errEventReportPersistence, request.EventId, err)
 	}
 	response.DetailedResponse = detailedResponse
 	if response.Investigation == "" {
@@ -4122,6 +4198,42 @@ func getEventIdentity(dbManager *common.DatabaseManager, request EventAnalysisRe
 		fingerprint = request.EventId
 	}
 	return fingerprint, row.AggregationKey, nil
+}
+
+// completeSkippedEventAnalysis persists all four event stages without loading
+// evidence or running an agent. The report is written last so the completion
+// check cannot observe a report older than its skipped inputs.
+func completeSkippedEventAnalysis(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, fingerprint, accountId, aggKey, reason string) error {
+	const skippedReport = "Analysis skipped because debug analysis is disabled for this account."
+	for _, aType := range []events.EventAnalysisType{
+		events.AnalysisTypeSummary,
+		events.AnalysisTypeInvestigation,
+		events.AnalysisTypeLog,
+		events.AnalysisTypeDetailedResponse,
+	} {
+		existing, err := repo.GetEventAnalysis(ctx, eventId, fingerprint, aggKey, accountId, aType)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", aType, err)
+		}
+		if existing != nil && existing.Status == string(events.AnalysisStatusCompleted) && aType != events.AnalysisTypeDetailedResponse {
+			continue
+		}
+		if aType == events.AnalysisTypeDetailedResponse && (existing == nil || strings.TrimSpace(existing.Summary) == "") {
+			if err := repo.UpsertEventAnalysis(ctx, eventId, "", skippedReport, string(events.AnalysisStatusCompleted), fingerprint, accountId, aggKey, aType); err != nil {
+				return fmt.Errorf("complete %s: %w", aType, err)
+			}
+			continue
+		}
+		if existing != nil {
+			err = repo.UpdateEventAnalysisStatusById(ctx, existing.ID, string(events.AnalysisStatusCompleted), reason)
+		} else {
+			err = repo.UpsertEventAnalysisStatus(ctx, eventId, fingerprint, accountId, aggKey, string(events.AnalysisStatusCompleted), reason, aType, false)
+		}
+		if err != nil {
+			return fmt.Errorf("complete %s: %w", aType, err)
+		}
+	}
+	return nil
 }
 
 // markAllAnalysisSkipped marks every non-terminal analysis row for an event as

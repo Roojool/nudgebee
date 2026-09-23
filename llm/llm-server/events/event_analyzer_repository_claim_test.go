@@ -286,3 +286,48 @@ func TestClaimEventAnalysis(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }
+
+// A partial pipeline claims detailed_response while preserving the completed
+// log row. The claim must create a new report generation, but never steal an
+// already-running report from another HTTP or MQ dispatcher.
+func TestClaimPartialEventReport(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	const eventID, fp, acct, aggKey = "evt-partial", "fp-partial", "acct-partial", "alert"
+	for _, tc := range []struct {
+		name    string
+		status  AnalysisStatus
+		claimed bool
+	}{
+		{name: "completed report starts new generation", status: AnalysisStatusCompleted, claimed: true},
+		{name: "active report is not stolen", status: AnalysisStatusInProgress, claimed: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, mock := newClaimTestRepo(t)
+			mock.ExpectBegin()
+			mock.ExpectQuery("SELECT analysis_id FROM event_analysis_mapping .* FOR UPDATE").
+				WithArgs(eventID, AnalysisTypeDetailedResponse).
+				WillReturnRows(sqlmock.NewRows([]string{"analysis_id"}).AddRow("report-old"))
+			mock.ExpectQuery("SELECT status, COALESCE\\(updated_at, recorded_at\\) FROM event_log_analysis").
+				WithArgs("report-old").
+				WillReturnRows(sqlmock.NewRows([]string{"status", "written_at"}).AddRow(string(tc.status), time.Now()))
+			if tc.claimed {
+				mock.ExpectQuery("SELECT id, status.* FROM event_log_analysis WHERE id = .* FOR UPDATE").
+					WithArgs(fp, acct, aggKey, AnalysisTypeDetailedResponse).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "status", "written_at"}).AddRow("report-old", string(tc.status), time.Now()))
+				mock.ExpectQuery("INSERT INTO event_log_analysis").
+					WithArgs(eventID, fp, AnalysisStatusInProgress, acct, aggKey, AnalysisTypeDetailedResponse).
+					WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("report-new"))
+				mock.ExpectExec("INSERT INTO event_analysis_mapping .* DO UPDATE SET analysis_id").
+					WithArgs(eventID, "report-new", AnalysisTypeDetailedResponse).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+				mock.ExpectCommit()
+			} else {
+				mock.ExpectRollback()
+			}
+			claimed, err := repo.ClaimEventAnalysis(ctx, eventID, fp, acct, aggKey, AnalysisTypeDetailedResponse, true)
+			require.NoError(t, err)
+			assert.Equal(t, tc.claimed, claimed)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}

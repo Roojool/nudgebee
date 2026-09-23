@@ -217,6 +217,9 @@ func (r *EventAnalysisRepository) ListCompletedEventAnalysisVersions(ctx *securi
 	return versions, nil
 }
 
+// ErrEventNotFound distinguishes a missing event from a retryable database error.
+var ErrEventNotFound = errors.New("analyzer: event not found")
+
 // GetEventInfo fetches basic event details (ID, fingerprint, aggregation key) from the database.
 func (r *EventAnalysisRepository) GetEventInfo(ctx *security.RequestContext, eventId string, accountId string) (*EventInfo, error) {
 	eventSqlQuery := `SELECT id, fingerprint, aggregation_key, created_at FROM events WHERE id = $1 and cloud_account_id = $2;`
@@ -239,7 +242,7 @@ func (r *EventAnalysisRepository) GetEventInfo(ctx *security.RequestContext, eve
 			return nil, err
 		}
 		if dbEventId.String == "" {
-			return nil, common.Error{Message: "analyzer: event not found - " + eventId}
+			return nil, fmt.Errorf("%w - %s", ErrEventNotFound, eventId)
 		}
 		return &EventInfo{
 			ID:             dbEventId.String,
@@ -252,7 +255,7 @@ func (r *EventAnalysisRepository) GetEventInfo(ctx *security.RequestContext, eve
 		return nil, err
 	}
 
-	return nil, common.Error{Message: "analyzer: event not found - " + eventId}
+	return nil, fmt.Errorf("%w - %s", ErrEventNotFound, eventId)
 }
 
 // GetAnalysisIdFromMapping returns the analysis_id for a given (event_id, analysis_type) pair.
