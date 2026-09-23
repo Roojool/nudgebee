@@ -30,11 +30,7 @@ func (t *PVRightsizeTask) GetDisplayName() string {
 }
 
 func (t *PVRightsizeTask) Execute(taskCtx types.TaskContext, params map[string]any) (any, error) {
-	taskCtx.GetLogger().Debug("Executing PVRightsizeTask", "params", params)
-
-	if paramsStr, err := common.MarshalJson(params); err == nil {
-		taskCtx.GetLogger().Info("params", "params", paramsStr)
-	}
+	taskCtx.GetLogger().Debug("Executing PVRightsizeTask")
 
 	// 1. Extract Parameters
 	accountId := taskCtx.GetAccountID()

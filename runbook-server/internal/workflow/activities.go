@@ -18,7 +18,22 @@ type WorkflowActivities struct {
 
 // Internal_UpdateLastExecutionStatus updates the last execution status of a workflow.
 func (a *WorkflowActivities) Internal_UpdateLastExecutionStatus(ctx context.Context, wf model.Workflow, status model.WorkflowExecutionStatus, statusMessage string) error {
+	statusMessage = a.scrubSecrets(ctx, wf.TenantID, wf.AccountID, statusMessage)
 	return a.Store.SetLastExecutionStatus(ctx, wf.TenantID, wf.AccountID, wf.ID, status, time.Now().UTC(), statusMessage, wf.LastExecutionVersion)
+}
+
+// scrubSecrets replaces the account's credential values in a failure message
+// before it is stored. Secrets are fetched here rather than passed in, so they
+// never enter the workflow history as activity input.
+func (a *WorkflowActivities) scrubSecrets(ctx context.Context, tenantID, accountID, text string) string {
+	if text == "" || a.ConfigService == nil {
+		return text
+	}
+	resp, err := a.FetchWorkflowConfigsActivity(ctx, tenantID, accountID, false)
+	if err != nil {
+		return text
+	}
+	return ScrubSecretValues(text, SecretValues(resp.Secrets))
 }
 
 // FetchWorkflowDefinitionActivity fetches a workflow definition by its name.

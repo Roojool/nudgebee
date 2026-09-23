@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"nudgebee/runbook/internal/logsafe"
 	"nudgebee/runbook/internal/tasks/types"
 )
 
@@ -45,7 +46,7 @@ func (t *PrintTask) Execute(taskCtx types.TaskContext, params map[string]any) (r
 		}
 	}
 
-	taskCtx.GetLogger().Info("PrintTask Executed", "message", message)
+	taskCtx.GetLogger().Info("PrintTask Executed", "message", logsafe.Shape(message))
 
 	// Return the message directly as 'data'
 	return map[string]string{

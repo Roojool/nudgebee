@@ -30,11 +30,7 @@ func (t *HorizontalRightsizeTask) GetDisplayName() string {
 }
 
 func (t *HorizontalRightsizeTask) Execute(taskCtx types.TaskContext, params map[string]any) (any, error) {
-	taskCtx.GetLogger().Debug("Executing HorizontalRightsizeTask", "params", params)
-
-	if paramsStr, err := common.MarshalJson(params); err == nil {
-		taskCtx.GetLogger().Info("params", "params", paramsStr)
-	}
+	taskCtx.GetLogger().Debug("Executing HorizontalRightsizeTask")
 
 	// 1. Extract Parameters
 	accountId := taskCtx.GetAccountID()

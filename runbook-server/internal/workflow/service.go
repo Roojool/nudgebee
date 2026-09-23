@@ -1563,6 +1563,10 @@ func (s *Service) DryRunWorkflow(ctx *security.RequestContext, accountId string,
 		if queryErr == nil {
 			var trace []model.TaskExecutionDetails
 			if err := queryResp.Get(&trace); err == nil {
+				// The queried trace never passed through processWorkflowHistory,
+				// so it has had no redaction at all.
+				RedactSecretsFromTasks(trace, request.Definition)
+				ScrubTaskValues(trace, s.secretValues(ctx, accountId))
 				response.Tasks = trace
 			} else {
 				ctx.GetLogger().Warn("failed to deserialize dry run trace", "error", err)
@@ -1580,6 +1584,8 @@ func (s *Service) DryRunWorkflow(ctx *security.RequestContext, accountId string,
 			response.Output = output
 		}
 	}
+
+	response.Error = ScrubSecretValues(response.Error, s.secretValues(ctx, accountId))
 
 	return response, nil
 }
@@ -3990,6 +3996,27 @@ func (s *Service) ListMCPTools(ctx *security.RequestContext, accountId string, p
 	return map[string]any{"tools": tools}, nil
 }
 
+// secretValues returns the account's credential values for scrubbing error
+// text; nil when configs cannot be read, which leaves the text as it was.
+func (s *Service) secretValues(ctx *security.RequestContext, accountID string) []string {
+	if s.configService == nil {
+		return nil
+	}
+	tenantID := ctx.GetSecurityContext().GetTenantId()
+	configs, err := s.configService.ListConfigsDecrypted(ctx.GetContext(), tenantID, &accountID, nil)
+	if err != nil {
+		ctx.GetLogger().Warn("failed to fetch secrets for error scrubbing", "error", err)
+		return nil
+	}
+	secrets := make(map[string]any)
+	for _, cfg := range configs {
+		if cfg.Type == model.ConfigTypeSecret {
+			secrets[cfg.Key] = cfg.Value
+		}
+	}
+	return SecretValues(secrets)
+}
+
 func (s *Service) ValidateWorkflow(ctx *security.RequestContext, accountId string, wf model.Workflow) error {
 	if !ctx.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeCreate) &&
 		!canInspectWorkflows(ctx.GetSecurityContext(), accountId) {
@@ -4007,6 +4034,10 @@ func (s *Service) ValidateWorkflow(ctx *security.RequestContext, accountId strin
 
 	// Validate template syntax (parse all templates without evaluating them)
 	if err := ValidateTemplateSyntax(wf.Definition.Tasks); err != nil {
+		return common.ErrorBadRequest(err.Error())
+	}
+
+	if err := ValidateNoSecretsInState(wf.Definition.Tasks); err != nil {
 		return common.ErrorBadRequest(err.Error())
 	}
 
@@ -5001,7 +5032,7 @@ func (s *Service) processWorkflowHistory(ctx *security.RequestContext, accountID
 
 	// Redact after virtualization so synthesized and skipped rows are covered and
 	// task IDs are exact definition IDs.
-	RedactSecretsFromTasks(workflowDetails.Tasks, wfDef)
+	RedactExecutionSecrets(workflowDetails, wfDef, s.secretValues(ctx, accountID))
 
 	var sanitizeTaskExecutionDetails func([]model.TaskExecutionDetails)
 	sanitizeTaskExecutionDetails = func(tasks []model.TaskExecutionDetails) {

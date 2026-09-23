@@ -488,6 +488,8 @@ func TestGetDetailedWorkflowExecutionInputs(t *testing.T) {
 	mockStore := new(MockWorkflowStore)
 	mockTaskRegistry := tasks.NewInitializedTaskRegistry()
 	mockConfigService := new(MockConfigService)
+	// Error text is scrubbed of the account's secret values, which are read here.
+	mockConfigService.On("ListConfigsDecrypted", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return([]model.Config{}, nil).Maybe()
 	workflowExector := &WorkflowExecutor{
 		temporalClient: mockTemporalClient,
 		workflowStore:  mockStore,
