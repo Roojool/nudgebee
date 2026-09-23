@@ -248,7 +248,7 @@ rules:
           description: "Event is a CloudWatch Alarm State Change"
         - template: '{{ eq (index .Detail "state" "value") "ALARM" }}'
           description: "Alarm state is ALARM"
-        - template: '{{ eq (index .Detail "configuration" "namespace") "AWS/ECS" }}'
+        - template: '{{ eq (alarmNamespace .Detail) "AWS/ECS" }}'
           description: "Alarm namespace is AWS/ECS (for CPU/Memory)"
         - template: | # Check if alarm name indicates it's one of our auto-created CPU or Memory alarms
             {{ $alarmName := (index .Detail "alarmName") }}
@@ -268,22 +268,13 @@ rules:
       description:
         template: >-
           The CloudWatch Alarm '{{ (index .Detail "alarmName") }}' for ECS service
-          {{ $serviceName := "" }}
-          {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-          '{{ $serviceName }}' in cluster
-          {{ $clusterName := "" }}
-          {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ $clusterName = (index $dim "value") | str }}{{ end }}{{ end }}
-          '{{ $clusterName }}'
+          '{{ alarmDimension .Detail "ServiceName" }}' in cluster
+          '{{ alarmDimension .Detail "ClusterName" }}'
           has entered the ALARM state. Reason: {{ (index .Detail "state" "reason") }}.
-          Metric: {{ (index .Detail "configuration" "metricName") }}.
+          Metric: {{ (alarmMetricName .Detail) }}.
       status: "FIRING"
       resource_id: # ServiceName from alarm dimensions
-        template: |
-          {{ $serviceName := "" }}
-          {{ range $dim := (index .Detail "configuration" "dimensions") }}
-            {{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}
-          {{ end }}
-          {{ $serviceName }}
+        template: "{{ alarmDimension .Detail \"ServiceName\" }}"
       resource_type:
         value: "service"
       resource_service_name:
@@ -299,12 +290,7 @@ rules:
           resource_type: "service" # Assuming your aws_get_resource can handle this type for ECS services
           # Construct service ARN from dimensions
           resource_identifier: |
-            {{ $clusterName := "" }}{{ $serviceName := "" }}
-            {{ range $dim := (index .Detail "configuration" "dimensions") }}
-              {{ if eq (index $dim "name") "ClusterName" }}{{ $clusterName = (index $dim "value") | str }}{{ end }}
-              {{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}
-            {{ end }}
-            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ $clusterName }}/{{ $serviceName }}
+            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ alarmDimension .Detail "ClusterName" }}/{{ alarmDimension .Detail "ServiceName" }}
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
       - name: "get_related_ecs_metrics_on_alarm"
@@ -312,14 +298,12 @@ rules:
         description: "Fetch CPU and Memory utilization metrics for the service."
         params:
           namespace: "AWS/ECS"
-          metric_name: "{{ (index .Detail \"configuration\" \"metricName\") }}" # The metric that alarmed
+          metric_name: "{{ (alarmMetricName .Detail) }}" # The metric that alarmed
           dimensions: # Directly use dimensions from the alarm event
             - Name: "ClusterName"
-              Value: |
-                {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ (index $dim "value") | str }}{{ end }}{{ end }}
+              Value: "{{ alarmDimension .Detail \"ClusterName\" }}"
             - Name: "ServiceName"
-              Value: |
-                {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ (index $dim "value") | str }}{{ end }}{{ end }}
+              Value: "{{ alarmDimension .Detail \"ServiceName\" }}"
           period_seconds: 300
           statistic: "Average"
           start_time_offset: "-1h" # Look back 1 hour from alarm time
@@ -329,10 +313,8 @@ rules:
         description: "Fetch logs for the ECS service in alarm."
         params:
           auto_detect_log_group: true # Use the new boolean flag
-          cluster_name: | # Provide cluster name from alarm dimensions
-            {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ (index $dim "value") | str }}{{ end }}{{ end }}
-          service_name: | # Provide service name from alarm dimensions
-            {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ (index $dim "value") | str }}{{ end }}{{ end }}
+          cluster_name: "{{ alarmDimension .Detail \"ClusterName\" }}" # Provide cluster name from alarm dimensions
+          service_name: "{{ alarmDimension .Detail \"ServiceName\" }}" # Provide service name from alarm dimensions
           query: "fields @timestamp, @message | sort @timestamp desc | limit 100" # General query
           start_time_offset: "-30m"
           end_time_offset: "+5m"
@@ -349,7 +331,7 @@ rules:
           description: "Alarm state is ALARM"
         - template: '{{ containsStr (index .Detail "alarmName") "-TaskLogErrors-Auto" }}'
           description: "Alarm name matches ECS Log Error auto-alarm pattern"
-        - template: '{{ hasPrefix (index .Detail "configuration" "namespace") "ECS/" }}'
+        - template: '{{ hasPrefix (alarmNamespace .Detail) "ECS/" }}'
           description: "Alarm namespace starts with ECS/"
     event_template:
       event_name:
@@ -365,9 +347,9 @@ rules:
       description:
         template: >-
           The CloudWatch Log Alarm '{{ (index .Detail "alarmName") }}'
-          (Namespace: {{ (index .Detail "configuration" "namespace") }})
+          (Namespace: {{ (alarmNamespace .Detail) }})
           has entered the ALARM state. Reason: {{ (index .Detail "state" "reason") }}.
-          Metric: {{ (index .Detail "configuration" "metricName") }}.
+          Metric: {{ (alarmMetricName .Detail) }}.
       status: "FIRING"
       resource_id: # ServiceName derived from alarm name or namespace
         template: |
@@ -433,18 +415,16 @@ rules:
       description:
         template: >-
           The CloudWatch Alarm '{{ (index .Detail "alarmName") }}' for ECS service
-          {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-          '{{ $serviceName }}' indicates running task count is below desired.
+          '{{ alarmDimension .Detail "ServiceName" }}' indicates running task count is below desired.
           Reason: {{ (index .Detail "state" "reason") }}.
       status: "FIRING"
       resource_id: # ServiceName from alarm dimensions
-        template: |
-          {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
-      resource_type: 
+        template: "{{ alarmDimension .Detail \"ServiceName\" }}"
+      resource_type:
         value: "service"
-      resource_service_name: 
+      resource_service_name:
         value: "ecs"
-      resource_region: 
+      resource_region:
         template: "{{ (index .Event \"region\") }}"
     actions:
       - name: "get_ecs_service_details_on_running_count_alarm"
@@ -453,16 +433,13 @@ rules:
           service_name: "ecs"
           resource_type: "service"
           resource_identifier: |
-            {{ $clusterName := "" }}{{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ $clusterName = (index $dim "value") | str }}{{ end }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ $clusterName }}/{{ $serviceName }}
+            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ alarmDimension .Detail "ClusterName" }}/{{ alarmDimension .Detail "ServiceName" }}
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
       - name: "get_ecs_service_logs_on_running_count_alarm"
         type: "aws_get_log"
         params:
-          log_group_name: |
-            {{ $serviceName := "unknown-service" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-            /ecs/{{ $serviceName }}
+          log_group_name: "/ecs/{{ alarmDimension .Detail \"ServiceName\" | default \"unknown-service\" }}"
           query: "fields @timestamp, @message | sort @timestamp desc | limit 100"
           start_time_offset: "-30m"
           end_time_offset: "+5m"
@@ -474,8 +451,7 @@ rules:
           region: "{{ (index .Event \"region\") }}"
           lookup_attributes:
             - AttributeKey: "ResourceName" # Service ARN or Name; already scopes to this specific ECS service
-              AttributeValue: |
-                {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
+              AttributeValue: "{{ alarmDimension .Detail \"ServiceName\" }}"
           max_results: 20
           identifier_type: "arn"
 
@@ -504,20 +480,17 @@ rules:
       description:
         template: >-
           The CloudWatch Alarm '{{ (index .Detail "alarmName") }}' for ECS service
-          {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-          '{{ $serviceName }}' in cluster
-          {{ $clusterName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ $clusterName = (index $dim "value") | str }}{{ end }}{{ end }}
-          '{{ $clusterName }}' indicates tasks are pending for an extended period.
+          '{{ alarmDimension .Detail "ServiceName" }}' in cluster
+          '{{ alarmDimension .Detail "ClusterName" }}' indicates tasks are pending for an extended period.
           Reason: {{ (index .Detail "state" "reason") }}.
       status: "FIRING"
       resource_id: # ServiceName from alarm dimensions
-        template: |
-          {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
-      resource_type: 
+        template: "{{ alarmDimension .Detail \"ServiceName\" }}"
+      resource_type:
         value: "service"
-      resource_service_name: 
+      resource_service_name:
         value: "ecs"
-      resource_region: 
+      resource_region:
         template: "{{ (index .Event \"region\") }}"
     actions:
       - name: "get_ecs_service_details_on_pending_alarm"
@@ -526,8 +499,7 @@ rules:
           service_name: "ecs"
           resource_type: "service"
           resource_identifier: |
-            {{ $clusterName := "" }}{{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ $clusterName = (index $dim "value") | str }}{{ end }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}
-            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ $clusterName }}/{{ $serviceName }}
+            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ alarmDimension .Detail "ClusterName" }}/{{ alarmDimension .Detail "ServiceName" }}
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
       - name: "get_ecs_cluster_capacity_metrics_on_pending_alarm" # Check if cluster has capacity
@@ -537,8 +509,7 @@ rules:
           metric_name: "CPUReservation" # Also consider MemoryReservation, CPUUtilization, MemoryUtilization for the cluster
           dimensions:
             - Name: "ClusterName"
-              Value: |
-                {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ClusterName" }}{{ (index $dim "value") | str }}{{ end }}{{ end }}
+              Value: "{{ alarmDimension .Detail \"ClusterName\" }}"
           period_seconds: 300
           statistic: "Average"
           start_time_offset: "-1h"
@@ -551,8 +522,7 @@ rules:
           region: "{{ (index .Event \"region\") }}"
           lookup_attributes:
             - AttributeKey: "ResourceName" # Service ARN or Name; already scopes to this specific ECS service
-              AttributeValue: |
-                {{ $serviceName := "" }}{{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "ServiceName" }}{{ $serviceName = (index $dim "value") | str }}{{ end }}{{ end }}{{ $serviceName }}
+              AttributeValue: "{{ alarmDimension .Detail \"ServiceName\" }}"
           max_results: 20
 
 # Rule for all ECS Task State Change events
@@ -960,9 +930,9 @@ rules:
           description: "Event is a CloudWatch Alarm State Change"
         - template: '{{ eq (index .Detail "state" "value") "ALARM" }}'
           description: "Alarm state is ALARM"
-        - template: '{{ eq (index .Detail "configuration" "namespace") "AWS/ApplicationELB" }}'
+        - template: '{{ eq (alarmNamespace .Detail) "AWS/ApplicationELB" }}'
           description: "Alarm namespace is AWS/ApplicationELB"
-        - template: '{{ eq (index .Detail "configuration" "metricName") "HTTPCode_Target_5XX_Count" }}'
+        - template: '{{ eq (alarmMetricName .Detail) "HTTPCode_Target_5XX_Count" }}'
           description: "Alarm metric is HTTPCode_Target_5XX_Count"
         # Optional: Filter by a naming convention for these alarms if you have one
         # - template: '{{ containsStr (index .Detail "alarmName") "-ECS-ALB-5XX-Errors" }}'
@@ -970,7 +940,7 @@ rules:
       event_name:
         template: "{{ (index .Detail \"alarmName\") }}"
       title:
-        template: "ALB 5XX Errors for ECS Service: {{ range $dim := (index .Detail \"configuration\" \"dimensions\") }}{{ if eq (index $dim \"name\") \"TargetGroup\" }}{{ index ((index $dim \"value\") | str | splitList \"/\") 1 }}{{ end }}{{ end }}"
+        template: "ALB 5XX Errors for ECS Service: {{ index (splitList \"/\" (alarmDimension .Detail \"TargetGroup\")) 1 }}"
       severity: "Critical"
       fingerprint:
         # Unified with the polling path fingerprint
@@ -981,13 +951,12 @@ rules:
         template: |
           High HTTP 5xx errors detected from targets for Application Load Balancer.
           Alarm Name: {{ (index .Detail "alarmName") }}
-          Target Group (from alarm dimension): {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "TargetGroup" }}{{ (index $dim "value") }}{{ end }}{{ end }}
-          Load Balancer (from alarm dimension): {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "LoadBalancer" }}{{ (index $dim "value") }}{{ end }}{{ end }}
+          Target Group (from alarm dimension): {{ alarmDimension .Detail "TargetGroup" }}
+          Load Balancer (from alarm dimension): {{ alarmDimension .Detail "LoadBalancer" }}
           Reason: {{ (index .Detail "state" "reason") }}
       status: "FIRING"
       resource_id: # Target Group ARN from alarm dimensions
-        template: |
-          {{ range $dim := (index .Detail "configuration" "dimensions") }}{{ if eq (index $dim "name") "TargetGroup" }}{{ (index $dim "value") }}{{ end }}{{ end }}
+        template: "{{ alarmDimension .Detail \"TargetGroup\" }}"
       resource_type: # The alarm is for an ALB Target Group, which serves an ECS Service
         value: "elbv2-targetgroup" # Or "ecs-service" if you prefer to link it that way
       resource_service_name:
@@ -1015,7 +984,11 @@ rules:
         params:
           namespace: "AWS/ApplicationELB"
           metric_name: "TargetResponseTime" # Also consider RequestCount, UnHealthyHostCount
-          dimensions: "{{ toJson (index .Detail \"configuration\" \"dimensions\") }}" # Pass all dimensions from the alarm
+          dimensions: # LoadBalancer/TargetGroup are the dimensions for AWS/ApplicationELB metrics
+            - Name: "LoadBalancer"
+              Value: "{{ alarmDimension .Detail \"LoadBalancer\" }}"
+            - Name: "TargetGroup"
+              Value: "{{ alarmDimension .Detail \"TargetGroup\" }}"
           period_seconds: 60
           statistic: "Average" # Or p90, p95 for TargetResponseTime
           start_time_offset: "-30m"

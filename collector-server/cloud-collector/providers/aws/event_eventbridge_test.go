@@ -27,12 +27,16 @@ type dummyAwsProvider struct {
 	queryLogsLastArgs               providers.QueryLogsRequest
 	queryMetricesCallCount          int
 	queryMetricesLastArgs           providers.QueryMetricsRequest
+	queryMetricesCalls              []providers.QueryMetricsRequest
 	lookupCloudTrailEventsCallCount int
 	lookupCloudTrailEventsLastArgs  struct {
 		input *cloudtrail.LookupEventsInput
 	}
 	getECSServiceDetailsCallCount int
 	getECSServiceDetailsLastArgs  struct {
+		region, clusterIdentifier, serviceIdentifier string
+	}
+	getECSServiceDetailsCalls []struct {
 		region, clusterIdentifier, serviceIdentifier string
 	}
 	getECSTaskDefinitionDetailsCallCount int
@@ -55,6 +59,7 @@ func (d *dummyAwsProvider) QueryLogs(ctx providers.CloudProviderContext, account
 func (d *dummyAwsProvider) QueryMetrices(ctx providers.CloudProviderContext, account providers.Account, filter providers.QueryMetricsRequest) (providers.QueryMetricsResponse, error) {
 	d.queryMetricesCallCount++
 	d.queryMetricesLastArgs = filter
+	d.queryMetricesCalls = append(d.queryMetricesCalls, filter)
 	ctx.GetLogger().Info("dummyAwsProvider: QueryMetrices called", "filter", fmt.Sprintf("%+v", filter))
 
 	// Ensure MetricNames and ResourceIds are not empty before accessing them
@@ -127,6 +132,9 @@ func (d *dummyAwsProvider) GetECSServiceDetails(ctx providers.CloudProviderConte
 	d.getECSServiceDetailsLastArgs.region = region
 	d.getECSServiceDetailsLastArgs.clusterIdentifier = clusterIdentifier
 	d.getECSServiceDetailsLastArgs.serviceIdentifier = serviceIdentifier
+	d.getECSServiceDetailsCalls = append(d.getECSServiceDetailsCalls, struct {
+		region, clusterIdentifier, serviceIdentifier string
+	}{region, clusterIdentifier, serviceIdentifier})
 	ctx.GetLogger().Info("dummyAwsProvider: GetECSServiceDetails called", "region", region, "cluster", clusterIdentifier, "service", serviceIdentifier)
 
 	return providers.Resource{

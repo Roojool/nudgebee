@@ -786,6 +786,37 @@ func (p *TemplatedEventBridgeProcessor) renderTemplateValue(ctx providers.CloudP
 				}
 				return template.HTML(b), nil
 			},
+			// alarmNamespace/alarmMetricName/alarmDimension read the namespace,
+			// metric name and dimensions of a CloudWatch alarm from
+			// detail.configuration.metrics[].metricStat.metric — the real shape of a
+			// CloudWatch Alarm State Change EventBridge event (there is no top-level
+			// configuration.namespace/metricName/dimensions field). Use in place of a
+			// {{ range $dim := (index .Detail "configuration" "dimensions") }} loop,
+			// which reads a path that doesn't exist on real events.
+			"alarmNamespace": func(detail map[string]any) string {
+				metric, _ := findAlarmMetricStat(detail)["metric"].(map[string]any)
+				ns, _ := metric["namespace"].(string)
+				return ns
+			},
+			"alarmMetricName": func(detail map[string]any) string {
+				metric, _ := findAlarmMetricStat(detail)["metric"].(map[string]any)
+				name, _ := metric["name"].(string)
+				return name
+			},
+			"alarmDimension": func(detail map[string]any, dimensionName string) string {
+				metric, _ := findAlarmMetricStat(detail)["metric"].(map[string]any)
+				dims, _ := metric["dimensions"].(map[string]any)
+				// Case-insensitive: EventBridge sometimes sends the same dimension
+				// under different casings (e.g. "LoadBalancer" vs "loadBalancer"),
+				// same quirk extractAlarmMetricDetails already guards against.
+				target := strings.ToLower(strings.TrimSpace(dimensionName))
+				for k, v := range dims {
+					if strings.ToLower(strings.TrimSpace(k)) == target {
+						return fmt.Sprintf("%v", v)
+					}
+				}
+				return ""
+			},
 		}
 		tmpl, err := template.New(fieldName).Funcs(funcMap).Parse(templateStr)
 		if err != nil {
@@ -2160,9 +2191,35 @@ func parseTimeOffsets(eventTime time.Time, startOffsetStr, endOffsetStr string) 
 	return startTime, endTime, nil
 }
 
+// findAlarmMetricStat locates the first CloudWatch alarm metric data query
+// (detail.configuration.metrics[].metricStat) that carries a MetricStat,
+// skipping metric-math expression-only entries. Real CloudWatch Alarm State
+// Change events always nest namespace/name/dimensions here — there is no
+// top-level configuration.namespace/metricName/dimensions field, even for
+// alarms created via the "classic" single-metric PutMetricAlarm params (AWS
+// normalizes every alarm into the metrics[] shape for the notification).
+// Shared by extractAlarmMetricDetails and the alarmNamespace/alarmMetricName/
+// alarmDimension*/template functions so every runbook rule reads the same path.
+func findAlarmMetricStat(detail map[string]any) map[string]any {
+	config, _ := detail["configuration"].(map[string]any)
+	if config == nil {
+		return nil
+	}
+	metrics, _ := config["metrics"].([]any)
+	for _, metricRaw := range metrics {
+		metric, _ := metricRaw.(map[string]any)
+		if metric == nil {
+			continue
+		}
+		if metricStat, _ := metric["metricStat"].(map[string]any); metricStat != nil {
+			return metricStat
+		}
+	}
+	return nil
+}
+
 // extractAlarmMetricDetails extracts CloudWatch metric dimensions and statistic
-// from an EventBridge CloudWatch Alarm State Change event. It navigates to
-// detail.configuration.metrics[].metricStat and returns:
+// from an EventBridge CloudWatch Alarm State Change event and returns:
 //   - dimensions as []map[string]string{{"Name": k, "Value": v}} for GetMetricData
 //   - statistic string (e.g. "Sum", "Average", "Maximum")
 func extractAlarmMetricDetails(ebEvent EventBridgeEvent) ([]map[string]string, string) {
@@ -2170,55 +2227,36 @@ func extractAlarmMetricDetails(ebEvent EventBridgeEvent) ([]map[string]string, s
 	if err := common.UnmarshalJson(ebEvent.Detail, &detail); err != nil {
 		return nil, ""
 	}
-	config, _ := detail["configuration"].(map[string]any)
-	if config == nil {
-		return nil, ""
-	}
-	metrics, _ := config["metrics"].([]any)
-	if len(metrics) == 0 {
+	metricStat := findAlarmMetricStat(detail)
+	if metricStat == nil {
 		return nil, ""
 	}
 
-	// Find the first metric that has metricStat (skip math expressions which only have "expression")
-	for _, metricRaw := range metrics {
-		metric, _ := metricRaw.(map[string]any)
-		if metric == nil {
-			continue
-		}
-		metricStat, _ := metric["metricStat"].(map[string]any)
-		if metricStat == nil {
-			continue
-		}
+	stat, _ := metricStat["stat"].(string)
 
-		// Extract statistic
-		stat, _ := metricStat["stat"].(string)
-
-		// Extract dimensions
-		innerMetric, _ := metricStat["metric"].(map[string]any)
-		if innerMetric == nil {
-			return nil, stat
-		}
-		dims, _ := innerMetric["dimensions"].(map[string]any)
-		if len(dims) == 0 {
-			return nil, stat
-		}
-		// Deduplicate dimensions — EventBridge sometimes sends both "LoadBalancer" and
-		// "loadBalancer" with the same value. Keep only unique values by lowercased key.
-		seen := make(map[string]bool, len(dims))
-		var result []map[string]string
-		for k, v := range dims {
-			lower := strings.ToLower(k)
-			if seen[lower] {
-				continue
-			}
-			seen[lower] = true
-			if vStr, ok := v.(string); ok {
-				result = append(result, map[string]string{"Name": k, "Value": vStr})
-			}
-		}
-		return result, stat
+	innerMetric, _ := metricStat["metric"].(map[string]any)
+	if innerMetric == nil {
+		return nil, stat
 	}
-	return nil, ""
+	dims, _ := innerMetric["dimensions"].(map[string]any)
+	if len(dims) == 0 {
+		return nil, stat
+	}
+	// Deduplicate dimensions — EventBridge sometimes sends both "LoadBalancer" and
+	// "loadBalancer" with the same value. Keep only unique values by lowercased key.
+	seen := make(map[string]bool, len(dims))
+	var result []map[string]string
+	for k, v := range dims {
+		lower := strings.ToLower(k)
+		if seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		if vStr, ok := v.(string); ok {
+			result = append(result, map[string]string{"Name": k, "Value": vStr})
+		}
+	}
+	return result, stat
 }
 
 // toLowerCamelCase converts a string to lowerCamelCase.
