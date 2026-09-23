@@ -1,0 +1,49 @@
+{{- if .Values.scriptPodNetworkPolicy.enabled }}
+{{- $internalCIDRs := .Values.scriptPodNetworkPolicy.internalCIDRs | default list }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "workflow-server.fullname" . }}-script-pods
+  labels:
+    {{- include "workflow-server.labels" . | nindent 4 }}
+  {{- with .Values.scriptPodNetworkPolicy.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels:
+      nudgebee.io/workload: workflow-script
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.scriptPodNetworkPolicy.dnsNamespaceSelector | nindent 14 }}
+          {{- with .Values.scriptPodNetworkPolicy.dnsPodSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              {{- range $internalCIDRs }}
+              - {{ . | quote }}
+              {{- end }}
+{{- end }}

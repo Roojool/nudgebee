@@ -33,6 +33,20 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ''
 
+# Egress policy for Jobs created by the workflow scripting executor. The
+# template excludes link-local, RFC1918, CGNAT, and loopback IPv4 by default.
+# Add internalCIDRs if the cluster has internal addresses outside those ranges
+# or its CNI evaluates Service VIPs before translation to Pod IPs. Confirm
+# enforcement and internal-Service denial with a live Job on each cluster.
+scriptPodNetworkPolicy:
+  enabled: true
+  annotations: {}
+  internalCIDRs: []
+  dnsNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  dnsPodSelector:
+    k8s-app: kube-dns
+
 podAnnotations: {}
 
 podSecurityContext:
