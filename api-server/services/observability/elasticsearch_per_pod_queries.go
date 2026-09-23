@@ -2,6 +2,7 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 )
 
@@ -55,7 +56,7 @@ func esPerPodStatAgg(agg ParsedAggregate, field string) (map[string]any, bool) {
 // answering confidently with the wrong grouping.
 func esPerPodCollapsedAgg(src esMetricSource, meta RequestMetadata, scope esUtilScope) map[string]any {
 	stat, supported := esPerPodStatAgg(meta.Aggregate, src.Field)
-	if !supported || len(src.GroupBy) == 0 || len(src.GroupBy) > 2 {
+	if !supported || len(src.GroupBy) == 0 || len(src.GroupBy) > esPerPodMaxGroupLevels {
 		return nil
 	}
 
@@ -65,47 +66,168 @@ func esPerPodCollapsedAgg(src esMetricSource, meta RequestMetadata, scope esUtil
 	}
 	filters = append(filters, esSourceScopeFilters(src, meta, scope)...)
 
-	inner := map[string]any{"stat": stat}
-	if len(src.GroupBy) == 2 {
-		inner = map[string]any{
-			"g1": map[string]any{
-				"terms": map[string]any{"field": src.GroupBy[1], "size": esUtilTermsSize},
-				"aggs":  map[string]any{"stat": stat},
+	// Nest one terms level per grouping field, innermost first, so the aggregation
+	// mirrors GroupBy exactly. Two levels render byte-identically to the shape this
+	// replaces; a third appears only where a source asks for one.
+	aggs := map[string]any{"stat": stat}
+	for i := len(src.GroupBy) - 1; i >= 0; i-- {
+		aggs = map[string]any{
+			esPerPodLevelName(i): map[string]any{
+				"terms": map[string]any{"field": src.GroupBy[i], "size": esUtilTermsSize},
+				"aggs":  aggs,
 			},
 		}
 	}
 
 	return map[string]any{
 		"filter": map[string]any{"bool": map[string]any{"filter": filters}},
-		"aggs": map[string]any{
-			"g0": map[string]any{
-				"terms": map[string]any{"field": src.GroupBy[0], "size": esUtilTermsSize},
-				"aggs":  inner,
-			},
-		},
+		"aggs":   aggs,
 	}
+}
+
+// esPerPodMaxGroupLevels is how deep the collapsed aggregation nests: namespace, pod
+// and container is the deepest any per-container key needs.
+const esPerPodMaxGroupLevels = 3
+
+// esPerPodLevelName is the aggregation name for grouping level i. Kept as g0/g1/g2 so
+// a two-level body is byte-identical to the one this generalises.
+func esPerPodLevelName(i int) string { return fmt.Sprintf("g%d", i) }
+
+// esPerPodLevelLabel names the canonical label a grouping field produces. Resolved
+// from the source's own field names rather than from the level's position, so adding
+// a namespace level above the pod cannot silently relabel the pod as a namespace.
+func esPerPodLevelLabel(src esMetricSource, field string) string {
+	switch field {
+	case src.Fields.Namespace:
+		return "namespace"
+	case src.Fields.Pod:
+		return "pod"
+	case src.Fields.Container:
+		return "container"
+	case src.Fields.Node:
+		return "node"
+	}
+	return ""
 }
 
 // esPerPodResult decodes the collapsed shape. Deliberately separate from
 // esUtilSourceResult: that one is built around a date_histogram this path does not
 // emit, and decoding into it would silently find no buckets.
+// esPerPodResult decodes the collapsed shape. Deliberately separate from
+// esUtilSourceResult: that one is built around a date_histogram this path does not
+// emit, and decoding into it would silently find no buckets.
+//
+// Levels are decoded generically rather than as named fields, because the number of
+// them follows the source's GroupBy — two for pod and container, three when a
+// namespace level is needed to keep same-named pods apart.
 type esPerPodResult struct {
-	DocCount int64 `json:"doc_count"`
-	G0       struct {
-		SumOtherDocCount int64           `json:"sum_other_doc_count"`
-		Buckets          []esPerPodGroup `json:"buckets"`
-	} `json:"g0"`
+	DocCount int64                      `json:"doc_count"`
+	Levels   map[string]json.RawMessage `json:"-"`
 }
 
-type esPerPodGroup struct {
-	Key  string          `json:"key"`
-	Stat json.RawMessage `json:"stat"`
-	G1   struct {
-		Buckets []struct {
-			Key  string          `json:"key"`
-			Stat json.RawMessage `json:"stat"`
-		} `json:"buckets"`
-	} `json:"g1"`
+// UnmarshalJSON keeps doc_count and hands the rest to the level walker.
+func (r *esPerPodResult) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if dc, ok := raw["doc_count"]; ok {
+		if err := json.Unmarshal(dc, &r.DocCount); err != nil {
+			return err
+		}
+	}
+	r.Levels = raw
+	return nil
+}
+
+// esPerPodTerms is one terms aggregation: its buckets, and how many documents the
+// size cap dropped.
+type esPerPodTerms struct {
+	SumOtherDocCount int64                        `json:"sum_other_doc_count"`
+	Buckets          []map[string]json.RawMessage `json:"buckets"`
+}
+
+// esPerPodSeries turns the collapsed response into one single-point series per
+// grouping combination — pod, or pod and container, or namespace, pod and container.
+//
+// The point is stamped at the end of the requested window rather than at a sample
+// time: the value describes the whole window, and without a histogram there is no
+// bucket whose timestamp would be more truthful.
+func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base map[string]string, endMs int64) ([]Result, int64) {
+	ts := endMs / 1000
+	var series []Result
+	var truncated int64
+
+	// walk descends one grouping level at a time, carrying the labels collected so
+	// far. The label for a level comes from the source's own field names, so a
+	// namespace level above the pod cannot be mistaken for the pod.
+	var walk func(level int, node map[string]json.RawMessage, labels map[string]string)
+	walk = func(level int, node map[string]json.RawMessage, labels map[string]string) {
+		if level >= len(src.GroupBy) {
+			if v, ok := esUtilReducedValue(node["stat"]); ok {
+				series = append(series, Result{
+					Metric:     esPerPodLabels(base, labels),
+					Timestamps: []int64{ts},
+					Values:     []float64{v * scale},
+				})
+			}
+			return
+		}
+
+		raw, ok := node[esPerPodLevelName(level)]
+		if !ok {
+			// The level is absent, so this source grouped less deeply than declared.
+			// Read whatever statistic is here rather than dropping the bucket.
+			if v, ok := esUtilReducedValue(node["stat"]); ok {
+				series = append(series, Result{
+					Metric:     esPerPodLabels(base, labels),
+					Timestamps: []int64{ts},
+					Values:     []float64{v * scale},
+				})
+			}
+			return
+		}
+
+		var terms esPerPodTerms
+		if err := json.Unmarshal(raw, &terms); err != nil {
+			return
+		}
+		truncated += terms.SumOtherDocCount
+
+		name := esPerPodLevelLabel(src, src.GroupBy[level])
+		for _, bucket := range terms.Buckets {
+			var key string
+			if err := json.Unmarshal(bucket["key"], &key); err != nil || key == "" {
+				continue
+			}
+			next := make(map[string]string, len(labels)+1)
+			for k, v := range labels {
+				next[k] = v
+			}
+			if name != "" {
+				next[name] = key
+			}
+			walk(level+1, bucket, next)
+		}
+	}
+
+	walk(0, res.Levels, map[string]string{})
+	return series, truncated
+}
+
+// esPerPodLabels names the series by what produced it, overriding the workload-level
+// labels the base carries: on a per-container key the identity of the series IS the
+// pod and container, and leaving `workload` set would give every series the same one.
+func esPerPodLabels(base map[string]string, grouped map[string]string) map[string]string {
+	labels := make(map[string]string, len(base)+len(grouped))
+	for k, v := range base {
+		labels[k] = v
+	}
+	delete(labels, "workload")
+	for k, v := range grouped {
+		labels[k] = v
+	}
+	return labels
 }
 
 // parseESPerPodResponse reads the collapsed response, taking the first candidate
@@ -136,7 +258,7 @@ func parseESPerPodResponse(resp *esUtilAggResponse, m esUtilMetric, meta Request
 			continue
 		}
 
-		series, truncated := esPerPodSeries(&decoded, esPerPodScale(src, meta), esUtilSeriesLabels(src, meta), meta.EndMs)
+		series, truncated := esPerPodSeries(&decoded, src, esPerPodScale(src, meta), esUtilSeriesLabels(src, meta), meta.EndMs)
 		if len(series) == 0 {
 			continue
 		}
@@ -156,46 +278,6 @@ func esPodNameValues(pods []string) []string {
 		return []string{}
 	}
 	return pods
-}
-
-// esPerPodSeries turns the collapsed response into one single-point series per pod,
-// or per pod and container when the source groups by both.
-//
-// The point is stamped at the end of the requested window rather than at a sample
-// time: the value describes the whole window, and without a histogram there is no
-// bucket whose timestamp would be more truthful.
-func esPerPodSeries(res *esPerPodResult, scale float64, base map[string]string, endMs int64) ([]Result, int64) {
-	ts := endMs / 1000
-	series := make([]Result, 0, len(res.G0.Buckets))
-	truncated := res.G0.SumOtherDocCount
-
-	for _, pod := range res.G0.Buckets {
-		if pod.Key == "" {
-			continue
-		}
-		if len(pod.G1.Buckets) == 0 {
-			if v, ok := esUtilReducedValue(pod.Stat); ok {
-				series = append(series, Result{
-					Metric:     esPerPodLabels(base, pod.Key, ""),
-					Timestamps: []int64{ts},
-					Values:     []float64{v * scale},
-				})
-			}
-			continue
-		}
-		for _, container := range pod.G1.Buckets {
-			v, ok := esUtilReducedValue(container.Stat)
-			if !ok || container.Key == "" {
-				continue
-			}
-			series = append(series, Result{
-				Metric:     esPerPodLabels(base, pod.Key, container.Key),
-				Timestamps: []int64{ts},
-				Values:     []float64{v * scale},
-			})
-		}
-	}
-	return series, truncated
 }
 
 // esPerPodScale is the factor a per-pod value is reported in.
@@ -259,7 +341,7 @@ func esPerPodHistogramSeries(sr *esUtilSourceResult, scale float64, base map[str
 	for _, key := range order {
 		s := byGroup[key]
 		results = append(results, Result{
-			Metric:     esPerPodLabels(base, s.pod, s.container),
+			Metric:     esPerPodLabels(base, esPerPodHistogramLabels(s.pod, s.container)),
 			Timestamps: s.ts,
 			Values:     s.values,
 		})
@@ -267,17 +349,11 @@ func esPerPodHistogramSeries(sr *esUtilSourceResult, scale float64, base map[str
 	return results
 }
 
-// esPerPodLabels names the series by the pod (and container) that produced it,
-// overriding the workload-level labels the base carries: on a per-pod key the
-// identity of the series IS the pod, and leaving `pod` set to the workload name
-// would give every series the same identity.
-func esPerPodLabels(base map[string]string, pod, container string) map[string]string {
-	labels := make(map[string]string, len(base)+2)
-	for k, v := range base {
-		labels[k] = v
-	}
-	labels["pod"] = pod
-	delete(labels, "workload")
+// esPerPodHistogramLabels adapts the histogram path's pod/container pair to the label
+// map the collapsed path builds. That path groups at most two levels, so it never
+// carries a namespace.
+func esPerPodHistogramLabels(pod, container string) map[string]string {
+	labels := map[string]string{"pod": pod}
 	if container != "" {
 		labels["container"] = container
 	}

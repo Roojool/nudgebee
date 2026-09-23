@@ -273,6 +273,28 @@ func esWorkloadMemSources(containerNamed bool) []esMetricSource {
 	return []esMetricSource{pod, container, otlp, native}
 }
 
+// esGroupedByNamespace returns the sources with a namespace level above their
+// existing grouping, when the scope needs one.
+//
+// A per-container key's answer is one series per container, and the thing that makes
+// two containers distinct is (namespace, pod, container). At workload and pod scope a
+// namespace filter supplies the first part, so grouping by the other two is enough —
+// and leaving those sources untouched keeps their rendered bodies byte-identical. At
+// node and cluster scope nothing filters by namespace, so it has to be grouped.
+func esGroupedByNamespace(sources []esMetricSource, needed bool) []esMetricSource {
+	if !needed {
+		return sources
+	}
+	out := make([]esMetricSource, 0, len(sources))
+	for _, src := range sources {
+		if src.Fields.Namespace != "" && len(src.GroupBy) < esPerPodMaxGroupLevels {
+			src.GroupBy = append([]string{src.Fields.Namespace}, src.GroupBy...)
+		}
+		out = append(out, src)
+	}
+	return out
+}
+
 // esSpecSource builds the source for a resource request/limit. These live in the
 // state_container metricset (kube-state-metrics), keyed by pod and container, and
 // carry no node field — a node filter would match nothing.
@@ -403,8 +425,14 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 
 	cpuUsage := esWorkloadCPUSources(containerNamed)
 	memUsage := esWorkloadMemSources(containerNamed)
-	perContainerCPU := cpuUsage
-	perContainerMem := memUsage
+	// At node and cluster scope nothing filters by namespace, so the grouping has to
+	// carry it: two namespaces each running a pod called `worker-0` would otherwise
+	// land in the same terms bucket and be reported as one series.
+	perContainerCPU := esGroupedByNamespace(cpuUsage, nodeScope)
+	perContainerMem := esGroupedByNamespace(memUsage, nodeScope)
+	perContainerSpec := func(ecsField, otelMetric string) []esMetricSource {
+		return esGroupedByNamespace(esSpecSources(ecsField, otelMetric), nodeScope)
+	}
 	if nodeScope {
 		cpuUsage = esNodeCPUUsageSources()
 		memUsage = esNodeMemUsageSources()
@@ -505,52 +533,33 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// high-water mark has no field in any Elasticsearch layout we read, so it falls
 	// through to esUtilUnsupportedNote rather than being answered with the working
 	// set, which is a different number and would size a limit too low.
-	// Per-container keys answer at workload and pod scope only.
+	// Per-container keys, at every scope.
 	//
-	// Not at node or cluster scope, and the reason is the grouping rather than the
-	// data: every per-container source groups by pod (and container), never by
-	// namespace — esPerPodCollapsedAgg does not even accept a third level. At
-	// workload and pod scope a namespace term filter makes that safe, because every
-	// document already comes from one namespace. Without that filter, two namespaces
-	// each running a pod called `worker-0` — an ordinary StatefulSet name — land in
-	// the SAME terms bucket and are reported as one series, with no error.
+	// At workload and pod scope a namespace term filter already pins every document
+	// to one namespace, so grouping by pod and container is enough. At node and
+	// cluster scope there is no such filter, and esGroupedByNamespace adds a
+	// namespace level above the pod — without it, two namespaces each running a pod
+	// called `worker-0` would land in the same terms bucket and be reported as one
+	// series, with no error.
 	//
-	// Prometheus and Datadog group by namespace natively, so they do answer here.
-	// Elasticsearch will too once the per-pod aggregation carries a namespace level;
-	// that lands with the consumer that needs it, rather than shipping a silent merge.
+	// The extra level only exists in the collapsed (aggregate) path. The histogram
+	// path groups at most twice, so a node-scoped request with no aggregate finds no
+	// usable source and comes back empty with a note rather than a merged answer.
 	case "container_cpu_usage_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
 		return esUtilMetric{Sources: perContainerCPU, PerPod: true}, true
 	case "container_memory_working_set_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
 		return esUtilMetric{Sources: perContainerMem, PerPod: true}, true
 
 	// Requests and limits in the same per-container shape as the usage keys, so a
 	// consumer can join the two on (pod, container) within a namespace.
 	case "container_cpu_request_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
-		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request"), PerPod: true}, true
+		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request"), PerPod: true}, true
 	case "container_cpu_limit_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
-		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.limit.cores", "k8s.container.cpu_limit"), PerPod: true}, true
+		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.cpu.limit.cores", "k8s.container.cpu_limit"), PerPod: true}, true
 	case "container_memory_request_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
-		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.request.bytes", "k8s.container.memory_request"), PerPod: true}, true
+		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.memory.request.bytes", "k8s.container.memory_request"), PerPod: true}, true
 	case "container_memory_limit_by_pod":
-		if nodeScope {
-			return esUtilMetric{}, false
-		}
-		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.limit.bytes", "k8s.container.memory_limit"), PerPod: true}, true
+		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.memory.limit.bytes", "k8s.container.memory_limit"), PerPod: true}, true
 
 	case "cpu_usage_max_pod":
 		if nodeScope {
@@ -1462,4 +1471,19 @@ func esScopeNeedsPodJoin(plans []esUtilMetric, meta RequestMetadata, scope esUti
 		}
 	}
 	return false
+}
+
+// esSearchInto posts one _search and decodes it, so the two queries above do not each
+// repeat the request/read/unmarshal dance.
+func esSearchInto(ctx *security.RequestContext, cfg *ElasticsearchConfig, index string, body map[string]any, into any) error {
+	url := fmt.Sprintf("%s/%s/_search", cfg.Url, index)
+	resp, err := esRequestJSON("POST", url, body, cfg) //nolint:bodyclose
+	if err != nil {
+		return err
+	}
+	raw, err := readResponse(resp, "noisy neighbours query")
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, into)
 }

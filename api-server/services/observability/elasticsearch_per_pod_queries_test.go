@@ -214,16 +214,16 @@ func TestESPerPod_HighWaterMarkIsUnsupported(t *testing.T) {
 	assert.Contains(t, note, "container_memory_max_usage_by_pod")
 }
 
-// Per-container keys answer at workload and pod scope, and are REFUSED at node and
-// cluster scope — because of the grouping, not the data.
+// Per-container keys answer at every scope, and the grouping is what makes node and
+// cluster scope safe.
 //
-// Every per-container source groups by pod (and container), never by namespace. At
-// workload and pod scope a namespace term filter makes that safe: every document
-// already comes from one namespace. Without it, two namespaces each running a pod
-// called `worker-0` land in the same terms bucket and are reported as one series,
-// silently. Refusing is the honest answer until the aggregation carries a namespace
-// level; Prometheus and Datadog group by namespace natively and do answer there.
-func TestESPerPod_RefusedWhereNamespaceWouldCollide(t *testing.T) {
+// At workload and pod scope a namespace term filter pins every document to one
+// namespace, so pod and container is enough to identify a series — and those sources
+// are left untouched so their bodies stay byte-identical. At node and cluster scope
+// nothing filters by namespace, so it is grouped: without it, two namespaces each
+// running a pod called `worker-0` land in the same terms bucket and are reported as
+// one series, with no error.
+func TestESPerPod_GroupsByNamespaceOnlyWhereNothingFiltersIt(t *testing.T) {
 	perContainerKeys := []string{
 		"container_cpu_usage_by_pod", "container_memory_working_set_by_pod",
 		"container_cpu_request_by_pod", "container_cpu_limit_by_pod",
@@ -232,32 +232,80 @@ func TestESPerPod_RefusedWhereNamespaceWouldCollide(t *testing.T) {
 
 	for _, key := range perContainerKeys {
 		for _, scope := range []esUtilScope{esScopeNode, esScopeCluster} {
-			_, ok := esUtilisationMetric(key, scope, false)
-			assert.False(t, ok, "%s must not answer at %s scope while it cannot group by namespace", key, scope)
+			plan, ok := esUtilisationMetric(key, scope, false)
+			require.True(t, ok, "%s answers at %s scope", key, scope)
+			require.NotEmpty(t, plan.Sources)
+			for i, src := range plan.Sources {
+				if src.Fields.Namespace == "" {
+					continue // a layout with no namespace field cannot group by one
+				}
+				require.NotEmpty(t, src.GroupBy)
+				assert.Equal(t, src.Fields.Namespace, src.GroupBy[0],
+					"%s at %s scope, source %d must group by namespace first", key, scope, i)
+				assert.LessOrEqual(t, len(src.GroupBy), esPerPodMaxGroupLevels)
+			}
 		}
 
 		for _, scope := range []esUtilScope{esScopeWorkload, esScopePod} {
 			plan, ok := esUtilisationMetric(key, scope, false)
 			require.True(t, ok, "%s at %s scope", key, scope)
-			require.True(t, plan.PerPod, "%s at %s scope is per-pod", key, scope)
 			require.NotEmpty(t, plan.Sources)
-			// GroupBy[0] is what the per-pod parser keys each series on. It has to be
-			// the pod — a node-grouped source here would count nodes and call them pods.
+			// Unchanged where a namespace filter already applies, so these bodies —
+			// and the searches they batch into — stay exactly as they were.
 			assert.Equal(t, esECSFields.Pod, plan.Sources[0].GroupBy[0],
 				"%s at %s scope groups by pod first", key, scope)
 		}
 	}
 }
 
-// The guard above is only sound while the aggregation really cannot express a
-// namespace level. If that changes, the refusal should be revisited rather than
-// silently outliving its reason.
-func TestESPerPod_CollapsedAggStillCannotGroupByNamespace(t *testing.T) {
-	src := esWorkloadCPUSources(true)[0]
-	assert.LessOrEqual(t, len(src.GroupBy), 2,
-		"esPerPodCollapsedAgg accepts at most two grouping levels")
-	assert.NotContains(t, src.GroupBy, esECSFields.Namespace,
-		"no per-container source groups by namespace yet")
+// The namespace level has to reach the rendered aggregation, not just the plan, and
+// the label has to follow the FIELD rather than the level's position — otherwise
+// adding a level above the pod silently relabels the pod as a namespace.
+func TestESPerPod_NamespaceLevelIsRenderedAndLabelled(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_memory_working_set_by_pod", esScopeNode, true)
+	require.True(t, ok)
+
+	meta := RequestMetadata{NodeName: "ip-10-0-1-5", EndMs: 1_700_000_000_000}
+	parsed, err := parseAggregate("max")
+	require.NoError(t, err)
+	meta.Aggregate = parsed
+
+	body := bodyAsMap(t, buildESUtilisationAggQuery(plan, meta, esScopeNode, 1000, 2000, 300))
+	g0 := jsonPath(t, body, "aggs", "src_0", "aggs", "g0").(map[string]any)
+	assert.Equal(t, esECSFields.Namespace, jsonPath(t, g0, "terms", "field"), "outermost level is the namespace")
+	g1 := jsonPath(t, g0, "aggs", "g1").(map[string]any)
+	assert.Equal(t, esECSFields.Pod, jsonPath(t, g1, "terms", "field"), "then the pod")
+
+	src := plan.Sources[0]
+	assert.Equal(t, "namespace", esPerPodLevelLabel(src, src.Fields.Namespace))
+	assert.Equal(t, "pod", esPerPodLevelLabel(src, src.Fields.Pod))
+	assert.Equal(t, "container", esPerPodLevelLabel(src, src.Fields.Container))
+}
+
+// Two namespaces, one pod name: the collision this grouping exists to prevent.
+func TestESPerPod_SameNamedPodsInTwoNamespacesStaySeparate(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_memory_working_set_by_pod", esScopeNode, false)
+	require.True(t, ok)
+	src := plan.Sources[0]
+	require.Equal(t, src.Fields.Namespace, src.GroupBy[0])
+
+	body := []byte(`{"g0":{"buckets":[
+		{"key":"team-a","g1":{"buckets":[{"key":"worker-0","stat":{"value":100}}]}},
+		{"key":"team-b","g1":{"buckets":[{"key":"worker-0","stat":{"value":900}}]}}
+	]}}`)
+	var res esPerPodResult
+	require.NoError(t, json.Unmarshal(body, &res))
+
+	series, _ := esPerPodSeries(&res, src, 1, map[string]string{}, 1_700_000_000_000)
+	require.Len(t, series, 2, "one series per namespace, not one merged series")
+
+	byNamespace := map[string]float64{}
+	for _, s := range series {
+		assert.Equal(t, "worker-0", s.Metric["pod"])
+		byNamespace[s.Metric["namespace"]] = s.Values[0]
+	}
+	assert.InDelta(t, 100, byNamespace["team-a"], 1e-9)
+	assert.InDelta(t, 900, byNamespace["team-b"], 1e-9)
 }
 
 // The spec keys answer in the same per-container shape as the usage keys, so usage

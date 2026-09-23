@@ -14,6 +14,59 @@ import (
 
 // --- PROMETHEUS HELPERS ---
 
+// Node-exporter identifies a machine by address, not by Kubernetes name: its only
+// identity labels are `instance` ("10.128.0.50:9100") and the DaemonSet pod it runs in.
+// So a caller holding just a node name had nothing to filter on, and the interpolated
+// `instance=~"%s.*"` collapsed to `instance=~".*"` — matching EVERY node. Measured on
+// dev: 42.96 GB reported for a node with 12.06 GB allocatable, silently, because a
+// regex that matches everything is not an error.
+//
+// Three forms, in order of preference:
+//
+//	IP known    `{instance=~"<ip>.*"}` — cheapest, and what the nodes page already gets
+//	name only   joined to kube_pod_info through the node-exporter pod: `pod` and
+//	            `namespace` match exactly on both sides (no port to strip, unlike
+//	            `instance`) and kube_pod_info carries the node name. Verified on dev:
+//	            both forms return 3.259 GB for the same node.
+//	neither     a selector that matches NOTHING, so a caller with no scope sees a gap
+//	            instead of the whole cluster.
+//
+// The join assumes node-exporter runs one pod per node, which is how a DaemonSet
+// deploys it. A cluster scraping it some other way falls through to no series — still
+// better than a wrong number, and the `node_resources_*` arm beside each caller covers
+// clusters running our own node-agent instead.
+func promNodeExporterScope(meta RequestMetadata) (selector, join string) {
+	switch {
+	case meta.InternalIP != "":
+		return fmt.Sprintf(`instance=~"%s.*"`, meta.InternalIP), ""
+	case meta.NodeName != "":
+		return "", fmt.Sprintf(` * on(pod, namespace) group_left(node) kube_pod_info{node="%s"}`, meta.NodeName)
+	}
+	return `instance="` + promNoNodeScope + `"`, ""
+}
+
+// promNodeAgentScope is the same question for the node-agent series, which DO carry the
+// node name in `instance`. Only the no-scope case needed fixing: it matched everything.
+func promNodeAgentScope(meta RequestMetadata) string {
+	if meta.NodeName != "" {
+		return fmt.Sprintf(`instance=~"%s.*"`, meta.NodeName)
+	}
+	return `instance="` + promNoNodeScope + `"`
+}
+
+// promNoNodeScope is a name no instance can have, so the selector matches nothing.
+// Deliberately visible in the query text: a reader seeing it in a log knows the caller
+// supplied no node, rather than wondering why a node looks idle.
+const promNoNodeScope = "__no_node_scope__"
+
+// promPrefixComma joins a filter onto a selector that already has content.
+func promPrefixComma(filter string) string {
+	if filter == "" {
+		return ""
+	}
+	return ", " + filter
+}
+
 func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[string]string {
 	queries := make(map[string]string)
 
@@ -77,9 +130,17 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 			queries[metricKey] = promNodeAllocatable(node, "memory")
 
 		case "cpu_usage":
-			queries[metricKey] = fmt.Sprintf(`sum(irate(node_cpu_seconds_total{mode!="idle", instance=~"%s.*"}[5m])) OR sum(irate(node_resources_cpu_usage_seconds_total{mode!="idle", instance=~"%s.*"}[5m]))`, meta.InternalIP, meta.NodeName)
+			sel, join := promNodeExporterScope(meta)
+			agent := promNodeAgentScope(meta)
+			queries[metricKey] = fmt.Sprintf(
+				`sum(irate(node_cpu_seconds_total{mode!="idle"%s}[5m])%s) OR sum(irate(node_resources_cpu_usage_seconds_total{mode!="idle", %s}[5m]))`,
+				promPrefixComma(sel), join, agent)
 		case "memory_usage":
-			queries[metricKey] = fmt.Sprintf(`sum(node_memory_Active_bytes{instance=~"%s.*"}) or sum(node_resources_memory_total_bytes{instance=~"%s.*"} - node_resources_memory_available_bytes{instance=~"%s.*"})`, meta.InternalIP, meta.NodeName, meta.NodeName)
+			sel, join := promNodeExporterScope(meta)
+			agent := promNodeAgentScope(meta)
+			queries[metricKey] = fmt.Sprintf(
+				`sum(node_memory_Active_bytes{%s}%s) or sum(node_resources_memory_total_bytes{%s} - node_resources_memory_available_bytes{%s})`,
+				sel, join, agent, agent)
 		case "cpu_request":
 			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{resource="cpu", node=~"%s.*"})`, meta.NodeName)
 		case "memory_request":

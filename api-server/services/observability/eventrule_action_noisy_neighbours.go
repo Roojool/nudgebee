@@ -65,31 +65,11 @@ const (
 	noisyNeighboursLookbackMinutes = 10
 )
 
-// Indirected so a test can drive Execute through the provider dispatch without the
-// integration tables or a live Elasticsearch behind them. The dispatch line is the
-// part that was wrong, so it is the part that has to be exercised.
-var (
-	noisyNeighboursMetricsProvider = GetLogsMetricsTracesProvider
-	fetchESNoisyNeighbours         = esNoisyNeighbours
-	fetchPromNoisyNeighbours       = promNoisyNeighbours
-)
-
-// usesElasticsearchMetrics reports whether the account's metrics provider is the
-// Elasticsearch source, by asking the same registry that routes its queries.
-//
-// This used to be `provider == "elasticsearch"`. The registry spells it "ES", so the
-// comparison never matched and every Elasticsearch account fell through to PromQL,
-// which it cannot answer: the card was empty on exactly the clusters its ES path was
-// written for, with no error. Deriving the answer from getMetricsSource means a
-// caller cannot disagree with the registry about a provider's name.
-func usesElasticsearchMetrics(provider, source string) bool {
-	metricSource, err := getMetricsSource(provider, source)
-	if err != nil {
-		return false
-	}
-	_, isES := metricSource.(*ElasticSaasMetricSource)
-	return isES
-}
+// Indirected so a test can exercise the card's ranking and payload without a live
+// metrics backend. There is no provider dispatch left to drive: the layer resolves
+// the account's backend, so what remains worth testing is what the card does with
+// what comes back.
+var fetchNoisyNeighbourMetrics = fetchNoisyNeighbours
 
 func (a *noisyNeighboursAction) CanAutoExecute(ctx playbooks.PlaybookActionContext) bool {
 	if !noisyNeighboursAggKeys[ctx.GetEvent().AggregationKey] {
@@ -134,7 +114,7 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 	requestCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), nil, nil)
 
 	start, end := playbooks.RangeQueryWindow(ctx.GetEvent(), noisyNeighboursLookbackMinutes, time.Now().UTC())
-	data, err := fetchNoisyNeighbours(requestCtx, accountID, nodeName, start, end)
+	data, err := fetchNoisyNeighbourMetrics(requestCtx, accountID, nodeName, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -146,184 +126,114 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 	return noisyNeighboursResponse(podName, namespace, rawParams, data)
 }
 
-// fetchNoisyNeighbours is the one place that decides which implementation answers,
-// and it decides by the account's DEFAULT metrics provider — the rule every metrics
-// card follows, so the enricher itself carries no provider knowledge.
+type noisyNeighbourData struct {
+	NodeName        string
+	NodeUsed        float64
+	NodeAllocatable float64
+	TotalRequested  float64
+	Neighbours      []map[string]any
+
+	// CPUMeasured is set only when at least one container reported CPU usage.
+	// Left false, the renderer omits the CPU keys entirely rather than reporting
+	// a hard zero — "we did not measure it" and "nothing is using CPU" must not
+	// look the same to a reader.
+	CPUMeasured     bool
+	NodeCPUUsed     float64
+	NodeCPUCapacity float64
+	CPUNeighbours   []map[string]any
+}
+
+// noisyNeighbourKeys are the two families the card ranks, each fetched with the
+// statistic that suits it. They go in separate requests because `aggregate` applies
+// to a whole request, and memory and CPU want different reductions.
+var (
+	noisyNeighbourMemoryKeys = []string{
+		"container_memory_working_set_by_pod",
+		"container_memory_request_by_pod",
+		"container_memory_limit_by_pod",
+		"mem_total",
+	}
+	noisyNeighbourCPUKeys = []string{
+		"container_cpu_usage_by_pod",
+		"container_cpu_request_by_pod",
+		"container_cpu_limit_by_pod",
+		"cpu_total",
+	}
+)
+
+// fetchNoisyNeighbours asks the utilisation layer which containers on a node are
+// consuming what, and what each asked for.
 //
-//   - Elasticsearch: the ES implementation.
-//   - Prometheus family (prometheus, chronosphere — including an agent's Prometheus
-//     when nothing is configured): the PromQL implementation, asked through the
-//     provider and source that were resolved, so a Chronosphere default is queried as
-//     Chronosphere rather than as whatever "prometheus" happens to resolve to.
-//   - Any other provider (Datadog, New Relic, ...) has no implementation yet. The
-//     PromQL one is tried against the account's Prometheus, which keeps the card on
-//     accounts that have both; when that fails too, the result is (nil, nil) and the
-//     card is skipped with a log line naming the provider, instead of surfacing the
-//     Prometheus resolver's "agent not connected", which says nothing about why.
+// It names keys and a node, never a provider: api-server resolves the account's
+// metrics backend and builds the native query. That replaces two hand-written
+// implementations — one PromQL, one Elasticsearch — plus the dispatch that chose
+// between them, which admitted only Prometheus and Chronosphere and silently skipped
+// the card for Datadog, New Relic and Dynatrace.
+//
+// Two requests rather than one because `aggregate` is per request: memory is ranked on
+// its PEAK over the window, CPU on its AVERAGE. That is what the Elasticsearch
+// implementation already did, and it is the more useful reading for an evidence card
+// on a node-pressure event — the peak is what caused the pressure. The PromQL
+// implementation took the latest sample instead, so Prometheus numbers move slightly
+// and the two providers now agree, which they did not before.
 func fetchNoisyNeighbours(ctx *security.RequestContext, accountID, nodeName string, start, end time.Time) (*noisyNeighbourData, error) {
-	provider, source, err := noisyNeighboursMetricsProvider(ctx, accountID, "", "metrics", "")
+	ask := func(keys []string, aggregate string) (map[string][]latestSample, error) {
+		output, err := FetchMetricUtilisation(ctx, GetUtilisationTrendRequest{
+			AccountId: accountID,
+			StartTime: start.UnixMilli(),
+			EndTime:   end.UnixMilli(),
+			Aggregate: aggregate,
+			Request: map[string]any{
+				"kind":      "node",
+				"node_name": nodeName,
+				"metrics":   keys,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		return latestValuesByKey(output), nil
+	}
+
+	memory, err := ask(noisyNeighbourMemoryKeys, "max")
 	if err != nil {
-		return nil, fmt.Errorf("noisy_neighbours_enricher: metrics provider: %w", err)
+		// A provider that cannot answer these keys is not an error the event should
+		// carry: the card is skipped with the reason logged, which is what the
+		// dispatch this replaces did for every provider it had no implementation for.
+		ctx.GetLogger().Info("noisy_neighbours_enricher: metrics unavailable for this account; skipping the card",
+			"account_id", accountID, "node", nodeName, "error", err)
+		return nil, nil
 	}
-	switch {
-	case usesElasticsearchMetrics(provider, source):
-		data, esErr := fetchESNoisyNeighbours(ctx, accountID, nodeName,
-			noisyNeighboursLookbackMinutes, noisyNeighboursTopN)
-		if esErr != nil {
-			return nil, fmt.Errorf("noisy_neighbours_enricher: elasticsearch: %w", esErr)
-		}
-		return data, nil
-	case answersPromQL(provider):
-		return fetchPromNoisyNeighbours(ctx, accountID, provider, source, nodeName, start, end)
-	default:
-		data, promErr := fetchPromNoisyNeighbours(ctx, accountID, integrationPrometheus, "", nodeName, start, end)
-		if promErr != nil {
-			ctx.GetLogger().Info("noisy_neighbours_enricher: no implementation for this metrics provider, and no Prometheus to fall back to; skipping the card",
-				"account_id", accountID, "provider", provider, "source", source, "fallback_error", promErr)
-			return nil, nil
-		}
-		return data, nil
+	cpu, err := ask(noisyNeighbourCPUKeys, "avg")
+	if err != nil {
+		ctx.GetLogger().Info("noisy_neighbours_enricher: cpu metrics unavailable; rendering the card without them",
+			"account_id", accountID, "node", nodeName, "error", err)
+		cpu = map[string][]latestSample{}
 	}
+
+	results := map[string][]latestSample{
+		"top_pods":     memory["container_memory_working_set_by_pod"],
+		"mem_requests": memory["container_memory_request_by_pod"],
+		"mem_limits":   memory["container_memory_limit_by_pod"],
+
+		"node_alloc":   memory["mem_total"],
+		"top_pods_cpu": cpu["container_cpu_usage_by_pod"],
+		"cpu_requests": cpu["container_cpu_request_by_pod"],
+		"cpu_limits":   cpu["container_cpu_limit_by_pod"],
+
+		"node_cpu_alloc": cpu["cpu_total"],
+	}
+	// CPU is reported only when something actually measured it, so "we did not
+	// measure" and "nothing is using CPU" stay distinguishable in the card.
+	cpuMeasured := len(results["top_pods_cpu"]) > 0 || len(results["node_cpu_alloc"]) > 0
+
+	return buildNoisyNeighbourData(nodeName, results, cpuMeasured)
 }
 
-// answersPromQL reports whether a metrics provider is queried in PromQL over the
-// cAdvisor and kube-state-metrics series the PromQL implementation reads.
-func answersPromQL(provider string) bool {
-	switch provider {
-	case "prometheus", "chronosphere":
-		return true
-	}
-	return false
-}
-
-// promNoisyNeighbours answers from Prometheus-family metrics.
-func promNoisyNeighbours(ctx *security.RequestContext, accountID, provider, source, nodeName string, start, end time.Time) (*noisyNeighbourData, error) {
-	// We assemble five instant queries against the host node so the
-	// resulting `neighbours` shape matches what the legacy Robusta
-	// playbook emitted (memory_analyzer.py:100 →
-	// `{name, pod_name, namespace, memory_used, memory_requested,
-	//   memory_limit}`). The UI's NoisyNeighbour card consumes those
-	// fields verbatim; missing `name` or `memory_requested` renders as
-	// "Container undefined does not have a memory requests".
-	//
-	// Where the K8s node name lands on cAdvisor
-	// (container_memory_working_set_bytes) depends on the Prometheus scrape
-	// config, and we've observed three real-world variations:
-	//   1. kube-prometheus-stack (EKS): node name on `node`, `instance` is
-	//      the kubelet scrape target (`<nodeIP>:10250`).
-	//   2. older relabel rules: node name on `instance`, `node` relabelled
-	//      to a node-pool category (e.g. `node="db"`).
-	//   3. BOTH at once (a vmsingle cluster scraping kubelets via two jobs):
-	//      one job emits convention 1, the other convention 2, so every
-	//      container has TWO near-duplicate series.
-	// We can't know the convention up front, so we match the node name on
-	// EITHER `node` or `instance`. The catch is variation 3: a naive
-	// `{node="X"} or {instance="X"}` at the selector level keeps both
-	// duplicate series and DOUBLE-COUNTS memory. So we aggregate to
-	// (pod, namespace, container) on each branch FIRST, then `or` — after
-	// aggregation both branches share an identical label signature, so the
-	// `or` takes the `node=` side and only fills in containers it's
-	// missing. One scrape's view wins; no double counting.
-	//   - kube-state-metrics (kube_*): node name is always on `node` (its
-	//     `instance` is the kube-state-metrics pod), so those queries below
-	//     filter by `node=` alone.
-	// Keeping the `container` label intact lets us join against the
-	// kube_pod_container_resource_{requests,limits} series, which only
-	// carry `pod` / `namespace` / `container`.
-	perContainer := func(series func(selector string) string, extraFilters string) string {
-		return fmt.Sprintf(
-			`sum by (pod, namespace, container) (%s) or sum by (pod, namespace, container) (%s)`,
-			series(fmt.Sprintf(`__CLUSTER__ node="%s"%s`, nodeName, extraFilters)),
-			series(fmt.Sprintf(`__CLUSTER__ instance="%s"%s`, nodeName, extraFilters)),
-		)
-	}
-	memorySeries := func(selector string) string {
-		return fmt.Sprintf(`container_memory_working_set_bytes{%s}`, selector)
-	}
-	// CPU is a rate, so the node/instance `or` wraps the rate() per branch —
-	// aggregating first and rating after would be wrong across restarts.
-	cpuSeries := func(selector string) string {
-		return fmt.Sprintf(`rate(container_cpu_usage_seconds_total{%s}[5m])`, selector)
-	}
-	perContainerUsage := func(extraFilters string) string {
-		return perContainer(memorySeries, extraFilters)
-	}
-	topPodsQuery := fmt.Sprintf(
-		`topk(15, %s)`,
-		perContainerUsage(`, pod!="", container!="", container!="POD", image!=""`),
-	)
-	nodeUsageQuery := fmt.Sprintf(
-		`sum(%s)`,
-		perContainerUsage(`, pod!="", image!=""`),
-	)
-	nodeAllocatableQuery := fmt.Sprintf(
-		`kube_node_status_allocatable{__CLUSTER__ resource="memory", node="%s"}`,
-		nodeName,
-	)
-	memoryRequestsQuery := fmt.Sprintf(
-		`kube_pod_container_resource_requests{__CLUSTER__ resource="memory", node="%s"}`,
-		nodeName,
-	)
-	memoryLimitsQuery := fmt.Sprintf(
-		`kube_pod_container_resource_limits{__CLUSTER__ resource="memory", node="%s"}`,
-		nodeName,
-	)
-	// CPU, the half we never measured. A node pinned at its CPU limit starves
-	// every pod on it — probes time out, requests queue — while memory looks
-	// perfectly healthy, so a memory-only answer reports nothing wrong and the
-	// blame lands on whatever the reader can see (usually the probe's own
-	// settings).
-	topPodsCPUQuery := fmt.Sprintf(
-		`topk(%d, %s)`,
-		noisyNeighboursTopN,
-		perContainer(cpuSeries, `, pod!="", container!="", container!="POD", image!=""`),
-	)
-	nodeCPUUsageQuery := fmt.Sprintf(
-		`sum(%s)`,
-		perContainer(cpuSeries, `, pod!="", image!=""`),
-	)
-	nodeCPUCapacityQuery := fmt.Sprintf(
-		`kube_node_status_allocatable{__CLUSTER__ resource="cpu", node="%s"}`,
-		nodeName,
-	)
-	cpuRequestsQuery := fmt.Sprintf(
-		`kube_pod_container_resource_requests{__CLUSTER__ resource="cpu", node="%s"}`,
-		nodeName,
-	)
-	cpuLimitsQuery := fmt.Sprintf(
-		`kube_pod_container_resource_limits{__CLUSTER__ resource="cpu", node="%s"}`,
-		nodeName,
-	)
-
-	// One batch through the metrics layer, which runs it on the connection the
-	// user configured or the cluster agent's Prometheus. Every query is scoped to
-	// a single node over a 10-minute range, so the added CPU half costs
-	// evaluation time on a few dozen series, not a fan-out.
-	output, err := FetchMetricsQuery(ctx, FetchMetricsRequest{
-		AccountId:            accountID,
-		MetricProvider:       provider,
-		MetricProviderSource: source,
-		Queries: map[string]string{
-			"top_pods":       topPodsQuery,
-			"node_used":      nodeUsageQuery,
-			"node_alloc":     nodeAllocatableQuery,
-			"mem_requests":   memoryRequestsQuery,
-			"mem_limits":     memoryLimitsQuery,
-			"top_pods_cpu":   topPodsCPUQuery,
-			"node_cpu_used":  nodeCPUUsageQuery,
-			"node_cpu_alloc": nodeCPUCapacityQuery,
-			"cpu_requests":   cpuRequestsQuery,
-			"cpu_limits":     cpuLimitsQuery,
-		},
-		StartTime:    start.UnixMilli(),
-		EndTime:      end.UnixMilli(),
-		StepInterval: 30,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("noisy_neighbours_enricher: prom: %w", err)
-	}
-	results := latestValuesByKey(output)
-
+// buildNoisyNeighbourData ranks and trims what the layer returned. Provider-agnostic
+// by construction: it reads canonical namespace / pod / container labels, which every
+// builder now emits.
+func buildNoisyNeighbourData(nodeName string, results map[string][]latestSample, cpuMeasured bool) (*noisyNeighbourData, error) {
 	// Index requests / limits by (namespace, pod, container) for O(1)
 	// lookup while iterating top_pods. kube-state-metrics emits one
 	// series per (pod, container) per resource — no aggregation needed.
@@ -396,9 +306,23 @@ func promNoisyNeighbours(ctx *security.RequestContext, accountID, provider, sour
 		}
 	}
 
-	nodeUsed := firstLatestValue(results["node_used"])
+	// The node totals are the sum of the containers on it, not a node-level gauge.
+	//
+	// `memory_usage` and `cpu_usage` at node scope read node_memory_Active_bytes /
+	// node_cpu_seconds_total filtered by `instance=~"<internal IP>.*"`, and this
+	// enricher only ever knows the node NAME. With no IP that regex matches every
+	// instance, so the card reported the whole cluster against one node's
+	// allocatable: 51.3 GB used of 12.9 GB, and 20.0 cores of 3.92, measured on dev.
+	//
+	// Summing the per-container series is what the PromQL this replaces did and needs
+	// no IP. It sums EVERY container the layer returned for the node, not the fifteen
+	// the card lists: the total is what the node is using, and trimming it to the
+	// visible rows would under-report it on any node running more than fifteen
+	// containers — which is most of them. The rows therefore do not add up to the
+	// total, by design.
+	nodeUsed := sumLatestValues(results["top_pods"])
 	nodeAlloc := firstLatestValue(results["node_alloc"])
-	nodeCPUUsed := firstLatestValue(results["node_cpu_used"])
+	nodeCPUUsed := sumLatestValues(results["top_pods_cpu"])
 	nodeCPUCapacity := firstLatestValue(results["node_cpu_alloc"])
 
 	// Every query came back empty, allocatable included. A real node always
@@ -417,7 +341,7 @@ func promNoisyNeighbours(ctx *security.RequestContext, accountID, provider, sour
 		NodeAllocatable: nodeAlloc,
 		TotalRequested:  totalRequested,
 		Neighbours:      neighbours,
-		CPUMeasured:     true,
+		CPUMeasured:     cpuMeasured,
 		NodeCPUUsed:     nodeCPUUsed,
 		NodeCPUCapacity: nodeCPUCapacity,
 		CPUNeighbours:   cpuNeighbours,
@@ -504,6 +428,16 @@ func indexByPodContainer(samples []latestSample) map[string]float64 {
 
 // firstLatestValue is the latest sample of the first series — for the
 // scalar-ish node queries that resolve to a single series.
+// sumLatestValues totals one key's series — the node's own usage, summed from the
+// containers running on it.
+func sumLatestValues(samples []latestSample) float64 {
+	total := 0.0
+	for _, s := range samples {
+		total += s.Value
+	}
+	return total
+}
+
 func firstLatestValue(samples []latestSample) float64 {
 	for _, s := range samples {
 		return s.Value
