@@ -97,17 +97,17 @@ func init() {
 	if testing.Testing() {
 		return
 	}
-	// "starting" log so a hang inside MqConsume (TCP dial / AMQP
-	// handshake / ExchangeDeclare) is visible in container logs even if
-	// the "registered successfully" line below never prints.
+	// MqConsume only registers a supervisor; connecting and consuming happen
+	// in the background ("rbmq: consumer running" / GET /health/mq).
 	slog.Info("eventasync: registering rabbitmq consumer",
 		"exchange", config.Config.RabbitMqTroubleshootExchange,
 		"queue", config.Config.RabbitMqTroubleshootQueue)
 	err := common.MqConsume(config.Config.RabbitMqTroubleshootExchange, config.Config.RabbitMqTroubleshootQueue, config.Config.RabbitMqTroubleshootQueue, processTroubleshootingEventFromMq)
 	if err != nil {
-		slog.Error("unable to register consumer", "error", err)
+		slog.Error("eventasync: unable to register consumer", "error", err)
+		return
 	}
-	slog.Info("eventasync: consumer registered successfully to rabbitmq")
+	slog.Info("eventasync: consumer supervisor started")
 }
 
 func processTroubleshootingEventFromMq(msgCtx context.Context, data []byte) error {

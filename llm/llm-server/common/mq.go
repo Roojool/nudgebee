@@ -1,15 +1,30 @@
 package common
 
+// RabbitMQ lifecycle contract (enforced by mq_lifecycle_test.go), #39159:
+//  1. One supervisor per queue: runs a consumer or retries w/ backoff until MqClose; see MqConsumerStatuses.
+//  2. Failed dials are never cached (retry after mqDialCooldown); dials are bounded by mqDialTimeout and
+//     never hold a lock, so callers & MqClose don't wait on the network.
+//  3. A publish error replaces only that publisher; it never closes or waits on consumers.
+//  4. Only MqClose stops a supervisor (cancel -> close, bounded ~2×mqShutdownTimeout); any other stop -> re-arm.
+//  5. ≤1 live library consumer per supervisor; the old one is closed before the next is built.
+//
+// Delivery (unchanged): success -> Ack, error -> NackRequeue (unbounded, no DLQ). Queues are non-durable &
+// messages transient -> lost on broker restart; channel loss before ack -> redelivery -> possible duplicates.
+// A lost broker connection shows as "reconnecting" (conn state); a channel-only failure on a live conn
+// still shows "running": go-rabbitmq exposes no channel state.
+
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"nudgebee/llm/config"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/wagslane/go-rabbitmq"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -37,107 +52,228 @@ func mqExtractContext(headers map[string]interface{}) (context.Context, trace.Sp
 	return otel.Tracer("mq").Start(ctx, "rabbitmq.consume", trace.WithSpanKind(trace.SpanKindConsumer))
 }
 
+// mqConsumer and mqPublisher are the parts of the go-rabbitmq handles this file
+// uses; they exist so the lifecycle can be tested without a broker.
+type mqConsumer interface {
+	Run(handler rabbitmq.Handler) error
+	CloseWithContext(ctx context.Context)
+}
+
+type mqPublisher interface {
+	Publish(data []byte, routingKeys []string, optionFuncs ...func(*rabbitmq.PublishOptions)) error
+	Close()
+}
+
 var (
-	rbmqConnOnce sync.Once
-	rbmqConn     *rabbitmq.Conn
-	// rbmqConsumers / rbmqPublishers are keyed by queue / exchange:routing-key
-	// respectively. Both are mutated from multiple goroutines: the
-	// reconnect path of each consumer/publisher modifies its own entry,
-	// and concurrent reconnects across different exchanges (e.g. the
-	// troubleshoot exchange and the cache-invalidation exchange) used to
-	// race on the map header → fatal "concurrent map writes". All access
-	// must hold rbmqMux.
-	rbmqMux            sync.Mutex
-	rbmqConsumers      = make(map[string]*rabbitmq.Consumer)
-	rbmqPublishers     = make(map[string]*rabbitmq.Publisher)
+	// rbmqConnMu guards the fields below; never held across network I/O.
+	rbmqConnMu       sync.Mutex
+	rbmqConn         *rabbitmq.Conn
+	rbmqLastDialFail time.Time
+	rbmqDialDone     chan struct{} // non-nil while a dial is in flight
+	rbmqConnGen      uint64        // bumped by MqClose -> a dial finishing later is discarded
+	rbmqConnDownAt   time.Time     // set by watchConn while the shared conn is closed (library redialing)
+
+	// rbmqMux guards rbmqPublishers and rbmqSupervisors.
+	rbmqMux         sync.Mutex
+	rbmqPublishers  = make(map[string]mqPublisher)
+	rbmqSupervisors = make(map[string]*mqConsumerSupervisor)
+
 	maxAttempts        = 3
 	reconnectTimeDelay = 5 * time.Second
+	mqDialCooldown     = time.Second
+	mqDialTimeout      = 5 * time.Second // TCP connect + AMQP handshake, per dial and per library redial
+	mqRearmMaxDelay    = time.Minute
+	mqRearmResetAfter  = time.Minute
+	mqShutdownTimeout  = 10 * time.Second
+
+	mqDial = func(url string) (*rabbitmq.Conn, error) {
+		return rabbitmq.NewConn(url,
+			rabbitmq.WithConnectionOptionsLogging,
+			rabbitmq.WithConnectionOptionsBaseReconnectInterval(reconnectTimeDelay),
+			rabbitmq.WithConnectionOptionsConfig(rabbitmq.Config{Dial: amqp.DefaultDial(mqDialTimeout)}),
+		)
+	}
+	mqCloseConn = func(c *rabbitmq.Conn) error { return c.Close() }
+	// A consumer inside go-rabbitmq's own reconnect never returns to its supervisor, so conn state
+	// is the only signal of a mid-life broker outage (#39163).
+	mqConnIsClosed     = func(c *rabbitmq.Conn) bool { return c.IsClosed() }
+	mqConnPollInterval = time.Second
+	mqNewConsumer      = func(conn *rabbitmq.Conn, queue string, opts ...func(*rabbitmq.ConsumerOptions)) (mqConsumer, error) {
+		return rabbitmq.NewConsumer(conn, queue, opts...)
+	}
+	mqNewPublisher = func(conn *rabbitmq.Conn, opts ...func(*rabbitmq.PublisherOptions)) (mqPublisher, error) {
+		return rabbitmq.NewPublisher(conn, opts...)
+	}
 )
 
-var ErrRbmqNoConn = fmt.Errorf("rbmq: unable to connect to rabbitmq")
+var (
+	ErrRbmqNoConn                  = fmt.Errorf("rbmq: unable to connect to rabbitmq")
+	ErrMqConsumerAlreadyRegistered = errors.New("rbmq: consumer already registered for queue")
+	errMqConsumerStoppedUnexpected = errors.New("rbmq: consumer stopped without shutdown")
+)
 
-func init() {
-	// todo close connections on exit gracefully
-	// currently this is blocking testcase execution
-	// c := make(chan os.Signal, 1)
-	// signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+// getConnection returns the shared conn, or nil without waiting if none is available: a dial is
+// in flight, the last one failed < mqDialCooldown ago, or this call's own dial fails.
+func getConnection() *rabbitmq.Conn { return connect(false) }
 
-	// for {
-	// 	select {
-	// 	case <-c:
-	// 		closeConnection()
-	// 		return
-	// 	}
-	// }
-}
-
-func getConnection() *rabbitmq.Conn {
-	if rbmqConn == nil {
-		rbmqConnOnce.Do(func() {
-			// Diagnostic: this dial has no client-side timeout. A blocked
-			// SYN/handshake can stall the entire startup path silently
-			// (rabbit.NewConn doesn't log until it errors). The "dialing"
-			// line below + the "connected" / error line is what lets us
-			// tell from logs alone whether we were stuck here.
-			slog.Default().Info("rbmq: dialing rabbitmq",
-				"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort)
-			rbmqConn1, err := rabbitmq.NewConn(
-				fmt.Sprintf("amqp://%s:%s@%s:%d", config.Config.RabbitMqUsername, config.Config.RabbitMqPassword, config.Config.RabbitMqHost, config.Config.RabbitMqPort),
-				rabbitmq.WithConnectionOptionsLogging,
-				rabbitmq.WithConnectionOptionsBaseReconnectInterval(reconnectTimeDelay),
-			)
-			if err != nil {
-				slog.Default().Error("rbmq: error connecting to rabbitmq",
-					"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort, "error", err)
-			} else {
-				slog.Default().Info("rbmq: connected to rabbitmq",
-					"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort)
-			}
-			rbmqConn = rbmqConn1
-		})
+// connect dials if needed. At most one dial runs at a time; waitForDial callers (supervisors)
+// wait for an in-flight dial, bounded by mqDialTimeout. Failures aren't cached past the cooldown.
+// Once dialed, go-rabbitmq reconnects the conn itself, so only MqClose drops it.
+func connect(waitForDial bool) *rabbitmq.Conn {
+	rbmqConnMu.Lock()
+	if rbmqConn != nil {
+		defer rbmqConnMu.Unlock()
+		return rbmqConn
 	}
-	return rbmqConn
+	if done := rbmqDialDone; done != nil {
+		rbmqConnMu.Unlock()
+		if !waitForDial {
+			return nil
+		}
+		<-done
+		rbmqConnMu.Lock()
+		defer rbmqConnMu.Unlock()
+		return rbmqConn
+	}
+	if !rbmqLastDialFail.IsZero() && time.Since(rbmqLastDialFail) < mqDialCooldown {
+		rbmqConnMu.Unlock()
+		return nil
+	}
+	done := make(chan struct{})
+	rbmqDialDone = done
+	gen := rbmqConnGen
+	rbmqConnMu.Unlock()
+
+	slog.Default().Info("rbmq: dialing rabbitmq",
+		"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort)
+	conn, err := mqDial(fmt.Sprintf("amqp://%s:%s@%s:%d", config.Config.RabbitMqUsername, config.Config.RabbitMqPassword, config.Config.RabbitMqHost, config.Config.RabbitMqPort))
+
+	rbmqConnMu.Lock()
+	rbmqDialDone = nil
+	close(done)
+	switch {
+	case gen != rbmqConnGen: // MqClose ran during the dial
+		rbmqConnMu.Unlock()
+		if conn != nil {
+			_ = mqCloseConn(conn)
+		}
+		return nil
+	case err != nil:
+		rbmqLastDialFail = time.Now()
+		rbmqConnMu.Unlock()
+		slog.Default().Error("rbmq: error connecting to rabbitmq",
+			"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort, "error", err)
+		return nil
+	}
+	rbmqLastDialFail = time.Time{}
+	rbmqConn = conn
+	rbmqConnDownAt = time.Time{}
+	rbmqConnMu.Unlock()
+	go watchConn(conn, gen, mqConnIsClosed, mqConnPollInterval)
+	slog.Default().Info("rbmq: connected to rabbitmq",
+		"host", config.Config.RabbitMqHost, "port", config.Config.RabbitMqPort)
+	return conn
 }
 
+// watchConn records when the shared conn goes down & clears it on recovery, until MqClose
+// replaces the generation. isClosed/interval are captured so it never reads globals late.
+func watchConn(conn *rabbitmq.Conn, gen uint64, isClosed func(*rabbitmq.Conn) bool, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		closed := isClosed(conn) // may block while the library redials (≤ mqDialTimeout)
+		rbmqConnMu.Lock()
+		if gen != rbmqConnGen {
+			rbmqConnMu.Unlock()
+			return
+		}
+		switch {
+		case !closed:
+			rbmqConnDownAt = time.Time{}
+		case rbmqConnDownAt.IsZero():
+			rbmqConnDownAt = time.Now()
+		}
+		rbmqConnMu.Unlock()
+	}
+}
+
+// MqClose is process shutdown, never error recovery: stops supervisors (no re-arm), closes publishers & conn.
+// Bounded ~2×mqShutdownTimeout even with a stuck handler; later MqConsume/MqPublish start clean.
 func MqClose() {
 	rbmqMux.Lock()
-	consumers := rbmqConsumers
+	supervisors := rbmqSupervisors
 	publishers := rbmqPublishers
-	rbmqConsumers = make(map[string]*rabbitmq.Consumer)
-	rbmqPublishers = make(map[string]*rabbitmq.Publisher)
+	rbmqSupervisors = make(map[string]*mqConsumerSupervisor)
+	rbmqPublishers = make(map[string]mqPublisher)
 	rbmqMux.Unlock()
 
-	// Close handles outside the lock — Close() on wagslane handles can
-	// block briefly and we don't want to serialize teardown with healthy
-	// publishes/consumes that are racing for the same lock.
-	for _, consumer := range consumers {
-		consumer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), mqShutdownTimeout)
+	defer cancel()
+
+	// Cancel all first so no supervisor re-arms while its siblings close.
+	for _, s := range supervisors {
+		s.cancel()
 	}
-	for _, publisher := range publishers {
-		publisher.Close()
+	// Close in parallel so one slow handler can't spend its siblings' grace period.
+	waitBounded(ctx, "close consumers", func() {
+		var wg sync.WaitGroup
+		for _, s := range supervisors {
+			wg.Go(func() { s.closeCurrent(ctx) })
+		}
+		wg.Wait()
+	})
+	// A stuck handler can use up ctx during close; Run still returns once the
+	// close finishes, so give supervisors their own window to exit.
+	exitCtx, exitCancel := context.WithTimeout(context.Background(), mqShutdownTimeout)
+	defer exitCancel()
+	for _, s := range supervisors {
+		select {
+		case <-s.done:
+		case <-exitCtx.Done():
+			slog.Warn("rbmq: consumer supervisor did not stop before shutdown timeout", "queue", s.queue)
+		}
 	}
 
-	rbmqConnOnce = sync.Once{}
+	rbmqConnMu.Lock()
+	conn := rbmqConn
 	rbmqConn = nil
+	rbmqLastDialFail = time.Time{}
+	rbmqConnGen++ // never waits on an in-flight dial; its result is discarded; stops watchConn
+	rbmqConnDownAt = time.Time{}
+	rbmqConnMu.Unlock()
+	closeConn := mqCloseConn // captured: an abandoned step must not read globals late
+	waitBounded(exitCtx, "close publishers and connection", func() {
+		for _, publisher := range publishers {
+			publisher.Close()
+		}
+		if conn != nil {
+			if err := closeConn(conn); err != nil {
+				slog.Warn("rbmq: error closing connection", "error", err)
+			}
+		}
+	})
 }
 
-func MqConsume(exchangeName string, routingKey string, queue string, processor func(ctx context.Context, data []byte) error) error {
-	conn := getConnection()
-	if conn == nil {
-		slog.Error("rbmq: error connecting to rabbitmq")
-		return ErrRbmqNoConn
+// waitBounded runs f and returns when it finishes or ctx ends. AMQP channel/connection closes wait on
+// the broker with no timeout; at shutdown an unfinished f is left to the process exit.
+func waitBounded(ctx context.Context, step string, f func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("rbmq: shutdown step timed out; continuing", "step", step)
 	}
+}
 
-	// newConsumer builds a consumer on the current shared connection. Used
-	// for both the initial creation and every reconnect below so the two can
-	// never drift; getConnection() is re-fetched each call so a reconnect
-	// picks up the live connection after a broker restart.
-	newConsumer := func() (*rabbitmq.Consumer, error) {
-		conn := getConnection()
-		if conn == nil {
-			return nil, ErrRbmqNoConn
-		}
-		return rabbitmq.NewConsumer(
+// MqConsume registers a supervised consumer for queue and returns at once; connecting happens in the
+// background until MqClose. Errors only if queue already has a consumer.
+func MqConsume(exchangeName string, routingKey string, queue string, processor func(ctx context.Context, data []byte) error) error {
+	return startMqConsumer(queue, processor, func(conn *rabbitmq.Conn) (mqConsumer, error) {
+		return mqNewConsumer(
 			conn,
 			queue,
 			rabbitmq.WithConsumerOptionsRoutingKey(routingKey),
@@ -147,71 +283,7 @@ func MqConsume(exchangeName string, routingKey string, queue string, processor f
 			rabbitmq.WithConsumerOptionsExchangeDurable,
 			rabbitmq.WithConsumerOptionsConsumerName(config.Config.OtelServiceName+"/"+routingKey+"/"+config.Config.ServerName),
 		)
-	}
-
-	consumer, err := newConsumer()
-	if err != nil {
-		slog.Error("rbmq: error creating consumer", "error", err)
-		return err
-	}
-
-	rbmqMux.Lock()
-	rbmqConsumers[queue] = consumer
-	rbmqMux.Unlock()
-
-	go func() {
-		// Infinite reconnect: a bounded (maxAttempts) reconnect loop gives up
-		// forever once the budget is exhausted — after a broker flap the
-		// consumer goroutine exits and the queue is left with no consumer, so
-		// published messages pile up (or, for a non-durable queue, are
-		// dropped) until the pod is manually restarted. That silent wedge is
-		// exactly what took down the event-investigation pipeline. Loop
-		// forever with backoff instead so the consumer recovers from any
-		// duration of broker unavailability. Each reconnect rebuilds a fresh
-		// consumer (rather than recursing) so this stays a single long-lived
-		// goroutine and never calls Run on a closed handle.
-		for {
-			err := consumer.Run(
-				func(d rabbitmq.Delivery) rabbitmq.Action {
-					ctx, span := mqExtractContext(d.Headers)
-					defer span.End()
-					if perr := processor(ctx, d.Body); perr != nil {
-						log.Printf("rbmq: error processing message on %s: %s", queue, perr)
-						return rabbitmq.NackRequeue
-					}
-					return rabbitmq.Ack
-				})
-			if err == nil {
-				// consumer.Run returns nil only on an intentional Close();
-				// clean shutdown, don't re-arm.
-				return
-			}
-			slog.Error("rbmq: consumer.run failed; reconnecting", "queue", queue, "error", err)
-			consumer.Close()
-			rbmqMux.Lock()
-			if rbmqConsumers[queue] == consumer {
-				delete(rbmqConsumers, queue)
-			}
-			rbmqMux.Unlock()
-
-			// Rebuild with backoff until NewConsumer succeeds.
-			for {
-				time.Sleep(reconnectTimeDelay)
-				c, nerr := newConsumer()
-				if nerr != nil {
-					slog.Error("rbmq: error recreating consumer; will retry", "queue", queue, "error", nerr)
-					continue
-				}
-				consumer = c
-				rbmqMux.Lock()
-				rbmqConsumers[queue] = consumer
-				rbmqMux.Unlock()
-				break
-			}
-		}
-	}()
-
-	return nil
+	})
 }
 
 // MqFanoutSubscribe subscribes to a fanout exchange so this pod receives
@@ -224,89 +296,315 @@ func MqConsume(exchangeName string, routingKey string, queue string, processor f
 // Each pod gets its own auto-delete + exclusive queue named
 // "<exchangeName>_<ServerName>" so the queue is uniquely owned by this
 // pod's connection and cleaned up by RabbitMQ when the pod disconnects.
-// No leaked queues survive a pod restart.
+// No leaked queues survive a pod restart. Supervised like MqConsume.
 func MqFanoutSubscribe(exchangeName string, processor func(ctx context.Context, data []byte) error) error {
-	conn := getConnection()
-	if conn == nil {
-		slog.Error("rbmq: error connecting to rabbitmq for fanout subscribe")
-		return ErrRbmqNoConn
-	}
-
 	queue := exchangeName + "_" + config.Config.ServerName
+	return startMqConsumer(queue, processor, func(conn *rabbitmq.Conn) (mqConsumer, error) {
+		return mqNewConsumer(
+			conn,
+			queue,
+			rabbitmq.WithConsumerOptionsExchangeName(exchangeName),
+			rabbitmq.WithConsumerOptionsExchangeKind("fanout"),
+			rabbitmq.WithConsumerOptionsExchangeDeclare,
+			rabbitmq.WithConsumerOptionsExchangeDurable,
+			// Empty routing key is fine for fanout (the exchange ignores it on
+			// publish), but we MUST call WithConsumerOptionsRoutingKey to make
+			// wagslane append a Binding entry — without it the queue is created
+			// but never bound to the exchange and every publish silently
+			// returns "Message published but NOT routed".
+			rabbitmq.WithConsumerOptionsRoutingKey(""),
+			rabbitmq.WithConsumerOptionsQueueAutoDelete,
+			rabbitmq.WithConsumerOptionsQueueExclusive,
+			rabbitmq.WithConsumerOptionsQOSPrefetch(1),
+			rabbitmq.WithConsumerOptionsConsumerName(config.Config.OtelServiceName+"/fanout/"+queue),
+		)
+	})
+}
 
-	consumer, err := rabbitmq.NewConsumer(
-		conn,
-		queue,
-		rabbitmq.WithConsumerOptionsExchangeName(exchangeName),
-		rabbitmq.WithConsumerOptionsExchangeKind("fanout"),
-		rabbitmq.WithConsumerOptionsExchangeDeclare,
-		rabbitmq.WithConsumerOptionsExchangeDurable,
-		// Empty routing key is fine for fanout (the exchange ignores it on
-		// publish), but we MUST call WithConsumerOptionsRoutingKey to make
-		// wagslane append a Binding entry — without it the queue is created
-		// but never bound to the exchange and every publish silently
-		// returns "Message published but NOT routed".
-		rabbitmq.WithConsumerOptionsRoutingKey(""),
-		rabbitmq.WithConsumerOptionsQueueAutoDelete,
-		rabbitmq.WithConsumerOptionsQueueExclusive,
-		rabbitmq.WithConsumerOptionsQOSPrefetch(1),
-		rabbitmq.WithConsumerOptionsConsumerName(config.Config.OtelServiceName+"/fanout/"+queue),
-	)
-	if err != nil {
-		slog.Error("rbmq: error creating fanout consumer", "exchange", exchangeName, "queue", queue, "error", err)
-		return err
+func startMqConsumer(queue string, processor func(ctx context.Context, data []byte) error, build func(*rabbitmq.Conn) (mqConsumer, error)) error {
+	rbmqMux.Lock()
+	defer rbmqMux.Unlock()
+	if _, exists := rbmqSupervisors[queue]; exists {
+		return fmt.Errorf("%w: %s", ErrMqConsumerAlreadyRegistered, queue)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &mqConsumerSupervisor{
+		queue:     queue,
+		processor: processor,
+		build:     build,
+		ctx:       ctx,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		state:     MqConsumerConnecting,
+		since:     time.Now(),
+		inFlight:  make(map[uint64]time.Time),
+		timing: mqSupervisorTiming{
+			rearmBase:    reconnectTimeDelay,
+			rearmMax:     mqRearmMaxDelay,
+			resetAfter:   mqRearmResetAfter,
+			closeTimeout: mqShutdownTimeout,
+		},
+	}
+	rbmqSupervisors[queue] = s
+	go s.run()
+	return nil
+}
 
-	go func() {
-		// Infinite reconnect: a fanout consumer that gives up after N
-		// attempts re-introduces the silent-staleness failure mode this
-		// helper exists to prevent — published invalidations land on a
-		// queue that no consumer is attached to (and because the queue is
-		// auto-delete + exclusive, the queue itself is gone after the
-		// consumer's connection drops). The pod would then run against
-		// stale caches indefinitely with no signal until the next
-		// restart. Looping forever with backoff matches the wagslane
-		// connection-level reconnect interval and ensures recovery from
-		// any duration of broker unavailability.
-		for {
-			err := consumer.Run(
-				func(d rabbitmq.Delivery) rabbitmq.Action {
-					ctx, span := mqExtractContext(d.Headers)
-					defer span.End()
-					if perr := processor(ctx, d.Body); perr != nil {
-						log.Printf("rbmq fanout: error processing message on %s: %s", exchangeName, perr)
-						return rabbitmq.NackRequeue
-					}
-					return rabbitmq.Ack
-				})
-			if err == nil {
-				// consumer.Run returned without error — clean shutdown,
-				// usually because someone called consumer.Close(). Don't
-				// re-arm in that case.
-				return
-			}
-			slog.Error("rbmq: fanout consumer.run failed; reconnecting",
-				"exchange", exchangeName, "queue", queue, "error", err)
-			time.Sleep(reconnectTimeDelay)
-			consumer.Close()
-			rbmqMux.Lock()
-			delete(rbmqConsumers, queue)
-			rbmqMux.Unlock()
-			if rerr := MqFanoutSubscribe(exchangeName, processor); rerr != nil {
-				slog.Error("rbmq: error reconnecting fanout consumer; will retry",
-					"exchange", exchangeName, "queue", queue, "error", rerr)
-				// Loop continues — sleep already happened above.
-				continue
-			}
-			// Reconnect spawned its own goroutine; this one is done.
+// MqConsumerState is a supervised consumer's state.
+type MqConsumerState string
+
+const (
+	// MqConsumerConnecting: no library consumer is attached; the supervisor is
+	// retrying (connection unavailable, declare failed, or re-arming).
+	MqConsumerConnecting MqConsumerState = "connecting"
+	// MqConsumerRunning: a library consumer is attached and running.
+	MqConsumerRunning MqConsumerState = "running"
+	// MqConsumerReconnecting: attached, but the broker connection is down & go-rabbitmq is redialing.
+	MqConsumerReconnecting MqConsumerState = "reconnecting"
+)
+
+// MqConsumerStatus is a snapshot of one supervised consumer.
+type MqConsumerStatus struct {
+	Queue     string          `json:"queue"`
+	State     MqConsumerState `json:"state"`
+	Since     time.Time       `json:"since"`
+	LastError string          `json:"last_error,omitempty"`
+	Restarts  int             `json:"restarts"`
+	InFlight  int             `json:"in_flight"`
+	// OldestInFlightSince is when the longest-running handler started.
+	OldestInFlightSince *time.Time `json:"oldest_in_flight_since,omitempty"`
+}
+
+// mqSupervisorTiming is captured when a supervisor starts, so a supervisor
+// never reads package settings that may change while it runs.
+type mqSupervisorTiming struct {
+	rearmBase    time.Duration
+	rearmMax     time.Duration
+	resetAfter   time.Duration
+	closeTimeout time.Duration
+}
+
+type mqConsumerSupervisor struct {
+	queue     string
+	processor func(ctx context.Context, data []byte) error
+	build     func(*rabbitmq.Conn) (mqConsumer, error)
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	timing    mqSupervisorTiming
+
+	mu        sync.Mutex
+	current   mqConsumer
+	state     MqConsumerState
+	since     time.Time
+	lastError string
+	restarts  int
+	nextID    uint64
+	inFlight  map[uint64]time.Time
+}
+
+func (s *mqConsumerSupervisor) run() {
+	defer close(s.done)
+	failures := 0
+	for {
+		if s.ctx.Err() != nil {
 			return
 		}
+		err := s.runOnce()
+		if s.ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errMqConsumerRanLongEnough) {
+			failures = 0
+		}
+		failures++
+		s.mu.Lock()
+		if s.state != MqConsumerConnecting { // since = start of the outage, not of this retry
+			s.state = MqConsumerConnecting
+			s.since = time.Now()
+		}
+		s.lastError = err.Error()
+		s.restarts++
+		s.mu.Unlock()
+		delay := mqRearmDelay(failures, s.timing.rearmBase, s.timing.rearmMax)
+		slog.Error("rbmq: consumer not running; retrying", "queue", s.queue, "error", err, "retry_in", delay)
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+	}
+}
+
+var errMqConsumerRanLongEnough = errors.New("rbmq: consumer ran long enough to reset backoff")
+
+// runOnce builds & runs one consumer until it stops, returning why; wraps errMqConsumerRanLongEnough
+// if it had been up for timing.resetAfter.
+func (s *mqConsumerSupervisor) runOnce() error {
+	conn := connect(true)
+	if conn == nil {
+		return ErrRbmqNoConn
+	}
+	built, err := s.build(conn)
+	if err != nil {
+		return fmt.Errorf("rbmq: create consumer: %w", err)
+	}
+	consumer := &onceClosedConsumer{mqConsumer: built}
+	// Always release this handle before building another, so a supervisor
+	// never owns two. A handle MqClose already closed makes this a no-op.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), s.timing.closeTimeout)
+		defer cancel()
+		consumer.CloseWithContext(closeCtx)
 	}()
 
+	s.mu.Lock()
+	if s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return s.ctx.Err()
+	}
+	s.current = consumer
+	s.state = MqConsumerRunning
+	s.since = time.Now()
+	s.mu.Unlock()
+	slog.Info("rbmq: consumer running", "queue", s.queue)
+
+	started := time.Now()
+	runErr := consumer.Run(s.handle)
+
+	s.mu.Lock()
+	s.current = nil
+	s.mu.Unlock()
+	if s.ctx.Err() != nil {
+		return s.ctx.Err()
+	}
+
+	if runErr != nil {
+		runErr = fmt.Errorf("rbmq: consumer run: %w", runErr)
+	} else {
+		// Run returns nil only after Close, and only MqClose may close.
+		runErr = errMqConsumerStoppedUnexpected
+	}
+	if time.Since(started) >= s.timing.resetAfter {
+		return fmt.Errorf("%w: %w", errMqConsumerRanLongEnough, runErr)
+	}
+	return runErr
+}
+
+// closeCurrent closes the running consumer, if any, waiting for its handler
+// no longer than ctx allows. The caller must have cancelled s first.
+func (s *mqConsumerSupervisor) closeCurrent(ctx context.Context) {
+	s.mu.Lock()
+	current := s.current
+	s.mu.Unlock()
+	if current != nil {
+		current.CloseWithContext(ctx)
+	}
+}
+
+func (s *mqConsumerSupervisor) handle(d rabbitmq.Delivery) rabbitmq.Action {
+	s.mu.Lock()
+	s.nextID++
+	id := s.nextID
+	s.inFlight[id] = time.Now()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.inFlight, id)
+		s.mu.Unlock()
+	}()
+
+	ctx, span := mqExtractContext(d.Headers)
+	defer span.End()
+	if err := s.processor(ctx, d.Body); err != nil {
+		slog.Error("rbmq: error processing message; requeueing", "queue", s.queue, "error", err)
+		return rabbitmq.NackRequeue
+	}
+	return rabbitmq.Ack
+}
+
+func (s *mqConsumerSupervisor) status() MqConsumerStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := MqConsumerStatus{
+		Queue:     s.queue,
+		State:     s.state,
+		Since:     s.since,
+		LastError: s.lastError,
+		Restarts:  s.restarts,
+		InFlight:  len(s.inFlight),
+	}
+	for _, started := range s.inFlight {
+		if st.OldestInFlightSince == nil || started.Before(*st.OldestInFlightSince) {
+			oldest := started
+			st.OldestInFlightSince = &oldest
+		}
+	}
+	return st
+}
+
+// onceClosedConsumer makes CloseWithContext idempotent: go-rabbitmq's Close
+// must only be called once, and both the supervisor and MqClose may close.
+type onceClosedConsumer struct {
+	mqConsumer
+	once sync.Once
+}
+
+func (c *onceClosedConsumer) CloseWithContext(ctx context.Context) {
+	c.once.Do(func() { c.mqConsumer.CloseWithContext(ctx) })
+}
+
+// mqRearmDelay doubles base per consecutive failure, capped at maxDelay.
+func mqRearmDelay(failures int, base, maxDelay time.Duration) time.Duration {
+	delay := base
+	for i := 1; i < failures && delay < maxDelay; i++ {
+		delay *= 2
+	}
+	return min(delay, maxDelay)
+}
+
+// MqConsumerStatuses returns every registered consumer's status, by queue.
+func MqConsumerStatuses() []MqConsumerStatus {
+	rbmqConnMu.Lock()
+	downAt := rbmqConnDownAt
+	rbmqConnMu.Unlock()
+
 	rbmqMux.Lock()
-	rbmqConsumers[queue] = consumer
+	supervisors := make([]*mqConsumerSupervisor, 0, len(rbmqSupervisors))
+	for _, s := range rbmqSupervisors {
+		supervisors = append(supervisors, s)
+	}
 	rbmqMux.Unlock()
-	return nil
+
+	statuses := make([]MqConsumerStatus, 0, len(supervisors))
+	for _, s := range supervisors {
+		st := s.status()
+		if st.State == MqConsumerRunning && !downAt.IsZero() {
+			st.State = MqConsumerReconnecting
+			if downAt.After(st.Since) { // since = later of outage start & when it last started running
+				st.Since = downAt
+			}
+			st.LastError = "rbmq: broker connection lost; go-rabbitmq reconnecting"
+		}
+		statuses = append(statuses, st)
+	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Queue < statuses[j].Queue })
+	return statuses
+}
+
+// MqConsumersHealthy is false if none are registered (llm-server always registers some) or any
+// has been out of "running" for over grace. Long in-flight handlers are reported, not unhealthy.
+func MqConsumersHealthy(grace time.Duration) (bool, []MqConsumerStatus) {
+	statuses := MqConsumerStatuses()
+	if len(statuses) == 0 {
+		return false, statuses
+	}
+	for _, st := range statuses {
+		if st.State != MqConsumerRunning && time.Since(st.Since) > grace {
+			return false, statuses
+		}
+	}
+	return true, statuses
 }
 
 func MqPublish(exchangeName string, routingKey string, message ...any) error {
@@ -320,6 +618,8 @@ func MqPublishWithContext(ctx context.Context, exchangeName string, routingKey s
 	return mqPublish(ctx, exchangeName, routingKey, message...)
 }
 
+// mqPublish retries up to maxAttempts on a closed channel or failed publisher create, replacing only its
+// own publisher (invariant 3). Not mandatory, not confirmed -> unroutable messages drop silently.
 func mqPublish(ctx context.Context, exchangeName string, routingKey string, message ...any) error {
 	// Base header carried on every publish, plus the active W3C trace context
 	// (traceparent) injected from ctx so the consumer can continue the trace.
@@ -331,62 +631,45 @@ func mqPublish(ctx context.Context, exchangeName string, routingKey string, mess
 		headers[k] = v
 	}
 
-	var err error
-	for range maxAttempts {
-		err = nil
-		key := fmt.Sprintf("%s:%s", exchangeName, routingKey)
+	payloads := make([][]byte, 0, len(message))
+	for _, msg1 := range message {
+		switch msg := msg1.(type) {
+		case string:
+			payloads = append(payloads, []byte(msg))
+		case []byte:
+			payloads = append(payloads, msg)
+		default:
+			data, err := MarshalJson(msg)
+			if err != nil {
+				return fmt.Errorf("rbmq: marshal message: %w", err)
+			}
+			payloads = append(payloads, data)
+		}
+	}
 
-		// Map lookup + create-if-missing happens under rbmqMux so two
-		// concurrent publishers on different exchanges can't fatally race
-		// the map header.
-		rbmqMux.Lock()
-		publisher, ok := rbmqPublishers[key]
-		rbmqMux.Unlock()
-		if !ok {
-			conn := getConnection()
-			if conn == nil {
-				slog.Error("rbmq: error connecting to rabbitmq")
-				return ErrRbmqNoConn
+	key := fmt.Sprintf("%s:%s", exchangeName, routingKey)
+	var lastErr error
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("rbmq: publish to %s abandoned: %w (last error: %w)", key, ctx.Err(), lastErr)
+			case <-time.After(reconnectTimeDelay):
 			}
-			newPublisher, perr := rabbitmq.NewPublisher(
-				conn,
-				rabbitmq.WithPublisherOptionsLogging,
-				rabbitmq.WithPublisherOptionsExchangeName(exchangeName),
-				rabbitmq.WithPublisherOptionsExchangeDeclare,
-				rabbitmq.WithPublisherOptionsExchangeDurable,
-			)
-			if perr != nil {
-				slog.Error("rbmq: error creating publisher", "error", perr)
-				return perr
-			}
-			// Re-check under lock — another goroutine may have raced ahead.
-			rbmqMux.Lock()
-			if existing, dup := rbmqPublishers[key]; dup && existing != nil {
-				newPublisher.Close()
-				publisher = existing
-			} else {
-				rbmqPublishers[key] = newPublisher
-				publisher = newPublisher
-			}
-			rbmqMux.Unlock()
 		}
 
-		for _, msg1 := range message {
-			var data []byte
-			switch msg := msg1.(type) {
-			case string:
-				data = []byte(msg)
-			case []byte:
-				data = msg
-			default:
-				data, err = MarshalJson(msg)
-				if err != nil {
-					return err
-				}
+		publisher, err := getPublisher(key, exchangeName)
+		if err != nil {
+			if errors.Is(err, ErrRbmqNoConn) {
+				return err
 			}
+			lastErr = err
+			continue
+		}
 
+		for i := range payloads {
 			err = publisher.Publish(
-				data,
+				payloads[i],
 				[]string{routingKey},
 				rabbitmq.WithPublishOptionsContentType("application/json"),
 				rabbitmq.WithPublishOptionsExchange(exchangeName),
@@ -396,20 +679,66 @@ func mqPublish(ctx context.Context, exchangeName string, routingKey string, mess
 				break
 			}
 		}
-		if err != nil {
-			if strings.Contains(err.Error(), "channel/connection is not open") {
-				slog.Info("rbmq: reconnecting publisher as connection is closed")
-				publisher.Close()
-				rbmqMux.Lock()
-				delete(rbmqPublishers, key)
-				rbmqMux.Unlock()
-				time.Sleep(reconnectTimeDelay)
-				MqClose()
-				continue
-			}
+		if err == nil {
+			return nil
 		}
-		return err
+		if !strings.Contains(err.Error(), "channel/connection is not open") {
+			return fmt.Errorf("rbmq: publish to %s: %w", key, err)
+		}
+		slog.Info("rbmq: publisher channel closed; replacing publisher", "key", key, "attempt", attempt+1)
+		dropPublisher(key, publisher)
+		lastErr = err
+	}
+	return fmt.Errorf("rbmq: publish to %s failed after %d attempts: %w", key, maxAttempts, lastErr)
+}
+
+func getPublisher(key string, exchangeName string) (mqPublisher, error) {
+	rbmqMux.Lock()
+	publisher, ok := rbmqPublishers[key]
+	rbmqMux.Unlock()
+	if ok {
+		return publisher, nil
 	}
 
-	return err
+	conn := getConnection()
+	if conn == nil {
+		slog.Error("rbmq: error connecting to rabbitmq")
+		return nil, ErrRbmqNoConn
+	}
+	newPublisher, err := mqNewPublisher(
+		conn,
+		rabbitmq.WithPublisherOptionsLogging,
+		rabbitmq.WithPublisherOptionsExchangeName(exchangeName),
+		rabbitmq.WithPublisherOptionsExchangeDeclare,
+		rabbitmq.WithPublisherOptionsExchangeDurable,
+	)
+	if err != nil {
+		slog.Error("rbmq: error creating publisher", "key", key, "error", err)
+		return nil, fmt.Errorf("rbmq: create publisher %s: %w", key, err)
+	}
+	// Re-check under lock — another goroutine may have raced ahead.
+	rbmqMux.Lock()
+	if existing, dup := rbmqPublishers[key]; dup && existing != nil {
+		rbmqMux.Unlock()
+		newPublisher.Close() // channel close is network I/O -> never under rbmqMux
+		return existing, nil
+	}
+	rbmqPublishers[key] = newPublisher
+	rbmqMux.Unlock()
+	return newPublisher, nil
+}
+
+// dropPublisher removes publisher from the cache and closes it, but only if it
+// is still the cached one, so concurrent publishers never close it twice.
+func dropPublisher(key string, publisher mqPublisher) {
+	rbmqMux.Lock()
+	current, ok := rbmqPublishers[key]
+	owned := ok && current == publisher
+	if owned {
+		delete(rbmqPublishers, key)
+	}
+	rbmqMux.Unlock()
+	if owned {
+		publisher.Close()
+	}
 }

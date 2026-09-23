@@ -39,9 +39,8 @@ func init() {
 		panic("cache-invalidation: ServerName must be set; check the LLM_SERVER_NAME / HOSTNAME env var")
 	}
 
-	// "starting" log so a hang inside MqFanoutSubscribe (TCP dial / AMQP
-	// handshake / queue declare) is visible in container logs even if
-	// the "registered" line below never prints.
+	// MqFanoutSubscribe only registers a supervisor; connecting and consuming
+	// happen in the background ("rbmq: consumer running" / GET /health/mq).
 	slog.Info("cache-invalidation: registering fanout consumer",
 		"exchange", config.Config.RabbitMqLLMCacheInvalidationExchange,
 		"server_name", config.Config.ServerName)
@@ -53,7 +52,7 @@ func init() {
 			"exchange", config.Config.RabbitMqLLMCacheInvalidationExchange, "error", err)
 		return
 	}
-	slog.Info("cache-invalidation: fanout consumer registered",
+	slog.Info("cache-invalidation: fanout consumer supervisor started",
 		"exchange", config.Config.RabbitMqLLMCacheInvalidationExchange)
 }
 
