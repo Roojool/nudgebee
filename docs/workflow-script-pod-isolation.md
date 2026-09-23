@@ -1,18 +1,14 @@
 # Workflow script pod isolation
 
-Status: Implemented in chart and executor; cluster rollout pending
+## Overview
 
-Related issue: nudgebee-enterprise#39059
-
-## Decision
-
-Treat every Kubernetes Job created by workflow-server's scripting executor as
+Every Kubernetes Job created by workflow-server's scripting executor is treated as
 untrusted tenant-authored code. These Jobs receive no ambient Kubernetes or
 cloud identity and cannot reach cloud instance metadata. Provider-specific
 cloud access remains the responsibility of explicit, target-authorized task
 executors; it is not added to arbitrary script Jobs.
 
-The first rollout blocks cloud metadata and cluster-internal destinations and
+The default policy blocks cloud metadata and cluster-internal destinations and
 removes the Kubernetes token. User-defined Jobs have no reason to call
 llm-server, workflow-server, or other internal services directly. Required
 workflow integrations must use their authorized task paths instead.
@@ -36,24 +32,24 @@ The common cloud metadata path is link-local `169.254.0.0/16`. Relevant known
 endpoints include AWS, Azure, and GKE Dataplane V2 at `169.254.169.254`, plus
 the GKE metadata-server path at `169.254.169.252`.
 
-## Proposed changes
+## Configuration
 
-### 1. Give generated Jobs a stable security identity
+### Job identity
 
-In `runbook-server/internal/tasks/scripting/executors/k8s_executor.go`, add the
-same immutable label to the Job and its pod template:
+`runbook-server/internal/tasks/scripting/executors/k8s_executor.go` sets the
+same immutable label on the Job and its pod template:
 
 ```yaml
 nudgebee.io/workload: workflow-script
 ```
 
-The label must be set by workflow-server, not accepted from workflow input.
+The label is set by workflow-server, not accepted from workflow input.
 It covers all current callers of `KubernetesExecutor`, including script,
 GitHub CLI, and GitLab CLI tasks.
 
-### 2. Remove ambient pod credentials
+### Ambient pod credentials
 
-Set the following fields on the generated PodSpec:
+The generated PodSpec sets these fields:
 
 ```yaml
 automountServiceAccountToken: false
@@ -63,7 +59,7 @@ hostIPC: false
 enableServiceLinks: false
 ```
 
-Add this fixed environment variable after user-provided `envFrom`:
+The container sets this fixed environment variable after user-provided `envFrom`:
 
 ```yaml
 AWS_EC2_METADATA_DISABLED: "true"
@@ -82,7 +78,7 @@ Do not add a cloud-enabled service account to these Jobs. If a future workflow
 task needs AWS, GCP, or Azure access, it must use a dedicated executor that
 resolves and authorizes the requested target outside this untrusted pod.
 
-### 3. Install a restricted-egress NetworkPolicy
+### Restricted-egress NetworkPolicy
 
 The workflow-server chart policy is enabled by default with generic link-local,
 private, CGNAT, and loopback exclusions. Installations may add cluster-specific
@@ -138,7 +134,7 @@ is not true must add their actual Service and Pod CIDRs to `internalCIDRs`.
 Keep DNS restricted to the cluster DNS pods. Do not add an unrestricted egress
 exception that reopens metadata or internal Services.
 
-### 4. Enforce the policy in each cluster
+### Cluster enforcement
 
 A rendered NetworkPolicy has no effect unless the cluster network provider
 enforces it. Roll out enforcement separately in every environment:
@@ -150,7 +146,7 @@ enforces it. Roll out enforcement separately in every environment:
 Policy enforcement should be enabled in a staging environment first. Enabling
 it may activate previously installed policies that have never been exercised.
 
-## Explicit non-goals
+## Out of scope
 
 - Moving workflow Jobs to dedicated nodes.
 - Adding AWS, GCP, or Azure credentials to arbitrary script Jobs.
@@ -210,7 +206,7 @@ Record the cluster, CNI enforcement state, Job name, pod name, node name, and
 command result for each runtime check. A rendered policy without these runtime
 checks is not considered mitigation.
 
-### Pre-implementation network-policy probe (2026-09-23)
+### Dev GKE network-policy probes (2026-09-23)
 
 On dev GKE (`gke_nudgebee-dev_us-central1_nudgebee-dev`, namespace
 `nudgebee`), the existing `llm-server-workspace` policy selected a running
@@ -225,11 +221,11 @@ both metadata addresses timed out, while `workflow-server:8000/health`,
 The Kubernetes service-account token path was absent. The temporary pod and
 policy were deleted and their absence verified.
 
-This proves the preliminary rule's behavior on that GKE cluster at probe time.
+This records the preliminary rule's behavior on that GKE cluster at probe time.
 It does not validate a workflow-created Job, EKS VPC CNI enforcement, other
 GKE clusters, IPv6, or cloud credential selection.
 
-After the requirement to block internal services was clarified, a second
+To verify internal-service isolation, a second
 temporary pod and policy (`codex-workflow-internal-test`) excluded link-local,
 RFC1918, CGNAT, loopback, and the dev GKE Service CIDR
 `34.118.224.0/20`. The cluster's Pod CIDR is `10.64.0.0/14` and its
@@ -262,11 +258,11 @@ test before the policy is considered effective there.
   considered complete there.
 - NetworkPolicy behavior around node-local traffic is CNI-specific. Each
   supported deployment model requires a live negative metadata test.
-- A privileged or host-network pod could bypass this design. Admission policy
+- A privileged or host-network pod could bypass these controls. Admission policy
   should deny those fields for workflow Jobs; the current executor does not
   expose them, but admission provides defense against future regressions.
 - Other tenant-controlled pod creators need their own selectors and policies;
-  this proposal only covers `KubernetesExecutor` Jobs.
+  this policy only covers `KubernetesExecutor` Jobs.
 
 ## Follow-up identity work
 
