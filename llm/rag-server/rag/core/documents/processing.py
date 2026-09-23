@@ -661,6 +661,12 @@ def process_documents(
 
     run_id = run_id or str(uuid.uuid4())
     _stamp_provenance(documents, source=source, tenant_id=tenant_id)
+    # Counted before chunking: a KB's document_count is what the list column
+    # shows and what the documents drilldown enumerates (one row per parent,
+    # collection._is_listed_point), so it stays in source-document units. The
+    # chunks below are embedding and retrieval units, and the tracker's own
+    # counts stay in those.
+    source_document_count = len(documents)
     documents = _chunk_long_documents(documents)
 
     # Initialize tracker with load metadata
@@ -727,7 +733,7 @@ def process_documents(
         update_kb_load_result(
             knowledgebase_id,
             "active",
-            tracker.expected_document_count or total_documents,
+            source_document_count,
             warning=warning,
         )
 

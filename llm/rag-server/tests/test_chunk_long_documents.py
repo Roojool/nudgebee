@@ -155,3 +155,37 @@ def test_a_caller_supplied_parent_id_is_kept():
     doc = Document(page_content=content, metadata={"parent_id": "caller-owned"})
 
     assert {c.metadata["parent_id"] for c in processing._chunk_long_documents([doc])} == {"caller-owned"}
+
+
+def test_kb_document_count_stays_in_source_documents_not_chunks(monkeypatch):
+    # Chunking is a retrieval-unit decision; it must not change how many
+    # documents a KB reports. The list column and the documents drilldown
+    # (_is_listed_point, one row per parent) have to agree.
+    import rag.core.documents.processing as proc
+
+    monkeypatch.setattr(proc, "_setup_collection", lambda *a, **k: ("kb_1", {}, False))
+    monkeypatch.setattr(proc.EmbeddingTracker, "persist", lambda self, **k: None)
+
+    async def no_embedding(*a, **k):
+        return None
+
+    monkeypatch.setattr(proc, "process_all_batches", no_embedding)
+    reported = []
+    monkeypatch.setattr(proc, "update_kb_load_result", lambda kb_id, status, count=None, **k: reported.append(count))
+
+    content = "\n\n".join(f"Paragraph {i} " + ("x" * 200) for i in range(10))
+    documents = [Document(page_content=content, metadata={"title": "Runbook"})]
+    assert len(processing._chunk_long_documents(documents)) > 1
+
+    _, document_ids = proc.process_documents(
+        documents,
+        embeddings=None,
+        module="knowledge_base",
+        collection_name="kb_1",
+        knowledgebase_id="kb-1",
+    )
+
+    assert reported == [1]
+    # The returned ids stay per chunk: handle_updated_documents prunes the
+    # collection against them, and the stored points are chunks.
+    assert len(document_ids) > 1

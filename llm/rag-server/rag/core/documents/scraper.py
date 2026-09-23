@@ -471,7 +471,10 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
             # Only once the embed is known to have produced documents: source for a load
             # that never happened would show a reader pages that are not in the index.
             source_store.store(collection_name, sources, run_id)
-        update_integration_kb_load_result(integration_id, "active", len(document_ids))
+        # Pages, not `document_ids`: process_documents chunks long documents, so
+        # its ids are embedding units. The KB's document_count is the number the
+        # list column shows beside a drilldown that lists one row per page.
+        update_integration_kb_load_result(integration_id, "active", len(documents))
         return document_ids
     except Exception as e:
         logger.error(f"Failed to process Confluence integration {integration_id}: {e}")
@@ -799,7 +802,8 @@ def _process_servicenow_integration(
                     integration_id, "error", error_message="Embedding produced no documents from the ServiceNow scrape"
                 )
                 return []
-        update_integration_kb_load_result(integration_id, "active", len(document_ids))
+        # Articles, not `document_ids` — see the Confluence path above.
+        update_integration_kb_load_result(integration_id, "active", len(documents))
         return document_ids
 
     except Exception as e:

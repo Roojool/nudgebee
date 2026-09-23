@@ -151,3 +151,26 @@ def test_a_page_whose_body_did_not_render_is_counted_as_failed():
     stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
     collect_confluence_tree_documents(solo, "root", stats)
     assert stats["failed_pages"] == 1, "a body that never rendered must be counted"
+
+
+def test_integration_kb_document_count_counts_pages_not_chunks(monkeypatch):
+    confluence = fake_confluence(
+        pages={"100": "<p>Runbooks</p>", "101": "<p>child</p>"},
+        children={"100": ["101"]},
+    )
+    monkeypatch.setattr(scraper, "build_confluence_client", lambda config: confluence)
+
+    # Stand in for chunking: three embedding units per scraped page.
+    def process_documents(documents, embeddings, **kwargs):
+        return kwargs["collection_name"], [f"{d.metadata['page_id']}-{i}" for d in documents for i in range(3)]
+
+    monkeypatch.setattr(scraper, "process_documents", process_documents)
+    monkeypatch.setattr(scraper.source_store, "store", lambda *a, **k: None)
+    results = []
+    monkeypatch.setattr(scraper, "update_integration_kb_load_result", lambda *a, **k: results.append(a))
+
+    integration = {"integration_id": "int-1", "config": {"namespace": "SRE", "page_trees": "100"}}
+    ids = scraper._process_integration(integration, "tenant-1", embeddings=None)
+
+    assert len(ids) == 6
+    assert results[-1] == ("int-1", "active", 2)
