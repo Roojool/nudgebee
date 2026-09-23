@@ -2,6 +2,8 @@
 the runner maps pipeline outcomes onto the engine's (docs, LLMResult) contract,
 and the engine actually delegates to it."""
 
+import subprocess
+
 import pytest
 import yaml
 
@@ -162,6 +164,48 @@ def test_explore_scenario_returns_answer_and_citation_note(event_env, monkeypatc
 
     assert docs == ["put() never evicts"]
     assert tc["_score_note"] == "[event_code_fix] citation_grounded=True"
+
+
+def _pr_followup_verifier():
+    runner._load_scenario("undersized_memory_limit_oom")
+    import pr_followup_verifier
+
+    return pr_followup_verifier
+
+
+def test_orphan_sweep_is_best_effort_when_gh_raises(monkeypatch):
+    verifier = _pr_followup_verifier()
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("gh is not installed")
+
+    monkeypatch.setattr(verifier, "_gh", fail)
+    verifier.sweep_orphaned_prs("https://github.com/example/fixture")
+
+
+@pytest.mark.parametrize("stdout", ["", "[]", "{"])
+def test_followup_malformed_pr_view_is_unresolved(monkeypatch, stdout):
+    verifier = _pr_followup_verifier()
+    monkeypatch.setattr(
+        verifier,
+        "_gh",
+        lambda args: subprocess.CompletedProcess(args, 0, stdout, ""),
+    )
+
+    result = verifier.verify_followup({}, "pr-url", "branch", "example/fixture", "before")
+
+    assert result["bucket"] == verifier.BUCKET_UNRESOLVED
+    assert "failed to parse PR head SHA" in result["detail"]
+
+
+def test_cleanup_pr_is_best_effort_when_gh_raises(monkeypatch):
+    verifier = _pr_followup_verifier()
+
+    def fail(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args, timeout=60)
+
+    monkeypatch.setattr(verifier, "_gh", fail)
+    verifier.cleanup_pr("pr-url", "example/fixture")
 
 
 def test_engine_delegates_to_the_runner_instead_of_calling_the_llm(monkeypatch):

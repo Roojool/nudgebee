@@ -52,32 +52,34 @@ def sweep_orphaned_prs(repo_url: str) -> None:
     left behind — not a separate cron (docs/code-analysis-eval-spec.md §5c).
     Best-effort: a failed sweep must never block the run that calls it.
     """
-    repo = _repo_slug(repo_url)
-    listed = _gh(
-        [
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--search",
-            f"head:{_BRANCH_PREFIX}",
-            "--state",
-            "open",
-            "--json",
-            "number,createdAt,url",
-        ]
-    )
-    if listed.returncode != 0:
-        return
     try:
+        repo = _repo_slug(repo_url)
+        listed = _gh(
+            [
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--search",
+                f"head:{_BRANCH_PREFIX}",
+                "--state",
+                "open",
+                "--json",
+                "number,createdAt,url",
+            ]
+        )
+        if listed.returncode != 0:
+            return
         prs = json.loads(listed.stdout or "[]")
-    except json.JSONDecodeError:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_ORPHAN_MAX_AGE_HOURS)
+        for pr in prs:
+            created = datetime.fromisoformat(pr["createdAt"].replace("Z", "+00:00"))
+            if created < cutoff:
+                _gh(["pr", "close", pr["url"], "--repo", repo])
+    except Exception:
+        # This sweep is only a cleanup convenience: gh/network/parse failures
+        # must never prevent a benchmark scenario from starting.
         return
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=_ORPHAN_MAX_AGE_HOURS)
-    for pr in prs:
-        created = datetime.fromisoformat(pr["createdAt"].replace("Z", "+00:00"))
-        if created < cutoff:
-            _gh(["pr", "close", pr["url"], "--repo", repo])
 
 
 def setup_pr(
@@ -210,7 +212,18 @@ def verify_followup(
             "bucket": BUCKET_UNRESOLVED,
             "detail": f"could not re-fetch PR state: {view.stderr[:300]}",
         }
-    after_head_sha = json.loads(view.stdout)["headRefOid"]
+    try:
+        parsed = json.loads(view.stdout or "{}")
+        if not isinstance(parsed, dict):
+            raise TypeError("parsed JSON is not an object")
+        after_head_sha = parsed.get("headRefOid")
+        if not after_head_sha:
+            raise KeyError("headRefOid")
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return {
+            "bucket": BUCKET_UNRESOLVED,
+            "detail": f"failed to parse PR head SHA from gh output: {exc}",
+        }
 
     if after_head_sha == before_head_sha:
         return {
@@ -271,4 +284,8 @@ def verify_followup(
 
 def cleanup_pr(pr_url: str, repo: str) -> None:
     """Close the PR after scoring, regardless of outcome."""
-    _gh(["pr", "close", pr_url, "--repo", repo])
+    try:
+        _gh(["pr", "close", pr_url, "--repo", repo])
+    except Exception:
+        # Cleanup must not mask the result or exception from the scenario.
+        return
