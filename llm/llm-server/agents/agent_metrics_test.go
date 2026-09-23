@@ -1,9 +1,13 @@
 package agents
 
 import (
+	"nudgebee/llm/agents/core"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
+	toolcore "nudgebee/llm/tools/core"
 	"testing"
+
+	"github.com/tmc/langchaingo/llms"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,4 +185,32 @@ func TestNewMetricsQueryAgentPinsESIndex(t *testing.T) {
 	esWriter, ok := wrapper.agent.(*ESMetricsQueryAgent)
 	require.True(t, ok)
 	assert.Equal(t, "metrics-kubernetes.*", esWriter.requestedIndex)
+}
+
+// TestNewestMetricsStepReportsFailedStepAsError pins #36633: a failed forwarded step
+// (relay down, deadline exceeded) must not reach the orchestrator as a metrics success.
+func TestNewestMetricsStepReportsFailedStepAsError(t *testing.T) {
+	step := func(content string, failed bool) core.ToolInvocation {
+		return core.ToolInvocation{Response: llms.ToolCallResponse{Content: content}, Failed: failed}
+	}
+
+	content, status, ok := newestMetricsStep([]core.ToolInvocation{
+		step(`{"promql":"up"}`, false),
+		step("executePromQl: relay execute: relay error: agent not connected", true),
+		step("", false),
+	})
+	require.True(t, ok)
+	assert.Equal(t, "executePromQl: relay execute: relay error: agent not connected", content)
+	assert.Equal(t, toolcore.NBToolResponseStatusError, status)
+
+	content, status, ok = newestMetricsStep([]core.ToolInvocation{
+		step("relay error: agent not connected", true),
+		step(`{"data":[1]}`, false),
+	})
+	require.True(t, ok)
+	assert.Equal(t, `{"data":[1]}`, content)
+	assert.Equal(t, toolcore.NBToolResponseStatusSuccess, status)
+
+	_, _, ok = newestMetricsStep([]core.ToolInvocation{step("", true)})
+	assert.False(t, ok)
 }

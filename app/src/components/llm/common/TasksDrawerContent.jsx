@@ -73,8 +73,33 @@ const withExecutionBatchNodes = (tasks) => {
   ];
 };
 
+const isFailedStatus = (status) => ['error', 'fail', 'failed'].includes(String(status || '').toLowerCase());
+
+// A row's own status only says the sub-agent returned, not that its work succeeded
+// -> `success` with any failed row beneath it becomes "completed with errors" (#36633).
+const withRolledUpStatus = (tasks) => {
+  const parentOf = new Map(tasks.map((task) => [taskKeyOf(task), task.parentId != null ? String(task.parentId) : '']));
+  // Walk up from every failed row; `seen` stops the walk on a cyclic parent link.
+  const hasFailedDescendant = new Set();
+  tasks.forEach((task) => {
+    if (!isFailedStatus(task.response_status)) {
+      return;
+    }
+    const seen = new Set([taskKeyOf(task)]);
+    for (let id = parentOf.get(taskKeyOf(task)); id && !seen.has(id); id = parentOf.get(id)) {
+      seen.add(id);
+      hasFailedDescendant.add(id);
+    }
+  });
+  return tasks.map((task) =>
+    String(task.response_status || '').toLowerCase() === 'success' && hasFailedDescendant.has(taskKeyOf(task))
+      ? { ...task, response_status: 'completed_with_errors' }
+      : task
+  );
+};
+
 const buildTaskTree = (tasks) => {
-  const normalizedTasks = withExecutionBatchNodes(tasks);
+  const normalizedTasks = withRolledUpStatus(withExecutionBatchNodes(tasks));
   const byId = new Map();
   normalizedTasks.forEach((t) => {
     const id = taskKeyOf(t);
@@ -442,4 +467,4 @@ TasksDrawerContent.propTypes = {
 export default TasksDrawerContent;
 
 // Exported for unit tests only. Not part of the public component API.
-export { buildTaskTree, flattenWithOrphans, withExecutionBatchNodes };
+export { buildTaskTree, flattenWithOrphans, withExecutionBatchNodes, withRolledUpStatus };

@@ -1526,6 +1526,10 @@ func TestGetToolInvocations_SkipsWaitingSteps(t *testing.T) {
 	for _, inv := range invs {
 		assert.NotContains(t, inv.Response.Content, "Do you want to continue?")
 	}
+	// Failure must survive into the invocation so a wrapper forwarding
+	// Response.Content can't relabel the error as success (#36633).
+	assert.False(t, invs[0].Failed)
+	assert.True(t, invs[1].Failed)
 }
 
 // --- validateToolInput evidence tests ---

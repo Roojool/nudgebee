@@ -3407,6 +3407,7 @@ func (e *plannerExecutor) GetToolInvocations() []ToolInvocation {
 			},
 			Log:        call.Log,
 			References: step.References,
+			Failed:     step.Status == ToolStatusFailure,
 		})
 	}
 

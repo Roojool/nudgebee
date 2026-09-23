@@ -353,6 +353,9 @@ type ToolInvocation struct {
 	Response   llms.ToolCallResponse
 	Log        string
 	References []toolcore.NBToolResponseReference
+	// Failed is true when the step's tool reported failure, so a wrapper that
+	// forwards Response.Content upward doesn't relabel an error as success.
+	Failed bool
 }
 
 type NBAgentPlanner interface {

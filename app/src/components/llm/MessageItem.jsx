@@ -26,6 +26,9 @@ const getStatusIcon = (status) => {
   if (s === 'fail' || s === 'error' || s === 'failed') {
     return { icon: AskNudgebeeErrorIcon, label: 'Error' };
   }
+  if (s === 'completed_with_errors') {
+    return { icon: AskNudgebeeSuccessIcon, label: 'Completed with errors' };
+  }
   if (s === 'skipped') {
     return { icon: AskNudgebeeSkipIcon, label: 'Skipped' };
   }
@@ -530,6 +533,8 @@ const MessageItem = ({
                           ? message?.response_summary
                           : message?.response?.text === 'error: unable to fetch data'
                           ? 'Unable to fetch data'
+                          : message.response_status === 'completed_with_errors'
+                          ? statusIcon.label
                           : capitalize(message.response_status)
                       }
                       sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', fontFamily: ds.font.sans, flex: 1, minWidth: 0 }}

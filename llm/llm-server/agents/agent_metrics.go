@@ -12,7 +12,6 @@ import (
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
-	"slices"
 	"strings"
 	"time"
 )
@@ -487,10 +486,9 @@ func (m MetricsAgentTool) Call(nbRequestContext toolcore.NbToolContext, input to
 			}
 		}
 
-		// Build the bounded evidence manifest from the chronological step order
-		// BEFORE the in-place reverse below — this bespoke wrapper bypasses
-		// factory_agent's generic path, so without this the `metrics` sub-agent
-		// drops its evidence at the tool boundary.
+		// Build the bounded evidence manifest from the chronological step order —
+		// this bespoke wrapper bypasses factory_agent's generic path, so without
+		// this the `metrics` sub-agent drops its evidence at the tool boundary.
 		subAgentEvidence := core.BuildSubAgentEvidenceForTool(nbRequestContext.Ctx, MetricsAgentName, resp.AgentStepResponse)
 
 		if _, ok := agent.(core.NBAgentReActPlannerSummaryToolProvider); ok {
@@ -504,26 +502,21 @@ func (m MetricsAgentTool) Call(nbRequestContext toolcore.NbToolContext, input to
 			}, nil
 		}
 
-		slices.Reverse(resp.AgentStepResponse)
-		for _, invocation := range resp.AgentStepResponse {
-			if invocation.Response.Content != "" {
-				// If we saved to a file, we return the summary text instead of the full JSON content
-				respData := invocation.Response.Content
-				respType := toolcore.NBToolResponseTypeJson
-				if len(references) > 0 {
-					respData = metricData
-					respType = toolcore.NBToolResponseTypeText
-				}
-
-				return toolcore.NBToolResponse{
-					Data:              respData,
-					Type:              respType,
-					Status:            toolcore.NBToolResponseStatusSuccess,
-					References:        references,
-					SubAgentEvidence:  subAgentEvidence,
-					AdditionalDetails: additionalDetails,
-				}, nil
+		if content, status, ok := newestMetricsStep(resp.AgentStepResponse); ok {
+			// If we saved to a file, we return the summary text instead of the full JSON content
+			respType := toolcore.NBToolResponseTypeJson
+			if len(references) > 0 {
+				content = metricData
+				respType = toolcore.NBToolResponseTypeText
 			}
+			return toolcore.NBToolResponse{
+				Data:              content,
+				Type:              respType,
+				Status:            status,
+				References:        references,
+				SubAgentEvidence:  subAgentEvidence,
+				AdditionalDetails: additionalDetails,
+			}, nil
 		}
 		return toolcore.NBToolResponse{
 			Data:              metricData,
@@ -536,4 +529,19 @@ func (m MetricsAgentTool) Call(nbRequestContext toolcore.NbToolContext, input to
 	}
 
 	return toolcore.NBToolResponse{AdditionalDetails: additionalDetails, References: resp.References}, toolcore.ErrUnableToFetchData
+}
+
+// newestMetricsStep returns the sub-agent's newest non-empty step, which the metrics
+// tool forwards as its data; a failed step's content is error text -> reported as Error.
+func newestMetricsStep(steps []core.ToolInvocation) (string, toolcore.NBToolResponseStatus, bool) {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i].Response.Content == "" {
+			continue
+		}
+		if steps[i].Failed {
+			return steps[i].Response.Content, toolcore.NBToolResponseStatusError, true
+		}
+		return steps[i].Response.Content, toolcore.NBToolResponseStatusSuccess, true
+	}
+	return "", "", false
 }
