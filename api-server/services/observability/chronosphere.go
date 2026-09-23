@@ -138,16 +138,12 @@ func (s *ChronosphereMetricSource) FetchMetricLabelValues(ctx *security.RequestC
 		return nil, err
 	}
 
-	values, raw, err := decodeInnerData(result)
+	values, _, err := decodeInnerData(result)
 	if err != nil {
 		return nil, err
 	}
 
-	output := make([]OutputMetricsLabelValues, len(values))
-	for i, v := range values {
-		output[i] = OutputMetricsLabelValues{Value: v, Attributes: raw}
-	}
-	return output, nil
+	return labelValuesOutput(values), nil
 }
 
 func (s *ChronosphereMetricSource) FetchMetricList(ctx *security.RequestContext, req FetchMetricsListRequest) ([]OutputMetrics, error) {
