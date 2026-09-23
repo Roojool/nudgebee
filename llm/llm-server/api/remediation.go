@@ -367,8 +367,18 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 	// an EC2 instance, and what stops an `aws` command going out without --region and failing with
 	// "You must specify a region" having done nothing.
 	humanContent := investigationContext
+	var preamble []string
 	if account := describeRemediationAccount(request.AccountId, request.EventId); account != "" {
-		humanContent = account + "\n\n" + investigationContext
+		preamble = append(preamble, account)
+	}
+	// The rest of what a runnable, non-repeating plan needs and the prose does not carry: how long
+	// this has been going on, exactly what to act on, the target's current configuration, and what
+	// has already been tried. See remediation_context.go.
+	if facts := buildRemediationFacts(ctx, request.AccountId, request.EventId); facts != "" {
+		preamble = append(preamble, facts)
+	}
+	if len(preamble) > 0 {
+		humanContent = strings.Join(preamble, "\n\n") + "\n\n" + investigationContext
 	}
 
 	resp, err := agentcore.GenerateAndTrackLLMContent(ctx, sc.GetUserId(), request.AccountId, "", "", "", false, []llms.MessageContent{
