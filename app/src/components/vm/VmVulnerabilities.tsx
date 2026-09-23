@@ -10,6 +10,7 @@ import { Label } from '@ui/Label';
 import Datetime from '@shared/format/Datetime';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import DownloadButton from '@shared/buttons/DownloadButton';
+import TicketLink from '@shared/links/TicketLink';
 import { useTenantBranding } from '@hooks/useTenantBranding';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { toast as snackbar } from '@ui/Toast';
@@ -110,11 +111,12 @@ const severityFromWeight = (weight: number) => WEIGHT_SEVERITY.find(([threshold]
  */
 const menuItems = (canCreateTicket: boolean, finding: VmVulnerability) => {
   const dismissEntry = dismissMenuEntry(finding.status, hasWriteAccess(finding.account_id));
+  const existingTicket = finding.ticket?.ticket_id;
   return [
     {
       id: 'create-ticket',
-      label: canCreateTicket ? 'Create Ticket' : 'Create Ticket · requires tickets:Write',
-      disabled: !canCreateTicket,
+      label: existingTicket ? `Ticket: ${existingTicket}` : canCreateTicket ? 'Create Ticket' : 'Create Ticket · requires tickets:Write',
+      disabled: !!existingTicket || !canCreateTicket,
     },
     {
       id: 'apply-patch',
@@ -366,7 +368,14 @@ const VmVulnerabilities = ({
             component: <SeverityIcon level={toSeverityLevel(finding.severity)} size={14} aria-label={finding.severity} />,
             drilldownQuery: { finding },
           },
-          { component: <CellText text={payload.vuln_id} subtext={vulnSubtext || undefined} mono /> },
+          {
+            component: (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[0] }}>
+                <CellText text={payload.vuln_id} subtext={vulnSubtext || undefined} mono />
+                {finding.ticket ? <TicketLink ticketURL={finding.ticket.url || ''} ticketID={finding.ticket.ticket_id} /> : null}
+              </Box>
+            ),
+          },
           { component: <CellText text={payload.package?.name} subtext={packageSubtext || undefined} /> },
           { component: <CellText text={payload.package?.version} mono /> },
           {
@@ -490,7 +499,18 @@ const VmVulnerabilities = ({
       open={!!ticketFinding}
       handleClose={() => setTicketFinding(null)}
       onClose={() => setTicketFinding(null)}
-      onSuccess={() => setTicketFinding(null)}
+      onSuccess={({ ticketId, url }: { ticketId?: string; url?: string } = {}) => {
+        // Update the row (and open detail panel, if it's the same finding) locally rather than
+        // refetch — the ticket→finding link can lag a re-query.
+        if (ticketFinding && ticketId) {
+          const ticket = { ticket_id: ticketId, url };
+          setRows((prev) => prev.map((row) => (row.id === ticketFinding.id ? { ...row, ticket } : row)));
+          if (panelFinding?.id === ticketFinding.id) {
+            setPanelFinding((prev) => (prev ? { ...prev, ticket } : null));
+          }
+        }
+        setTicketFinding(null);
+      }}
       onFailure={(error: string) => snackbar.error(error || 'Failed to create ticket')}
       ticketData={{
         subject: `${ticketFinding.severity} vulnerability ${ticketFinding.recommendation?.vuln_id || ''} in ${

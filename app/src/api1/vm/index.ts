@@ -18,6 +18,7 @@
 import { gqlStringify, queryGraphQL } from '@lib/HttpService';
 import apiHome from '@api1/home';
 import k8sApi from '@api1/kubernetes';
+import ticketsApi from '@api1/tickets';
 
 /** rule_name every VM vulnerability finding is written under. */
 export const VM_VULNERABILITY_RULE = 'vm_package_vulnerability';
@@ -100,6 +101,7 @@ export interface VmVulnerability {
   updated_at: string;
   created_at: string;
   recommendation: VmVulnerabilityPayload;
+  ticket?: { ticket_id: string; url?: string };
 }
 
 /** Dimension the vulnerability list can be rolled up by. */
@@ -526,8 +528,21 @@ const apiVm = {
       offset,
     });
     const rows = response?.data?.data?.findings?.rows || [];
+    const findings = rows.map((row: any) => ({ ...row, recommendation: safeParse(row.recommendation) || {} })) as VmVulnerability[];
+    // Tickets store the finding id as reference_id; one batched lookup maps them back.
+    const findingIds = findings.map((finding) => finding.id);
+    if (findingIds.length > 0) {
+      const tickets: any = await ticketsApi.listTicketsSummary({ reference_id: findingIds });
+      const ticketByFinding = new Map<string, { ticket_id: string; url?: string }>();
+      (tickets?.data?.tickets || []).forEach((ticket: any) => {
+        if (ticket.ticket_id) ticketByFinding.set(ticket.reference_id, { ticket_id: ticket.ticket_id, url: ticket.url || undefined });
+      });
+      findings.forEach((finding) => {
+        finding.ticket = ticketByFinding.get(finding.id);
+      });
+    }
     return {
-      rows: rows.map((row: any) => ({ ...row, recommendation: safeParse(row.recommendation) || {} })) as VmVulnerability[],
+      rows: findings,
       total: response?.data?.data?.findings_aggregate?.rows?.[0]?.count || 0,
     };
   },
