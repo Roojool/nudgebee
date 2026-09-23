@@ -85,25 +85,30 @@ func datadogRollupSecondsForPods(windowSeconds int64, pods int) int {
 // resolution the budget allows and datadogCollapseOverTime does the arithmetic.
 func buildDatadogPerPodQuery(metric string, meta RequestMetadata, filterStr string, windowSeconds int64) string {
 	query := fmt.Sprintf("avg:%s{%s} by {kube_namespace,pod_name,kube_container_name}", metric, datadogPerPodFilter(filterStr, meta))
-	switch {
-	case meta.Aggregate.Name == "":
+	if meta.Aggregate.Name == "" {
 		return query
-	case datadogCollapsedHere(meta.Aggregate):
-		return fmt.Sprintf("%s.rollup(avg, %d)", query, datadogPerPodRollupSeconds(meta, windowSeconds))
-	default:
-		// One bucket as wide as the window IS the collapse.
-		return fmt.Sprintf("%s.rollup(%s, %d)", query, meta.Aggregate.Name, windowSeconds)
 	}
+	return fmt.Sprintf("%s.rollup(%s, %d)", query,
+		datadogRollupFunc(meta.Aggregate), datadogPerPodRollupSeconds(meta, windowSeconds))
 }
 
-// datadogCollapsedHere reports whether an aggregate has to be computed from the
-// returned points rather than pushed into the query.
+// datadogRollupFunc is the function Datadog buckets with, which is not always the
+// aggregate the caller asked for.
 //
-// A percentile because Datadog has none over time. A count because `.rollup(count, W)`
-// counts the points Datadog happens to store in W, and `count` is defined in Step-wide
-// intervals (see metrics_aggregate_count.go) — a unit only this side knows.
-func datadogCollapsedHere(agg ParsedAggregate) bool {
-	return agg.IsQuantile() || agg.Name == AggregateCount
+// The aggregate's own function wherever Datadog has it. Bucketing by average and then
+// taking the maximum on this side does not give a maximum: a spike shorter than the
+// bucket is averaged away before this side ever sees it. Measured on a workload with
+// 69 pod incarnations, `max` over max-buckets read 6.7x higher than `max` over
+// avg-buckets at the same 900s width, and 21x higher at the extreme.
+//
+// `avg` for a percentile, because Datadog has no percentile rollup and the quantile is
+// computed here across the buckets; and for count, where a bucket's value does not
+// matter, only whether it has one.
+func datadogRollupFunc(agg ParsedAggregate) string {
+	if agg.IsQuantile() || agg.Name == AggregateCount {
+		return "avg"
+	}
+	return agg.Name
 }
 
 // datadogPerPodRollupSeconds is the bucket width those aggregates are computed from.
@@ -198,15 +203,10 @@ func datadogCollapseOverTime(results []QueryResult, meta RequestMetadata) {
 	step := aggregateStepSeconds(meta)
 
 	for i := range results {
+		// Every key collapses here now. Nothing is pushed down as a bucket the width
+		// of the window, and Datadog's source reads neither `instant` nor `step`, so
+		// everything arrives as a range whatever the caller asked for.
 		_, isPerPod := datadogPerPodKeys[results[i].QueryKey]
-		// A per-pod key whose aggregate was pushed into the query as
-		// `.rollup(<agg>, window)` already holds one point, so there is nothing left
-		// to do — datadogCollapsedHere names the ones that were NOT pushed down.
-		// Every other key arrives as a range whatever the caller asked: Datadog's
-		// source reads neither `instant` nor `step`, so those collapse here.
-		if isPerPod && !datadogCollapsedHere(meta.Aggregate) {
-			continue
-		}
 		for j := range results[i].Payload {
 			series := &results[i].Payload[j]
 			if len(series.Timestamps) == 0 {

@@ -36,10 +36,13 @@ func TestDatadogCollapseOverTime_CollapsesScalarKeysToo(t *testing.T) {
 	}
 }
 
-// A per-pod key with a plain aggregate was already collapsed by its rollup; reducing it
-// again would be harmless but wasteful, and reducing a range that is NOT one point
-// would be wrong. Pinned so the fast path cannot be removed by accident.
-func TestDatadogCollapseOverTime_LeavesRolledUpPerPodKeysAlone(t *testing.T) {
+// A per-pod key with a plain aggregate is reduced HERE, like every other aggregate.
+//
+// It used to be pushed into the query as `.rollup(max, <window>)` and arrive already
+// collapsed, so this path skipped it. That form silently dropped series — 28 of 69 pod
+// incarnations on a live 14-day window — so nothing is pushed down any more and this
+// is the only place the collapse happens.
+func TestDatadogCollapseOverTime_ReducesPerPodKeysHere(t *testing.T) {
 	max, err := parseAggregate("max")
 	require.NoError(t, err)
 
@@ -48,8 +51,8 @@ func TestDatadogCollapseOverTime_LeavesRolledUpPerPodKeysAlone(t *testing.T) {
 		Payload:  []Result{{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 5, 9}}},
 	}}
 	datadogCollapseOverTime(results, RequestMetadata{Aggregate: max})
-	assert.Len(t, results[0].Payload[0].Values, 3,
-		"the rollup already answered this; the response shape is Datadog's to decide")
+	require.Len(t, results[0].Payload[0].Values, 1, "an aggregate answers with one point")
+	assert.Equal(t, 9.0, results[0].Payload[0].Values[0])
 }
 
 // No aggregate means the caller wants the series.

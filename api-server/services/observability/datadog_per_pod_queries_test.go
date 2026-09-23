@@ -26,15 +26,61 @@ func datadogPerPodMeta(t *testing.T, aggregate string, pods int) RequestMetadata
 	return meta
 }
 
-// A plain aggregate is pushed down: one bucket as wide as the window IS the collapse,
-// and it costs one value per pod on the wire instead of a series.
-func TestBuildDatadogPerPodQuery_PlainAggregateRollsUpTheWholeWindow(t *testing.T) {
+// No aggregate is pushed down as a window-wide bucket any more.
+//
+// `.rollup(<agg>, <window>)` looks like the cheapest possible collapse — one value per
+// pod on the wire — and Datadog does not answer it reliably. Measured live on a
+// workload with 69 pod incarnations over 14 days, the window-wide form returned 28 of
+// them; the loss starts around 5 days and is not monotonic, which is bucket alignment
+// rather than volume. So the query asks for a bounded rollup and the collapse is
+// arithmetic on this side.
+func TestBuildDatadogPerPodQuery_PlainAggregateAsksForABoundedRollup(t *testing.T) {
 	meta := datadogPerPodMeta(t, "max", 6)
 	meta.PodNames, meta.PodNamesSupplied = nil, false
 	got := buildDatadogPerPodQuery(datadogPerPodMetricMemory, meta, "kube_namespace:nudgebee", 1209600)
+
+	assert.NotContains(t, got, ", 1209600)",
+		"a bucket as wide as the window silently drops series")
+	rollup := datadogPerPodRollupSeconds(meta, 1209600)
+	assert.LessOrEqual(t, rollup, datadogCoarsestRollupSeconds,
+		"the rollup must stay inside the budget, well under the width that loses series")
 	assert.Equal(t,
-		"avg:kubernetes.memory.working_set{kube_namespace:nudgebee} by {kube_namespace,pod_name,kube_container_name}.rollup(max, 1209600)",
+		fmt.Sprintf("avg:kubernetes.memory.working_set{kube_namespace:nudgebee} by "+
+			"{kube_namespace,pod_name,kube_container_name}.rollup(max, %d)", rollup),
 		got)
+}
+
+// The bucket function is the aggregate's OWN wherever Datadog has it.
+//
+// Bucketing by average and then reducing on this side does not give the statistic that
+// was asked for: a spike shorter than the bucket is averaged away before this side
+// ever sees it. Measured on 69 pod incarnations at the same 900s width, `max` over
+// max-buckets read 6.7x higher than `max` over avg-buckets, and 21x at the extreme.
+//
+// A percentile and a count are the exceptions: Datadog has no percentile rollup, and a
+// count cares only whether a bucket exists, not what is in it.
+func TestDatadogRollupFunc_UsesTheAggregatesOwnFunction(t *testing.T) {
+	for _, tc := range []struct{ aggregate, want string }{
+		{"max", "max"}, {"min", "min"}, {"sum", "sum"}, {"avg", "avg"},
+		{"count", "avg"}, {"p50", "avg"}, {"p99", "avg"}, {"p99.9", "avg"},
+	} {
+		agg, err := parseAggregate(tc.aggregate)
+		require.NoErrorf(t, err, "aggregate %q", tc.aggregate)
+		assert.Equalf(t, tc.want, datadogRollupFunc(agg),
+			"%s must bucket with %s", tc.aggregate, tc.want)
+	}
+}
+
+// Every aggregate reaches the query as a bounded rollup, so none can get back to the
+// window-wide form by a route a future case forgets to check.
+func TestBuildDatadogPerPodQuery_NoAggregateEverAsksForTheWholeWindow(t *testing.T) {
+	for _, name := range []string{"max", "min", "avg", "sum", "count", "p50", "p99"} {
+		meta := datadogPerPodMeta(t, name, 6)
+		got := buildDatadogPerPodQuery(datadogPerPodMetricCPU, meta, "kube_namespace:nudgebee", 1209600)
+		assert.NotContainsf(t, got, ", 1209600)", "aggregate %q asked for the whole window", name)
+		assert.Containsf(t, got, fmt.Sprintf(".rollup(%s, ", datadogRollupFunc(meta.Aggregate)),
+			"aggregate %q", name)
+	}
 }
 
 // A percentile cannot be pushed down — Datadog has no percentile over time for a
@@ -153,8 +199,10 @@ func TestDatadogCollapseOverTime_TouchesEveryKeyThatStillNeedsIt(t *testing.T) {
 
 	perPod := series("container_cpu_usage_by_pod")
 	datadogCollapseOverTime(perPod, RequestMetadata{Aggregate: max})
-	assert.Len(t, perPod[0].Payload[0].Values, 3,
-		"a plain aggregate on a per-pod key was already pushed down as a rollup")
+	assert.Len(t, perPod[0].Payload[0].Values, 1,
+		"a plain aggregate is reduced here too now, because the window-wide rollup it "+
+			"used to be pushed down as loses series")
+	assert.Equal(t, 3.0, perPod[0].Payload[0].Values[0], "and it is the maximum of them")
 
 	perPodQuantile := series("container_cpu_usage_by_pod")
 	datadogCollapseOverTime(perPodQuantile, RequestMetadata{Aggregate: p99})
