@@ -1028,13 +1028,20 @@ const KubernetesEventsTable = ({
     }
   };
 
-  const handleToggleEventStatus = async (eventId, newStatus) => {
+  const handleToggleEventStatus = async (eventId, newStatus, details) => {
     try {
-      await k8sApi.updateEventStatus(eventId, newStatus);
+      await k8sApi.updateEventStatus(eventId, newStatus, details);
       rawEventsRef.current = rawEventsRef.current.map((e) => (e.id === eventId ? { ...e, status: newStatus } : e));
       if (newStatus === 'CLOSED') {
         const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
-        if (closerName) closedByMapRef.current.set(eventId, closerName);
+        if (closerName) {
+          closedByMapRef.current.set(eventId, {
+            name: closerName,
+            reasonCode: details?.reasonCode,
+            reasonText: details?.reasonText,
+            evidenceUrl: details?.evidenceUrl,
+          });
+        }
       } else {
         closedByMapRef.current.delete(eventId);
       }
@@ -1436,7 +1443,10 @@ const KubernetesEventsTable = ({
                   eventId={item.id}
                   status={item.status}
                   canToggle={hasWriteAccess(item.account_id)}
-                  closedByName={closedByMapRef.current.get(item.id)}
+                  closedByName={closedByMapRef.current.get(item.id)?.name}
+                  closedReasonCode={closedByMapRef.current.get(item.id)?.reasonCode}
+                  closedReasonText={closedByMapRef.current.get(item.id)?.reasonText}
+                  closedEvidenceUrl={closedByMapRef.current.get(item.id)?.evidenceUrl}
                   onToggle={handleToggleEventStatus}
                 />
               </Box>
@@ -1617,7 +1627,14 @@ const KubernetesEventsTable = ({
             if (requestId !== eventsRequestIdRef.current) return;
             const closedByMap = new Map();
             (changes || []).forEach((change) => {
-              if (change.event_id && change.changed_by_name) closedByMap.set(change.event_id, change.changed_by_name);
+              if (change.event_id && change.changed_by_name) {
+                closedByMap.set(change.event_id, {
+                  name: change.changed_by_name,
+                  reasonCode: change.reason_code,
+                  reasonText: change.reason_text,
+                  evidenceUrl: change.evidence_url,
+                });
+              }
             });
             closedByMapRef.current = closedByMap;
             setData(buildRowData(events, ticketReferenceMapRef.current));

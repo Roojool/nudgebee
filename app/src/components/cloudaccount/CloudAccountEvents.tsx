@@ -189,10 +189,10 @@ const CloudAccountEvents = (props: {
   const rawEventsRef = useRef<any[]>([]);
   const ticketReferenceMapRef = useRef<Map<string, any>>(new Map());
   const buildRowDataRef = useRef<((evts: any[], map: Map<string, any>) => ICustomTableRow[][]) | null>(null);
-  // event id -> the display name of whoever manually closed it, prefetched
-  // below alongside the ticket badges. Read directly by mapEventToRow's Alert
-  // Status cell (see KubernetesEvents.jsx's identical pattern).
-  const closedByMapRef = useRef<Map<string, string>>(new Map());
+  // event id -> who manually closed it and why, prefetched below alongside
+  // the ticket badges. Read directly by mapEventToRow's Alert Status cell
+  // (see KubernetesEvents.jsx's identical pattern).
+  const closedByMapRef = useRef<Map<string, { name: string; reasonCode?: string; reasonText?: string; evidenceUrl?: string }>>(new Map());
 
   const cloudAccountEventsTable = 'cloudaccount-events';
   const _showEllipsis = true;
@@ -362,13 +362,24 @@ const CloudAccountEvents = (props: {
     setEvents(rawEventsRef.current.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));
   };
 
-  const handleToggleEventStatus = async (eventId: string, newStatus: string) => {
+  const handleToggleEventStatus = async (
+    eventId: string,
+    newStatus: string,
+    details: { reasonCode: string; reasonText?: string; evidenceUrl?: string }
+  ) => {
     try {
-      await k8sApi.updateEventStatus(eventId, newStatus);
+      await k8sApi.updateEventStatus(eventId, newStatus, details);
       rawEventsRef.current = rawEventsRef.current.map((e: any) => (e.id === eventId ? { ...e, status: newStatus } : e));
       if (newStatus === 'CLOSED') {
         const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
-        if (closerName) closedByMapRef.current.set(eventId, closerName);
+        if (closerName) {
+          closedByMapRef.current.set(eventId, {
+            name: closerName,
+            reasonCode: details?.reasonCode,
+            reasonText: details?.reasonText,
+            evidenceUrl: details?.evidenceUrl,
+          });
+        }
       } else {
         closedByMapRef.current.delete(eventId);
       }
@@ -462,7 +473,10 @@ const CloudAccountEvents = (props: {
             eventId={item.id}
             status={item?.status}
             canToggle={hasWriteAccess(item.account_id || props.accountId)}
-            closedByName={closedByMapRef.current.get(item.id)}
+            closedByName={closedByMapRef.current.get(item.id)?.name}
+            closedReasonCode={closedByMapRef.current.get(item.id)?.reasonCode}
+            closedReasonText={closedByMapRef.current.get(item.id)?.reasonText}
+            closedEvidenceUrl={closedByMapRef.current.get(item.id)?.evidenceUrl}
             onToggle={handleToggleEventStatus}
           />
           <Text value={item.source?.replace('AWS_', '')} secondaryText sx={{ fontSize: ds.text.caption, mt: 'var(--ds-space-1)' }} />
@@ -573,9 +587,16 @@ const CloudAccountEvents = (props: {
             .getEventStatusChanges(closedEventIds)
             .then((changes: any[]) => {
               if (isCancelled()) return;
-              const closedByMap = new Map<string, string>();
+              const closedByMap = new Map<string, { name: string; reasonCode?: string; reasonText?: string; evidenceUrl?: string }>();
               (changes || []).forEach((change) => {
-                if (change.event_id && change.changed_by_name) closedByMap.set(change.event_id, change.changed_by_name);
+                if (change.event_id && change.changed_by_name) {
+                  closedByMap.set(change.event_id, {
+                    name: change.changed_by_name,
+                    reasonCode: change.reason_code,
+                    reasonText: change.reason_text,
+                    evidenceUrl: change.evidence_url,
+                  });
+                }
               });
               closedByMapRef.current = closedByMap;
               setEvents(events.map((item: any) => mapEventToRow(item, ticketReferenceMapRef.current)));

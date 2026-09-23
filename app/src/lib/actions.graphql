@@ -1268,6 +1268,9 @@ type Mutation {
   event_update_status(
     event_id: String!
     status: String!
+    reason_code: String!
+    reason_text: String
+    evidence_url: String
   ): UpdateEventStatusResponse
 }
 
@@ -9296,6 +9299,9 @@ type EventManualStatusChangeResponse {
   changed_by_name: String!
   status: String!
   changed_at: String!
+  reason_code: String
+  reason_text: String
+  evidence_url: String
 }
 
 type GetBulkOperationStatusResponse {

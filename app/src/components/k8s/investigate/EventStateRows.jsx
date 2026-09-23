@@ -34,10 +34,30 @@ const HISTORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // the same value. RESOLVED (and anything else) falls back to the old
 // read-only Label: AlertStatusBadge has no dropdown transitions for it, and
 // showing an arrow that does nothing would be worse than no arrow.
-const StateLine = ({ state, testId, eventId, rawStatus, canToggle, closedByName, onToggle }) => (
+const StateLine = ({
+  state,
+  testId,
+  eventId,
+  rawStatus,
+  canToggle,
+  closedByName,
+  closedReasonCode,
+  closedReasonText,
+  closedEvidenceUrl,
+  onToggle,
+}) => (
   <Box sx={valueSx} data-testid={testId}>
     {rawStatus === 'FIRING' || rawStatus === 'CLOSED' ? (
-      <AlertStatusBadge eventId={eventId} status={rawStatus} canToggle={canToggle} closedByName={closedByName} onToggle={onToggle} />
+      <AlertStatusBadge
+        eventId={eventId}
+        status={rawStatus}
+        canToggle={canToggle}
+        closedByName={closedByName}
+        closedReasonCode={closedReasonCode}
+        closedReasonText={closedReasonText}
+        closedEvidenceUrl={closedEvidenceUrl}
+        onToggle={onToggle}
+      />
     ) : (
       <Label tone={state.tone} text={state.label} margin='0' />
     )}
@@ -60,6 +80,9 @@ StateLine.propTypes = {
   rawStatus: PropTypes.string,
   canToggle: PropTypes.bool,
   closedByName: PropTypes.string,
+  closedReasonCode: PropTypes.string,
+  closedReasonText: PropTypes.string,
+  closedEvidenceUrl: PropTypes.string,
   onToggle: PropTypes.func,
 };
 
@@ -116,7 +139,7 @@ export const useEventOccurrence = (row) => {
 };
 
 /** "State" row: is this still going on, or has it ended. */
-export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleStatus }) => {
+export const EventStateRows = ({ row, canToggleStatus, closedByName, closedReasonCode, closedReasonText, closedEvidenceUrl, onToggleStatus }) => {
   const state = describeEventState({ status: row?.status, startsAt: row?.starts_at, endsAt: row?.ends_at });
   if (!state) return null;
   return (
@@ -129,6 +152,9 @@ export const EventStateRows = ({ row, canToggleStatus, closedByName, onToggleSta
         rawStatus={row?.status}
         canToggle={canToggleStatus}
         closedByName={closedByName}
+        closedReasonCode={closedReasonCode}
+        closedReasonText={closedReasonText}
+        closedEvidenceUrl={closedEvidenceUrl}
         onToggle={onToggleStatus}
       />
     </Box>
@@ -179,5 +205,8 @@ EventStateRows.propTypes = {
   row: PropTypes.object,
   canToggleStatus: PropTypes.bool,
   closedByName: PropTypes.string,
+  closedReasonCode: PropTypes.string,
+  closedReasonText: PropTypes.string,
+  closedEvidenceUrl: PropTypes.string,
   onToggleStatus: PropTypes.func,
 };

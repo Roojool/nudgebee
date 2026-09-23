@@ -184,16 +184,27 @@ function InvestigateSidebar({
   // it's re-fetched whenever the event's own status flips (a reopen elsewhere,
   // or this panel's own toggle below, can make a previously-set name stale).
   const [closedByName, setClosedByName] = useState(undefined);
+  const [closedReasonCode, setClosedReasonCode] = useState(undefined);
+  const [closedReasonText, setClosedReasonText] = useState(undefined);
+  const [closedEvidenceUrl, setClosedEvidenceUrl] = useState(undefined);
   useEffect(() => {
     let cancelled = false;
     setClosedByName(undefined);
+    setClosedReasonCode(undefined);
+    setClosedReasonText(undefined);
+    setClosedEvidenceUrl(undefined);
     if (row?.id && row?.status === 'CLOSED') {
       k8sApi
         .getEventStatusChanges([row.id])
         .then((changes) => {
           if (cancelled) return;
           const match = (changes || []).find((c) => c.event_id === row.id);
-          if (match?.changed_by_name) setClosedByName(match.changed_by_name);
+          if (match?.changed_by_name) {
+            setClosedByName(match.changed_by_name);
+            setClosedReasonCode(match.reason_code);
+            setClosedReasonText(match.reason_text);
+            setClosedEvidenceUrl(match.evidence_url);
+          }
         })
         .catch(() => {});
     }
@@ -202,15 +213,23 @@ function InvestigateSidebar({
     };
   }, [row?.id, row?.status]);
 
-  const handleToggleAlertStatus = async (eventId, newStatus) => {
+  const handleToggleAlertStatus = async (eventId, newStatus, details) => {
     try {
-      await k8sApi.updateEventStatus(eventId, newStatus);
+      await k8sApi.updateEventStatus(eventId, newStatus, details);
       onRowChange((prev) => ({ ...prev, status: newStatus }));
       if (newStatus === 'CLOSED') {
         const closerName = getUserSession()?.user?.name || getUserSession()?.user?.email;
-        if (closerName) setClosedByName(closerName);
+        if (closerName) {
+          setClosedByName(closerName);
+          setClosedReasonCode(details?.reasonCode);
+          setClosedReasonText(details?.reasonText);
+          setClosedEvidenceUrl(details?.evidenceUrl);
+        }
       } else {
         setClosedByName(undefined);
+        setClosedReasonCode(undefined);
+        setClosedReasonText(undefined);
+        setClosedEvidenceUrl(undefined);
       }
       snackbar.success(newStatus === 'CLOSED' ? 'Event closed' : 'Event opened');
     } catch (_error) {
@@ -441,6 +460,9 @@ function InvestigateSidebar({
             row={row}
             canToggleStatus={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
             closedByName={closedByName}
+            closedReasonCode={closedReasonCode}
+            closedReasonText={closedReasonText}
+            closedEvidenceUrl={closedEvidenceUrl}
             onToggleStatus={handleToggleAlertStatus}
           />
           <Row label='Severity'>

@@ -333,6 +333,9 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 			c.JSON(400, common.ErrorActionBadRequest("status is required"))
 			return
 		}
+		reasonCode, _ := actionRequest["reason_code"].(string)
+		reasonText, _ := actionRequest["reason_text"].(string)
+		evidenceUrl, _ := actionRequest["evidence_url"].(string)
 
 		ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
 		if err != nil {
@@ -340,7 +343,13 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 			return
 		}
 
-		resp, err := event.UpdateEventStatus(ctx, event.UpdateEventStatusRequest{EventID: eventID, Status: status}, ctx.GetSecurityContext().GetUserId())
+		resp, err := event.UpdateEventStatus(ctx, event.UpdateEventStatusRequest{
+			EventID:     eventID,
+			Status:      status,
+			ReasonCode:  reasonCode,
+			ReasonText:  reasonText,
+			EvidenceUrl: evidenceUrl,
+		}, ctx.GetSecurityContext().GetUserId())
 		if err != nil {
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return
@@ -355,7 +364,7 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 			EventCategory:  audit.EventAlertEvent,
 			EventType:      audit.EventTypeEventUpdate,
 			EventPrevState: map[string]any{"event_id": eventID, "status": resp.PrevStatus},
-			EventState:     map[string]any{"event_id": eventID, "status": status},
+			EventState:     map[string]any{"event_id": eventID, "status": status, "reason_code": reasonCode, "reason_text": reasonText, "evidence_url": evidenceUrl},
 			EventActor:     audit.EventActorApiService,
 			EventTarget:    eventID,
 			EventAction:    audit.EventActionUpdate,

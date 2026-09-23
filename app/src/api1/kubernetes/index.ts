@@ -419,8 +419,8 @@ query ResolveEventRecord($id:String!) {
 
 // Lifecycle fields only — for showing another event's state without loading its evidences.
 export const EVENT_UPDATE_STATUS = `
-mutation EventUpdateStatus($event_id: String!, $status: String!) {
-  event_update_status(event_id: $event_id, status: $status) {
+mutation EventUpdateStatus($event_id: String!, $status: String!, $reason_code: String!, $reason_text: String, $evidence_url: String) {
+  event_update_status(event_id: $event_id, status: $status, reason_code: $reason_code, reason_text: $reason_text, evidence_url: $evidence_url) {
     success
     prev_status
     new_status
@@ -434,6 +434,9 @@ mutation EventGetStatusChange($event_ids: [String!]!) {
     changed_by_name
     status
     changed_at
+    reason_code
+    reason_text
+    evidence_url
   }
 }
 `;
@@ -4442,10 +4445,13 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     };
   },
 
-  async updateEventStatus(eventId: string, status: string) {
+  async updateEventStatus(eventId: string, status: string, details: { reasonCode: string; reasonText?: string; evidenceUrl?: string }) {
     const response = await queryGraphQL(EVENT_UPDATE_STATUS, 'EventUpdateStatus', {
       event_id: eventId,
       status,
+      reason_code: details.reasonCode,
+      reason_text: details.reasonText,
+      evidence_url: details.evidenceUrl,
     });
     return response?.data?.data?.event_update_status;
   },

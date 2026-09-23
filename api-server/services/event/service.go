@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"nudgebee/services/account"
 	"nudgebee/services/account/adapter"
 	"nudgebee/services/audit"
@@ -30,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -4368,10 +4370,38 @@ var manualStatusChangeReasons = map[string]string{
 	string(EventStatusFiring): "manual_reopen",
 }
 
+// closeReasonCodes and reopenReasonCodes are the fixed reason vocabularies
+// offered on the Close and Open dropdowns respectively — same reason_code/
+// reason_text shape as event_classification, so a manual status change is
+// reportable by cause rather than only readable as free text.
+var closeReasonCodes = map[string]bool{
+	"already_fixed_externally":   true,
+	"false_alarm":                true,
+	"duplicate_of_another_alert": true,
+	"known_issue_wont_fix":       true,
+	"other":                      true,
+}
+
+var reopenReasonCodes = map[string]bool{
+	"issue_recurred":              true,
+	"closed_by_mistake":           true,
+	"needs_further_investigation": true,
+	"other":                       true,
+}
+
 // UpdateEventStatusRequest manually opens or closes an event's alert status.
 type UpdateEventStatusRequest struct {
 	EventID string `json:"event_id" mapstructure:"event_id"`
 	Status  string `json:"status" mapstructure:"status"`
+	// ReasonCode is required: one of closeReasonCodes when Status is CLOSED, or
+	// reopenReasonCodes when Status is FIRING.
+	ReasonCode string `json:"reason_code" mapstructure:"reason_code"`
+	// ReasonText is free-text elaboration. Required when ReasonCode is "other",
+	// optional otherwise.
+	ReasonText string `json:"reason_text" mapstructure:"reason_text"`
+	// EvidenceUrl is always optional: it's a free-text URL, so requiring it
+	// only proves the caller typed something, not that it's relevant.
+	EvidenceUrl string `json:"evidence_url" mapstructure:"evidence_url"`
 }
 
 type UpdateEventStatusResponse struct {
@@ -4392,6 +4422,31 @@ func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRe
 	changeReason, ok := manualStatusChangeReasons[request.Status]
 	if !ok {
 		return nil, fmt.Errorf("unsupported status: %s (only %s and %s are supported)", request.Status, EventStatusClosed, EventStatusFiring)
+	}
+
+	reasonCodes := closeReasonCodes
+	if request.Status == string(EventStatusFiring) {
+		reasonCodes = reopenReasonCodes
+	}
+	if !reasonCodes[request.ReasonCode] {
+		return nil, fmt.Errorf("invalid reason_code: %s", request.ReasonCode)
+	}
+	if request.ReasonCode == "other" && strings.TrimSpace(request.ReasonText) == "" {
+		return nil, fmt.Errorf("reason_text is required when reason_code is 'other'")
+	}
+	if utf8.RuneCountInString(request.ReasonText) > 500 {
+		return nil, fmt.Errorf("reason_text must not exceed 500 characters")
+	}
+	// The frontend already enforces this, but this RPC action is a public write
+	// boundary any client can call directly, bypassing that check.
+	if evidenceURL := strings.TrimSpace(request.EvidenceUrl); evidenceURL != "" {
+		if len(evidenceURL) > 2048 {
+			return nil, fmt.Errorf("evidence_url must not exceed 2048 characters")
+		}
+		parsed, parseErr := url.Parse(evidenceURL)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return nil, fmt.Errorf("evidence_url must be a valid http or https URL")
+		}
 	}
 
 	r, err := GetEvent(ctx, request.EventID)
@@ -4432,13 +4487,29 @@ func UpdateEventStatus(ctx *security.RequestContext, request UpdateEventStatusRe
 	logger := ctx.GetLogger()
 	tenant := common.StrVal(r.Tenant)
 	accountId := *r.CloudAccountId
+
+	// metadata carries the user-facing "why" alongside the fixed change_reason
+	// marker: change_reason must stay exactly "manual_close"/"manual_reopen" for
+	// GetEventManualStatusChanges' exact-match lookup below to keep working.
+	metadata := map[string]any{"reason_code": request.ReasonCode}
+	if reasonText := strings.TrimSpace(request.ReasonText); reasonText != "" {
+		metadata["reason_text"] = reasonText
+	}
+	if evidenceUrl := strings.TrimSpace(request.EvidenceUrl); evidenceUrl != "" {
+		metadata["evidence_url"] = evidenceUrl
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("event: failed to marshal status-change metadata: %w", err)
+	}
+
 	// Detach from the request context: this fire-and-forget write outlives the HTTP
 	// request, and the request ctx is cancelled the moment the handler returns its
 	// response (see the equivalent comment on triage.UpdateNBStatus).
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if histErr := insertEventStatusHistory(bgCtx, dbms.Db, request.EventID, tenant, accountId, prevStatus, request.Status, changeReason, userID); histErr != nil {
+		if histErr := insertEventStatusHistory(bgCtx, dbms.Db, request.EventID, tenant, accountId, prevStatus, request.Status, changeReason, userID, metadataJSON); histErr != nil {
 			logger.Error("event: failed to record manual status-change history", "error", histErr, "event_id", request.EventID)
 		}
 	}()
@@ -4453,6 +4524,9 @@ type EventManualStatusChange struct {
 	ChangedByName string    `json:"changed_by_name"`
 	Status        string    `json:"status"`
 	ChangedAt     time.Time `json:"changed_at"`
+	ReasonCode    string    `json:"reason_code"`
+	ReasonText    string    `json:"reason_text"`
+	EvidenceUrl   string    `json:"evidence_url"`
 }
 
 // GetEventManualStatusChanges batch-looks-up the most recent status-field
@@ -4494,10 +4568,12 @@ func GetEventManualStatusChanges(ctx *security.RequestContext, eventIDs []string
 		NewValue       []byte         `db:"new_value"`
 		ChangeReason   string         `db:"change_reason"`
 		ChangedAt      time.Time      `db:"changed_at"`
+		Metadata       []byte         `db:"metadata"`
 	}
 	err = dbms.Db.SelectContext(ctx.GetContext(), &rows,
 		`SELECT DISTINCT ON (eh.event_id)
 			eh.event_id, eh.cloud_account_id, eh.changed_by, eh.new_value, eh.change_reason, eh.changed_at,
+			COALESCE(eh.metadata, '{}'::jsonb) AS metadata,
 			COALESCE(u.display_name, u.username) AS changed_by_name
 		 FROM event_history eh
 		 LEFT JOIN users u ON u.id = eh.changed_by
@@ -4523,11 +4599,20 @@ func GetEventManualStatusChanges(ctx *security.RequestContext, eventIDs []string
 		if !row.ChangedBy.Valid || status != string(EventStatusClosed) || row.ChangeReason != manualStatusChangeReasons[string(EventStatusClosed)] {
 			continue
 		}
+		var meta struct {
+			ReasonCode  string `json:"reason_code"`
+			ReasonText  string `json:"reason_text"`
+			EvidenceUrl string `json:"evidence_url"`
+		}
+		_ = json.Unmarshal(row.Metadata, &meta) // pre-feature rows have no metadata; leave fields empty
 		results = append(results, EventManualStatusChange{
 			EventID:       row.EventID,
 			ChangedByName: row.ChangedByName.String,
 			Status:        status,
 			ChangedAt:     row.ChangedAt,
+			ReasonCode:    meta.ReasonCode,
+			ReasonText:    meta.ReasonText,
+			EvidenceUrl:   meta.EvidenceUrl,
 		})
 	}
 	return results, nil
@@ -4541,7 +4626,7 @@ func GetEventManualStatusChanges(ctx *security.RequestContext, eventIDs []string
 // second occurrence, silently dropping it via its ON CONFLICT DO NOTHING
 // dedup. triage.logStatusChangeToHistory (nb_status, equally repeatable)
 // uses the same random-id approach for the same reason.
-func insertEventStatusHistory(ctx context.Context, db DBExecutor, eventID, tenantID, cloudAccountID, oldStatus, newStatus, changeReason, changedBy string) error {
+func insertEventStatusHistory(ctx context.Context, db DBExecutor, eventID, tenantID, cloudAccountID, oldStatus, newStatus, changeReason, changedBy string, metadata []byte) error {
 	oldJSON, err := json.Marshal(oldStatus)
 	if err != nil {
 		return err
@@ -4551,10 +4636,10 @@ func insertEventStatusHistory(ctx context.Context, db DBExecutor, eventID, tenan
 		return err
 	}
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO event_history (id, event_id, tenant_id, cloud_account_id, change_type, old_value, new_value, change_reason, changed_by)
-		 VALUES ($1, $2, $3, $4, 'status', $5, $6, $7, $8)`,
+		`INSERT INTO event_history (id, event_id, tenant_id, cloud_account_id, change_type, old_value, new_value, change_reason, changed_by, metadata)
+		 VALUES ($1, $2, $3, $4, 'status', $5, $6, $7, $8, $9)`,
 		uuid.New().String(), eventID, tenantID, cloudAccountID, oldJSON, newJSON, changeReason,
-		sql.NullString{String: changedBy, Valid: changedBy != ""},
+		sql.NullString{String: changedBy, Valid: changedBy != ""}, metadata,
 	)
 	return err
 }
