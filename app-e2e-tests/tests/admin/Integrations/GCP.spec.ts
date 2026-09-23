@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { navigateToCloudTab, saveAndHandleAlreadyExists } from "./util";
+import { navigateToCloudTab, saveAndHandleAlreadyExists, getGcpServiceAccountKey } from "./util";
 
 const requiredEnv = [
   "GCP_DISPLAY_NAME",
@@ -21,7 +21,7 @@ test("Add GCP Account Integration", { tag: ["@dev", "@test", "@oss", "@regressio
   await locators.addGcpAccountBtn.click();
 
   await locators.gcpDisplayNameInput.fill(process.env.GCP_DISPLAY_NAME!);
-  await locators.gcpServiceAccountKeyInput.fill(process.env.GCP_SERVICE_ACCOUNT_KEY!);
+  await locators.gcpServiceAccountKeyInput.fill(getGcpServiceAccountKey());
   await locators.gcpCheckPermissionsBtn.click();
   await locators.gcpNextBtn.click();
   await locators.gcpDiscoverProjectsBtn.click();

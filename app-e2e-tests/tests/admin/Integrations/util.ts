@@ -4,6 +4,31 @@ import { IntegrationLocators } from "./IntegrationLocators";
 import { waitForGraphQLAndValidate } from "../../utils/GraphQLNetworkWatcher";
 import { notifyIntegrationMissingOnce } from "../../utils/IntegrationStatusCache";
 
+export function getGcpServiceAccountKey(): string {
+  const raw = process.env.GCP_SERVICE_ACCOUNT_KEY?.trim();
+  if (!raw) {
+    throw new Error("GCP_SERVICE_ACCOUNT_KEY is not set — add it to the E2E_DEV_ENV/E2E_TEST_ENV secret");
+  }
+
+  const decoded = Buffer.from(raw, "base64").toString("utf8");
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    throw new Error(
+      "GCP_SERVICE_ACCOUNT_KEY is not valid base64-encoded JSON. Store the service-account key JSON " +
+        "as base64 (e.g. `base64 -w 0 key.json`) in the E2E_DEV_ENV/E2E_TEST_ENV secret — a raw multi-line " +
+        "value gets truncated when the workflow exports .env.dev into $GITHUB_ENV line by line.",
+    );
+  }
+
+  if (parsed.type !== "service_account" || !parsed.project_id || !parsed.private_key || !parsed.client_email) {
+    throw new Error("GCP_SERVICE_ACCOUNT_KEY decoded but is missing required service_account fields");
+  }
+
+  return JSON.stringify(parsed);
+}
+
 async function navigateToAdminIntegrationsPage(page: Page, locators: IntegrationLocators): Promise<void> {
   await locators.adminBtn.waitFor({ state: "visible" });
   await locators.adminBtn.click();
@@ -472,6 +497,31 @@ export async function deleteIntegration(
   );
 
   console.log(`Deleted ${serviceName} integration "${configName}"`);
+}
+
+// Opens the config row's "Edit" dialog (prefilled, Save button reads "Update") and
+// leaves it open — callers fill/change fields themselves, then submit via
+// saveAndHandleAlreadyExists using locators.saveBtn (same #create-integration-acc id).
+export async function openEditIntegration(
+  page: Page,
+  {
+    openList,
+    configName,
+    serviceName,
+    statusFilterId,
+  }: { openList: () => Promise<void>; configName: string; serviceName: string; statusFilterId: string },
+): Promise<void> {
+  await openList();
+  await showAllStatuses(page, statusFilterId);
+  await filterListByName(page, configName);
+
+  const row = page.locator("tbody tr").filter({ hasText: configName }).first();
+  await row.waitFor({ state: "visible", timeout: 10000 });
+
+  await clickRowMenuItem(page, row, "Edit");
+  await page.getByRole("dialog").waitFor({ state: "visible", timeout: 10000 });
+
+  console.log(`Opened edit dialog for ${serviceName} integration "${configName}"`);
 }
 
 /**
