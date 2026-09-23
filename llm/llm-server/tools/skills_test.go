@@ -215,6 +215,7 @@ func TestLoadSkillsTool_ParseSkillNames(t *testing.T) {
 }
 
 func TestSkillData_IntegrationTypeRouting(t *testing.T) {
+	stringPtr := func(value string) *string { return &value }
 	// Verify that the kb_type/kb_source fields correctly determine
 	// which skills need RAG enrichment vs which have inline data.
 	testCases := []struct {
@@ -229,17 +230,17 @@ func TestSkillData_IntegrationTypeRouting(t *testing.T) {
 		},
 		{
 			name:     "Integration skill with empty data — needs RAG",
-			skill:    skillData{ID: "2", Data: "", KBType: "integration", KBSource: strPtr("confluence")},
+			skill:    skillData{ID: "2", Data: "", KBType: "integration", KBSource: stringPtr("confluence")},
 			needsRAG: true,
 		},
 		{
 			name:     "Integration skill with whitespace-only data — needs RAG",
-			skill:    skillData{ID: "3", Data: "   ", KBType: "integration", KBSource: strPtr("servicenow")},
+			skill:    skillData{ID: "3", Data: "   ", KBType: "integration", KBSource: stringPtr("servicenow")},
 			needsRAG: true,
 		},
 		{
 			name:     "Integration skill with data already populated — no RAG needed",
-			skill:    skillData{ID: "4", Data: "cached content", KBType: "integration", KBSource: strPtr("confluence")},
+			skill:    skillData{ID: "4", Data: "cached content", KBType: "integration", KBSource: stringPtr("confluence")},
 			needsRAG: false,
 		},
 		{

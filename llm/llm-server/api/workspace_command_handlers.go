@@ -28,6 +28,10 @@ type workspaceCommandHandler interface {
 var workspaceCommandHandlers = map[string]workspaceCommandHandler{
 	"kubectl": kubernetesWorkspaceCommandHandler{},
 	"aws":     awsWorkspaceCommandHandler{},
+	"gcloud":  cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gcloud"},
+	"gsutil":  cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gsutil"},
+	"bq":      cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "bq"},
+	"az":      cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteAzureCliCommand, executable: "az"},
 }
 
 type kubernetesWorkspaceCommandHandler struct{}
@@ -62,6 +66,54 @@ func (kubernetesWorkspaceCommandHandler) Execute(_ *security.RequestContext, too
 }
 
 var executeCloudCliV2 = cloud.ExecuteV2
+
+type cloudWorkspaceCommandHandler struct {
+	toolName   string
+	executable string
+}
+
+func (h cloudWorkspaceCommandHandler) RegisteredToolName() string { return h.toolName }
+
+func (h cloudWorkspaceCommandHandler) Prepare(ctx *security.RequestContext, toolCtx core.NbToolContext, req WorkspaceExecuteRequest) (workspaceCommandPlan, error) {
+	args, err := commandArgs(h.executable, req.Command)
+	if err != nil {
+		return workspaceCommandPlan{}, err
+	}
+	req.Command = buildProxyCommand(h.executable, args)
+	requested := req.TargetName
+	if requested == "" {
+		requested = req.ConfigName
+	}
+	target, err := resolveCloudWorkspaceTarget(ctx, req.AccountId, h.toolName, toolCtx.ToolConfig, requested)
+	if err != nil {
+		return workspaceCommandPlan{}, err
+	}
+	targetAccountID := tools.TargetAccountID(target)
+	if targetAccountID == "" {
+		return workspaceCommandPlan{}, fmt.Errorf("selected cloud account has no account id")
+	}
+	return workspaceCommandPlan{Request: req, TargetAccountID: targetAccountID}, nil
+}
+
+func resolveCloudWorkspaceTarget(ctx *security.RequestContext, accountID, toolName string, current core.ToolConfig, requested string) (core.ToolConfig, error) {
+	if requested != "" || tools.TargetAccountID(current) != "" {
+		return tools.ResolveRequestedTarget(ctx, accountID, toolName, current, requested)
+	}
+	targets, err := tools.ListAccountTargets(ctx, accountID, toolName)
+	if err != nil {
+		return core.ToolConfig{}, err
+	}
+	for _, target := range targets {
+		if tools.TargetAccountID(target) == accountID {
+			return target, nil
+		}
+	}
+	return core.ToolConfig{}, fmt.Errorf("cloud account is not selected; choose one of: %s", workspaceTargetNames(targets))
+}
+
+func (h cloudWorkspaceCommandHandler) Execute(ctx *security.RequestContext, _ core.NbToolContext, plan workspaceCommandPlan) (any, error) {
+	return executeWorkspaceCloudCli(ctx, plan)
+}
 
 type awsWorkspaceCommandHandler struct{}
 
@@ -103,9 +155,13 @@ func (awsWorkspaceCommandHandler) Prepare(ctx *security.RequestContext, _ core.N
 }
 
 func (awsWorkspaceCommandHandler) Execute(ctx *security.RequestContext, _ core.NbToolContext, plan workspaceCommandPlan) (any, error) {
+	return executeWorkspaceCloudCli(ctx, plan)
+}
+
+func executeWorkspaceCloudCli(ctx *security.RequestContext, plan workspaceCommandPlan) (any, error) {
 	sc := ctx.GetSecurityContext()
 	if sc == nil {
-		return nil, fmt.Errorf("AWS account access denied")
+		return nil, fmt.Errorf("cloud account access denied")
 	}
 	result, err := executeCloudCliV2(cloud.CloudExecuteCliCommandRequest{
 		AccountID: plan.TargetAccountID,

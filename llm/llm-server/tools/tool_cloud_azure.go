@@ -29,6 +29,7 @@ func init() {
 func (t AzureCliTool) ToolPrompt() []string {
 	return []string{
 		"**Routing boundary:** These rules apply after the active agent has selected `azure_execute`; they do not override an agent policy that routes Azure reads and local computation through the workspace shell.",
+		"**Target preservation:** If the task names an Azure account, pass that exact Nudgebee connection name in `account` on every `azure_execute` or `shell_execute` call. Do not substitute Azure's native `--subscription` flag for connection selection.",
 		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs, IPs, or names — empty CLI results mean 'not found'.",
 		"**RBAC safety:** NEVER attempt to modify your own role assignments or permissions. `az role assignment create`, `az ad app permission grant` for self are OFF LIMITS. Report AuthorizationFailed / 403 as a finding: state which command failed and which role is required on which scope.",
 		"**Monitoring disambiguation:** `az monitor metrics list` = numeric time-series (CPU, DTU, latency). `az monitor activity-log list` = control-plane audit events (who did what). `az monitor metrics alert list` = configured alert rules. Not interchangeable. Never install extensions to list alerts — the built-in works.",
@@ -38,7 +39,26 @@ func (t AzureCliTool) ToolPrompt() []string {
 	}
 }
 
-type AzureCliTool struct{}
+type AzureCliTool struct {
+	workspaceManager workspace.WorkspaceManager
+}
+
+func (t AzureCliTool) ConfirmationKey(toolInput string) string {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return targetConfirmationKey(t.Name(), RequestedCloudAccount(req.Arguments))
+}
+
+func (t AzureCliTool) RequestedTarget(toolInput string) (string, error) {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return RequestedCloudAccount(req.Arguments), nil
+}
+
+func (t AzureCliTool) workspace() workspace.WorkspaceManager {
+	if t.workspaceManager != nil {
+		return t.workspaceManager
+	}
+	return workspace.NewWorkspaceManager()
+}
 
 func (t AzureCliTool) Name() string {
 	return ToolExecuteAzureCliCommand
@@ -65,6 +85,7 @@ func (t AzureCliTool) Description() string {
 
 		* **Routing:** Availability does not make this tool the default for every Azure command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns Azure reads to the workspace shell, do not use this tool for those reads; keep this direct path for mutations, remote command execution, and commands with uncertain effects so approval and resume behavior is preserved.
 		* **Input:**  A valid 'az' CLI command string.  Include necessary options and arguments. 'login'/'logout' and 'account set|clear|import' are blocked.
+		* **Account:** Pass the connected Nudgebee account name in 'account' to run against another authorized Azure connection. This is separate from Azure's native subscription selector. Every result identifies the resolved account.
 		* **Output:**  The raw output of the executed 'az' CLI command.
 
 		**Examples:**
@@ -88,6 +109,10 @@ func (t AzureCliTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The 'az' CLI command to execute.",
 			},
+			"account": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "Optional connected Azure account name (or subscription/account id when unambiguous). Omit to use the conversation's current Azure account.",
+			},
 		},
 		Required: []string{"command"},
 	}
@@ -95,9 +120,15 @@ func (t AzureCliTool) InputSchema() core.ToolSchema {
 
 func (t AzureCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 
-	if nbRequestContext.ToolConfig.Name == "" {
+	requested := RequestedCloudAccount(input.Arguments)
+	if requested == "" && nbRequestContext.ToolConfig.Name == "" {
 		return core.NBToolResponse{}, fmt.Errorf("no tool configs found for - %s, please configure", t.Name())
 	}
+	target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, t.Name(), nbRequestContext.ToolConfig, requested)
+	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	provenance := cloudTargetProvenance(target)
 
 	command := strings.TrimSpace(input.Command)
 
@@ -129,51 +160,30 @@ func (t AzureCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToo
 		}
 	}
 
-	accountId := ""
-	for _, v := range nbRequestContext.ToolConfig.Values {
-		if v.Name == "id" {
-			accountId = v.Value
-			break
-		}
-	}
+	accountId := TargetAccountID(target)
 
 	if accountId == "" {
 		return core.NBToolResponse{}, fmt.Errorf("unable to identify accountId - %s, please configure", t.Name())
 	}
 
-	creds, err := GetCloudAccountCredentials(accountId)
-	if err != nil {
-		return core.NBToolResponse{}, err
+	env := map[string]string{
+		workspace.ENV_NB_TOOL_CONFIG_NAME:  target.Name,
+		workspace.ENV_NB_TARGET_ACCOUNT_ID: accountId,
 	}
-
-	auth, err := BuildAzureAuth(creds)
+	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
-		return core.NBToolResponse{}, err
-	}
-
-	// Auto-install costmanagement extension if needed
-	if strings.Contains(command, "costmanagement") {
-		auth.CommandPrefix += " && az extension add --name costmanagement > /dev/null "
-	}
-
-	auth.Env[workspace.ENV_NB_TOOL_CONFIG_NAME] = nbRequestContext.ToolConfig.Name
-	fullCommand := WrapCommandWithAuth(command, auth)
-
-	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, fullCommand, auth.Env)
-	if err != nil {
-		nbRequestContext.Ctx.GetLogger().Error("azure: unable to execute shell script", "error", err.Error(), "command", fullCommand)
+		nbRequestContext.Ctx.GetLogger().Error("azure: unable to execute shell script", "error", err.Error(), "command", command, "account", target.Name)
 		if response == "" {
 			response = err.Error()
 		}
 		return core.NBToolResponse{
-			Data:   cliRecoveryEnvelope(response, "", "az", "az <command> --help"),
+			Data:   provenance + cliRecoveryEnvelope(response, "", "az", "az <command> --help"),
 			Status: core.NBToolResponseStatusError,
 		}, err
 	}
 
 	return core.NBToolResponse{
-		Data:   response,
+		Data:   provenance + response,
 		Type:   core.NBToolResponseTypeText,
 		Status: core.NBToolResponseStatusSuccess,
 	}, nil
@@ -378,4 +388,11 @@ func (m AzureCliTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfig
 		ConfigSource: core.ToolConfigSourceAccount,
 		Properties:   map[string]core.ToolSchemaProperty{},
 	}
+}
+
+func (m AzureCliTool) IdentifyConfig(_ core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {
+	if selected, ok := identifyExplicitCloudAccount(input, availableConfigs); ok {
+		return selected, nil
+	}
+	return core.ToolConfig{}, nil
 }

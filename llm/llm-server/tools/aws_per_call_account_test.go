@@ -1,8 +1,6 @@
 package tools
 
 import (
-	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -31,11 +29,6 @@ func awsFixture(t *testing.T, account string) {
 		awsCfg("Demo123", "dev2-id", "864186153326"),
 		awsCfg("aws-secret", "no-access-id", "111111111111"),
 	}})
-	previous := awsAccountAuth
-	awsAccountAuth = func(_ context.Context, accountId string) (*CloudAuthResult, error) {
-		return &CloudAuthResult{Env: map[string]string{"AWS_ACCESS_KEY_ID": "key-" + accountId}}, nil
-	}
-	t.Cleanup(func() { awsAccountAuth = previous })
 }
 
 func awsCtx(t *testing.T, account string, tool core.NBTool) core.NbToolContext {
@@ -60,16 +53,18 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 	t.Run("no override stays on the saved account", func(t *testing.T) {
 		capture, resp, err := run(t, core.NBToolCallRequest{Command: "aws sts get-caller-identity"})
 		require.NoError(t, err)
-		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
+		require.NotContains(t, capture.env, "AWS_ACCESS_KEY_ID")
 		require.Equal(t, "aws-prod", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME])
+		require.Equal(t, "prod-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
 		require.True(t, strings.HasPrefix(resp.Data, "[account: aws-prod]\n"), resp.Data)
 	})
 
 	t.Run("account argument uses that account's credentials for this call", func(t *testing.T) {
 		capture, resp, err := run(t, core.NBToolCallRequest{Command: "aws sts get-caller-identity", Arguments: map[string]any{"account": "aws-demo"}})
 		require.NoError(t, err)
-		require.Equal(t, "key-demo-id", capture.env["AWS_ACCESS_KEY_ID"])
+		require.NotContains(t, capture.env, "AWS_ACCESS_KEY_ID")
 		require.Equal(t, "aws-demo", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME])
+		require.Equal(t, "demo-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
 		require.Equal(t, account, capture.account, "the conversation workspace does not move")
 		require.True(t, strings.HasPrefix(resp.Data, "[account: aws-demo]\n"), resp.Data)
 	})
@@ -77,20 +72,21 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 	t.Run("profile flag does not switch accounts", func(t *testing.T) {
 		capture, _, err := run(t, core.NBToolCallRequest{Command: "aws --profile aws-demo s3 ls"})
 		require.NoError(t, err)
-		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
-		require.Equal(t, "export PATH=/usr/bin:$PATH; aws --profile aws-demo s3 ls", capture.command, "the direct tool bypasses the workspace shim without parsing the AWS arguments")
+		require.NotContains(t, capture.env, "AWS_ACCESS_KEY_ID")
+		require.Equal(t, "prod-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
+		require.Equal(t, "aws --profile aws-demo s3 ls", capture.command)
 	})
 
 	t.Run("a unique account id selects that account", func(t *testing.T) {
 		capture, _, err := run(t, core.NBToolCallRequest{Command: "aws s3 ls", Arguments: map[string]any{"account": "136781626097"}})
 		require.NoError(t, err)
-		require.Equal(t, "key-demo-id", capture.env["AWS_ACCESS_KEY_ID"])
+		require.Equal(t, "demo-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
 	})
 
 	t.Run("the saved account's own id stays on the saved account", func(t *testing.T) {
 		capture, resp, err := run(t, core.NBToolCallRequest{Command: "aws s3 ls", Arguments: map[string]any{"account": "740395098545"}})
 		require.NoError(t, err)
-		require.Equal(t, "key-prod-id", capture.env["AWS_ACCESS_KEY_ID"])
+		require.Equal(t, "prod-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
 		require.True(t, strings.HasPrefix(resp.Data, "[account: aws-prod]\n"), resp.Data)
 	})
 
@@ -112,20 +108,6 @@ func TestAwsExecutePerCallAccount(t *testing.T) {
 	})
 }
 
-func TestAwsExecuteNamesAccountOnCredentialFailure(t *testing.T) {
-	const account = "aws-cred-failure"
-	awsFixture(t, account)
-	awsAccountAuth = func(_ context.Context, accountId string) (*CloudAuthResult, error) {
-		return nil, fmt.Errorf("PERMANENT ERROR: AWS STS AssumeRole failed for %s", accountId)
-	}
-	capture := &targetWorkspaceCapture{}
-	tool := AwsCliTool{workspaceManager: capture}
-	resp, err := tool.Call(awsCtx(t, account, tool), core.NBToolCallRequest{Command: "aws sts get-caller-identity", Arguments: map[string]any{"account": "aws-demo"}})
-	require.NoError(t, err, "permanent errors are returned as data, as before")
-	require.True(t, strings.HasPrefix(resp.Data, "[account: aws-demo]\nPERMANENT ERROR"), resp.Data)
-	require.Empty(t, capture.command)
-}
-
 func TestShellAwsUsesShimWithoutWorkspaceCredentials(t *testing.T) {
 	const account = "shell-aws-saved"
 	awsFixture(t, account)
@@ -138,6 +120,13 @@ func TestShellAwsUsesShimWithoutWorkspaceCredentials(t *testing.T) {
 	require.Equal(t, "aws-prod", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME], "the shim receives the per-call default; an explicit profile can still override it")
 	require.Equal(t, "aws --profile aws-demo sts get-caller-identity", capture.command)
 	require.Equal(t, "", ShellTool{}.ConfirmationKey(`{"command":"aws --profile aws-demo s3 rm s3://b/k"}`))
+}
+
+func TestAwsPermanentCredentialFailureClassification(t *testing.T) {
+	require.True(t, isPermanentAwsCredentialFailure("operation error STS: AssumeRole, https response error StatusCode: 403, AccessDenied"))
+	require.True(t, isPermanentAwsCredentialFailure("failed to retrieve credentials: not authorized"))
+	require.False(t, isPermanentAwsCredentialFailure("cloud CLI executor unavailable: connection refused"))
+	require.False(t, isPermanentAwsCredentialFailure("aws command exited with status 2"))
 }
 
 func TestAwsConfirmationKeyIsPerAccount(t *testing.T) {
@@ -177,7 +166,9 @@ func TestRenderExecutionTargets(t *testing.T) {
 	const account = "render-targets"
 	awsFixture(t, account)
 	StubTenantAccounts(t, "tenant", map[string][]core.ToolConfig{
-		ToolExecuteAwsCliCommand: {awsCfg("aws-prod", "prod-id", "740395098545"), awsCfg("aws-demo", "demo-id", "136781626097"), awsCfg("aws-secret", "no-access-id", "1")},
+		ToolExecuteAwsCliCommand:   {awsCfg("aws-prod", "prod-id", "740395098545"), awsCfg("aws-demo", "demo-id", "136781626097"), awsCfg("aws-secret", "no-access-id", "1")},
+		ToolExecuteGcpCliCommand:   {awsCfg("gcp-prod", "prod-id", "project-prod"), awsCfg("gcp-demo", "demo-id", "project-demo")},
+		ToolExecuteAzureCliCommand: {awsCfg("azure-prod", "prod-id", "subscription-prod"), awsCfg("azure-demo", "demo-id", "subscription-demo")},
 		ToolExecuteKubectlCommand: {
 			{Name: "k8s-prod", Values: []core.ToolConfigValue{{Name: "id", Value: "prod-id"}}},
 			{Name: "k8s-dev", Values: []core.ToolConfigValue{{Name: "id", Value: "demo-id"}}},
@@ -190,6 +181,8 @@ func TestRenderExecutionTargets(t *testing.T) {
 	require.Contains(t, block, "<execution_targets>")
 	require.Contains(t, block, "Kubernetes clusters: current k8s-prod; others you can use: k8s-dev.")
 	require.Contains(t, block, "AWS accounts: current aws-prod; others you can use: aws-demo (136781626097).")
+	require.Contains(t, block, "GCP accounts: current none selected yet; others you can use: gcp-demo (project-demo), gcp-prod (project-prod).")
+	require.Contains(t, block, "Azure accounts: current none selected yet; others you can use: azure-demo (subscription-demo), azure-prod (subscription-prod).")
 	require.Contains(t, block, "shell_execute AWS commands: pass --profile <name>")
 	require.NotContains(t, block, "aws-secret", "accounts the user cannot read are not listed")
 

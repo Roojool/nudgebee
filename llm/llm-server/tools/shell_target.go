@@ -220,11 +220,48 @@ func RequestedKubernetesCluster(command string, args map[string]any) (string, er
 }
 
 // RequestedAwsAccount returns the AWS account an aws_execute call explicitly
-// asks for via its `account` argument. Commands are not parsed for AWS: the
-// workspace has no AWS profiles, and shell aws always uses the saved account.
+// asks for via its `account` argument. shell_execute AWS selection remains a
+// concrete --profile flag resolved at the workspace proxy.
 func RequestedAwsAccount(args map[string]any) string {
+	return RequestedCloudAccount(args)
+}
+
+// RequestedCloudAccount returns the connected cloud account explicitly named
+// by a dedicated cloud tool or shell_execute call.
+func RequestedCloudAccount(args map[string]any) string {
 	account, _ := args["account"].(string)
 	return strings.TrimSpace(account)
+}
+
+func requestedCloudAccountFromCall(input core.NBToolCallRequest) string {
+	parsed := core.ParseNBToolCallRequestFromInput(input.Command)
+	for key, value := range input.Arguments {
+		if parsed.Arguments == nil {
+			parsed.Arguments = map[string]any{}
+		}
+		parsed.Arguments[key] = value
+	}
+	return RequestedCloudAccount(parsed.Arguments)
+}
+
+func identifyExplicitCloudAccount(input core.NBToolCallRequest, configs []core.ToolConfig) (core.ToolConfig, bool) {
+	requested := requestedCloudAccountFromCall(input)
+	if requested == "" {
+		return core.ToolConfig{}, false
+	}
+	var byNumber []core.ToolConfig
+	for _, config := range configs {
+		if strings.EqualFold(config.Name, requested) {
+			return config, true
+		}
+		if strings.EqualFold(targetAccountNumber(config), requested) {
+			byNumber = append(byNumber, config)
+		}
+	}
+	if len(byNumber) == 1 {
+		return byNumber[0], true
+	}
+	return core.ToolConfig{}, false
 }
 
 // StripKubectlContextFlag removes `--context` flags. The workspace has no
@@ -235,8 +272,9 @@ func StripKubectlContextFlag(command string) string {
 }
 
 // RequestedShellTarget returns the target a shell command names for the CLI
-// that owns it. Only kubectl (--context) can switch targets from a shell
-// command; other CLIs always use the saved target.
+// that owns it. kubectl and AWS encode their selector in concrete CLI argv;
+// GCP and Azure use shell_execute's account field because their native project,
+// subscription and account flags have different provider-level semantics.
 func RequestedShellTarget(owner, command string) (string, error) {
 	if owner == ToolExecuteKubectlCommand {
 		return RequestedKubernetesCluster(command, nil)
@@ -247,8 +285,12 @@ func RequestedShellTarget(owner, command string) (string, error) {
 // RequestedShellTargetFromInput is RequestedShellTarget for a raw
 // shell_execute tool input; it also returns the owning tool name.
 func RequestedShellTargetFromInput(toolInput string) (string, string, error) {
-	owner := ShellConfigToolName(toolInput)
-	requested, err := RequestedShellTarget(owner, extractCommandFromToolInput(toolInput))
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	owner := ShellConfigToolName(req.Command)
+	if owner == ToolExecuteGcpCliCommand || owner == ToolExecuteAzureCliCommand {
+		return owner, RequestedCloudAccount(req.Arguments), nil
+	}
+	requested, err := RequestedShellTarget(owner, req.Command)
 	return owner, requested, err
 }
 

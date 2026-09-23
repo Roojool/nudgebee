@@ -1,12 +1,9 @@
 package tools
 
 import (
-	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"nudgebee/llm/common"
-	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
 	"path/filepath"
@@ -14,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/google/shlex"
-	"github.com/lib/pq"
 )
 
 var wm = workspace.NewWorkspaceManager()
@@ -71,7 +67,7 @@ func (m ShellTool) Description() string {
 
 	**Preserve failures:** Check collection succeeded before analyzing its output. Keep stderr visible; avoid blanket error suppression or appending || true to every command. A partial or failed collection must not be presented as an empty successful result.
 
-	**Execution target:** ` + "`kubectl`" + ` runs on the conversation's current cluster. Add ` + "`--context <cluster-name>`" + ` to run a command on another connected cluster (one cluster per command). ` + "`aws`" + ` runs on the current AWS account; add ` + "`--profile <account-name>`" + ` to use another connected account. Unknown names return the available targets.
+	**Execution target:** ` + "`kubectl`" + ` runs on the conversation's current cluster. Add ` + "`--context <cluster-name>`" + ` to run a command on another connected cluster (one cluster per command). ` + "`aws`" + ` runs on the current AWS account; add ` + "`--profile <account-name>`" + ` to use another connected account. For ` + "`gcloud`/`gsutil`/`bq`/`az`" + ` commands, pass the connected Nudgebee account name in shell_execute's ` + "`account`" + ` field; provider-native project/subscription flags do not select a Nudgebee connection. Unknown names return the available targets.
 
 	**Empty-match is success.** When grep-family searchers (` + "`grep` / `egrep` / `fgrep` / `rg` / `ack` / `ag`" + `) find no matches, the observation comes back as ` + "`{\"stdout\":\"\",\"no_matches\":true}`" + ` with a Success status — the command ran fine and there is nothing to find. Do NOT retry the same command — either widen the pattern or conclude that no match exists. This semantic also applies when the searcher is the last segment of a pipeline (` + "`kubectl get pods | grep ready`" + `). It does NOT apply to ` + "`find`" + ` (whose exit 1 is a real path / permission error) or plain ` + "`jq`" + ` (which exits 0 and returns ` + "`null`" + ` on missing keys).
 
@@ -101,6 +97,10 @@ func (m ShellTool) InputSchema() core.ToolSchema {
 			"work_dir": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Working directory to execute the command in (optional).",
+			},
+			"account": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "Optional connected GCP or Azure account name for a shell command owned by gcloud, gsutil, bq, or az. Do not use this for local-only commands.",
 			},
 		},
 		Required: []string{"command"},
@@ -188,8 +188,8 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		}
 	}
 
-	// Prepare env. GCP/Azure still use workspace-scoped auth; AWS is relayed by
-	// the workspace shim and never receives credentials in this environment.
+	// Prepare per-command routing metadata. Cloud credentials are resolved only
+	// after the shim reaches the server-side cloud execution boundary.
 	env := map[string]string{}
 	commandOwner := ShellConfigToolName(originalCommand)
 	if selected := nbRequestContext.QueryConfig.ToolConfigs[commandOwner]; commandOwner != "" && selected != "" {
@@ -197,6 +197,15 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		// its own --context/--profile. This is what makes a delegate's child-only
 		// target apply to shell commands without rewriting their argv.
 		env[workspace.ENV_NB_TOOL_CONFIG_NAME] = selected
+	}
+	if requested := RequestedCloudAccount(input.Arguments); requested != "" && (commandOwner == ToolExecuteGcpCliCommand || commandOwner == ToolExecuteAzureCliCommand) {
+		saved, _ := ResolveShellTarget(nbRequestContext, commandOwner)
+		target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, commandOwner, saved, requested)
+		if err != nil {
+			return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+		}
+		env[workspace.ENV_NB_TOOL_CONFIG_NAME] = target.Name
+		env[workspace.ENV_NB_TARGET_ACCOUNT_ID] = TargetAccountID(target)
 	}
 	if commandOwner == ToolExecuteKubectlCommand {
 		// Keep the existing target-bound credential path for writes that were
@@ -216,21 +225,6 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 			}
 		}
 	}
-	cloudAuth, err := m.buildCloudAuthEnv(nbRequestContext, command)
-	if err != nil {
-		if commandOwner != "" {
-			return core.NBToolResponse{}, fmt.Errorf("shell: target credentials unavailable: %w", err)
-		}
-		// Non-fatal for local commands only.
-		// The account may not be a cloud account (e.g. K8s-only), or creds may be missing.
-		slog.Warn("shell: cloud auth injection skipped", "account_id", m.AccountId, "error", err)
-	} else if cloudAuth != nil {
-		for k, v := range cloudAuth.Env {
-			env[k] = v
-		}
-		command = WrapCommandWithBestEffortAuth(command, cloudAuth)
-	}
-
 	// Inject GITHUB_TOKEN when the command invokes `gh`. Same shape as the
 	// cloud cross-account path: hint via QueryConfig.ToolConfigs first, then
 	// fall back to the sole active github integration in the tenant.
@@ -574,63 +568,6 @@ func firstTokenIsFileReader(originalCommand string) bool {
 	return false
 }
 
-// buildCloudAuthEnv returns the workspace auth environment + command wrappers
-// needed for GCP/Azure CLI access. AWS is handled by the workspace shim.
-// For non-cloud accounts (e.g. K8s), it falls back to cross-account auth when the
-// command is a recognized cloud CLI (gcloud, aws, az).
-func (m ShellTool) buildCloudAuthEnv(nbRequestContext core.NbToolContext, command string) (*CloudAuthResult, error) {
-	if m.AccountId == "" {
-		return nil, nil
-	}
-	// AWS CLI calls are relayed by the workspace shim and receive credentials
-	// only inside cloud-collector. Never place AWS credentials in the workspace
-	// command environment, including for AWS-origin workspaces.
-	if shellCloudAuthUsesShim(command) {
-		return nil, nil
-	}
-	if owner := ShellConfigToolName(command); owner != "" {
-		if owner == ToolExecuteKubectlCommand {
-			return nil, nil
-		}
-		selected, err := m.resolveShellTarget(nbRequestContext, owner, command)
-		if err != nil {
-			return nil, err
-		}
-		provider, _ := detectCloudCLI(command)
-		for _, value := range selected.Values {
-			if value.Name == "id" {
-				return buildAuthForAccount(nbRequestContext, provider, value.Value)
-			}
-		}
-		return nil, fmt.Errorf("shell: selected target has no account id")
-	}
-
-	creds, err := GetCloudAccountCredentials(m.AccountId)
-	if err != nil {
-		if errors.Is(err, ErrAccountNumberNotFound) || errors.Is(err, ErrCloudProviderNotFound) {
-			return m.buildCrossAccountCloudAuth(nbRequestContext, command)
-		}
-		return nil, err
-	}
-
-	provider := strings.ToLower(creds.CloudProvider)
-	switch provider {
-	case "gcp":
-		return BuildGcpAuth(creds)
-	case "azure":
-		return BuildAzureAuth(creds)
-	default:
-		// Not a cloud account (e.g. kubernetes) — try cross-account auth
-		// only if the command is a recognized cloud CLI.
-		return m.buildCrossAccountCloudAuth(nbRequestContext, command)
-	}
-}
-
-func shellCloudAuthUsesShim(command string) bool {
-	provider, _ := detectCloudCLI(command)
-	return provider == "aws"
-}
-
 // cloudCLIMapping maps command substrings to their cloud provider and
 // corresponding dedicated tool name (used for tool_configs hint resolution).
 var cloudCLIMapping = []struct {
@@ -685,161 +622,6 @@ func detectCloudCLI(command string) (provider, toolName string) {
 		}
 	}
 	return "", ""
-}
-
-// buildCrossAccountCloudAuth injects cloud credentials for a non-cloud account
-// (e.g. Kubernetes) when the shell command is a recognized cloud CLI.
-//
-// Resolution order:
-//  1. If QueryConfig.ToolConfigs has a hint for the detected CLI tool (e.g.
-//     gcloud_execute → "gcp-dev - my-project-dev"), use that specific account.
-//  2. If no hint exists and exactly one account of that provider is active in
-//     the tenant, use it.
-//  3. If multiple accounts exist with no hint, skip — ambiguous.
-func (m ShellTool) buildCrossAccountCloudAuth(nbRequestContext core.NbToolContext, command string) (*CloudAuthResult, error) {
-	provider, toolName := detectCloudCLI(command)
-	if provider == "" {
-		return nil, nil // not a cloud CLI command
-	}
-
-	sc := nbRequestContext.Ctx.GetSecurityContext()
-	tenantId := sc.GetTenantId()
-	if tenantId == "" {
-		return nil, nil
-	}
-
-	// Strategy 1: use the conversation's tool_config hint if the planner already
-	// resolved which cloud account to use for this tool.
-	if configName := nbRequestContext.QueryConfig.ToolConfigs[toolName]; configName != "" {
-		accountId, err := resolveAccountByName(sc, provider, configName)
-		if err != nil {
-			slog.Warn("shell: cross-account config hint lookup failed", "config_name", configName, "provider", provider, "error", err)
-		} else if accountId != "" {
-			return buildAuthForAccount(nbRequestContext, provider, accountId)
-		}
-	}
-
-	// Strategy 2: if exactly one account exists for this provider, use it.
-	// Multiple accounts → ambiguous, skip.
-	accountId, err := resolveSoleAccount(sc, provider)
-	if err != nil {
-		return nil, fmt.Errorf("shell: cross-account lookup failed: %w", err)
-	}
-	if accountId == "" {
-		return nil, nil // 0 or 2+ accounts
-	}
-
-	return buildAuthForAccount(nbRequestContext, provider, accountId)
-}
-
-// resolveAccountByName finds a cloud account by its display name or account number within a tenant.
-// Matches on account_name first; falls back to account_number so callers can pass either the
-// human-readable name or the provider-assigned ID (e.g. a GCP project ID).
-func resolveAccountByName(sc *security.SecurityContext, provider, accountName string) (string, error) {
-	tenantId := sc.GetTenantId()
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		return "", fmt.Errorf("failed to get database manager: %w", err)
-	}
-
-	query := `SELECT id::text FROM cloud_accounts
-		 WHERE tenant = $1 AND (account_name = $2 OR account_number = $2) AND lower(cloud_provider) = $3 AND status = 'active'`
-	args := []any{tenantId, accountName, provider}
-
-	// Admins can access any account in the tenant.
-	// Non-admins are restricted to their authorized accounts.
-	if !sc.IsSuperAdmin() && !sc.IsTenantAdmin() {
-		query += " AND id = ANY($4)"
-		args = append(args, pq.Array(sc.GetAccountIds()))
-	}
-	query += " LIMIT 1"
-
-	row, err := dbms.QueryRow(query, args...)
-	if err != nil {
-		return "", err
-	}
-
-	var accountId string
-	if err := row.Scan(&accountId); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Log available names to help diagnose mismatches.
-			// Apply the same permission boundary as the primary query.
-			debugQuery := `SELECT id::text, account_name, account_number FROM cloud_accounts WHERE tenant = $1 AND lower(cloud_provider) = $2 AND status = 'active'`
-			debugArgs := []any{tenantId, provider}
-			if !sc.IsSuperAdmin() && !sc.IsTenantAdmin() {
-				debugQuery += " AND id = ANY($3)"
-				debugArgs = append(debugArgs, pq.Array(sc.GetAccountIds()))
-			}
-			debugRows, dErr := dbms.Query(debugQuery, debugArgs...)
-			if dErr == nil {
-				defer func() { _ = debugRows.Close() }()
-				type acctRow struct{ id, name, number string }
-				var available []acctRow
-				for debugRows.Next() {
-					var r acctRow
-					_ = debugRows.Scan(&r.id, &r.name, &r.number)
-					available = append(available, r)
-				}
-				slog.Warn("shell: resolveAccountByName found no match",
-					"provider", provider, "searched_name", accountName, "tenant", tenantId,
-					"available_accounts", available)
-			}
-			return "", nil
-		}
-		return "", fmt.Errorf("resolveAccountByName: scan failed: %w", err)
-	}
-	return accountId, nil
-}
-
-// resolveSoleAccount returns the account ID if exactly one active account exists
-// for the given provider in the tenant. Returns "" if zero or 2+ exist.
-func resolveSoleAccount(sc *security.SecurityContext, provider string) (string, error) {
-	tenantId := sc.GetTenantId()
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		return "", fmt.Errorf("failed to get database manager: %w", err)
-	}
-
-	query := `SELECT id::text FROM cloud_accounts
-		 WHERE tenant = $1 AND lower(cloud_provider) = $2 AND status = 'active'`
-	args := []any{tenantId, provider}
-
-	// Admins can access any account in the tenant.
-	// Non-admins are restricted to their authorized accounts.
-	if !sc.IsSuperAdmin() && !sc.IsTenantAdmin() {
-		query += " AND id = ANY($3)"
-		args = append(args, pq.Array(sc.GetAccountIds()))
-	}
-	query += " LIMIT 2"
-
-	rows, err := dbms.Query(query, args...)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err := rows.Close(); err != nil {
-			slog.Error("shell: failed to close rows", "error", err)
-		}
-	}()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			slog.Warn("shell: failed to scan cloud account row", "error", err)
-			continue
-		}
-		ids = append(ids, id)
-	}
-
-	if len(ids) != 1 {
-		if len(ids) > 1 {
-			slog.Info("shell: multiple cloud accounts for provider, skipping cross-account auth",
-				"provider", provider, "count", len(ids))
-		}
-		return "", nil
-	}
-	return ids[0], nil
 }
 
 // detectCLIToken returns true if the command invokes `kw` as a distinct token
@@ -946,25 +728,6 @@ func (m ShellTool) buildGitlabAuthEnv(nbRequestContext core.NbToolContext, comma
 	}
 
 	return BuildGitlabAuth(*chosen)
-}
-
-// buildAuthForAccount builds cloud auth for a specific account ID.
-func buildAuthForAccount(nbRequestContext core.NbToolContext, provider, accountId string) (*CloudAuthResult, error) {
-	if provider == "aws" {
-		return awsAccountAuth(nbRequestContext.Ctx.GetContext(), accountId)
-	}
-	creds, err := GetCloudAccountCredentials(accountId)
-	if err != nil {
-		return nil, fmt.Errorf("shell: cross-account credentials unavailable for %s: %w", provider, err)
-	}
-
-	switch provider {
-	case "gcp":
-		return BuildGcpAuth(creds)
-	case "azure":
-		return BuildAzureAuth(creds)
-	}
-	return nil, nil
 }
 
 // successResponseNoMatchesOnCluster is successResponseNoMatches for a kubectl

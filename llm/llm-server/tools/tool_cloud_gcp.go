@@ -30,6 +30,7 @@ func init() {
 func (t GcpCliTool) ToolPrompt() []string {
 	return []string{
 		"**Routing boundary:** These rules apply after the active agent has selected `gcloud_execute`; they do not override an agent policy that routes GCP reads and local computation through the workspace shell.",
+		"**Target preservation:** If the task names a GCP account, pass that exact Nudgebee connection name in `account` on every `gcloud_execute` or `shell_execute` call. Do not substitute gcloud's native `--project` flag for connection selection.",
 		"**Evidence-based:** Run command → parse output → make statement. NEVER invent resource IDs or make assumptions from empty results.",
 		"**IAM safety:** NEVER attempt to modify your own IAM permissions or bindings. `gcloud projects add-iam-policy-binding`, `gcloud projects set-iam-policy`, `gsutil iam set` are OFF LIMITS for granting yourself access. Report missing permissions as a finding.",
 		"**Project already set:** GCP project is pre-configured from account credentials. Do NOT run `gcloud config set project` before commands — pass `--project <project_id>` inline as a flag instead. Config-set slows execution and is unnecessary.",
@@ -39,7 +40,26 @@ func (t GcpCliTool) ToolPrompt() []string {
 	}
 }
 
-type GcpCliTool struct{}
+type GcpCliTool struct {
+	workspaceManager workspace.WorkspaceManager
+}
+
+func (t GcpCliTool) ConfirmationKey(toolInput string) string {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return targetConfirmationKey(t.Name(), RequestedCloudAccount(req.Arguments))
+}
+
+func (t GcpCliTool) RequestedTarget(toolInput string) (string, error) {
+	req := core.ParseNBToolCallRequestFromInput(toolInput)
+	return RequestedCloudAccount(req.Arguments), nil
+}
+
+func (t GcpCliTool) workspace() workspace.WorkspaceManager {
+	if t.workspaceManager != nil {
+		return t.workspaceManager
+	}
+	return workspace.NewWorkspaceManager()
+}
 
 func (t GcpCliTool) Name() string {
 	return ToolExecuteGcpCliCommand
@@ -78,6 +98,7 @@ func (t GcpCliTool) Description() string {
 
 		* **Routing:** Availability does not make this tool the default for every GCP command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns GCP reads to the workspace shell, do not use this tool for those reads; keep this direct path for supported mutations and commands with uncertain effects so approval and resume behavior is preserved.
 		* **Input:** A valid 'gcloud' CLI command string. Include necessary options and arguments. Be explicit about projects, zones, and regions.
+		* **Account:** Pass the connected Nudgebee account name in 'account' to run against another authorized GCP connection. This is separate from gcloud's native --project flag. Every result identifies the resolved account.
 		* **Output:** The raw output of the executed 'gcloud' CLI command.
 
 		**Examples:**
@@ -102,6 +123,10 @@ func (t GcpCliTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The 'gcloud' CLI command to execute.",
 			},
+			"account": {
+				Type:        core.ToolSchemaTypeString,
+				Description: "Optional connected GCP account name (or project/account id when unambiguous). Omit to use the conversation's current GCP account.",
+			},
 		},
 		Required: []string{"command"},
 	}
@@ -109,9 +134,15 @@ func (t GcpCliTool) InputSchema() core.ToolSchema {
 
 func (t GcpCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 
-	if nbRequestContext.ToolConfig.Name == "" {
+	requested := RequestedCloudAccount(input.Arguments)
+	if requested == "" && nbRequestContext.ToolConfig.Name == "" {
 		return core.NBToolResponse{}, fmt.Errorf("no tool configs found for - %s, please configure", t.Name())
 	}
+	target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, t.Name(), nbRequestContext.ToolConfig, requested)
+	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	provenance := cloudTargetProvenance(target)
 
 	command := strings.TrimSpace(input.Command)
 
@@ -128,46 +159,30 @@ func (t GcpCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 		return core.NBToolResponse{}, fmt.Errorf("auth commands not allowed")
 	}
 
-	accountId := ""
-	for _, v := range nbRequestContext.ToolConfig.Values {
-		if v.Name == "id" {
-			accountId = v.Value
-			break
-		}
-	}
+	accountId := TargetAccountID(target)
 
 	if accountId == "" {
 		return core.NBToolResponse{}, fmt.Errorf("unable to identify accountId - %s, please configure", t.Name())
 	}
 
-	creds, err := GetCloudAccountCredentials(accountId)
-	if err != nil {
-		return core.NBToolResponse{}, err
+	env := map[string]string{
+		workspace.ENV_NB_TOOL_CONFIG_NAME:  target.Name,
+		workspace.ENV_NB_TARGET_ACCOUNT_ID: accountId,
 	}
-
-	auth, err := BuildGcpAuth(creds)
+	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
-		return core.NBToolResponse{}, err
-	}
-
-	auth.Env[workspace.ENV_NB_TOOL_CONFIG_NAME] = nbRequestContext.ToolConfig.Name
-	fullCommand := WrapCommandWithAuth(command, auth)
-
-	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, fullCommand, auth.Env)
-	if err != nil {
-		nbRequestContext.Ctx.GetLogger().Error("gcp: unable to execute shell script", "error", err.Error(), "command", fullCommand)
+		nbRequestContext.Ctx.GetLogger().Error("gcp: unable to execute shell script", "error", err.Error(), "command", command, "account", target.Name)
 		if response == "" {
 			response = err.Error()
 		}
 		return core.NBToolResponse{
-			Data:   cliRecoveryEnvelope(response, gcloudErrorHint(response), "gcloud", "gcloud <command> --help"),
+			Data:   provenance + cliRecoveryEnvelope(response, gcloudErrorHint(response), "gcloud", "gcloud <command> --help"),
 			Status: core.NBToolResponseStatusError,
 		}, err
 	}
 
 	return core.NBToolResponse{
-		Data:   response,
+		Data:   provenance + response,
 		Type:   core.NBToolResponseTypeText,
 		Status: core.NBToolResponseStatusSuccess,
 	}, nil
@@ -312,6 +327,9 @@ func gcloudErrorHint(rawError string) string {
 }
 
 func (t GcpCliTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {
+	if selected, ok := identifyExplicitCloudAccount(input, availableConfigs); ok {
+		return selected, nil
+	}
 	// If project ID or account name is mentioned in the command, try to find matching config
 	command := strings.ToLower(input.Command)
 	var matches []core.ToolConfig

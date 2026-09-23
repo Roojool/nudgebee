@@ -37,6 +37,20 @@ var executionTargetKinds = []executionTargetKind{
 		showIDs:   true,
 		usedByAny: []string{ToolExecuteAwsCliCommand, core.ToolExecuteShellCommand},
 	},
+	{
+		tool:      ToolExecuteGcpCliCommand,
+		title:     "GCP accounts",
+		usage:     `gcloud_execute: pass account="<name>". shell_execute gcloud, gsutil, or bq commands: pass account="<name>" on the tool call; --project does not select a Nudgebee connection.`,
+		showIDs:   true,
+		usedByAny: []string{ToolExecuteGcpCliCommand, core.ToolExecuteShellCommand},
+	},
+	{
+		tool:      ToolExecuteAzureCliCommand,
+		title:     "Azure accounts",
+		usage:     `azure_execute: pass account="<name>". shell_execute az commands: pass account="<name>" on the tool call; --subscription does not select a Nudgebee connection.`,
+		showIDs:   true,
+		usedByAny: []string{ToolExecuteAzureCliCommand, core.ToolExecuteShellCommand},
+	},
 }
 
 // executionTargets returns the conversation's current target for a tool (""

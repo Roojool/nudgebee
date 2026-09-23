@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+func TestQuoteCommandArgRoundTrip(t *testing.T) {
+	value := "client secret with spaces and 'quotes' $dollars"
+	stdout, stderr, err := SecureExecute(context.Background(), SecureCommandOptions{Command: "printf '%s' " + QuoteCommandArg(value)})
+	if err != nil {
+		t.Fatalf("quote round trip failed: %v (stderr: %s)", err, stderr)
+	}
+	if stdout != value {
+		t.Fatalf("quoted argument changed: got %q, want %q", stdout, value)
+	}
+}
+
 func TestSecureExecute(t *testing.T) {
 	t.Run("SimpleSuccess", func(t *testing.T) {
 		opts := SecureCommandOptions{

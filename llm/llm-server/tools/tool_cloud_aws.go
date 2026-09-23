@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"context"
 	"fmt"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
@@ -49,16 +48,6 @@ func init() {
 	core.RegisterNBToolFactory(ToolExecuteAwsCliCommand, func(accountId string) (core.NBTool, error) {
 		return AwsCliTool{}, nil
 	})
-}
-
-// awsAccountAuth builds CLI credentials for a cloud account. It is a variable
-// so tests can avoid the database and STS.
-var awsAccountAuth = func(ctx context.Context, accountId string) (*CloudAuthResult, error) {
-	creds, err := GetCloudAccountCredentials(accountId)
-	if err != nil {
-		return nil, fmt.Errorf("aws: load account credentials: %w", err)
-	}
-	return BuildAwsAuth(ctx, creds)
 }
 
 type AwsCliTool struct {
@@ -165,29 +154,20 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 		return core.NBToolResponse{}, fmt.Errorf("unable to identify accountId - %s, please configure", t.Name())
 	}
 
-	auth, err := awsAccountAuth(nbRequestContext.Ctx.GetContext(), accountId)
-	if err != nil {
-		// Check for permanent STS errors that should not be retried
-		errMsg := err.Error()
-		errMsg = provenance + errMsg
-		if strings.Contains(errMsg, "PERMANENT ERROR") {
-			return core.NBToolResponse{
-				Data:   errMsg,
-				Status: core.NBToolResponseStatusError,
-			}, nil
-		}
-		return core.NBToolResponse{Data: errMsg, Status: core.NBToolResponseStatusError}, err
+	env := map[string]string{
+		workspace.ENV_NB_TOOL_CONFIG_NAME:  target.Name,
+		workspace.ENV_NB_TARGET_ACCOUNT_ID: accountId,
 	}
-
-	auth.Env[workspace.ENV_NB_TOOL_CONFIG_NAME] = target.Name
-
-	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, directAwsWorkspaceCommand(command), auth.Env)
+	response, err := t.workspace().ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("aws: unable to execute shell script", "error", err.Error(), "command", command, "account", target.Name)
 		if response == "" {
 			response = err.Error()
 		}
 		response = provenance + response
+		if isPermanentAwsCredentialFailure(response + " " + err.Error()) {
+			return core.NBToolResponse{Data: response, Status: core.NBToolResponseStatusError}, nil
+		}
 		// aws uses `aws <service> help` (no dashes), NOT `--help`, as the
 		// canonical help subcommand — hardcoding `--help` here would send
 		// the model to a slightly different code path.
@@ -205,16 +185,19 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 	}, nil
 }
 
-func awsTargetProvenance(target core.ToolConfig) string {
-	return fmt.Sprintf("[account: %s]\n", target.Name)
+func isPermanentAwsCredentialFailure(message string) bool {
+	lower := strings.ToLower(message)
+	credentialOperation := strings.Contains(lower, "assumerole") || strings.Contains(lower, "assume role") || strings.Contains(lower, "credential")
+	permanentRejection := strings.Contains(lower, "accessdenied") || strings.Contains(lower, "access denied") || strings.Contains(lower, "not authorized") || strings.Contains(lower, "status code: 403")
+	return credentialOperation && permanentRejection
 }
 
-// directAwsWorkspaceCommand preserves the existing aws_execute path while the
-// workspace's normal `aws` command is a relay shim. /usr/bin precedes the shim
-// in /usr/local/bin, while the rest of PATH stays available for existing
-// pipelines and scripts accepted by this tool.
-func directAwsWorkspaceCommand(command string) string {
-	return "export PATH=/usr/bin:$PATH; " + command
+func awsTargetProvenance(target core.ToolConfig) string {
+	return cloudTargetProvenance(target)
+}
+
+func cloudTargetProvenance(target core.ToolConfig) string {
+	return fmt.Sprintf("[account: %s]\n", target.Name)
 }
 
 // classifyAwsVerb checks a single verb against AWS verb lists.

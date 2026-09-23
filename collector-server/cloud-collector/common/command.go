@@ -17,6 +17,14 @@ import (
 	"github.com/google/shlex"
 )
 
+// QuoteCommandArg encodes one argv value for the shlex round trip used by
+// SecureExecute. SecureExecute never invokes a shell, but it accepts a command
+// string and tokenizes it, so dynamically sourced values must remain one
+// literal argument.
+func QuoteCommandArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 // ValidateCliCommand checks if the command's positional arguments (skipping flags)
 // match any blocked subcommand sequence. blockedPrefixes are space-separated token
 // sequences after the CLI tool name, e.g. ["configure", "sso", "config set"].

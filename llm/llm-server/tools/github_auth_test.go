@@ -23,8 +23,6 @@ func TestBuildGithubAuth_PAT(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, auth)
 	assert.Equal(t, "ghp_TestPersonalAccessTokenAbc123", auth.Env["GITHUB_TOKEN"])
-	assert.Empty(t, auth.CommandPrefix)
-	assert.Empty(t, auth.CommandSuffix)
 }
 
 func TestBuildGithubAuth_EmptyToken(t *testing.T) {

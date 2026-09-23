@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"nudgebee/collector/cloud/common"
+	"nudgebee/collector/cloud/config"
 	"nudgebee/collector/cloud/providers"
 	"os"
 	"strings"
@@ -395,7 +396,8 @@ func (a *gcloudProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, a
 	}
 
 	// Authenticate using the key file
-	authCmd := fmt.Sprintf("gcloud auth activate-service-account --key-file %s --project %s --account %s", tmpFile.Name(), session.ProjectId, session.ClientEmail)
+	authCmd := fmt.Sprintf("gcloud auth activate-service-account --key-file %s --project %s --account %s",
+		common.QuoteCommandArg(tmpFile.Name()), common.QuoteCommandArg(session.ProjectId), common.QuoteCommandArg(session.ClientEmail))
 	_, stderr, err := common.SecureExecute(ctx.GetContext(), common.SecureCommandOptions{
 		Command: authCmd,
 		Env:     baseEnv,
@@ -450,6 +452,170 @@ func (a *gcloudProvider) ExecuteCliCommand(ctx providers.CloudProviderContext, a
 	}
 
 	return stdout, nil
+}
+
+// ExecuteCliCommandV2 executes one Google Cloud CLI process for a workspace
+// shim. Long-lived authentication material and its temporary files remain
+// inside cloud-collector. The exact `gcloud auth print-access-token` command is
+// retained for existing Cloud Trace/Monitoring REST calls and returns only its
+// short-lived token to the workspace.
+func (a *gcloudProvider) ExecuteCliCommandV2(ctx providers.CloudProviderContext, account providers.Account, command string) (providers.CliExecutionResult, error) {
+	command = strings.TrimSpace(command)
+	args, err := shlex.Split(command)
+	if err != nil {
+		return providers.CliExecutionResult{}, fmt.Errorf("failed to parse GCP CLI command: %w", err)
+	}
+	if len(args) < 2 || !map[string]bool{"gcloud": true, "gsutil": true, "bq": true}[args[0]] {
+		return providers.CliExecutionResult{}, errors.New("GCP CLI command must start with gcloud, gsutil, or bq")
+	}
+	shortLivedToken := isGcloudPrintAccessToken(args)
+	if args[0] == "gcloud" && !shortLivedToken {
+		if err := common.ValidateCliCommand(command, gcloudBlockedCommands); err != nil {
+			return providers.CliExecutionResult{}, err
+		}
+	}
+	if args[0] == "gsutil" && args[1] == "config" {
+		return providers.CliExecutionResult{}, errors.New("gsutil config is not allowed")
+	}
+	if err := validateGcloudWorkspaceBoundary(args); err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+
+	env, cleanup, err := prepareGcloudCli(ctx, account)
+	if err != nil {
+		return providers.CliExecutionResult{}, err
+	}
+	defer cleanup()
+	return executeGcloudStructured(ctx, command, env)
+}
+
+func validateGcloudWorkspaceBoundary(args []string) error {
+	contains := func(sequence ...string) bool {
+		for i := 1; i+len(sequence) <= len(args); i++ {
+			match := true
+			for j := range sequence {
+				if args[i+j] != sequence[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+		return false
+	}
+	switch args[0] {
+	case "gcloud":
+		if (contains("auth") && !isGcloudPrintAccessToken(args)) || contains("config", "set") || contains("config", "unset") || contains("init") {
+			return errors.New("GCP authentication and persistent configuration commands are not allowed")
+		}
+		if contains("storage", "cp") || contains("storage", "mv") || contains("storage", "rsync") || contains("compute", "scp") {
+			return errors.New("GCP workspace CLI cannot transfer collector-local files")
+		}
+	case "gsutil":
+		if contains("config") {
+			return errors.New("gsutil config is not allowed")
+		}
+		if contains("cp") || contains("mv") || contains("rsync") {
+			return errors.New("GCP workspace CLI cannot transfer collector-local files")
+		}
+	case "bq":
+		if contains("extract") || contains("load") {
+			return errors.New("BigQuery workspace CLI cannot transfer collector-local files")
+		}
+	}
+	return nil
+}
+
+// isGcloudPrintAccessToken preserves the existing Cloud Trace/Monitoring REST
+// flow without exposing the long-lived service-account key. No other auth
+// subcommand or option-bearing variant is accepted across the workspace boundary.
+func isGcloudPrintAccessToken(args []string) bool {
+	return len(args) == 3 && args[0] == "gcloud" && args[1] == "auth" && args[2] == "print-access-token"
+}
+
+func prepareGcloudCli(ctx providers.CloudProviderContext, account providers.Account) ([]string, func(), error) {
+	session, err := getGcloudSessionFromAccount(ctx, account)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("failed to get access secret: %w", err)
+	}
+	tmpFile, err := os.CreateTemp("", "gcloud-key-*.json")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	cleanupFile := func() {
+		if err := os.Remove(tmpFile.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			ctx.GetLogger().Error("gcloud: failed to remove temporary key file", "error", err)
+		}
+	}
+	if err := os.Chmod(tmpFile.Name(), 0600); err != nil {
+		_ = tmpFile.Close()
+		cleanupFile()
+		return nil, func() {}, fmt.Errorf("failed to set permissions on temporary file: %w", err)
+	}
+	if _, err := tmpFile.Write([]byte(session.AccountCred)); err != nil {
+		_ = tmpFile.Close()
+		cleanupFile()
+		return nil, func() {}, fmt.Errorf("failed to write temporary key file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		cleanupFile()
+		return nil, func() {}, fmt.Errorf("failed to close temporary key file: %w", err)
+	}
+	configDir, err := os.MkdirTemp("", "gcloud-config-*")
+	if err != nil {
+		cleanupFile()
+		return nil, func() {}, fmt.Errorf("failed to create gcloud config directory: %w", err)
+	}
+	cleanup := func() {
+		cleanupFile()
+		if err := os.RemoveAll(configDir); err != nil {
+			ctx.GetLogger().Error("gcloud: failed to remove config directory", "error", err)
+		}
+	}
+	env := []string{"CLOUDSDK_CONFIG=" + configDir, "GOOGLE_APPLICATION_CREDENTIALS=" + tmpFile.Name()}
+	if home := os.Getenv("HOME"); home != "" {
+		env = append(env, "HOME="+home)
+	} else {
+		env = append(env, "HOME="+configDir)
+	}
+	authCmd := fmt.Sprintf("gcloud auth activate-service-account --key-file %s --project %s --account %s",
+		common.QuoteCommandArg(tmpFile.Name()), common.QuoteCommandArg(session.ProjectId), common.QuoteCommandArg(session.ClientEmail))
+	_, stderr, err := common.SecureExecute(ctx.GetContext(), common.SecureCommandOptions{Command: authCmd, Env: env, Timeout: 30 * time.Second})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("gcloud auth failed: %w, Stderr: %s", err, stderr)
+	}
+	return env, cleanup, nil
+}
+
+func executeGcloudStructured(ctx providers.CloudProviderContext, command string, env []string) (providers.CliExecutionResult, error) {
+	timeout := time.Duration(config.Config.CloudCollectorCliTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	maxOutput := config.Config.CloudCollectorCliMaxOutputBytes
+	if maxOutput <= 0 {
+		maxOutput = 1024 * 1024
+	}
+	truncated := false
+	stdout, stderr, err := common.SecureExecute(ctx.GetContext(), common.SecureCommandOptions{Command: command, Env: env, Timeout: timeout, MaxOutputBytes: maxOutput, OutputTruncated: &truncated})
+	result := providers.CliExecutionResult{Stdout: stdout, Stderr: stderr, OutputTruncated: truncated}
+	if err == nil {
+		return result, nil
+	}
+	var exitErr *common.CommandExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode
+		return result, nil
+	}
+	var timeoutErr *common.CommandTimeoutError
+	if errors.As(err, &timeoutErr) {
+		result.ExitCode, result.TimedOut = 124, true
+		return result, nil
+	}
+	return result, err
 }
 
 func (a *gcloudProvider) QueryServiceMap(ctx providers.CloudProviderContext, account providers.Account, query providers.QueryServiceMapRequest) (providers.QueryServiceMapResponse, error) {

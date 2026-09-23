@@ -31,8 +31,6 @@ func TestBuildGitlabAuth_SaaSOmitsHost(t *testing.T) {
 	// Without a writable config dir glab aborts before making any request —
 	// ExecuteCliCommand passes no HOME, so this must always be set.
 	assert.NotEmpty(t, auth.Env["GLAB_CONFIG_DIR"], "glab needs a writable config dir or every command fails")
-	assert.Empty(t, auth.CommandPrefix)
-	assert.Empty(t, auth.CommandSuffix)
 }
 
 func TestBuildGitlabAuth_SelfHostedSetsHost(t *testing.T) {

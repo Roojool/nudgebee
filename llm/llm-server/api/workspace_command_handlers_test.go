@@ -107,6 +107,56 @@ func TestAwsWorkspaceHandlerPreservesCloudProcessResult(t *testing.T) {
 	}, result)
 }
 
+func TestCloudWorkspaceHandlersResolveTargetWithoutCredentials(t *testing.T) {
+	ctx := security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"workspace", "gcp-id", "azure-id"})
+	tests := []struct {
+		name       string
+		handler    cloudWorkspaceCommandHandler
+		configName string
+		accountID  string
+		command    string
+		want       string
+	}{
+		{name: "gcloud", handler: cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gcloud"}, configName: "gcp-prod", accountID: "gcp-id", command: "gcloud compute instances list --format=json", want: "gcloud 'compute' 'instances' 'list' '--format=json'"},
+		{name: "gsutil", handler: cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gsutil"}, configName: "gcp-prod", accountID: "gcp-id", command: "gsutil ls gs://bucket", want: "gsutil 'ls' 'gs://bucket'"},
+		{name: "bq", handler: cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "bq"}, configName: "gcp-prod", accountID: "gcp-id", command: "bq ls --project_id project", want: "bq 'ls' '--project_id' 'project'"},
+		{name: "azure", handler: cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteAzureCliCommand, executable: "az"}, configName: "azure-prod", accountID: "azure-id", command: "az vm list --output json", want: "az 'vm' 'list' '--output' 'json'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubAwsWorkspaceTargets(t, []core.ToolConfig{awsTarget(tt.configName, tt.accountID, "", "")})
+			plan, err := tt.handler.Prepare(ctx, core.NbToolContext{ToolConfig: awsTarget(tt.configName, tt.accountID, "", "")}, WorkspaceExecuteRequest{
+				AccountId: "workspace", ConfigName: tt.configName, Command: tt.command,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.accountID, plan.TargetAccountID)
+			assert.Equal(t, tt.want, plan.Request.Command)
+		})
+	}
+}
+
+func TestCloudWorkspaceHandlerRejectsExecutableMismatch(t *testing.T) {
+	_, err := (cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gcloud"}).Prepare(nil, core.NbToolContext{}, WorkspaceExecuteRequest{Command: "az vm list"})
+	require.ErrorContains(t, err, "must start with gcloud")
+}
+
+func TestCloudWorkspaceHandlerFallsBackToWorkspaceAccount(t *testing.T) {
+	const workspaceAccount = "gcp-current-id"
+	ctx := security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{workspaceAccount, "gcp-other-id"})
+	stubAwsWorkspaceTargets(t, []core.ToolConfig{
+		awsTarget("gcp-other", "gcp-other-id", "", ""),
+		awsTarget("gcp-current", workspaceAccount, "", ""),
+	})
+
+	handler := cloudWorkspaceCommandHandler{toolName: tools.ToolExecuteGcpCliCommand, executable: "gcloud"}
+	plan, err := handler.Prepare(ctx, core.NbToolContext{}, WorkspaceExecuteRequest{
+		AccountId: workspaceAccount,
+		Command:   "gcloud projects list",
+	})
+	require.NoError(t, err)
+	require.Equal(t, workspaceAccount, plan.TargetAccountID)
+}
+
 func TestKubernetesWorkspaceHandlerPreservesContextRouting(t *testing.T) {
 	ctx := security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"workspace", "dev-id"})
 	stubTenantAccounts(t, "workspace", "dev-id")
