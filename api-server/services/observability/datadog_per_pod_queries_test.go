@@ -101,7 +101,7 @@ func TestDatadogCollapseOverTime(t *testing.T) {
 			{Metric: map[string]string{"pod_name": "b"}, Timestamps: []int64{1, 2, 3}, Values: []float64{5, 5, 5}},
 		},
 	}}
-	datadogCollapseOverTime(results, p99)
+	datadogCollapseOverTime(results, RequestMetadata{Aggregate: p99})
 
 	require.Len(t, results[0].Payload[0].Values, 1)
 	assert.InDelta(t, 8.86, results[0].Payload[0].Values[0], 0.01, "pod a's own p99, near its peak of 9")
@@ -148,16 +148,16 @@ func TestDatadogCollapseOverTime_TouchesEveryKeyThatStillNeedsIt(t *testing.T) {
 	}
 
 	scalar := series("cpu_usage")
-	datadogCollapseOverTime(scalar, p99)
+	datadogCollapseOverTime(scalar, RequestMetadata{Aggregate: p99})
 	assert.Len(t, scalar[0].Payload[0].Values, 1, "a scalar key has no rollup of its own, so it collapses here")
 
 	perPod := series("container_cpu_usage_by_pod")
-	datadogCollapseOverTime(perPod, max)
+	datadogCollapseOverTime(perPod, RequestMetadata{Aggregate: max})
 	assert.Len(t, perPod[0].Payload[0].Values, 3,
 		"a plain aggregate on a per-pod key was already pushed down as a rollup")
 
 	perPodQuantile := series("container_cpu_usage_by_pod")
-	datadogCollapseOverTime(perPodQuantile, p99)
+	datadogCollapseOverTime(perPodQuantile, RequestMetadata{Aggregate: p99})
 	assert.Len(t, perPodQuantile[0].Payload[0].Values, 1,
 		"a percentile cannot be pushed down, so it is computed here")
 }
@@ -232,7 +232,7 @@ func TestDatadogCollapseOverTime_AllGapSeriesStillCollapses(t *testing.T) {
 			{Timestamps: nil, Values: nil},
 		},
 	}}
-	datadogCollapseOverTime(results, p99)
+	datadogCollapseOverTime(results, RequestMetadata{Aggregate: p99})
 
 	require.Len(t, results[0].Payload[0].Values, 1, "one point, as Aggregate promises")
 	assert.True(t, math.IsNaN(results[0].Payload[0].Values[0]), "a gap stays a gap")
@@ -266,4 +266,113 @@ func TestDatadogPerPodFilter_ToleratesHowTheFilterWasAssembled(t *testing.T) {
 
 	assert.Equal(t, "kube_namespace:nudgebee AND pod_name:services-server-7d9f-00",
 		datadogPerPodFilter("kube_namespace:nudgebee, ", meta), "a trailing comma is dropped")
+}
+
+// `.rollup(count, W)` counts the points Datadog stored in W, which is a different
+// question from "how many of the caller's steps had data". Asking for buckets and
+// converting them is what keeps the data floor meaning the same thing here as on
+// Prometheus.
+func TestBuildDatadogPerPodQuery_CountAsksForBucketsNotADatadogCount(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+
+	meta := RequestMetadata{
+		Aggregate:        count,
+		PodNames:         []string{"web-1", "web-2"},
+		PodNamesSupplied: true,
+	}
+	q := buildDatadogPerPodQuery("kubernetes.cpu.usage.total", meta, "kube_namespace:shop", 14*24*3600)
+
+	assert.Contains(t, q, ".rollup(avg, 300)", "the finest rollup two pods over 14 days affords")
+	assert.NotContains(t, q, "rollup(count", "a Datadog count is in Datadog's own unit")
+}
+
+// The collapse has to multiply by the SAME rollup the query asked for. Recomputing it
+// from the same inputs is the only way that stays true when the budget changes.
+func TestDatadogCollapseOverTime_CountIsStepEquivalent(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+
+	meta := RequestMetadata{
+		Aggregate:        count,
+		RangeWindow:      "1209600s", // 14 days
+		Step:             "75s",
+		PodNames:         []string{"web-1", "web-2"},
+		PodNamesSupplied: true,
+	}
+	require.Equal(t, 300, datadogPerPodRollupSeconds(meta, 14*24*3600),
+		"the query and the collapse must agree on the bucket width")
+
+	results := []QueryResult{{
+		QueryKey: "container_cpu_usage_by_pod",
+		Payload: []Result{
+			// Twelve 5-minute buckets: one hour of observation.
+			{Metric: map[string]string{"pod_name": "web-1"}, Timestamps: seq(12), Values: ones(12)},
+			// Same twelve buckets, but the pod only existed for four of them.
+			{Metric: map[string]string{"pod_name": "web-2"}, Timestamps: seq(12), Values: onesThenGaps(4, 8)},
+		},
+	}}
+	datadogCollapseOverTime(results, meta)
+
+	require.Len(t, results[0].Payload[0].Values, 1, "one point, as Aggregate promises")
+	assert.InDelta(t, 48, results[0].Payload[0].Values[0], 0.001,
+		"an hour of data is 48 steps of 75s — the same number Prometheus would count")
+	assert.InDelta(t, 16, results[0].Payload[1].Values[0], 0.001,
+		"20 minutes is 16 steps; a gap is not observation")
+}
+
+// Without a pod list the rollup is the coarsest one, and the conversion has to use it
+// too — otherwise a workload-wide count is out by a factor of twelve.
+func TestDatadogCollapseOverTime_CountFollowsTheCoarseRollup(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+
+	meta := RequestMetadata{Aggregate: count, RangeWindow: "1209600s", Step: "75s"}
+	require.Equal(t, 3600, datadogPerPodRollupSeconds(meta, 14*24*3600))
+
+	results := []QueryResult{{
+		QueryKey: "container_cpu_usage_by_pod",
+		Payload:  []Result{{Timestamps: seq(2), Values: ones(2)}},
+	}}
+	datadogCollapseOverTime(results, meta)
+	assert.InDelta(t, 2*3600/75.0, results[0].Payload[0].Values[0], 0.001,
+		"two hourly buckets are two hours of observation")
+}
+
+// A metadata built without a step (every direct-constructed one, and any caller that
+// does not send one) must get Datadog's own number rather than a silent division.
+func TestDatadogCollapseOverTime_CountWithoutAStepIsLeftInBuckets(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+
+	results := []QueryResult{{
+		QueryKey: "container_cpu_usage_by_pod",
+		Payload:  []Result{{Timestamps: seq(5), Values: ones(5)}},
+	}}
+	datadogCollapseOverTime(results, RequestMetadata{Aggregate: count, RangeWindow: "86400s"})
+	assert.Equal(t, float64(5), results[0].Payload[0].Values[0], "five buckets, uncounted in steps")
+}
+
+func seq(n int) []int64 {
+	out := make([]int64, n)
+	for i := range out {
+		out[i] = int64(1_700_000_000 + i*300)
+	}
+	return out
+}
+
+func ones(n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		out[i] = 1
+	}
+	return out
+}
+
+func onesThenGaps(measured, gaps int) []float64 {
+	out := ones(measured)
+	for i := 0; i < gaps; i++ {
+		out = append(out, math.NaN())
+	}
+	return out
 }

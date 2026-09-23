@@ -22,10 +22,13 @@ import (
 // each timestamp, ooPercentile reduces one series OVER time, and both have been
 // called "p90".
 const (
-	AggregateAvg   = "avg"
-	AggregateSum   = "sum"
-	AggregateMax   = "max"
-	AggregateMin   = "min"
+	AggregateAvg = "avg"
+	AggregateSum = "sum"
+	AggregateMax = "max"
+	AggregateMin = "min"
+	// AggregateCount is the one aggregate whose unit is the contract's rather than
+	// the provider's: Step-wide intervals with data, not stored samples. See
+	// metrics_aggregate_count.go for why, and for the conversion each provider does.
 	AggregateCount = "count"
 )
 
@@ -79,4 +82,43 @@ func promQLOverTime(agg ParsedAggregate, expr, window, step string) string {
 		return fmt.Sprintf("quantile_over_time(%g, %s)", agg.Quantile, subquery)
 	}
 	return fmt.Sprintf("%s_over_time(%s)", agg.Name, subquery)
+}
+
+// promSelfWindowedKeys are the keys whose PromQL already collapses the request's own
+// range window. The percentile/peak family aggregates over [rangeW:stepW] by
+// construction and cpu_real rates across the whole window, so wrapping them again
+// would take a statistic of a statistic — a max_over_time of a max_over_time. For
+// these the key's own definition wins and the request's aggregate is a no-op.
+var promSelfWindowedKeys = map[string]bool{
+	"cpu_real":      true,
+	"p50_cpu":       true,
+	"p90_cpu":       true,
+	"max_usage_cpu": true,
+	"max_usage_mem": true,
+}
+
+// promApplyAggregate collapses every built query to one point of the requested
+// statistic.
+//
+// It runs over the whole map at the end of a builder rather than inside each case,
+// because `aggregate` is a property of the REQUEST, not of the key: a caller that
+// asks for max gets max whichever key it names. Wrapping case by case is what let
+// cpu_usage and memory_usage silently ignore it — aggregate=max and aggregate=avg
+// returned the same number, and it was neither the maximum nor the average but the
+// instantaneous value at the window end, because an aggregated request is served as
+// an instant query and an unwrapped expression has nothing to collapse.
+//
+// Datadog already reduces every series uniformly in datadogCollapseOverTime; this is
+// the Prometheus half of the same contract. With no aggregate asked for it returns
+// immediately, so the default path's query text is unchanged for every key.
+func promApplyAggregate(queries map[string]string, agg ParsedAggregate, rangeW, stepW string) {
+	if agg.Name == "" {
+		return
+	}
+	for key, expr := range queries {
+		if promSelfWindowedKeys[key] {
+			continue
+		}
+		queries[key] = promQLOverTime(agg, expr, rangeW, stepW)
+	}
 }

@@ -69,7 +69,7 @@ func esPerPodCollapsedAgg(src esMetricSource, meta RequestMetadata, scope esUtil
 	// Nest one terms level per grouping field, innermost first, so the aggregation
 	// mirrors GroupBy exactly. Two levels render byte-identically to the shape this
 	// replaces; a third appears only where a source asks for one.
-	aggs := map[string]any{"stat": stat}
+	aggs := esPerPodLeafAggs(stat, meta.Aggregate)
 	for i := len(src.GroupBy) - 1; i >= 0; i-- {
 		aggs = map[string]any{
 			esPerPodLevelName(i): map[string]any{
@@ -84,6 +84,29 @@ func esPerPodCollapsedAgg(src esMetricSource, meta RequestMetadata, scope esUtil
 		"aggs":   aggs,
 	}
 }
+
+// esPerPodLeafAggs is what sits under the innermost grouping level.
+//
+// The statistic, and — only for a count — the first and last timestamp the series
+// was seen at. Elasticsearch holds one document per collection period, so
+// value_count is a document count, and turning it into the Step-wide intervals the
+// contract defines (metrics_aggregate_count.go) needs that period. It is not
+// declared anywhere we can read: Metricbeat, the OTLP collector and the OTel-native
+// exporter all write different documents, and a customer is free to change the
+// interval. So it is measured from the data, which costs two numeric sub-aggregations
+// on a bucket that is already being built.
+func esPerPodLeafAggs(stat map[string]any, agg ParsedAggregate) map[string]any {
+	leaf := map[string]any{"stat": stat}
+	if agg.Name == AggregateCount {
+		leaf["ts_min"] = map[string]any{"min": map[string]any{"field": esPerPodTimeField}}
+		leaf["ts_max"] = map[string]any{"max": map[string]any{"field": esPerPodTimeField}}
+	}
+	return leaf
+}
+
+// esPerPodTimeField is the one field every layout here shares. The date_histogram
+// path filters and buckets on it unconditionally for all three document shapes.
+const esPerPodTimeField = "@timestamp"
 
 // esPerPodMaxGroupLevels is how deep the collapsed aggregation nests: namespace, pod
 // and container is the deepest any per-container key needs.
@@ -153,9 +176,9 @@ type esPerPodTerms struct {
 // The point is stamped at the end of the requested window rather than at a sample
 // time: the value describes the whole window, and without a histogram there is no
 // bucket whose timestamp would be more truthful.
-func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base map[string]string, endMs int64) ([]Result, int64) {
-	ts := endMs / 1000
-	var series []Result
+func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base map[string]string, meta RequestMetadata) ([]Result, int64) {
+	ts := meta.EndMs / 1000
+	var leaves []esPerPodLeaf
 	var truncated int64
 
 	// walk descends one grouping level at a time, carrying the labels collected so
@@ -164,12 +187,8 @@ func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base
 	var walk func(level int, node map[string]json.RawMessage, labels map[string]string)
 	walk = func(level int, node map[string]json.RawMessage, labels map[string]string) {
 		if level >= len(src.GroupBy) {
-			if v, ok := esUtilReducedValue(node["stat"]); ok {
-				series = append(series, Result{
-					Metric:     esPerPodLabels(base, labels),
-					Timestamps: []int64{ts},
-					Values:     []float64{v * scale},
-				})
+			if leaf, ok := esPerPodReadLeaf(node, base, labels, scale); ok {
+				leaves = append(leaves, leaf)
 			}
 			return
 		}
@@ -178,12 +197,8 @@ func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base
 		if !ok {
 			// The level is absent, so this source grouped less deeply than declared.
 			// Read whatever statistic is here rather than dropping the bucket.
-			if v, ok := esUtilReducedValue(node["stat"]); ok {
-				series = append(series, Result{
-					Metric:     esPerPodLabels(base, labels),
-					Timestamps: []int64{ts},
-					Values:     []float64{v * scale},
-				})
+			if leaf, ok := esPerPodReadLeaf(node, base, labels, scale); ok {
+				leaves = append(leaves, leaf)
 			}
 			return
 		}
@@ -212,7 +227,83 @@ func esPerPodSeries(res *esPerPodResult, src esMetricSource, scale float64, base
 	}
 
 	walk(0, res.Levels, map[string]string{})
+
+	if meta.Aggregate.Name == AggregateCount {
+		esPerPodCountAsSteps(leaves, aggregateStepSeconds(meta))
+	}
+
+	series := make([]Result, 0, len(leaves))
+	for _, leaf := range leaves {
+		series = append(series, Result{
+			Metric:     leaf.Metric,
+			Timestamps: []int64{ts},
+			Values:     []float64{leaf.Value},
+		})
+	}
+	if len(series) == 0 {
+		return nil, truncated
+	}
 	return series, truncated
+}
+
+// esPerPodLeaf is one grouping combination's answer, before the count conversion.
+//
+// SpanMs and Value are kept together because the conversion is not per series: the
+// collection period is a property of the stream, and the only honest way to read it
+// off a set of counts is to compare them (see esPerPodCountAsSteps).
+type esPerPodLeaf struct {
+	Metric map[string]string
+	Value  float64
+	SpanMs float64
+}
+
+// esPerPodReadLeaf pulls the statistic, and the observed span when one was asked for.
+func esPerPodReadLeaf(node map[string]json.RawMessage, base map[string]string, labels map[string]string, scale float64) (esPerPodLeaf, bool) {
+	v, ok := esUtilReducedValue(node["stat"])
+	if !ok {
+		return esPerPodLeaf{}, false
+	}
+	leaf := esPerPodLeaf{Metric: esPerPodLabels(base, labels), Value: v * scale}
+	lo, haveLo := esUtilReducedValue(node["ts_min"])
+	hi, haveHi := esUtilReducedValue(node["ts_max"])
+	if haveLo && haveHi && hi > lo {
+		leaf.SpanMs = hi - lo
+	}
+	return leaf, true
+}
+
+// esPerPodCountAsSteps rewrites document counts as Step-wide intervals, in place.
+//
+// The collection period is taken as the SHORTEST cadence any series in the response
+// shows. A series' own span divided by its gaps is only an upper bound on the period:
+// a pod that was restarted, or descheduled for an hour, has the same document count
+// spread over a longer span and looks slower than the stream really is. Taking the
+// minimum across series reads the period off whichever series was observed without
+// interruption, which on a real cluster is most of them.
+//
+// With nothing to measure from — one document, or one series that never had two — the
+// counts are left exactly as Elasticsearch reported them. That is what a caller gets
+// today, so an unmeasurable response cannot be made worse by this.
+func esPerPodCountAsSteps(leaves []esPerPodLeaf, stepSeconds float64) {
+	period := 0.0
+	for _, leaf := range leaves {
+		// NaN fails every comparison, so it has to be excluded by name or it reaches
+		// the division below and poisons the period for every other series.
+		if math.IsNaN(leaf.SpanMs) || math.IsNaN(leaf.Value) || leaf.SpanMs <= 0 || leaf.Value < 2 {
+			continue
+		}
+		// N documents spanning S seconds sit N-1 intervals apart.
+		p := leaf.SpanMs / 1000 / (leaf.Value - 1)
+		if period == 0 || p < period {
+			period = p
+		}
+	}
+	if period <= 0 {
+		return
+	}
+	for i := range leaves {
+		leaves[i].Value = stepEquivalentCount(leaves[i].Value, period, stepSeconds)
+	}
 }
 
 // esPerPodLabels names the series by what produced it, overriding the workload-level
@@ -258,7 +349,7 @@ func parseESPerPodResponse(resp *esUtilAggResponse, m esUtilMetric, meta Request
 			continue
 		}
 
-		series, truncated := esPerPodSeries(&decoded, src, esPerPodScale(src, meta), esUtilSeriesLabels(src, meta), meta.EndMs)
+		series, truncated := esPerPodSeries(&decoded, src, esPerPodScale(src, meta), esUtilSeriesLabels(src, meta), meta)
 		if len(series) == 0 {
 			continue
 		}

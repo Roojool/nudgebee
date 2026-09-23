@@ -28,7 +28,7 @@ func TestDatadogCollapseOverTime_CollapsesScalarKeysToo(t *testing.T) {
 			QueryKey: "cpu_total",
 			Payload:  []Result{{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 5, 9}}},
 		}}
-		datadogCollapseOverTime(results, parsed)
+		datadogCollapseOverTime(results, RequestMetadata{Aggregate: parsed})
 
 		require.Len(t, results[0].Payload[0].Values, 1, tc.aggregate)
 		assert.InDelta(t, tc.want, results[0].Payload[0].Values[0], 1e-9, tc.aggregate)
@@ -47,7 +47,7 @@ func TestDatadogCollapseOverTime_LeavesRolledUpPerPodKeysAlone(t *testing.T) {
 		QueryKey: "container_cpu_usage_by_pod",
 		Payload:  []Result{{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 5, 9}}},
 	}}
-	datadogCollapseOverTime(results, max)
+	datadogCollapseOverTime(results, RequestMetadata{Aggregate: max})
 	assert.Len(t, results[0].Payload[0].Values, 3,
 		"the rollup already answered this; the response shape is Datadog's to decide")
 }
@@ -58,7 +58,7 @@ func TestDatadogCollapseOverTime_UntouchedWithoutAnAggregate(t *testing.T) {
 		QueryKey: "cpu_total",
 		Payload:  []Result{{Timestamps: []int64{1, 2, 3}, Values: []float64{1, 5, 9}}},
 	}}
-	datadogCollapseOverTime(results, ParsedAggregate{})
+	datadogCollapseOverTime(results, RequestMetadata{})
 	assert.Len(t, results[0].Payload[0].Values, 3)
 }
 
@@ -71,7 +71,7 @@ func TestDatadogCollapseOverTime_AllGapsIsNaNNotZero(t *testing.T) {
 		QueryKey: "mem_total",
 		Payload:  []Result{{Timestamps: []int64{1, 2}, Values: []float64{math.NaN(), math.NaN()}}},
 	}}
-	datadogCollapseOverTime(results, max)
+	datadogCollapseOverTime(results, RequestMetadata{Aggregate: max})
 	require.Len(t, results[0].Payload[0].Values, 1)
 	assert.True(t, math.IsNaN(results[0].Payload[0].Values[0]))
 }

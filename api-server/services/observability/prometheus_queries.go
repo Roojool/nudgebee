@@ -83,6 +83,17 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 	// key below asks both ways — see promPerContainerOnNode.
 	node := meta.NodeName
 
+	// Subquery window for an aggregated request, same defaults as the workload
+	// builder so a caller that omits them still gets a parseable [range:step].
+	rangeW := meta.RangeWindow
+	if rangeW == "" {
+		rangeW = "24h"
+	}
+	stepW := meta.Step
+	if stepW == "" {
+		stepW = "5m"
+	}
+
 	for _, metricKey := range metrics {
 		switch metricKey {
 		// --- Per-container metrics, narrowed to one node ---
@@ -91,35 +102,28 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 		// workload builder produces; only the narrowing differs. That is the point of
 		// the family: a caller asks the same question and says where to look.
 		case "container_cpu_usage_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promPerContainerOnNode(promRateSeries("container_cpu_usage_seconds_total", meta.RateWindow), node,
-					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
-				meta.RangeWindow, meta.Step)
+			queries[metricKey] = promPerContainerOnNode(
+				promRateSeries("container_cpu_usage_seconds_total", meta.RateWindow), node,
+				`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`)
 		case "container_memory_working_set_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promPerContainerOnNode(promGaugeSeries("container_memory_working_set_bytes"), node,
-					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
-				meta.RangeWindow, meta.Step)
+			queries[metricKey] = promPerContainerOnNode(
+				promGaugeSeries("container_memory_working_set_bytes"), node,
+				`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`)
 		case "container_memory_max_usage_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promPerContainerOnNode(promGaugeSeries("container_memory_max_usage_bytes"), node,
-					`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`),
-				meta.RangeWindow, meta.Step)
+			queries[metricKey] = promPerContainerOnNode(
+				promGaugeSeries("container_memory_max_usage_bytes"), node,
+				`pod!=""`, `container!=""`, `container!="POD"`, `image!=""`)
 
 		// Spec keys come from kube-state-metrics, which labels by `node` only — no
 		// `instance` variant to fall back to, so these do not need the two-armed form.
 		case "container_cpu_request_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promSpecOnNode("kube_pod_container_resource_requests", node, "cpu"), meta.RangeWindow, meta.Step)
+			queries[metricKey] = promSpecOnNode("kube_pod_container_resource_requests", node, "cpu")
 		case "container_cpu_limit_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promSpecOnNode("kube_pod_container_resource_limits", node, "cpu"), meta.RangeWindow, meta.Step)
+			queries[metricKey] = promSpecOnNode("kube_pod_container_resource_limits", node, "cpu")
 		case "container_memory_request_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promSpecOnNode("kube_pod_container_resource_requests", node, "memory"), meta.RangeWindow, meta.Step)
+			queries[metricKey] = promSpecOnNode("kube_pod_container_resource_requests", node, "memory")
 		case "container_memory_limit_by_pod":
-			queries[metricKey] = promQLOverTime(meta.Aggregate,
-				promSpecOnNode("kube_pod_container_resource_limits", node, "memory"), meta.RangeWindow, meta.Step)
+			queries[metricKey] = promSpecOnNode("kube_pod_container_resource_limits", node, "memory")
 
 		// What the node can give out, as opposed to what it is using. The workload
 		// builder answers these cluster-wide; at node scope they are the denominator
@@ -196,6 +200,7 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 			queries[metricKey] = fmt.Sprintf(`sum(irate(node_disk_written_bytes_total{__CLUSTER__ instance=~"%s.*", device!~"loop.*|ram.*|dm-.*"}[5m])) or sum(irate(node_disk_written_bytes_total{__CLUSTER__ instance=~"%s.*", device!~"loop.*|ram.*|dm-.*"}[5m])) or sum(irate(node_disk_written_bytes_total{__CLUSTER__ instance=~"%s.*", device!~"loop.*|ram.*|dm-.*"}[5m]))`, meta.InternalIP, meta.NodeName, meta.NodeIP)
 		}
 	}
+	promApplyAggregate(queries, meta.Aggregate, rangeW, stepW)
 	return queries
 }
 
@@ -381,12 +386,12 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			expr := promKubeletPreferred(
 				`max by (namespace, container, pod) (rate(container_cpu_usage_seconds_total{__CLUSTER__ %s}[`+rateW+`]))`,
 				containerFilter)
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+			queries[metricKey] = expr
 		case "container_memory_working_set_by_pod":
 			expr := promKubeletPreferred(
 				`max by (namespace, container, pod) (container_memory_working_set_bytes{__CLUSTER__ %s})`,
 				containerFilter)
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+			queries[metricKey] = expr
 		case "container_memory_max_usage_by_pod":
 			// The cgroup high-water mark, the floor for a memory LIMIT recommendation.
 			// No other provider carries it, so they return nothing and say so; the
@@ -394,7 +399,7 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			expr := promKubeletPreferred(
 				`max by (namespace, container, pod) (container_memory_max_usage_bytes{__CLUSTER__ %s})`,
 				containerFilter)
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate, expr, rangeW, stepW)
+			queries[metricKey] = expr
 
 		// Requests and limits for the SAME series shape as the usage keys above, so a
 		// consumer can join usage against its spec on (namespace, pod, container)
@@ -403,21 +408,21 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// No promKubeletPreferred: these come from kube-state-metrics, which is a
 		// single series per container, not a per-scraper cAdvisor series.
 		case "container_cpu_request_by_pod":
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
-				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
-					promSelector(containerFilter, `resource="cpu"`)), rangeW, stepW)
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
+				promSelector(containerFilter, `resource="cpu"`))
 		case "container_cpu_limit_by_pod":
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
-				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
-					promSelector(containerFilter, `resource="cpu"`)), rangeW, stepW)
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
+				promSelector(containerFilter, `resource="cpu"`))
 		case "container_memory_request_by_pod":
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
-				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
-					promSelector(containerFilter, `resource="memory"`)), rangeW, stepW)
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, container, pod) (kube_pod_container_resource_requests{__CLUSTER__ %s})`,
+				promSelector(containerFilter, `resource="memory"`))
 		case "container_memory_limit_by_pod":
-			queries[metricKey] = promQLOverTime(safeMeta.Aggregate,
-				fmt.Sprintf(`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
-					promSelector(containerFilter, `resource="memory"`)), rangeW, stepW)
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, container, pod) (kube_pod_container_resource_limits{__CLUSTER__ %s})`,
+				promSelector(containerFilter, `resource="memory"`))
 
 		// --- PVC Metrics ---
 		case "pvc_usage":
@@ -599,6 +604,7 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (increase(container_http_requests_total{ __CLUSTER__ status=~"4..|5..",container_id=~"%s"}[1h])))`, safeMeta.ContainerName)
 		}
 	}
+	promApplyAggregate(queries, safeMeta.Aggregate, rangeW, stepW)
 	return queries
 }
 

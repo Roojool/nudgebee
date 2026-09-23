@@ -85,20 +85,39 @@ func buildDatadogPerPodQuery(metric string, meta RequestMetadata, filterStr stri
 	switch {
 	case meta.Aggregate.Name == "":
 		return query
-	case meta.Aggregate.IsQuantile():
-		// The budget is a count of points, so it needs a count of series. Without a
-		// pod list the query is workload-wide and the series count is unknown, so
-		// take the coarsest rollup rather than size on a number we do not have — a
-		// churny workload is exactly where the guess would be worst.
-		rollup := datadogCoarsestRollupSeconds
-		if meta.PodNamesSupplied {
-			rollup = datadogRollupSecondsForPods(windowSeconds, len(meta.PodNames))
-		}
-		return fmt.Sprintf("%s.rollup(avg, %d)", query, rollup)
+	case datadogCollapsedHere(meta.Aggregate):
+		return fmt.Sprintf("%s.rollup(avg, %d)", query, datadogPerPodRollupSeconds(meta, windowSeconds))
 	default:
 		// One bucket as wide as the window IS the collapse.
 		return fmt.Sprintf("%s.rollup(%s, %d)", query, meta.Aggregate.Name, windowSeconds)
 	}
+}
+
+// datadogCollapsedHere reports whether an aggregate has to be computed from the
+// returned points rather than pushed into the query.
+//
+// A percentile because Datadog has none over time. A count because `.rollup(count, W)`
+// counts the points Datadog happens to store in W, and `count` is defined in Step-wide
+// intervals (see metrics_aggregate_count.go) — a unit only this side knows.
+func datadogCollapsedHere(agg ParsedAggregate) bool {
+	return agg.IsQuantile() || agg.Name == AggregateCount
+}
+
+// datadogPerPodRollupSeconds is the bucket width those aggregates are computed from.
+//
+// Shared by the builder and the collapse rather than recomputed in each, because the
+// count conversion multiplies by exactly this number: a collapse that assumed a
+// different rollup from the one the query asked for would misreport coverage by that
+// ratio, silently and only on Datadog.
+func datadogPerPodRollupSeconds(meta RequestMetadata, windowSeconds int64) int {
+	// The budget is a count of points, so it needs a count of series. Without a pod
+	// list the query is workload-wide and the series count is unknown, so take the
+	// coarsest rollup rather than size on a number we do not have — a churny workload
+	// is exactly where the guess would be worst.
+	if !meta.PodNamesSupplied {
+		return datadogCoarsestRollupSeconds
+	}
+	return datadogRollupSecondsForPods(windowSeconds, len(meta.PodNames))
 }
 
 // datadogPerPodFilter scopes the query to the caller's exact pod list.
@@ -158,25 +177,31 @@ func datadogPodNameClause(pods []string) string {
 	return "(" + strings.Join(terms, " OR ") + ")"
 }
 
-// datadogCollapseOverTime reduces each series to the requested percentile of its own
-// values, over time.
+// datadogCollapseOverTime reduces each series to one point, over time, for the
+// aggregates the query could not be asked for.
 //
 // Deliberately not computePercentileFromSeries, which reduces ACROSS series at each
 // timestamp — a different question that happens to share the name "p90". This is the
 // axis ooPercentile implements for OpenObserve, and the one rightsizing means: how
 // hot did THIS pod get.
-func datadogCollapseOverTime(results []QueryResult, aggregate ParsedAggregate) {
-	if aggregate.Name == "" {
+//
+// `count` is reduced here too, and for a different reason: Datadog can answer it, but
+// in its own buckets. See metrics_aggregate_count.go for the unit the contract picks.
+func datadogCollapseOverTime(results []QueryResult, meta RequestMetadata) {
+	if meta.Aggregate.Name == "" {
 		return
 	}
+	rollup := float64(datadogPerPodRollupSeconds(meta, int64(datadogRollupSeconds(meta.RangeWindow))))
+	step := aggregateStepSeconds(meta)
+
 	for i := range results {
 		_, isPerPod := datadogPerPodKeys[results[i].QueryKey]
-		// A plain aggregate on a per-pod key was already pushed into the query as
-		// `.rollup(<agg>, window)`, so the response holds one point and there is
-		// nothing left to do. Everything else arrives as a range: Datadog's source
-		// reads neither `instant` nor `step`, so a key with no rollup of its own
-		// comes back at full resolution however the caller asked for it.
-		if isPerPod && !aggregate.IsQuantile() {
+		// A per-pod key whose aggregate was pushed into the query as
+		// `.rollup(<agg>, window)` already holds one point, so there is nothing left
+		// to do — datadogCollapsedHere names the ones that were NOT pushed down.
+		// Every other key arrives as a range whatever the caller asked: Datadog's
+		// source reads neither `instant` nor `step`, so those collapse here.
+		if isPerPod && !datadogCollapsedHere(meta.Aggregate) {
 			continue
 		}
 		for j := range results[i].Payload {
@@ -184,14 +209,23 @@ func datadogCollapseOverTime(results []QueryResult, aggregate ParsedAggregate) {
 			if len(series.Timestamps) == 0 {
 				continue
 			}
-			value, ok := datadogReduceOverTime(series.Values, aggregate)
-			if !ok {
-				// Every sample was a gap — normal for a pod that lived through part
-				// of the window. Still exactly one point, because that is what
-				// Aggregate promises and what the callers reading payload[0] expect,
-				// carrying NaN (which marshals to null) rather than a zero that would
-				// read as a pod measured idle.
-				value = math.NaN()
+			var value float64
+			if isPerPod && meta.Aggregate.Name == AggregateCount {
+				// Each bucket Datadog answered stands for `rollup` seconds of
+				// observation; a gap stands for none. Converting to Step-wide intervals
+				// is what makes this comparable to Prometheus's count_over_time, and to
+				// the floor the caller checks it against.
+				value = stepEquivalentCount(float64(countFinite(series.Values)), rollup, step)
+			} else {
+				v, ok := datadogReduceOverTime(series.Values, meta.Aggregate)
+				if !ok {
+					// Every sample was a gap — normal for a pod that lived through part of
+					// the window. Still exactly one point, because that is what Aggregate
+					// promises and what callers reading payload[0] expect, carrying NaN
+					// (which marshals to null) rather than a zero that would read as idle.
+					v = math.NaN()
+				}
+				value = v
 			}
 			last := series.Timestamps[len(series.Timestamps)-1]
 			series.Timestamps, series.Values = []int64{last}, []float64{value}
@@ -254,6 +288,21 @@ func datadogReduceOverTime(values []float64, aggregate ParsedAggregate) (float64
 		return float64(len(finite)), true
 	}
 	return 0, false
+}
+
+// countFinite is how many of a series' points are measurements.
+//
+// A gap arrives as NaN and is not an observation: counting it would credit a pod with
+// coverage over an interval it did not exist in, which is the opposite of what the
+// floor is asked to detect. Zero is a measurement and counts.
+func countFinite(values []float64) int {
+	n := 0
+	for _, v := range values {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			n++
+		}
+	}
+	return n
 }
 
 // percentileOverTime is linear interpolation over one series' own values, matching

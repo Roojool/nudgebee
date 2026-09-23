@@ -296,7 +296,7 @@ func TestESPerPod_SameNamedPodsInTwoNamespacesStaySeparate(t *testing.T) {
 	var res esPerPodResult
 	require.NoError(t, json.Unmarshal(body, &res))
 
-	series, _ := esPerPodSeries(&res, src, 1, map[string]string{}, 1_700_000_000_000)
+	series, _ := esPerPodSeries(&res, src, 1, map[string]string{}, RequestMetadata{EndMs: 1_700_000_000_000})
 	require.Len(t, series, 2, "one series per namespace, not one merged series")
 
 	byNamespace := map[string]float64{}
@@ -451,5 +451,135 @@ func TestESPodNamesFilter_SkipsWorkloadScopedSources(t *testing.T) {
 	for _, f := range filters {
 		assert.NotContains(t, f.(map[string]any), "terms",
 			"a workload-level source takes no pod filter")
+	}
+}
+
+// Elasticsearch stores one document per collection period, so value_count is a
+// document count. The period is not declared anywhere — Metricbeat, the OTLP
+// collector and the OTel-native exporter all write different documents — so the
+// query has to bring back enough to measure it.
+func TestESPerPod_CountAsksForTheSpanItNeedsToConvert(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_cpu_usage_by_pod", esScopeWorkload, false)
+	require.True(t, ok)
+
+	meta := RequestMetadata{Namespace: "shop", Name: "web"}
+	counted, err := parseAggregate("count")
+	require.NoError(t, err)
+	meta.Aggregate = counted
+
+	body := bodyAsMap(t, buildESUtilisationAggQuery(plan, meta, esScopeWorkload, 1000, 2000, 300))
+	leaf := jsonPath(t, body, "aggs", "src_0", "aggs", "g0", "aggs").(map[string]any)
+	assert.NotNil(t, leaf["stat"])
+	assert.Equal(t, "@timestamp", jsonPath(t, leaf, "ts_min", "min", "field"))
+	assert.Equal(t, "@timestamp", jsonPath(t, leaf, "ts_max", "max", "field"))
+
+	// Every other aggregate pays nothing for this.
+	meta.Aggregate, err = parseAggregate("max")
+	require.NoError(t, err)
+	plain := bodyAsMap(t, buildESUtilisationAggQuery(plan, meta, esScopeWorkload, 1000, 2000, 300))
+	plainLeaf := jsonPath(t, plain, "aggs", "src_0", "aggs", "g0", "aggs").(map[string]any)
+	assert.NotContains(t, plainLeaf, "ts_min")
+	assert.NotContains(t, plainLeaf, "ts_max")
+}
+
+// 360 documents is an hour when they arrive every 10s and six hours when they arrive
+// every minute. Reporting the raw count would put the same pod on either side of the
+// caller's floor depending on a setting neither of them chose.
+func TestESPerPod_CountIsStepEquivalent(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_cpu_usage_by_pod", esScopeWorkload, false)
+	require.True(t, ok)
+	src := plan.Sources[0]
+
+	counted, err := parseAggregate("count")
+	require.NoError(t, err)
+	meta := RequestMetadata{Aggregate: counted, Step: "75s", EndMs: 1_700_000_000_000}
+
+	// Documents every 10s: web-1 for an hour, web-2 for six minutes.
+	body := []byte(`{"g0":{"buckets":[
+		{"key":"web-1","stat":{"value":360},"ts_min":{"value":1699996400000},"ts_max":{"value":1700000000000}},
+		{"key":"web-2","stat":{"value":36},"ts_min":{"value":1699999640000},"ts_max":{"value":1700000000000}}
+	]}}`)
+	var res esPerPodResult
+	require.NoError(t, json.Unmarshal(body, &res))
+
+	series, _ := esPerPodSeries(&res, src, esPerPodScale(src, meta), map[string]string{}, meta)
+	require.Len(t, series, 2)
+
+	byPod := map[string]float64{}
+	for _, s := range series {
+		byPod[s.Metric["pod"]] = s.Values[0]
+	}
+	assert.InDelta(t, 48, byPod["web-1"], 0.2, "an hour is 48 steps of 75s, not 360 points")
+	assert.InDelta(t, 4.8, byPod["web-2"], 0.2, "six minutes is under the floor, and stays under it")
+}
+
+// A pod that was descheduled has its documents spread over a longer span, so its own
+// cadence reads slower than the stream's. The period is the fastest any series shows.
+func TestESPerPod_CountReadsThePeriodFromTheUninterruptedSeries(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_cpu_usage_by_pod", esScopeWorkload, false)
+	require.True(t, ok)
+	src := plan.Sources[0]
+
+	counted, err := parseAggregate("count")
+	require.NoError(t, err)
+	meta := RequestMetadata{Aggregate: counted, Step: "75s", EndMs: 1_700_000_000_000}
+
+	// steady: 360 docs over an hour, so 10s apart. gappy: the same 360 documents, but
+	// spread across six hours because the pod was down for five of them.
+	body := []byte(`{"g0":{"buckets":[
+		{"key":"steady","stat":{"value":360},"ts_min":{"value":1699996400000},"ts_max":{"value":1700000000000}},
+		{"key":"gappy","stat":{"value":360},"ts_min":{"value":1699978400000},"ts_max":{"value":1700000000000}}
+	]}}`)
+	var res esPerPodResult
+	require.NoError(t, json.Unmarshal(body, &res))
+
+	series, _ := esPerPodSeries(&res, src, esPerPodScale(src, meta), map[string]string{}, meta)
+	byPod := map[string]float64{}
+	for _, s := range series {
+		byPod[s.Metric["pod"]] = s.Values[0]
+	}
+	assert.InDelta(t, 48, byPod["steady"], 0.2)
+	assert.InDelta(t, 48, byPod["gappy"], 0.2,
+		"the same 360 readings are the same hour of observation, wherever they fell")
+}
+
+// Nothing to measure from means the number Elasticsearch reported, unchanged. That is
+// today's answer, so an unmeasurable response cannot be made worse by the conversion.
+func TestESPerPod_CountWithNothingToMeasureIsLeftAlone(t *testing.T) {
+	plan, ok := esUtilisationMetric("container_cpu_usage_by_pod", esScopeWorkload, false)
+	require.True(t, ok)
+	src := plan.Sources[0]
+
+	counted, err := parseAggregate("count")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		meta RequestMetadata
+		body string
+	}{
+		{
+			name: "one document, so no interval",
+			meta: RequestMetadata{Aggregate: counted, Step: "75s", EndMs: 1_700_000_000_000},
+			body: `{"g0":{"buckets":[{"key":"web-1","stat":{"value":1},"ts_min":{"value":1700000000000},"ts_max":{"value":1700000000000}}]}}`,
+		},
+		{
+			name: "no step to convert into",
+			meta: RequestMetadata{Aggregate: counted, EndMs: 1_700_000_000_000},
+			body: `{"g0":{"buckets":[{"key":"web-1","stat":{"value":1},"ts_min":{"value":1699996400000},"ts_max":{"value":1700000000000}}]}}`,
+		},
+		{
+			name: "an older response with no span aggregations",
+			meta: RequestMetadata{Aggregate: counted, Step: "75s", EndMs: 1_700_000_000_000},
+			body: `{"g0":{"buckets":[{"key":"web-1","stat":{"value":1}}]}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var res esPerPodResult
+			require.NoError(t, json.Unmarshal([]byte(tc.body), &res))
+			series, _ := esPerPodSeries(&res, src, esPerPodScale(src, tc.meta), map[string]string{}, tc.meta)
+			require.Len(t, series, 1)
+			assert.Equal(t, float64(1), series[0].Values[0])
+		})
 	}
 }

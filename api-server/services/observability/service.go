@@ -3324,9 +3324,10 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	if metricsProvider == "datadog" {
 		datadogNanocoresToCores(output.Results)
 		datadogHTTPLabels(output.Results)
-		// Datadog has no percentile over time, so the collapse Aggregate promises is
-		// done here, from the points the rollup returned.
-		datadogCollapseOverTime(output.Results, meta.Aggregate)
+		// The collapse Aggregate promises is done here for the aggregates Datadog
+		// cannot be asked for: it has no percentile over time, and its own `count`
+		// is in buckets rather than in the caller's steps.
+		datadogCollapseOverTime(output.Results, meta)
 		output.Results = datadogNoteUnanswerablePerPodKeys(output.Results, meta.RequestedMetrics)
 		percentileKeys := make(map[string]float64)
 		for _, m := range meta.RequestedMetrics {
