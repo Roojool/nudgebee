@@ -20,6 +20,7 @@ import (
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
 	"nudgebee/llm/prompts"
+	"nudgebee/llm/security"
 	"nudgebee/llm/security/egressfilter"
 	toolscore "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
@@ -236,6 +237,29 @@ func main() {
 	egressfilter.StartTenantConfigCacheCleanup(syncCtx)
 	go toolscore.StartIntegrationKBSync(syncCtx)
 	slog.Info("main: started integration KB sync background thread")
+
+	// One-time sync of the capability catalog (agent tools + runbook-server
+	// workflow tasks, classified narrow/pass_through) into the shared table
+	// rag-server reads directly. Startup-only: the underlying catalog only
+	// changes on deploy, not per-request. See tools/core/capability_catalog.go.
+	// Backgrounded with a bounded timeout so a slow/unreachable runbook-server
+	// cannot block this process's own startup past its readiness probe;
+	// deliberately single-attempt (no retry loop) per the "not on a timer"
+	// design above — a failed sync is logged and picked up by the next deploy.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("main: recovered from panic in capability catalog sync", "panic", r)
+			}
+		}()
+		syncTimeoutCtx, cancel := context.WithTimeout(syncCtx, 30*time.Second)
+		defer cancel()
+		reqCtx := security.NewRequestContextForSuperAdmin()
+		reqCtx.SetContext(syncTimeoutCtx)
+		if err := toolscore.SyncCapabilityCatalog(reqCtx); err != nil {
+			slog.Error("main: failed to sync capability catalog", "error", err)
+		}
+	}()
 
 	// Clean up stale workspace pods on startup, and keep sweeping periodically:
 	// the lazy-create path never re-checks a healthy pod's image, so without

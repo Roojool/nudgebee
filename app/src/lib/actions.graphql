@@ -9696,6 +9696,17 @@ type KnowledgebaseOutput {
   last_loaded_at: timestamp
   note_category: String
   context_tags: [String!]
+  kinds: [String!]
+  shapes: [String!]
+  capabilities: [String!]
+  capability_details: [CapabilityDetail!]
+}
+
+type CapabilityDetail {
+  name: String!
+  description: String
+  surface: String
+  scope: String
 }
 
 type CreateKBResponse {

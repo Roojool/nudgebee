@@ -17,7 +17,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException
 from config import setup_logger
 from controllers.document_controller import load_module_docs
 from rag.core.documents import collection as document_collection
-from rag.core.documents import embedding_migration, module_retag_migration
+from rag.core.documents import embedding_migration, kb_capability_backfill, module_retag_migration
 from utils.shared import set_global_trace, release_lock
 
 # Load .env *before* any os.environ.get below, so local development can
@@ -45,6 +45,26 @@ setup_logger()
 logger = logging.getLogger(__name__)
 
 lock_dir = "./.locks"
+
+
+def _start_kb_capability_backfill():
+    """Backfill classification labels for KBs ingested before document
+    classification existed (PR #38623) — otherwise those KBs (and every
+    integration KB, whose scrapers pass no account) never get a Classification
+    column until someone re-uploads them. Independent of has_collections since
+    it reads which KBs exist from Postgres, not Qdrant. Off by default: unlike
+    the migrations above this spends real LLM money at real KB volume; see
+    rag/core/documents/kb_capability_backfill.py. Split out of
+    post_startup_task to keep that function's branching within the repo's
+    max-complexity lint budget.
+    """
+    if not kb_capability_backfill.is_enabled():
+        return
+    try:
+        kb_capability_backfill.start_background()
+        logger.info("KB capability backfill started in the background")
+    except Exception as backfill_exc:  # defensive: migration must never block startup
+        logger.exception(f"Could not start KB capability backfill (non-fatal): {backfill_exc}")
 
 
 def post_startup_task():
@@ -122,6 +142,8 @@ def post_startup_task():
                     logger.info("Embedding migration started in the background")
                 except Exception as emb_exc:  # defensive: migration must never block startup
                     logger.exception(f"Could not start embedding migration (non-fatal): {emb_exc}")
+
+            _start_kb_capability_backfill()
         except (
             ConnectionError,
             ResponseHandlingException,
