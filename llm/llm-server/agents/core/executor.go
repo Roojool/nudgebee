@@ -1270,6 +1270,15 @@ type NBClassificationAgent interface {
 	GetOptions() []string
 }
 
+// NBMultiOptionClassificationAgent is a classification agent whose answer may name
+// more than one option (comma-separated). Optional: a classification agent that does
+// not implement it stays single-select, which is the safe default — an agent whose
+// caller can only consume one answer must keep rejecting a multi-option one.
+type NBMultiOptionClassificationAgent interface {
+	NBClassificationAgent
+	AllowsMultipleOptions() bool
+}
+
 // resolveEffectivePlannerType maps an agent's *declared* planner type to the
 // planner that actually runs it. Orchestrating and ReAct agents both execute
 // via the ReAct3 planner (see createAgentPlanner), so they resolve to
@@ -1342,7 +1351,11 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		if !ok {
 			return nil, errors.New("agent is not of type NBClassificationAgent for classification planner")
 		}
-		nbAgentPlanner, err = NewClassificationPlanner(ctx, request, agent, systemMessage, classificationAgent.GetOptions())
+		multi := false
+		if multiAgent, ok := agent.(NBMultiOptionClassificationAgent); ok {
+			multi = multiAgent.AllowsMultipleOptions()
+		}
+		nbAgentPlanner, err = NewClassificationPlanner(ctx, request, agent, systemMessage, classificationAgent.GetOptions(), multi)
 	} else if agent.GetPlannerType() == AgentPlannerTypeCustom {
 		customAgent, ok := agent.(NBCustomAgent)
 		if !ok {

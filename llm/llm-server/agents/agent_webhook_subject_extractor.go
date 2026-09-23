@@ -59,8 +59,18 @@ func (a *WebhookSubjectExtractorAgent) GetNameAliases() []string {
 
 func (a *WebhookSubjectExtractorAgent) GetDescription() string {
 	return "Maps an incoming monitoring-alert webhook to the running k8s workload/service it concerns. " +
-		"Single-shot classifier over the account's running services; returns one service name or \"Not Found\"."
+		"Single-shot classifier over the account's running services; returns one or more service names " +
+		"(comma-separated, most relevant first) or \"Not Found\"."
 }
+
+// AllowsMultipleOptions lets an alert that genuinely spans several services name
+// them all, comma-separated and most-relevant-first. The caller (api-server's
+// ResolveSubjectNameViaAgent) makes the first name the event's subject and keeps the
+// full list on the `service` label — events.subject_name is a single column, and a
+// comma-joined string there would match no workload. Every name is still validated
+// against the options list, so this widens what the agent may report, not what it
+// may invent.
+func (a *WebhookSubjectExtractorAgent) AllowsMultipleOptions() bool { return true }
 
 func (a *WebhookSubjectExtractorAgent) GetPlannerType() core.AgentPlannerType {
 	return core.AgentPlannerTypeClassification

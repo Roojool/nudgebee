@@ -583,16 +583,66 @@ func ResolveSubjectNameViaAgent(sc *security.RequestContext, accountId, title, d
 		return ""
 	}
 
-	name := strings.TrimSpace(response.Response[0])
-	if name == "" || strings.EqualFold(name, webhookSubjectAgentNotFound) {
+	answer := strings.TrimSpace(response.Response[0])
+	if answer == "" {
 		labels["nb_llm_match"] = "not_found"
 		return ""
 	}
-	labels["nb_llm_match"] = name
-	if labels["service"] == "" {
-		labels["service"] = name
+	// Check the sentinel against the primary name, not the raw answer: a malformed
+	// reply like "Not Found, cart-service" doesn't equal "Not Found" whole, but its
+	// primary name is the sentinel, which must not be treated as a real subject.
+	primary := primarySubjectName(answer)
+	if strings.EqualFold(primary, webhookSubjectAgentNotFound) {
+		labels["nb_llm_match"] = "not_found"
+		return ""
 	}
-	return name
+	// Guards against a pipeline error (e.g. an expired Google AI CachedContent
+	// slot's 403) landing as response text instead of a Go error.
+	if !looksLikePlausibleSubject(answer) {
+		sc.GetLogger().Warn("subject_resolution: rejecting implausible extractor answer", "answer", answer)
+		labels["nb_llm_match"] = "not_found"
+		return ""
+	}
+	labels["nb_llm_match"] = answer
+	// The full answer goes on the `service` label so an alert spanning several
+	// services records all of them; only the primary one becomes the subject below.
+	if labels["service"] == "" {
+		labels["service"] = answer
+	}
+	return primary
+}
+
+// primarySubjectName reduces the extractor's answer to the single name that becomes
+// the event's subject. The agent may answer with several comma-separated services,
+// most relevant first (see AllowsMultipleOptions in llm-server), but subject_name is
+// one column with workload matching bolted to it: the comma-joined string matches no
+// workload, so the event would land with no namespace, kind or cloud_resource_id and
+// enrichers would query a workload that does not exist. Taking the first name keeps
+// the subject matchable while the `service` label retains the full list.
+//
+// Single-name answers — every answer before multi-select, and still the normal case —
+// contain no comma, and strings.Cut returns them whole.
+func primarySubjectName(answer string) string {
+	primary, _, _ := strings.Cut(answer, ",")
+	return strings.TrimSpace(primary)
+}
+
+// implausibleSubjectNameChars matches characters no real k8s name has but prose does.
+var implausibleSubjectNameChars = regexp.MustCompile(`[\s:\[\]]`)
+
+// looksLikePlausibleSubject checks per-token, not the raw string — the multi-match
+// separator (", ") itself contains a space.
+func looksLikePlausibleSubject(answer string) bool {
+	for _, tok := range strings.Split(answer, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue // a trailing/stray comma, same as primarySubjectName tolerates
+		}
+		if implausibleSubjectNameChars.MatchString(tok) {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveSubjectViaLLM resolves an event's subject via the
