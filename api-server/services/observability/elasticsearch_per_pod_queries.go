@@ -129,6 +129,11 @@ func esPerPodLevelLabel(src esMetricSource, field string) string {
 		return "container"
 	case src.Fields.Node:
 		return "node"
+	case src.Fields.PVC:
+		// Not a pod dimension, but the per-claim keys use this same grouping walk and
+		// a level with no name is dropped from the labels — the series would come back
+		// unidentifiable rather than wrong, which is harder to notice.
+		return "persistentvolumeclaim"
 	}
 	return ""
 }

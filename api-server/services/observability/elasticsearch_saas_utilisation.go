@@ -473,6 +473,19 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// because of filesystem overhead — a 100Gi claim measures 98.25 GiB here. It is
 	// the honest number for "how much room does this volume actually have", which is
 	// what the panel is asked, but it will not match the PromQL figure exactly.
+	// One series per claim rather than the sum below. The namespace level goes ABOVE
+	// the claim for the same reason it does for pods: a claim name is unique only
+	// within its namespace, and volume rightsizing keys on the pair.
+	case "pvc_used_by_claim":
+		return esUtilMetric{Sources: []esMetricSource{{
+			Field: "kubernetes.volume.fs.used.bytes", Scale: esNoScale, Agg: "max",
+			GroupBy: []string{esECSFields.Namespace, esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
+		}}, PerPod: true}, true
+	case "pvc_capacity_by_claim":
+		return esUtilMetric{Sources: []esMetricSource{{
+			Field: "kubernetes.volume.fs.capacity.bytes", Scale: esNoScale, Agg: "max",
+			GroupBy: []string{esECSFields.Namespace, esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
+		}}, PerPod: true}, true
 	case "pvc_usage":
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.volume.fs.used.bytes", Scale: esNoScale, Agg: "avg",

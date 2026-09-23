@@ -67,6 +67,37 @@ func buildDatadogNodeQueries(meta RequestMetadata, metrics []string) map[string]
 	return queries
 }
 
+// datadogPVCPerClaimQueries renders the per-claim volume keys, one series per claim.
+//
+// Separate from the switch in buildDatadogWorkloadQueries because those keys are the
+// only ones that answer with no workload scope, and that function returns before its
+// switch when there is none. A claim belongs to a namespace, not to a workload; volume
+// rightsizing asks about every claim in the cluster and matches them to workloads
+// afterwards, from Kubernetes rather than from metrics.
+func buildDatadogPVCPerClaimQueries(queries map[string]string, meta RequestMetadata, metrics []string) {
+	scope := "*"
+	switch {
+	case meta.Namespace != "" && meta.PVCName != "":
+		scope = fmt.Sprintf("kube_namespace:%s, persistentvolumeclaim:%s", meta.Namespace, meta.PVCName)
+	case meta.Namespace != "":
+		scope = fmt.Sprintf("kube_namespace:%s", meta.Namespace)
+	}
+
+	for _, metricKey := range metrics {
+		var metric string
+		switch metricKey {
+		case "pvc_used_by_claim":
+			metric = "used_bytes"
+		case "pvc_capacity_by_claim":
+			metric = "capacity_bytes"
+		default:
+			continue
+		}
+		queries[metricKey] = fmt.Sprintf(
+			"max:kubernetes.kubelet.volume.stats.%s{%s} by {persistentvolumeclaim,kube_namespace}", metric, scope)
+	}
+}
+
 func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[string]string {
 	// Per-pod keys roll up over the window, so they need its width in seconds.
 	// datadogRollupSeconds parses the "<N>s" form promAggWindow (or an explicit
@@ -100,6 +131,12 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 	if filterStr != "" && meta.ContainerName != "" {
 		filterStr = fmt.Sprintf("%s, kube_container_name:%s", filterStr, meta.ContainerName)
 	}
+
+	// Claim-scoped keys are answered first, because they are the only ones here that
+	// mean something without a workload: volume rightsizing walks every claim in the
+	// cluster, so an empty scope is "all of them". Everything below needs a workload
+	// filter and the guard after this returns without one.
+	buildDatadogPVCPerClaimQueries(queries, meta, metrics)
 
 	if filterStr == "" {
 		return queries

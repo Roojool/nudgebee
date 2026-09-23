@@ -454,6 +454,26 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 				promSelector(containerFilter, `resource="memory"`))
 
 		// --- PVC Metrics ---
+		//
+		// pvc_usage and pvc_requests sum every claim in scope into one number, which
+		// is what a panel showing "this workload's storage" wants. The _by_claim pair
+		// below answers the other question — one series per claim — because volume
+		// rightsizing sizes each PVC separately and a sum tells it nothing.
+		//
+		// Both labels are on the series deliberately: a claim name is unique only
+		// within its namespace, and the consumer keys on the pair.
+		case "pvc_used_by_claim":
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_used_bytes{__CLUSTER__ %s})`,
+				pvcFilter)
+		case "pvc_capacity_by_claim":
+			// kubelet_volume_stats_capacity_bytes, not the kube-state request: the
+			// request is what was ASKED for and the capacity is what the volume
+			// actually has, which is what a resize decision has to compare usage
+			// against. pvc_requests above keeps answering the other one.
+			queries[metricKey] = fmt.Sprintf(
+				`max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{__CLUSTER__ %s})`,
+				pvcFilter)
 		case "pvc_usage":
 			queries[metricKey] = fmt.Sprintf(`sum(kubelet_volume_stats_used_bytes{__CLUSTER__ %s})`, pvcFilter)
 		case "pvc_requests":
