@@ -267,6 +267,15 @@ import { ds } from '@utils/colors';
 - **Prefer Option B** (`ds.*`) in `.tsx`/`.ts`; use raw `var(--ds-*)` in `.css` / Emotion literals.
 - Do **not** use `--nb-*` legacy tokens in new DS components — reference only `--ds-*`.
 
+These rules are enforced. `npm run lint2` runs `check-ds`, which fails when a change **adds** a
+value that lands exactly on one of the scales above — `padding: '16px'`, `mt: 2` (MUI's 8px unit,
+so 16px), `borderRadius: '8px'`, `color: '#6f6f6f'`, `gap='12px'` as a prop. Only the increase is
+counted, against the file's own version at the merge base, so existing values never block anyone
+and a value someone chose off-scale on purpose (`13px`) is never touched. Box dimensions
+(`width`/`minWidth`/`maxHeight`), icon `fontSize`, and chart files are out of scope — they have no
+token scale. Where the system genuinely cannot express what the code needs, `// ds-allow: <reason>`
+on the line silences it and the reason belongs in the PR.
+
 ---
 
 ## 2. Composition recipes
@@ -370,7 +379,7 @@ import Stack from '@mui/material/Stack';
   width='md'
   loader={isSubmitting}
   actionButtons={
-    <Stack direction='row' gap='12px' sx={{ button: { minWidth: '140px' } }}>
+    <Stack direction='row' gap={ds.space[3]} sx={{ button: { minWidth: '140px' } }}>
       <Button tone='secondary' onClick={handleCancel} disabled={isSubmitting}>Cancel</Button>
       <Button onClick={handleSubmit} disabled={isSubmitting}>Create Ticket</Button>
     </Stack>
