@@ -364,11 +364,43 @@ const GROUPING_DIMENSIONS: Record<VmVulnerabilityGrouping, { groupBy: string[]; 
   vulnerability: { groupBy: ['vuln_id'], key: 'vuln_id', label: 'vuln_id', canListVms: true },
   package: { groupBy: ['package_name'], key: 'package_name', label: 'package_name', canListVms: true },
   // A VM group is one machine — listing its VMs would restate the label.
-  vm: { groupBy: ['resource_id', 'resource_name'], key: 'resource_id', label: 'resource_name', canListVms: false },
+  //
+  // Grouped by resource_id ALONE (not resource_name too): resource_name is
+  // one of the columns that forces recommendation_groupings_v2 onto the
+  // query engine's joined CTE + window-function plan, which windows every
+  // recommendation row on the account (all rules, all statuses) before
+  // filtering by rule_name/status — measured at 7-8s cold on a tenant with
+  // ~24k findings (#38494). Names are resolved separately afterwards via a
+  // cheap indexed point lookup against cloud_resourses (resolveVmNames), not
+  // by widening the GROUP BY.
+  vm: { groupBy: ['resource_id'], key: 'resource_id', label: 'resource_id', canListVms: false },
+};
+
+/**
+ * resource_id -> name for a small set of ids, via cloud_resources_list_v2 —
+ * a plain indexed lookup on a different table, unrelated to the
+ * recommendation query's CTE cost. Used to label "by VM" groups without
+ * putting resource_name back in recommendation_groupings_v2's GROUP BY.
+ */
+const resolveVmNames = async (accountId: string | string[], ids: string[]): Promise<Record<string, string>> => {
+  if (!ids.length) return {};
+  const where = { account: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId }, id: { _in: ids } };
+  const response = await queryGraphQL(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit: ids.length, offset: 0 });
+  const rows = response?.data?.data?.vms?.rows || [];
+  const nameById: Record<string, string> = {};
+  for (const row of rows) {
+    if (row?.id) nameById[row.id] = row.name || row.resourse_id || row.id;
+  }
+  return nameById;
 };
 
 const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}, status: string[] = OPEN_STATUSES) => ({
   account_id: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId },
+  // VM findings are always Security (see vmpackage/persist.go's recommendationCategory).
+  // Pushed into the where-clause explicitly so the partial index on
+  // (tenant_id, cloud_account_id, rule_name) WHERE category='Security' AND
+  // status IN ('Open','InProgress') applies — see #38494.
+  category: { _eq: 'Security' },
   rule_name: { _eq: VM_VULNERABILITY_RULE },
   status: { _in: status },
   ...extra,
@@ -627,10 +659,14 @@ const apiVm = {
       .replaceAll('__DISTINCT_ARGS__', JSON.stringify([dimension.key]));
     const response = await queryGraphQLCached(query, 'VmVulnerabilityGroups', { limit, offset });
     const rows = response?.data?.data?.groups?.rows || [];
+    // The 'vm' dimension groups by resource_id alone (see GROUPING_DIMENSIONS'
+    // comment), so its label needs a separate name lookup — a handful of ids
+    // (at most `limit`), not the full account.
+    const vmNameById = grouping === 'vm' ? await resolveVmNames(accountId, rows.map((row: any) => row.resource_id).filter(Boolean)) : {};
     return {
       rows: rows.map((row: any) => ({
         key: row[dimension.key] || '',
-        label: row[dimension.label] || row[dimension.key] || '',
+        label: grouping === 'vm' ? vmNameById[row.resource_id] || row.resource_id || '' : row[dimension.label] || row[dimension.key] || '',
         count: row.count || 0,
         max_severity_weight: row.max_severity_weight || 0,
         resource_names: String(row.resource_names || '')

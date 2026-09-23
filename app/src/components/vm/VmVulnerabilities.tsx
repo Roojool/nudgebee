@@ -354,7 +354,11 @@ const VmVulnerabilities = ({
     () =>
       rows.map((finding) => {
         const payload = finding.recommendation || {};
-        const packageSubtext = [payload.package?.type, showVm && !vmUnderVulnerability ? finding.resource_name : undefined]
+        // arch distinguishes the common case of the same CVE/package appearing
+        // as two rows for one VM — once per architecture the package is
+        // installed under (e.g. noarch and x86_64) — which otherwise look
+        // identical apart from this column (#38976).
+        const packageSubtext = [payload.package?.type, payload.package?.arch, showVm && !vmUnderVulnerability ? finding.resource_name : undefined]
           .filter(Boolean)
           .join(' · ');
         const vulnSubtext = [payload.kev ? 'Known exploited' : undefined, vmUnderVulnerability ? finding.resource_name : undefined]
