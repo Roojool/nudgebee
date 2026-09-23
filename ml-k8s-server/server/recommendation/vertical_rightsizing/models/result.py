@@ -110,7 +110,6 @@ class Result(pd.BaseModel):
     description: Optional[str] = None
     strategy: StrategyData
     errors: list[dict[str, Any]] = pd.Field(default_factory=list)
-    clusterSummary: dict[str, Any] = {}
     config: Config
 
     def __init__(self, *args, **kwargs) -> None:

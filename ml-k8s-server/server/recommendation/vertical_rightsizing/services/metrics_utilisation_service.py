@@ -97,10 +97,6 @@ class UtilisationMetricsService(MetricsService):
         """api-server is reached per query; there is no separate connection to test."""
         return True
 
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        """Nothing reads this. The two providers that implement it are never asked."""
-        return {}
-
     async def load_pods(self, object: K8sObjectData, period: timedelta) -> List[PodData]:
         if self._inventory is not None:
             return await self._inventory.load_pods(object, period)

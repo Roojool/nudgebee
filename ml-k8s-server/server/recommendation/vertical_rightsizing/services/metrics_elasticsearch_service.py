@@ -195,11 +195,6 @@ class ElasticsearchMetricsService(MetricsService):
 
     # --- MetricsService ------------------------------------------------------
 
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        # Cluster capacity comes from the workload inventory, not from here — same as
-        # the Datadog service.
-        return {}
-
     async def load_pods(self, object: K8sObjectData, period: timedelta) -> List[PodData]:
         body = {
             "size": 0,

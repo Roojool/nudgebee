@@ -1,7 +1,7 @@
 import abc
 import datetime
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 
 from server.recommendation.vertical_rightsizing.models.result import PodsTimeData
 from server.recommendation.vertical_rightsizing.models.objects import K8sObjectData, PodData
@@ -29,10 +29,6 @@ class MetricsService(abc.ABC):
     def name(cls) -> str:
         classname = cls.__name__
         return classname.replace("MetricsService", "") if classname != MetricsService.__name__ else classname
-
-    @abc.abstractmethod
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        pass
 
     @abc.abstractmethod
     async def load_pods(self, object: K8sObjectData, period: datetime.timedelta) -> List[PodData]:

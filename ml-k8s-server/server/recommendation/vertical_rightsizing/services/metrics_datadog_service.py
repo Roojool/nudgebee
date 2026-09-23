@@ -216,10 +216,6 @@ class DatadogMetricsService(MetricsService):
                     logger.warning(f"Datadog: unreadable sample for pod {pod_name}, skipping")
         return result
 
-    async def get_cluster_summary(self) -> Dict[str, Any]:
-        """Datadog doesn't provide cluster-level summary the same way Prometheus does."""
-        return {}
-
     async def load_pods(self, object: K8sObjectData, period: timedelta) -> list[PodData]:
         """
         Load pod names from Datadog metric series.

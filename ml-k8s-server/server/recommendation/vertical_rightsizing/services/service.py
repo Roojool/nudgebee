@@ -328,9 +328,6 @@ class RecommendationService:
 
         logger.info(f"Processing {len(workloads)} workloads")
 
-        # Get cluster summary and process workloads concurrently
-        cluster_summary_task = self._metrics_service_loaders.get_cluster_summary()
-
         # Batch sizing to avoid overwhelming relay server and memory
         # Each workload makes ~4-5 Prometheus queries, so smaller batches for more workloads
         # Cap at max_workers to prevent excessive concurrent memory usage
@@ -362,8 +359,6 @@ class RecommendationService:
                 elif result is not None:
                     scans.append(result)
 
-        # Wait for cluster summary
-        cluster_summary = await cluster_summary_task
         successful_scans = scans  # All scans are already non-None due to filtering above
 
         if len(scans) == 0:
@@ -384,7 +379,6 @@ class RecommendationService:
                 name=str(self._strategy).lower(),
                 settings=self._strategy.settings.model_dump(),
             ),
-            clusterSummary=cluster_summary,
             config=self._config,
         )
 

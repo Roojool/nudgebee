@@ -281,10 +281,6 @@ def test_an_unexpected_error_is_caught_too():
     assert all(value == {} for value in result.values())
 
 
-def test_nothing_reads_the_cluster_summary_so_it_answers_empty():
-    assert asyncio.run(_service().get_cluster_summary()) == {}
-
-
 # --- which pods a workload had ----------------------------------------------------
 
 
