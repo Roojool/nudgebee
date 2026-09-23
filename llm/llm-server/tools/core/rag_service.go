@@ -324,6 +324,17 @@ func QueryRAGCollectionReranked(ctx context.Context, userId, accountId, query, m
 // that already know the tenant scope (e.g. memory-v2 compose, which
 // sends the tenant UUID as account_id) should pass it.
 func QueryRAGCollection(ctx context.Context, userId, accountId, tenantId, query, module, collectionName string, numberOfResults int, conversationID string, messageId string, agentId string, trackTokenUsage bool, metadataFilter ...map[string]any) RAGSearchResults {
+	results, _ := QueryRAGCollectionErr(ctx, userId, accountId, tenantId, query, module, collectionName, numberOfResults, conversationID, messageId, agentId, trackTokenUsage, metadataFilter...)
+	return results
+}
+
+// QueryRAGCollectionErr is QueryRAGCollection with the retrieval error kept.
+//
+// "the corpus had nothing for this turn" and "the call failed" are different
+// facts that an empty slice cannot tell apart. Callers that record why a
+// retrieval produced nothing — the memory layers distinguish rag_empty from
+// rag_error — need the error so an outage is not logged as normal operation.
+func QueryRAGCollectionErr(ctx context.Context, userId, accountId, tenantId, query, module, collectionName string, numberOfResults int, conversationID string, messageId string, agentId string, trackTokenUsage bool, metadataFilter ...map[string]any) (RAGSearchResults, error) {
 	payload := ragQueryRequest{
 		AccountID:       accountId,
 		TenantID:        tenantId,
@@ -343,9 +354,9 @@ func QueryRAGCollection(ctx context.Context, userId, accountId, tenantId, query,
 
 	response, err := executeRAGCall(ctx, payload)
 	if err != nil {
-		return RAGSearchResults{}
+		return RAGSearchResults{}, err
 	}
-	return response
+	return response, nil
 }
 
 type ragServerCreateRequest struct {
