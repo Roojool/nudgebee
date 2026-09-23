@@ -136,7 +136,13 @@ class EmbeddingTracker:
         run_id=None,
     ):
         self.total_tokens = 0
+        # Chunks embedded. Drives the token-rate logging, which is per
+        # embedded unit.
         self.total_docs = 0
+        # Source documents embedded. A long document is embedded as several
+        # chunks, so counting units would report the Load History column in
+        # chunks — it read in documents until chunking was introduced.
+        self._document_keys: set = set()
         self.account_id = account_id if account_id else "global"
         self.is_global = not bool(account_id) or account_id == "global"
         self.collection_name = collection_name
@@ -152,7 +158,7 @@ class EmbeddingTracker:
         self.run_id = run_id
         self.load_start_time = None
 
-    def record(self, *, doc_id, text, embedding_model, usage_metadata=None):
+    def record(self, *, doc_id, text, embedding_model, usage_metadata=None, document_key=None):
         """Capture provider, token usage, and model details."""
         if self.llm_provider is None:
             self.llm_provider = get_provider_name(embedding_model.__class__.__name__)
@@ -172,6 +178,7 @@ class EmbeddingTracker:
 
         self.total_tokens += tokens
         self.total_docs += 1
+        self._document_keys.add(document_key or doc_id)
         logger.info(
             f"[EmbeddingTracker] Added {tokens} tokens for {doc_id}. "
             f"Total tokens for collection '{self.collection_name}': {self.total_tokens}"
@@ -196,6 +203,8 @@ class EmbeddingTracker:
         load_duration = None
         if self.load_start_time is not None:
             load_duration = time.time() - self.load_start_time
+
+        document_count = len(self._document_keys)
 
         try:
             # Use shared engine from db_query (module-level singleton with connection pooling)
@@ -230,7 +239,7 @@ class EmbeddingTracker:
                             "embedding_provider": self.llm_provider,
                             "embedding_model": self.llm_model,
                             "total_tokens": self.total_tokens,
-                            "document_count": self.total_docs,
+                            "document_count": document_count,
                             "operation_type": "batch_embedding",
                             "request_status": status,
                             "error_message": error_message,
@@ -246,15 +255,16 @@ class EmbeddingTracker:
                     logger.info(
                         f"[EmbeddingTracker] Inserted record for collection "
                         f"'{self.collection_name}' with {self.total_tokens} tokens, "
-                        f"{self.total_docs} documents, duration={load_duration:.1f}s"
+                        f"{document_count} documents, duration={load_duration:.1f}s"
                         if load_duration
                         else f"[EmbeddingTracker] Inserted record for collection "
                         f"'{self.collection_name}' with {self.total_tokens} tokens, "
-                        f"{self.total_docs} documents"
+                        f"{document_count} documents"
                     )
 
             self.total_tokens = 0
             self.total_docs = 0
+            self._document_keys = set()
 
         except Exception as e:
             logger.error(f"[EmbeddingTracker] Failed to persist records: {e}")

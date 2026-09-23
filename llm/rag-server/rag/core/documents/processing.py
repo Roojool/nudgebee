@@ -233,6 +233,9 @@ def _create_embeddings_batch(
                 text=doc.page_content,
                 embedding_model=embeddings,
                 usage_metadata=usage_metadata,
+                # Chunks of one document share a parent_id; an unchunked document
+                # is its own key.
+                document_key=(doc.metadata or {}).get("parent_id") or doc_id,
             )
 
 
@@ -677,7 +680,7 @@ def process_documents(
         triggered_by=triggered_by,
         trigger_type=trigger_type,
         module=module,
-        expected_document_count=len(documents),
+        expected_document_count=source_document_count,
         run_id=run_id,
     )
     tracker.start_timer()
