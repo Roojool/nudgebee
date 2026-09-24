@@ -1,9 +1,9 @@
 # Event Analysis + Code Fix
 
 Scores the production event-analysis + code-fix pipeline against synthetic,
-log-driven scenarios, across three entry points: the alert-injected
+log-driven scenarios, across four entry points: the alert-injected
 diagnosis+fix pipeline (`/v1/analyze/event/rca`), `code_analyzer`'s read-only
-explore mode, and `PRFollowupAgent`. Full contract:
+explore mode, `PRFollowupAgent`, and a multi-turn Ask Nudgebee conversation. Full contract:
 [`docs/code-analysis-eval-spec.md`](docs/code-analysis-eval-spec.md).
 
 ## Why this and not nb_scenarios or swebench alone
@@ -18,7 +18,7 @@ diagnosis and (where applicable) fix correctness scored out.
 
 ## What it measures — and doesn't
 
-Eight scenarios across three `type`s, each dispatched differently by
+Nine scenarios across four `type`s, each dispatched differently by
 `run_event_code_fix.py` (see `docs/code-analysis-eval-spec.md` §2-§6c for the
 full mechanics of each):
 
@@ -32,6 +32,7 @@ full mechanics of each):
 | 006 | Explore: "why does memory grow?" against 001's fixture | `explore` | ✓ (+ citation check) | n/a — read-only |
 | 007 | Explore: "why is this endpoint slow?" against 003's fixture | `explore` | ✓ (+ citation check) | n/a — read-only |
 | 008 | PR follow-up: harness opens a real PR with an incomplete fix, posts a review comment | `pr_followup` | n/a | ✓ (real PR, real convergence check) |
+| 009 | Multi-turn: "find the bug" → "fix it" → "now raise a pr for this", with a second repo the account could drift to | `multi_turn_repo` | n/a | ✓ (every turn stays on turn 1's repo; #38547) |
 
 Diagnosis/explore-answer scoring reuses the same RAGAS/verdict-judge
 machinery `nb_scenarios` uses (`llm/agents/common/ragas_evaluation.py`,

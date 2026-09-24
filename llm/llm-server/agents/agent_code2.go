@@ -1315,6 +1315,33 @@ type CodeAgent2Request struct {
 	AddressedComments json.RawMessage `json:"addressed_comments,omitempty"`
 }
 
+// repoFromQueryConfig returns the repo a conversation has already settled on: one
+// the user picked from a followup, else the git_repo stored on the message config,
+// which a later message inherits from the one before it. Empty when there is none.
+func repoFromQueryConfig(cfg toolcore.NBQueryConfig) string {
+	if repo := cfg.ToolConfigs["git_repo"]; repo != "" {
+		return repo
+	}
+	return cfg.GitRepo
+}
+
+// rememberConversationRepo records the repo on the message's stored config so
+// later turns keep working on it instead of detecting one again and possibly
+// landing elsewhere. Best effort: a failed write only costs the next turn a
+// fresh detection.
+func rememberConversationRepo(ctx *security.RequestContext, messageId, repo string) {
+	if repo == "" {
+		return
+	}
+	dao := core.GetConversationDao()
+	if dao == nil {
+		return
+	}
+	if err := dao.UpdateConversationMessageGitRepo(messageId, repo); err != nil {
+		ctx.GetLogger().Warn("code: unable to remember git_repo for the conversation", "error", err, "repo", repo)
+	}
+}
+
 func (l CodeAgent2) GetPlannerType() core.AgentPlannerType {
 	return core.AgentPlannerTypeCustom
 }
@@ -1394,18 +1421,13 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 	// pure exploration question ("what is the default Postgres connection
 	// limit?") got promoted to fix-mode and produced a spurious PR.
 
-	// Check if user selected a repo via followup response
-	if codeAgentRequest.GitRepo == "" && query.QueryConfig.ToolConfigs != nil {
-		if selectedRepo, ok := query.QueryConfig.ToolConfigs["git_repo"]; ok && selectedRepo != "" {
-			codeAgentRequest.GitRepo = selectedRepo
-			ctx.GetLogger().Info("code: using git_repo from followup selection", "repo", selectedRepo)
+	// Reuse the repo the conversation already settled on (a followup selection, or
+	// the one stored on the message config) before auto-detecting one.
+	if codeAgentRequest.GitRepo == "" {
+		if repo := repoFromQueryConfig(query.QueryConfig); repo != "" {
+			codeAgentRequest.GitRepo = repo
+			ctx.GetLogger().Info("code: using git_repo from request config", "repo", repo)
 		}
-	}
-
-	// Check Config for explicit git_repo before auto-detecting
-	if codeAgentRequest.GitRepo == "" && query.QueryConfig.GitRepo != "" {
-		codeAgentRequest.GitRepo = query.QueryConfig.GitRepo
-		ctx.GetLogger().Info("code: using git_repo from request config", "repo", query.QueryConfig.GitRepo)
 	}
 
 	// When input is plain text, try to extract a git URL embedded in the text
@@ -1670,6 +1692,8 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 	}
 
 	ctx.GetLogger().Info("code: using git provider", "provider", provider, "repo", repoUrl)
+
+	rememberConversationRepo(ctx, query.MessageId, codeAgentRequest.GitRepo)
 
 	// A second fix request in the same conversation is a retry, not a new bug.
 	// Amend the PR we already opened instead of cutting another branch and

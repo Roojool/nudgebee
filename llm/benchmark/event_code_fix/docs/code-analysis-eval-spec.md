@@ -377,6 +377,34 @@ pr_followup:
     - tests/test_cache.py::test_cache_respects_max_cache_size_env_var
 ```
 
+## 4d. Multi-turn repo-continuity scenario
+
+`type: multi_turn_repo` — added for #38547. In one Ask Nudgebee conversation
+("find the bug" → "fix it" → "now raise a pr for this") the code agent must stay
+on the repository the first turn settled on. Turn 1 names the repo; later turns
+do not, so the agent has to take it from the conversation instead of detecting
+one again. The scenario names a `distractor_repo` the account's git integration
+can also reach — without a second reachable repo there is nothing to drift to.
+
+**Execution.** The runner posts each turn to `/v1/completions/chat` with the same
+`conversation_id` and no `@code_analyzer` prefix, so every turn goes through the
+normal router, then polls `chat_get` until that turn is recorded and terminal.
+The last turn raises a real PR; the runner closes every PR the conversation
+raised, on whichever repo it landed, when the scenario ends. A crashed run can
+leave one open — the agent's branch names carry no benchmark prefix, so the
+orphan sweep (§5c) does not find them.
+
+**Scoring.** Deterministic, read from what llm-server persisted, no LLM judge:
+
+- `resolved` — every `code_analyzer` call ran on `repo` (its response's
+  `source_details`), and each such turn but the last stored `repo` in its
+  message config for the next turn to inherit.
+- `repo_drift` — some turn ran on another repository.
+- `repo_not_remembered` — the turns ran on `repo` but a turn had nothing stored
+  for its successor.
+- `no_code_agent_turn` — the router never sent a turn to the code agent, so there
+  is nothing to score (a routing miss, not a repo failure).
+
 ## 5. Execution contract
 
 1. **One-time setup** (per cluster/account, not per run): a

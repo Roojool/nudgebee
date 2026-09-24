@@ -1,0 +1,25 @@
+name: multi_turn_repo_continuity
+type: multi_turn_repo
+tags: [multi_turn, repo_continuity, ask_nudgebee]
+
+# Regression benchmark for #38547: in one Ask Nudgebee conversation the code
+# agent must stay on the repository the first turn settled on. Turn 1 names the
+# repo; the later turns deliberately do not ("now raise a pr for this"), so the
+# agent has to take it from the conversation instead of detecting one again.
+#
+# Needs a second repository the benchmark account's git integration can also
+# reach (distractor_repo). With only one connected repo there is nothing to
+# drift to and this scenario cannot fail. Both repos must be fixtures — the last
+# turn raises a real PR, which the runner closes when the scenario ends.
+#
+# Scored deterministically from what llm-server persisted (no LLM judge): the
+# repo each code_analyzer call ran on, and the repo stored on each turn's
+# message for the next turn to inherit. See conversation_repo_verifier.py.
+
+multi_turn:
+  repo: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  distractor_repo: https://github.com/nudgebee-org/REPLACE_WITH_SECOND_FIXTURE_REPO
+  turns:
+    - "Why might subscriber-cache-worker's memory grow over time? Look at the cache implementation in https://github.com/nudgebee-org/nb-benchmark-fixtures"
+    - "fix it"
+    - "now raise a pr for this"

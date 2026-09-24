@@ -273,6 +273,7 @@ type IConversationDao interface {
 	SaveConversationMessageSuggestion(messageId string, accountId string, conversationId string, messages []ConversationSuggestionMessageResponse) error
 	GetConversationAgentParentAgentIdAndPreviousState(agenId string) (string, string)
 	UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error
+	UpdateConversationMessageGitRepo(id, gitRepo string) error
 	UpdateConversationMessageFollowupConfig(id string, followupRequest FollowupRequest) error
 	LoadConversationMessages(accountID, conversationID, userID string, requestType MessageType, k int) ([]map[string]string, error)
 	ListConversationFileRefs(accountId, conversationId string, limit int) ([]FileEvidenceRef, error)
@@ -2246,13 +2247,43 @@ func (chat *ConversationDao) terminateConversation(ctx *security.RequestContext,
 	return claimed, nil
 }
 
+// UpdateConversationMessageConfig replaces the message's stored config, except
+// that a git_repo already stored on the message is kept.
+//
+// The code agent records the repo it resolved mid-turn
+// (UpdateConversationMessageGitRepo), but it runs as a sub-agent: the top-level
+// request that rewrites the config when the turn ends never saw it and carries
+// whatever repo the turn started with, or none. Letting that stale value win
+// would undo the code agent's write — including a switch from repo A to repo B.
+// The code agent is the only thing that resolves a repo, so the stored value is
+// authoritative once set.
 func (chat *ConversationDao) UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error {
 	configJson, _ := common.MarshalJson(config)
 
-	query := `UPDATE llm_conversation_messages SET message_config = $2 WHERE id = $1`
+	query := `UPDATE llm_conversation_messages
+		SET message_config = CASE
+			WHEN COALESCE(NULLIF(message_config, '')::jsonb ->> 'git_repo', '') <> ''
+			THEN jsonb_set($2::text::jsonb, '{git_repo}', to_jsonb(message_config::jsonb ->> 'git_repo'))::text
+			ELSE $2::text
+		END
+		WHERE id = $1`
 	_, err := chat.dbManager.Db.Exec(query, id, string(configJson))
 	if err != nil {
 		return fmt.Errorf("history: failed to update message: %w", err)
+	}
+	return nil
+}
+
+// UpdateConversationMessageGitRepo records the repository the code agent
+// resolved on the message's stored config, leaving every other field as is. The
+// next message in the conversation inherits it from there instead of detecting a
+// repository again (see the inheritance in handleConversationRequest).
+func (chat *ConversationDao) UpdateConversationMessageGitRepo(id, gitRepo string) error {
+	query := `UPDATE llm_conversation_messages
+		SET message_config = jsonb_set(COALESCE(NULLIF(message_config, ''), '{}')::jsonb, '{git_repo}', to_jsonb($2::text))::text
+		WHERE id = $1`
+	if _, err := chat.dbManager.Db.Exec(query, id, gitRepo); err != nil {
+		return fmt.Errorf("history: failed to update message git repo: %w", err)
 	}
 	return nil
 }

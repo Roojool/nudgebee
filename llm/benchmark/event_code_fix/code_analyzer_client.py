@@ -74,6 +74,66 @@ class CodeAnalyzerClient:
         if not cid:
             return {"_status": "SUBMIT_FAILED", "_detail": json.dumps(started)[:300]}
 
+        status, data = self._wait(cid, poll_interval, timeout_seconds)
+        if status in TERMINAL_BAD or status == "TIMEOUT":
+            return {"_status": status, "_conversation_id": cid}
+        result = self._code_analyzer_response(data)
+        if result is None:
+            return {"_status": "NOT_ROUTED_TO_CODE_ANALYZER", "_conversation_id": cid}
+        result["_conversation_id"] = cid
+        return result
+
+    def converse(
+        self,
+        text: str,
+        conversation_id: str | None = None,
+        turn_number: int = 1,
+        poll_interval: int = 10,
+        timeout_seconds: int = 600,
+    ) -> dict[str, Any]:
+        """Send one natural-language turn, into an existing conversation when
+        conversation_id is given, and return the whole finished conversation.
+        turn_number is this turn's 1-based position; it stops the poll from
+        mistaking the previous turn's COMPLETED status for this turn's.
+
+        Unlike query(), the text is not prefixed with @code_analyzer, so it goes
+        through the normal router exactly as a message typed into Ask Nudgebee
+        does. Returns {"_status", "_conversation_id", "conversation"}; conversation
+        is the chat_get payload and is only set when the turn completed.
+        """
+        body: dict[str, Any] = {
+            "query": text,
+            "account_id": self.account_id,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "async": True,
+        }
+        if conversation_id:
+            body["conversation_id"] = conversation_id
+        resp = requests.post(
+            f"{self.llm_url}/v1/completions/chat",
+            json=body,
+            headers=self.headers,
+            timeout=90,
+        )
+        resp.raise_for_status()
+        started = (resp.json().get("data")) or {}
+        cid = started.get("conversation_id") or conversation_id
+        if not cid:
+            return {"_status": "SUBMIT_FAILED", "_detail": json.dumps(started)[:300]}
+
+        status, data = self._wait(cid, poll_interval, timeout_seconds, turn_number)
+        result: dict[str, Any] = {"_status": status, "_conversation_id": cid}
+        if status in TERMINAL_OK:
+            result["conversation"] = data
+        return result
+
+    def _wait(
+        self, cid: str, poll_interval: int, timeout_seconds: int, min_turns: int = 0
+    ) -> tuple[str, dict[str, Any]]:
+        """Poll chat_get until the conversation reaches a terminal status with at
+        least min_turns user turns recorded. Returns (status, conversation
+        payload); status is TIMEOUT if it never did."""
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             time.sleep(poll_interval)
@@ -87,18 +147,16 @@ class CodeAnalyzerClient:
             conv = resp.json()
             data = conv.get("data") or conv
             status = str(data.get("status", "")).upper()
-            if status in TERMINAL_BAD:
-                return {"_status": status, "_conversation_id": cid}
-            if status in TERMINAL_OK:
-                result = self._code_analyzer_response(data)
-                if result is None:
-                    return {
-                        "_status": "NOT_ROUTED_TO_CODE_ANALYZER",
-                        "_conversation_id": cid,
-                    }
-                result["_conversation_id"] = cid
-                return result
-        return {"_status": "TIMEOUT", "_conversation_id": cid}
+            if status not in TERMINAL_BAD and status not in TERMINAL_OK:
+                continue
+            turns = [
+                m
+                for m in data.get("llm_conversation_messages") or []
+                if m.get("message_type", "generation") == "generation"
+            ]
+            if len(turns) >= min_turns:
+                return status, data
+        return "TIMEOUT", {}
 
     @staticmethod
     def _code_analyzer_response(data: dict[str, Any]) -> dict[str, Any] | None:
