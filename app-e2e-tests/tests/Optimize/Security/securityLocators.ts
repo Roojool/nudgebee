@@ -1,4 +1,3 @@
-// Not for OSS
 import { Page, Locator } from "@playwright/test";
 import { OptimizeModuleLocators } from "../optimizeModuleLocators";
 
@@ -32,6 +31,8 @@ export const CIS_TABLE = "kubernetesSecurityTable";
 // only grouping this suite touches, so the ungrouped constant is the one that applies.
 export const VM_TABLE = "VM_VULNERABILITIES_TABLE";
 export const POSTURE_TABLE = "cloud-posture-rules";
+// The Details view is the only Image Scan view with per-finding rows and the Dismiss / Reactivate row actions.
+export const DETAILS_TABLE = "details";
 
 // The heading CustomTable's showUpdatedEmptyData branch renders in place of an id'd one.
 export const NO_FINDINGS_HEADING = "All good here!";
@@ -49,6 +50,25 @@ export class SecurityLocators extends OptimizeModuleLocators {
   readonly imageScanSeverityFilter: Locator;
   readonly imageScanStatusFilter: Locator;
   readonly imageSearch: Locator;
+  readonly imageScanDetailsOption: Locator;
+
+  readonly dismissMenuItem: Locator;
+  readonly reactivateMenuItem: Locator;
+  readonly dismissDialog: Locator;
+  readonly dismissDurationFilter: Locator;
+  readonly dismissReasonInput: Locator;
+  readonly dismissConfirmButton: Locator;
+  readonly snoozeReturnCaption: Locator;
+  readonly permanentDismissCaption: Locator;
+  readonly dismissCancelButton: Locator;
+  readonly dismissCloseButton: Locator;
+
+  readonly findingPanel: Locator;
+  readonly panelDismissButton: Locator;
+  readonly panelReactivateButton: Locator;
+
+  readonly detailsHeaderCells: Locator;
+  readonly openDropdownOptions: Locator;
 
   readonly cisRoot: Locator;
   readonly cisStatusFilter: Locator;
@@ -87,6 +107,69 @@ export class SecurityLocators extends OptimizeModuleLocators {
     // placeholder, so the id (rung 3) outranks the placeholder (rung 4) — same call the
     // Recommendations search makes. Rendered only on the Images and Details views.
     this.imageSearch = page.locator("#security-filter-image").or(this.imageScanRoot.getByPlaceholder(/Image/)).first();
+    this.imageScanDetailsOption = this.toggleOption(this.imageScanViewToggle, "Details");
+
+    // The open menu is aria-hidden, so getByRole("menuitem") matches zero; the CSS role attribute and item id survive.
+    this.dismissMenuItem = page
+      .locator('[role="menuitem"]#dismiss:visible')
+      .or(
+        page.locator('[role="menuitem"]:visible', {
+          hasText: "Dismiss / snooze",
+        })
+      )
+      .first();
+    this.reactivateMenuItem = page
+      .locator('[role="menuitem"]#reactivate:visible')
+      .or(page.locator('[role="menuitem"]:visible', { hasText: "Reactivate" }))
+      .first();
+
+    this.dismissDialog = page
+      .getByRole("dialog", { name: "Dismiss Recommendation" })
+      .or(
+        page.locator('[aria-labelledby="alert-dialog-title"]', {
+          hasText: "Dismiss Recommendation",
+        })
+      )
+      .first();
+    this.dismissDurationFilter = this.filterTrigger("dismiss-snooze-select", "Duration", this.dismissDialog);
+    this.dismissReasonInput = this.dismissDialog
+      .getByRole("textbox", { name: "Reason" })
+      .or(this.dismissDialog.locator("#dismiss-reason"))
+      .first();
+    this.dismissConfirmButton = this.dismissDialog
+      .getByRole("button", { name: /^(Dismiss|Snooze)$/ })
+      .or(page.locator("#dismiss-confirm"))
+      .first();
+    this.snoozeReturnCaption = this.dismissDialog.getByText(/^Returns to the open list on /);
+    this.permanentDismissCaption = this.dismissDialog.getByText("Stays dismissed until someone reactivates it.");
+    this.dismissCancelButton = this.dismissDialog
+      .getByRole("button", { name: "Cancel", exact: true })
+      .or(page.locator("#dismiss-cancel"))
+      .first();
+    this.dismissCloseButton = this.dismissDialog
+      .getByRole("button", { name: "Close", exact: true })
+      .or(this.dismissDialog.locator("#close-modal-btn"))
+      .first();
+
+    // CustomTable header cells carry no testid or per-column id, so the table id scopes them.
+    this.detailsHeaderCells = page.locator(`#${DETAILS_TABLE} thead th`);
+    // FilterDropdown panels are aria-hidden while open, so getByRole("option") matches zero; the CSS role attribute survives.
+    this.openDropdownOptions = page.locator('[role="option"]:visible');
+
+    this.findingPanel = page.getByTestId("security-finding-panel");
+    // One button id serves both labels, so the id fallback is narrowed by text to keep the two apart.
+    this.panelDismissButton = this.findingPanel
+      .getByRole("button", { name: "Dismiss / Snooze", exact: true })
+      .or(
+        page.locator("#security-finding-dismiss", {
+          hasText: "Dismiss / Snooze",
+        })
+      )
+      .first();
+    this.panelReactivateButton = this.findingPanel
+      .getByRole("button", { name: "Reactivate", exact: true })
+      .or(page.locator("#security-finding-dismiss", { hasText: "Reactivate" }))
+      .first();
 
     // Same ListingLayout shape as Image Scan above — an id'd Card with no role and no name,
     // so there is no wider match that would not also match the page body.
@@ -125,6 +208,11 @@ export class SecurityLocators extends OptimizeModuleLocators {
       .locator(`#${tableId}-no-data`)
       .or(scope.getByRole("heading", { name: NO_FINDINGS_HEADING, exact: true }))
       .first();
+  }
+
+  // ThreeDotsMenu renders an icon-only button named "More actions" with a shared default id.
+  rowMenuTrigger(row: Locator): Locator {
+    return row.getByRole("button", { name: "More actions" }).or(row.locator("#three-dot-menu")).first();
   }
 
   // Tabs.jsx names each MUI Tab by its visible label, so getByRole is the higher rung.
