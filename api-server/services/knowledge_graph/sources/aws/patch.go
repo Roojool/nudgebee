@@ -91,9 +91,13 @@ func (p *patchPolicy) ContextFor(kind sources.ResourceKind) []core.NodeType {
 }
 
 // BuildNodes replays convertResourcesToGraph for one resource: include filter,
-// createNodeFromResource, the EC2/SSM collapse, and the VPC-name unique-key
-// rewrite resolved against contextNodes. It also fills the row cache the edge
-// builders read, so call it before OutgoingEdges for the same resource.
+// createNodeFromResource, the terminated-instance drop, the EC2/SSM collapse,
+// and the VPC-name unique-key rewrite resolved against contextNodes. It also
+// fills the row cache the edge builders read, so call it before OutgoingEdges
+// for the same resource.
+//
+// A ref for an instance AWS has terminated therefore builds no node, and
+// matchBuilt turns that into a rebuild — which tombstones the stored node.
 func (p *patchPolicy) BuildNodes(rows []sources.CloudResourceRow, contextNodes []*core.DbNode, req *core.SourceBuildRequest) ([]*core.DbNode, []string) {
 	p.source.fillRowCache(rows)
 
@@ -106,6 +110,7 @@ func (p *patchPolicy) BuildNodes(rows []sources.CloudResourceRow, contextNodes [
 			nodes = append(nodes, node)
 		}
 	}
+	nodes = dropTerminatedInstances(nodes)
 	nodes = collapseComputeInstanceDuplicates(nodes)
 
 	lookup := sources.NewNodeLookup(contextNodes)
