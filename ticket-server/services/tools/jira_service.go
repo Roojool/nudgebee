@@ -14,6 +14,7 @@ import (
 	"nudgebee/tickets-server/services/cache"
 	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/utils"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,7 +149,11 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 	issueResp, _, err := jiraClient.Issue.Create(&issue)
 	if err != nil {
 		slog.Error("Error creating Jira issue:", "error", slog.AnyValue(err))
-		return ticket, jiraCreateError(err)
+		createErr := jiraCreateError(err)
+		if options := jiraPriorityOptions(jiraClient, err); options != "" {
+			createErr = fmt.Errorf("%w (valid priorities: %s)", createErr, options)
+		}
+		return ticket, createErr
 	}
 	slog.Info("Jira issue created:", "Key", issueResp.Key)
 
@@ -174,6 +179,18 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 	ticket.CreatedAt = &now
 
 	return ticket, nil
+}
+
+var jiraNumericIDRe = regexp.MustCompile(`^\d+$`)
+
+// jiraPriority sends an all-digit value as a priority ID and anything else as a
+// priority name, so create and update read the same input the same way.
+func jiraPriority(value string) *jira.Priority {
+	value = strings.TrimSpace(value)
+	if jiraNumericIDRe.MatchString(value) {
+		return &jira.Priority{ID: value}
+	}
+	return &jira.Priority{Name: value}
 }
 
 // buildJiraIssueFields assembles the field set sent to Jira's create API.
@@ -206,10 +223,9 @@ func buildJiraIssueFields(ticket models.Ticket, additionalFields map[string]inte
 	}
 
 	if ticket.Severity != "" {
-		// Severity carries the Jira priority ID (the create-meta option value).
-		fields.Priority = &jira.Priority{
-			ID: ticket.Severity,
-		}
+		// Severity is the create-meta option value (a priority ID) from the UI, but a
+		// priority name from workflows and the assistant; Jira accepts either.
+		fields.Priority = jiraPriority(ticket.Severity)
 	}
 
 	assignee := ticket.Assignee
@@ -345,6 +361,23 @@ func jiraCreateError(err error) error {
 		return err
 	}
 	return fmt.Errorf("jira rejected the create request: %s", strings.Join(parts, "; "))
+}
+
+// jiraPriorityOptions lists the instance's priority names, but only when Jira just
+// rejected the priority, so the common path makes no extra call.
+func jiraPriorityOptions(client *jira.Client, err error) string {
+	var jerr *jira.Error
+	if !errors.As(err, &jerr) {
+		return ""
+	}
+	if _, rejected := jerr.Errors["priority"]; !rejected {
+		return ""
+	}
+	names := make([]string, 0)
+	for _, p := range fetchJiraPriorities(client) {
+		names = append(names, p.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 func validateParentIssue(client *jira.Client, parentKey string) error {
@@ -1217,7 +1250,7 @@ func (s *JiraService) Update(ctx *gin.Context, config models.TicketConfiguration
 	update := make(map[string]interface{})
 
 	if updateFields.Severity != "" {
-		update["priority"] = map[string]string{"name": updateFields.Severity}
+		update["priority"] = jiraPriority(updateFields.Severity)
 	}
 
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
@@ -1270,6 +1303,13 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 		return fmt.Errorf("failed to create Jira client: %w", err)
 	}
 
+	return transitionJiraIssue(jiraClient, ticketID, status)
+}
+
+// transitionJiraIssue moves the issue to status. Jira never offers a transition to
+// the status an issue is already in, so that case is a successful no-op and a
+// re-run of a workflow does not fail on an already-settled ticket.
+func transitionJiraIssue(jiraClient *jira.Client, ticketID string, status string) error {
 	// Get available transitions
 	transitions, _, err := jiraClient.Issue.GetTransitions(ticketID)
 	if err != nil {
@@ -1278,7 +1318,7 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 
 	// Find matching transition
 	var transitionID string
-	statusLower := strings.ToLower(status)
+	statusLower := strings.ToLower(strings.TrimSpace(status))
 	for _, t := range transitions {
 		if strings.ToLower(t.Name) == statusLower || strings.ToLower(t.To.Name) == statusLower {
 			transitionID = t.ID
@@ -1287,6 +1327,12 @@ func (s *JiraService) Transition(ctx *gin.Context, config models.TicketConfigura
 	}
 
 	if transitionID == "" {
+		if issue, _, getErr := jiraClient.Issue.Get(ticketID, &jira.GetQueryOptions{Fields: "status"}); getErr == nil &&
+			issue.Fields != nil && issue.Fields.Status != nil &&
+			strings.ToLower(strings.TrimSpace(issue.Fields.Status.Name)) == statusLower {
+			slog.Info("Jira issue already in target status, nothing to do", "ticketID", ticketID, "status", status)
+			return nil
+		}
 		availableStatuses := make([]string, len(transitions))
 		for i, t := range transitions {
 			availableStatuses[i] = t.To.Name
