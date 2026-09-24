@@ -305,6 +305,17 @@ type appConfig struct {
 	// cannot answer. Default on; turn it off to force CLI-always as a kill switch.
 	FeatureKGCloudTopologyFromDB bool `mapstructure:"feature_kg_cloud_topology_from_db"`
 
+	// When true, the knowledge graph reads each CloudFormation stack's
+	// managed-resource list from the stack's own cloud_resourses row, falling back
+	// to `aws cloudformation list-stack-resources` only when the key is absent.
+	// Default on; turn it off to force CLI-always as a kill switch.
+	//
+	// Separate from FeatureKGCloudTopologyFromDB on purpose: a kill switch is only
+	// worth having if it reverts exactly the thing that broke, and folding these
+	// together would mean a CloudFormation bug also reverts the ENI, Route 53 and
+	// load-balancer paths.
+	FeatureKGCFNStackResourcesFromDB bool `mapstructure:"feature_kg_cfn_stack_resources_from_db"`
+
 	// Webhook execution mode - true for async (default), false for sync (useful for tests)
 	WebhookAsyncExecution bool `mapstructure:"webhook_async_execution"`
 
@@ -555,6 +566,7 @@ func init() {
 
 	viper.SetDefault("feature_event_point_in_time_close_enabled", true)
 	viper.SetDefault("feature_kg_cloud_topology_from_db", true)
+	viper.SetDefault("feature_kg_cfn_stack_resources_from_db", true)
 	viper.SetDefault("webhook_async_execution", true)
 
 	viper.SetDefault("LLM_SERVER_TOOL_SHELL_IMAGE", "ghcr.io/nudgebee/nudgebee-debug:0.3.12")

@@ -583,6 +583,22 @@ func StoreResources(ctx *security.RequestContext, accountId string, serviceName 
 		}, nil
 	}
 
+	// AWS CloudFormation only: put each stack's managed-resource list on the
+	// stack's own row, so the knowledge graph stops shelling out to
+	// `aws cloudformation list-stack-resources` once per stack per build.
+	//
+	// Here and not inside the provider's GetResources on purpose: GetResources
+	// runs inside main.go's per-region goroutine, where a returned throttle error
+	// makes the collector skip that entire region for the cycle. Out here the
+	// worst a failure can do is leave one stack's key absent, which the graph
+	// reads as "never captured" and answers with its existing CLI path.
+	//
+	// Runs before the marshal below, so the keys ride the existing
+	// `meta = EXCLUDED.meta` upsert with no SQL change.
+	if strings.EqualFold(account.CloudProvider, "aws") && strings.EqualFold(serviceName, awsProvider.ServiceNameCloudFormation) {
+		enrichCloudFormationStacks(ctx, dbms, accountId, account, resources.Items)
+	}
+
 	resourceMap := map[string]map[string]any{}
 	t := time.Now().UTC().Format(time.RFC3339)
 	var nilString *string
