@@ -180,7 +180,7 @@ const VerdictCallout = ({ errorMessage, description, onLinkClick }) => {
           {errorMessage}
         </Typography>
       )}
-      {isNonEmptyString(description) && <MarkDowns data={description.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />}
+      {isNonEmptyString(description) && <MarkDowns data={description} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />}
     </Box>
   );
 };
@@ -198,7 +198,7 @@ const RootCauseSection = ({ rootCause, onLinkClick }) => {
   return (
     <Box sx={{ mb: sectionGap }}>
       <SectionTitle icon={<Search sx={{ fontSize: 16, color: 'var(--ds-gray-600)' }} />} label='Root cause' />
-      <MarkDowns data={rootCause.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
+      <MarkDowns data={rootCause} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
     </Box>
   );
 };
@@ -490,7 +490,7 @@ const ImplementationStepsSection = ({ steps, onLinkClick }) => {
           const text = stringifyStep(step);
           return (
             <li key={`step-${idx}-${text.slice(0, 40)}`}>
-              <MarkDowns data={text.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0, '& p': { margin: 0 } }} onLinkClick={onLinkClick} />
+              <MarkDowns data={text} sx={{ width: '100%', p: 0, '& p': { margin: 0 } }} onLinkClick={onLinkClick} />
             </li>
           );
         })}
@@ -508,7 +508,7 @@ const renderAlternativeFix = (alt, idx, onLinkClick) => {
   if (typeof alt === 'string') {
     return (
       <Box key={`alt-${idx}-${alt.slice(0, 30)}`} sx={{ mb: ds.space[2] }}>
-        <MarkDowns data={alt.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
+        <MarkDowns data={alt} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
       </Box>
     );
   }
@@ -532,9 +532,7 @@ const renderAlternativeFix = (alt, idx, onLinkClick) => {
             {alt.title}
           </Typography>
         )}
-        {isNonEmptyString(alt.description) && (
-          <MarkDowns data={alt.description.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
-        )}
+        {isNonEmptyString(alt.description) && <MarkDowns data={alt.description} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />}
         {isNonEmptyString(alt.git_diff) && <SimpleDiffViewer gitDiff={alt.git_diff} defaultExpanded={false} />}
       </Box>
     );
@@ -582,7 +580,7 @@ const InvestigationTrailSection = ({ trail, onLinkClick }) => {
           const text = stringifyStep(step);
           return (
             <li key={`trail-${idx}-${text.slice(0, 40)}`}>
-              <MarkDowns data={text.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0, '& p': { margin: 0 } }} onLinkClick={onLinkClick} />
+              <MarkDowns data={text} sx={{ width: '100%', p: 0, '& p': { margin: 0 } }} onLinkClick={onLinkClick} />
             </li>
           );
         })}
@@ -646,7 +644,7 @@ const ExecutionResultStrip = ({ status, summary, filesModified, verificationPass
         {verificationPassed === true && <Label text='Verification passed' tone='success' />}
         {verificationPassed === false && <Label text='Verification failed' tone='critical' />}
       </Box>
-      {isNonEmptyString(summary) && <MarkDowns data={summary.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />}
+      {isNonEmptyString(summary) && <MarkDowns data={summary} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />}
       {isNonEmptyArray(filesModified) && (
         <Box mt={ds.space.mul(0, 3)}>
           <Typography
@@ -673,7 +671,7 @@ const ExecutionResultStrip = ({ status, summary, filesModified, verificationPass
           >
             Verification details
           </Typography>
-          <MarkDowns data={verificationDetails.replace(/~/g, '\\~')} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
+          <MarkDowns data={verificationDetails} sx={{ width: '100%', p: 0 }} onLinkClick={onLinkClick} />
         </Box>
       )}
     </Box>

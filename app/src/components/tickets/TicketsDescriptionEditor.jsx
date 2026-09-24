@@ -32,11 +32,7 @@ function TicketsDescriptionEditor({ issueUrl, value, onChange, error }) {
 
   const handleEditToggle = () => setIsEditing((prev) => !prev);
 
-  const getDisplayValue = () => {
-    if (!value) return '';
-    if (isEditing) return value;
-    return value.replace(/~/g, '\\~');
-  };
+  const getDisplayValue = () => value || '';
 
   const hasError = error && !value;
 

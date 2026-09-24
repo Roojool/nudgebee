@@ -69,7 +69,7 @@ const TicketFormSection = ({
   // Ticket subject and description
   const [ticketDetails, setTicketDetails] = React.useState({
     subject: ticketData?.subject ?? '',
-    description: ticketData?.description?.replace(/~/g, '&#126;') ?? '',
+    description: ticketData?.description ?? '',
   });
 
   // Issue type dropdown options and selection
