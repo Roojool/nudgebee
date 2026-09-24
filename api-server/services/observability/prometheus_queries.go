@@ -209,6 +209,12 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 // the picker's start/end (unix millis). The window follows the picker so the usage,
 // P50/P90/Max and the usage-trend sparkline reflect the selected range instead of a
 // hardcoded 24h. Falls back to 24h when the range is missing or invalid.
+// promMaxRateWindowSeconds caps both the derived step and any rate window taken from
+// an explicit step. Thirty minutes is long enough to smooth a scrape gap and short
+// enough that rate() is not extrapolating across pods and nodes that did not live for
+// the whole window.
+const promMaxRateWindowSeconds = 1800
+
 func promAggWindow(startMs, endMs int64) (rangeStr, stepStr, rateStr string) {
 	rangeSec := (endMs - startMs) / 1000
 	if rangeSec <= 0 {
@@ -220,8 +226,8 @@ func promAggWindow(startMs, endMs int64) (rangeStr, stepStr, rateStr string) {
 	if stepSec < 60 {
 		stepSec = 60
 	}
-	if stepSec > 1800 {
-		stepSec = 1800
+	if stepSec > promMaxRateWindowSeconds {
+		stepSec = promMaxRateWindowSeconds
 	}
 	// Inner rate window: at least 5m (a few scrape intervals) and never finer than
 	// the step, so each sampled point covers its whole interval.
@@ -255,7 +261,19 @@ func resolveAggWindows(startMs, endMs int64, explicitStep int) (rangeW, stepW, r
 	rangeW, stepW, rateW = promAggWindow(startMs, endMs)
 	if explicitStep > 0 {
 		stepW = fmt.Sprintf("%ds", explicitStep)
-		rateW = stepW
+		// The rate window follows the step, but only up to the ceiling the derived
+		// path already uses. A step is a sampling interval; a rate window is the span
+		// a counter's rise is divided by, and the two stop agreeing once the step
+		// grows large. A caller sizing a bytes-per-day bucket sends a 1-day step,
+		// which made cpu_usage_trend `rate(node_cpu_seconds_total[1d])`: over a day on
+		// an autoscaling cluster that extrapolates across every node that came and
+		// went, and the sum exceeds the machine core count. Rightsizing's 75s step is
+		// far below the ceiling, so it keeps the exact window it asks for.
+		rateSec := explicitStep
+		if rateSec > promMaxRateWindowSeconds {
+			rateSec = promMaxRateWindowSeconds
+		}
+		rateW = fmt.Sprintf("%ds", rateSec)
 	}
 	return rangeW, stepW, rateW
 }
