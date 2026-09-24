@@ -301,7 +301,7 @@ var TenantAccountLister = core.ListTenantAccountToolConfigs
 
 // targetNoun names what a tool targets, for error messages.
 func targetNoun(toolName string) string {
-	if toolName == ToolExecuteKubectlCommand {
+	if toolName == ToolExecuteKubectlCommand || toolName == ToolExecuteHelmCommand {
 		return "cluster"
 	}
 	return "account"
@@ -500,6 +500,9 @@ func ListAccountTargets(ctx *security.RequestContext, accountID, toolName string
 func ResolveRequestedTarget(ctx *security.RequestContext, accountID, toolName string, current core.ToolConfig, requested string) (core.ToolConfig, error) {
 	if requested == "" || current.Name != "" && (strings.EqualFold(requested, current.Name) || strings.EqualFold(requested, targetAccountNumber(current))) {
 		return current, nil
+	}
+	if toolName == ToolExecuteHelmCommand {
+		return KubernetesTargetByName(ctx, accountID, requested)
 	}
 	return AccountTargetByName(ctx, accountID, toolName, requested)
 }

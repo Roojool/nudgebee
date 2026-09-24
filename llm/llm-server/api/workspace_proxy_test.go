@@ -420,6 +420,16 @@ func TestWorkspaceRelayTargetWriteAuthorization(t *testing.T) {
 		require.ErrorContains(t, err, "access denied", writeCmd)
 	}
 
+	for _, readCmd := range []string{"helm 'list' '-A'", "helm 'status' 'api'"} {
+		target, err := workspaceRelayTarget(readOnlyCtx, tools.RelayJobHelm, "selected-cluster", readCmd)
+		require.NoError(t, err, readCmd)
+		require.Equal(t, "target-k8s", target)
+	}
+	for _, writeCmd := range []string{"helm 'install' 'api' './chart'", "helm 'upgrade' 'api' './chart'", "helm 'uninstall' 'api'"} {
+		_, err := workspaceRelayTarget(readOnlyCtx, tools.RelayJobHelm, "selected-cluster", writeCmd)
+		require.ErrorContains(t, err, "access denied", writeCmd)
+	}
+
 	// Mutating commands allowed for write user
 	var writeSc security.SecurityContext
 	_ = json.Unmarshal([]byte(`{
@@ -795,6 +805,34 @@ func TestNormalizeKubectlProxyRequestExtractsConcreteContext(t *testing.T) {
 		})
 	}
 
+}
+
+func TestNormalizeHelmProxyRequestExtractsConcreteContext(t *testing.T) {
+	for _, tc := range []struct {
+		command    string
+		wantCmd    string
+		wantTarget string
+		wantErr    string
+	}{
+		{command: "helm list -A", wantCmd: "helm 'list' '-A'"},
+		{command: "helm --kube-context dev list -A", wantCmd: "helm 'list' '-A'", wantTarget: "dev"},
+		{command: "helm list --kube-context=prod", wantCmd: "helm 'list'", wantTarget: "prod"},
+		{command: "helm list --kube-context", wantErr: "requires a value"},
+		{command: "helm --kube-context=dev list --kube-context prod", wantErr: "more than one cluster"},
+		{command: "helm list --kube-apiserver=https://other", wantErr: "not allowed"},
+		{command: "helm list --kubeconfig /tmp/config", wantErr: "not allowed"},
+		{command: "kubectl get pods", wantErr: "must start with helm"},
+	} {
+		req := WorkspaceExecuteRequest{Command: tc.command}
+		err := normalizeHelmProxyRequest(&req)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr)
+			continue
+		}
+		require.NoError(t, err)
+		require.Equal(t, tc.wantCmd, req.Command)
+		require.Equal(t, tc.wantTarget, req.TargetName)
+	}
 }
 
 func TestRequireExecutionToken(t *testing.T) {

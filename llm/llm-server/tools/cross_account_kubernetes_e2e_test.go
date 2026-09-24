@@ -109,6 +109,64 @@ func requireShellSuccess(t *testing.T, response core.NBToolResponse, err error) 
 	return response.Data
 }
 
+// TestCrossAccountHelmE2E exercises the direct Helm tool through the workspace
+// shim and local workspace proxy. It intentionally uses read-only commands.
+// In addition to TEST_TENANT and TEST_USER, set HELM_E2E_WORKSPACE_ACCOUNT,
+// HELM_E2E_TARGET_ACCOUNT, and HELM_E2E_TARGET_NAME.
+func TestCrossAccountHelmE2E(t *testing.T) {
+	if os.Getenv("HELM_CROSS_ACCOUNT_E2E") != "1" {
+		t.Skip("set HELM_CROSS_ACCOUNT_E2E=1 and the HELM_E2E_* variables")
+	}
+	required := func(key string) string {
+		t.Helper()
+		value := strings.TrimSpace(os.Getenv(key))
+		require.NotEmpty(t, value, "%s must be set", key)
+		return value
+	}
+	workspaceAccount := required("HELM_E2E_WORKSPACE_ACCOUNT")
+	targetAccount := required("HELM_E2E_TARGET_ACCOUNT")
+	targetName := required("HELM_E2E_TARGET_NAME")
+	command := strings.TrimSpace(os.Getenv("HELM_E2E_COMMAND"))
+	if command == "" {
+		command = "helm list -A"
+	}
+	ctx := security.NewRequestContextForTenantAccountAdmin(required("TEST_TENANT"), required("TEST_USER"), []string{workspaceAccount, targetAccount})
+	helm := HelmExecuteTool{}
+	toolCtx := core.NewNbToolContext(ctx, helm, workspaceAccount, required("TEST_USER"),
+		"cross-account-helm-e2e-"+uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", core.NBQueryConfig{}, uuid.NewString())
+	response, err := helm.Call(toolCtx, core.NBToolCallRequest{Command: command, Arguments: map[string]any{"cluster": targetName}})
+	require.NoError(t, err, "helm response: %s", response.Data)
+	require.Equal(t, core.NBToolResponseStatusSuccess, response.Status, "helm response: %s", response.Data)
+	var result map[string]string
+	require.NoError(t, json.Unmarshal([]byte(response.Data), &result))
+	require.Equal(t, targetName, result["cluster"])
+	require.Contains(t, result, "stdout")
+
+	// The default call must stay on the workspace's account, while the shell
+	// shim must route a concrete --kube-context independently of tool metadata.
+	defaultResponse, err := helm.Call(toolCtx, core.NBToolCallRequest{Command: "helm version --short"})
+	require.NoError(t, err, "default helm response: %s", defaultResponse.Data)
+	require.Equal(t, core.NBToolResponseStatusSuccess, defaultResponse.Status)
+	var defaultResult map[string]string
+	require.NoError(t, json.Unmarshal([]byte(defaultResponse.Data), &defaultResult))
+	require.NotContains(t, defaultResult, "cluster")
+
+	shell := ShellTool{AccountId: workspaceAccount}
+	shellCtx := core.NewNbToolContext(ctx, shell, workspaceAccount, required("TEST_USER"),
+		"cross-account-helm-shell-e2e-"+uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", core.NBQueryConfig{}, uuid.NewString())
+	shellResponse, err := shell.Call(shellCtx, core.NBToolCallRequest{Command: "helm --kube-context " + common.ShellEscape(targetName) + " version --short"})
+	require.NoError(t, err, "shell helm response: %s", shellResponse.Data)
+	require.Equal(t, core.NBToolResponseStatusSuccess, shellResponse.Status)
+
+	_, err = helm.Call(toolCtx, core.NBToolCallRequest{Command: "helm version --short", Arguments: map[string]any{"cluster": "nonexistent-cross-account-helm-test"}})
+	require.Error(t, err, "unknown clusters must fail closed")
+	_, err = helm.Call(toolCtx, core.NBToolCallRequest{Command: "helm --kube-context k8s-dev version --short", Arguments: map[string]any{"cluster": targetName}})
+	require.ErrorContains(t, err, "disagree")
+	blockedResponse, err := helm.Call(toolCtx, core.NBToolCallRequest{Command: "helm version --short --kube-apiserver=https://example.invalid", Arguments: map[string]any{"cluster": targetName}})
+	require.Error(t, err)
+	require.Contains(t, blockedResponse.Data, "not allowed")
+}
+
 func TestCrossAccountKubernetesPythonUsesTwoContextsE2E(t *testing.T) {
 	fixture := loadCrossAccountKubernetesE2E(t)
 	contexts, err := json.Marshal([]string{fixture.context1, fixture.context2})

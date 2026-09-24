@@ -493,6 +493,13 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 
 	// The pod/token remains bound to req.AccountId; Kubernetes execution uses
 	// the selected cluster account, not the workspace's account.
+	if toolName == "helm" {
+		if normalizeErr := normalizeHelmProxyRequest(&req); normalizeErr != nil {
+			writeWorkspaceExecuteAudit(ctx, req, toolName, req.AccountId, false)
+			c.JSON(http.StatusBadRequest, gin.H{"error": normalizeErr.Error()})
+			return
+		}
+	}
 	requestedTarget := req.TargetName
 	if requestedTarget == "" {
 		requestedTarget = req.ConfigName
@@ -682,6 +689,51 @@ func normalizeKubectlProxyRequest(req *WorkspaceExecuteRequest) error {
 	return nil
 }
 
+// Helm's --kube-context selects a Nudgebee cluster, not a kubeconfig entry in
+// the relay pod. Resolve it server-side and remove it before relay execution.
+func normalizeHelmProxyRequest(req *WorkspaceExecuteRequest) error {
+	argv, err := commandArgs("helm", req.Command)
+	if err != nil {
+		return err
+	}
+	stripped := make([]string, 0, len(argv))
+	requested := ""
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		for _, forbidden := range []string{"--kubeconfig", "--kube-apiserver", "--kube-token", "--kube-ca-file", "--kube-as-user", "--kube-as-group", "--kube-insecure-skip-tls-verify"} {
+			if arg == forbidden || strings.HasPrefix(arg, forbidden+"=") {
+				return fmt.Errorf("helm %s is not allowed via workspace proxy", forbidden)
+			}
+		}
+		var value string
+		switch {
+		case arg == "--kube-context":
+			if i+1 >= len(argv) || argv[i+1] == "" {
+				return fmt.Errorf("helm --kube-context requires a value")
+			}
+			value = argv[i+1]
+			i++
+		case strings.HasPrefix(arg, "--kube-context="):
+			value = strings.TrimPrefix(arg, "--kube-context=")
+			if value == "" {
+				return fmt.Errorf("helm --kube-context requires a value")
+			}
+		default:
+			stripped = append(stripped, arg)
+			continue
+		}
+		if requested != "" && !strings.EqualFold(requested, value) {
+			return fmt.Errorf("helm command names more than one cluster")
+		}
+		requested = value
+	}
+	if requested != "" {
+		req.TargetName = requested
+	}
+	req.Command = buildProxyCommand("helm", stripped)
+	return nil
+}
+
 func kubectlCommandArgs(command string) ([]string, error) {
 	return commandArgs("kubectl", command)
 }
@@ -795,7 +847,7 @@ func workspaceExecuteReply(result any, err error) (int, gin.H) {
 }
 
 func workspaceRelayTarget(ctx core.NbToolContext, job tools.RelayJob, requestedConfig string, command string) (string, error) {
-	if job != tools.RelayJobKubectl {
+	if job != tools.RelayJobKubectl && job != tools.RelayJobHelm {
 		return ctx.AccountId, nil
 	}
 	selected := ctx.ToolConfig
@@ -818,8 +870,11 @@ func workspaceRelayTarget(ctx core.NbToolContext, job tools.RelayJob, requestedC
 		selected = found
 	}
 	requiredAccess := security.SecurityAccessTypeRead
-	if command != "" && tools.InferKubectlVerbType(command) != core.ToolRequestTypeRead {
-		requiredAccess = security.SecurityAccessTypeCreate
+	if command != "" {
+		if job == tools.RelayJobKubectl && tools.InferKubectlVerbType(command) != core.ToolRequestTypeRead ||
+			job == tools.RelayJobHelm && tools.InferHelmRequestType(command) != core.ToolRequestTypeRead {
+			requiredAccess = security.SecurityAccessTypeCreate
+		}
 	}
 	for _, value := range selected.Values {
 		if value.Name == "id" && value.Value != "" {

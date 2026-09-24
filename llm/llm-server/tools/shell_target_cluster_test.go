@@ -42,6 +42,29 @@ func TestRequestedKubernetesCluster(t *testing.T) {
 	}
 }
 
+func TestRequestedHelmCluster(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		args    map[string]any
+		want    string
+		wantErr string
+	}{
+		{command: "helm list -A"},
+		{command: "helm list -A", args: map[string]any{"cluster": "k8s-dev"}, want: "k8s-dev"},
+		{command: "helm --kube-context=k8s-dev list", want: "k8s-dev"},
+		{command: "helm --kube-context k8s-dev list", args: map[string]any{"cluster": "other"}, wantErr: "disagree"},
+		{command: "helm --kube-context k8s-dev list --kube-context other", wantErr: "two clusters"},
+	} {
+		got, err := RequestedHelmCluster(tc.command, tc.args)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, err, tc.wantErr)
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		}
+	}
+}
+
 func TestStripKubectlContextFlag(t *testing.T) {
 	require.Equal(t, "kubectl get pods -A | grep api", StripKubectlContextFlag("kubectl --context k8s-dev get pods -A | grep api"))
 	require.Equal(t, "kubectl get pods -A", StripKubectlContextFlag("kubectl get pods --context=k8s-dev -A"))

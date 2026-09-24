@@ -180,3 +180,23 @@ func TestKubernetesWorkspaceHandlerPreservesContextRouting(t *testing.T) {
 	assert.Equal(t, "k8s-dev", plan.Request.TargetName)
 	assert.Equal(t, "kubectl 'get' 'pods'", plan.Request.Command)
 }
+
+func TestHelmWorkspaceTargetUsesSelectedCluster(t *testing.T) {
+	ctx := security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"workspace", "dev-id"})
+	stubTenantAccounts(t, "workspace", "dev-id")
+	tools.StubTenantClusters(t, "tenant", []core.ToolConfig{
+		{Name: "k8s-prod", Values: []core.ToolConfigValue{{Name: "id", Value: "workspace"}}},
+		{Name: "k8s-dev", Values: []core.ToolConfigValue{{Name: "id", Value: "dev-id"}}},
+	})
+	toolCtx := core.NbToolContext{Ctx: ctx, AccountId: "workspace", ToolConfig: core.ToolConfig{Name: "k8s-prod"}}
+	target, err := workspaceRelayTarget(toolCtx, tools.RelayJobHelm, "k8s-dev", "helm list -A")
+	require.NoError(t, err)
+	require.Equal(t, "dev-id", target)
+
+	target, err = workspaceRelayTarget(toolCtx, tools.RelayJobHelm, "", "helm list -A")
+	require.NoError(t, err)
+	require.Equal(t, "workspace", target)
+
+	_, err = workspaceRelayTarget(toolCtx, tools.RelayJobHelm, "unknown", "helm list -A")
+	require.Error(t, err)
+}
