@@ -1034,6 +1034,7 @@ const DashboardView: React.FC<Props> = ({ dashboard, accounts, context, onBack, 
         handleClose={() => setPendingDelete(null)}
         title='Delete panel?'
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={confirmDeletePanel}
       >
         <Typography variant='body2'>

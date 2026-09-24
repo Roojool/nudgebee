@@ -138,6 +138,7 @@ export const KubernetesUnusedWorkloadUpdatePopupForm = ({ open, onClose, onSucce
   return (
     <Modal
       confirmText='Scale Down'
+      confirmTone='danger'
       handleClose={handleClose}
       title=''
       onConfirm={() => submitRecommendation()}

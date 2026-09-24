@@ -561,6 +561,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
         handleClose={() => setPendingDelete(null)}
         title='Delete sub-task?'
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={() => {
           if (pendingDelete !== null) handleDelete(pendingDelete);
           setPendingDelete(null);

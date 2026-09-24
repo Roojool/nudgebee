@@ -458,6 +458,7 @@ const KubernetesSLOConfigs: React.FC<KubernetesSLOConfigsProps> = ({ accountId }
         width='sm'
         loader={deleting}
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={confirmDelete}
         confirmDisabled={deleting}
       >

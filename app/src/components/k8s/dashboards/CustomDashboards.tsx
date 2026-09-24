@@ -625,6 +625,7 @@ const CustomDashboards: React.FC = () => {
         handleClose={deleting ? undefined : () => setPendingDelete(null)}
         title='Delete dashboard?'
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={confirmDelete}
         loader={deleting}
         backdropClickClose={false}

@@ -395,6 +395,7 @@ const ApiTokens = ({ open, title, onClose }) => {
         width='sm'
         title='Delete API Token'
         confirmText='Delete'
+        confirmTone='danger'
         onConfirm={confirmDeleteToken}
         loader={loading}
       >
