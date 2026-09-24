@@ -365,7 +365,7 @@ func TestServiceNowService_List_SetsHasMoreFromOverflowRow(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				var recs []string
 				for i := 0; i < tt.rows; i++ {
-					recs = append(recs, `{"sys_id":"s","number":"INC00`+string(rune('0'+i))+`","short_description":"d","state":"1","urgency":"2","sys_created_on":"2026-05-04 18:29:04"}`)
+					recs = append(recs, `{"sys_id":"s","number":"INC00`+string(rune('0'+i))+`","short_description":"d","state":"1","priority":"3","sys_created_on":"2026-05-04 18:29:04"}`)
 				}
 				_, _ = w.Write([]byte(`{"result":[` + strings.Join(recs, ",") + `]}`))
 			}))
@@ -395,5 +395,109 @@ func TestServiceNowService_List_SetsHasMoreFromOverflowRow(t *testing.T) {
 				t.Errorf("Total = %d, want %d", got.Total, tt.wantTotal)
 			}
 		})
+	}
+}
+
+func TestServiceNowService_GetComments_ReadsJournal(t *testing.T) {
+	var journalQuery string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "sys_journal_field") {
+			journalQuery = r.URL.Query().Get("sysparm_query")
+			_, _ = w.Write([]byte(`{"result":[
+			  {"value":"first note","sys_created_by":"alice","sys_created_on":"2026-05-04 18:29:04"},
+			  {"value":"customer reply","sys_created_by":"bob","sys_created_on":"2026-05-04 19:00:00"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"result":[{"sys_id":"abc123","number":"ACME0001234"}]}`))
+	}))
+	defer stub.Close()
+
+	svc := &ServiceNowService{}
+	cfg := models.TicketConfigurations{URL: stub.URL, Username: "u", Password: "p"}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	comments, err := svc.GetComments(ctx, cfg, "ACME0001234")
+	if err != nil {
+		t.Fatalf("GetComments: %v", err)
+	}
+	if len(comments) != 2 || comments[0].Comment != "first note" || comments[1].Author != "bob" {
+		t.Errorf("unexpected comments: %+v", comments)
+	}
+	if !strings.Contains(journalQuery, "element_id=abc123") || !strings.Contains(journalQuery, "elementINcomments,work_notes") {
+		t.Errorf("journal query = %q", journalQuery)
+	}
+}
+
+func TestGetNudgebeeSeverity(t *testing.T) {
+	for in, want := range map[string]string{"1": "Highest", "2": "High", "3": "Medium", "4": "Low", "5": "Lowest", "": "Low", "9": "Low"} {
+		if got := getNudgebeeSeverity(in); got != want {
+			t.Errorf("getNudgebeeSeverity(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestAddServiceNowIncidentComment_RejectsInvalidID(t *testing.T) {
+	cfg := models.TicketConfigurations{URL: "https://example.invalid", Username: "u", Password: "p"}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	err := AddServiceNowIncidentComment(ctx, cfg, models.Ticket{TicketID: "INC1^state=6", Comment: "x"})
+	if err == nil || !strings.Contains(err.Error(), "invalid incident ID") {
+		t.Errorf("expected invalid incident ID error, got %v", err)
+	}
+}
+
+func TestGetServiceNowPriorityLevel_InverseOfSeverity(t *testing.T) {
+	for _, sev := range []string{"Highest", "High", "Medium", "Low", "Lowest"} {
+		if got := getNudgebeeSeverity(getServiceNowPriorityLevel(sev)); got != sev {
+			t.Errorf("round trip %q -> %q", sev, got)
+		}
+	}
+	if getServiceNowPriorityLevel("bogus") != "" {
+		t.Error("unknown severity must not map to a priority")
+	}
+}
+
+func TestServiceNowService_List_RejectsUnknownPriority(t *testing.T) {
+	svc := &ServiceNowService{}
+	cfg := models.TicketConfigurations{URL: "https://example.invalid", Username: "u", Password: "p"}
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	_, err := svc.List(ctx, cfg, models.ListParams{Priority: "bogus", Limit: 10})
+	if err == nil || !strings.Contains(err.Error(), "unsupported priority filter") {
+		t.Errorf("expected unsupported priority filter error, got %v", err)
+	}
+}
+
+func TestServiceNowSeverityWrites_ImpactAndUrgency(t *testing.T) {
+	want := map[string][2]string{
+		"Highest": {"1", "1"}, "High": {"2", "1"}, "Medium": {"2", "2"}, "Low": {"2", "3"}, "Lowest": {"3", "3"},
+	}
+	for sev, iu := range want {
+		if got := getServiceNowImpact(sev); got != iu[0] {
+			t.Errorf("impact(%s) = %s, want %s", sev, got, iu[0])
+		}
+		if got := getServiceNowPriority(sev); got != iu[1] {
+			t.Errorf("urgency(%s) = %s, want %s", sev, got, iu[1])
+		}
+	}
+}
+
+func TestServiceNowSeverityHelpers_AreCaseInsensitive(t *testing.T) {
+	// impact, urgency, priority-filter
+	want := map[string][3]string{
+		"highest": {"1", "1", "1"}, "critical": {"1", "1", "1"}, "high": {"2", "1", "2"},
+		"medium": {"2", "2", "3"}, "low": {"2", "3", "4"}, "lowest": {"3", "3", "5"},
+	}
+	for name, w := range want {
+		for _, spelling := range []string{name, strings.ToUpper(name), strings.ToUpper(name[:1]) + name[1:]} {
+			if got := getServiceNowImpact(spelling); got != w[0] {
+				t.Errorf("impact(%q) = %s, want %s", spelling, got, w[0])
+			}
+			if got := getServiceNowPriority(spelling); got != w[1] {
+				t.Errorf("urgency(%q) = %s, want %s", spelling, got, w[1])
+			}
+			if got := getServiceNowPriorityLevel(spelling); got != w[2] {
+				t.Errorf("filter(%q) = %s, want %s", spelling, got, w[2])
+			}
+		}
 	}
 }

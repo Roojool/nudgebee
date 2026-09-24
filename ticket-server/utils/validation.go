@@ -10,7 +10,7 @@ import (
 // these functions sit on the request path for every ticket operation.
 var (
 	jiraKeyPattern     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*-\d+$|^\d+$`)
-	incidentPattern    = regexp.MustCompile(`^(INC|CHG|PRB|REQ|RITM|SCTASK)?\d+$|^[a-f0-9]{32}$`)
+	incidentPattern    = regexp.MustCompile(`^[A-Za-z]*\d+$|^[a-f0-9]{32}$`)
 	numericIDPattern   = regexp.MustCompile(`^\d+$`)
 	alphanumPattern    = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 	safeSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -80,7 +80,8 @@ func ValidateServiceNowTicketID(ticketID string) error {
 		return err
 	}
 
-	// ServiceNow incident numbers typically follow INC0000001 pattern or sys_id (32-char hex)
+	// Number prefixes are configurable per instance (INC0000001, ACME0001234, ...), so accept any
+	// letter prefix followed by digits, or a sys_id (32-char hex).
 	if !incidentPattern.MatchString(ticketID) {
 		return &TicketIDValidationError{
 			TicketID: ticketID,

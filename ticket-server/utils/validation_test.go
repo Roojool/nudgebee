@@ -75,7 +75,9 @@ func TestValidateServiceNowTicketID(t *testing.T) {
 		{name: "CHG number", ticketID: "CHG0001", wantErr: false},
 		{name: "plain numeric", ticketID: "12345", wantErr: false},
 		{name: "32-char sys_id", ticketID: "0123456789abcdef0123456789abcdef", wantErr: false},
-		{name: "invalid prefix", ticketID: "FOO0001", wantErr: true},
+		{name: "custom prefix", ticketID: "ACME0001234", wantErr: false},
+		{name: "no digits", ticketID: "ACME", wantErr: true},
+		{name: "query operator", ticketID: "INC0010072^state=6", wantErr: true},
 		{name: "short hex", ticketID: "abcdef", wantErr: true},
 		{name: "empty", ticketID: "", wantErr: true},
 	}
