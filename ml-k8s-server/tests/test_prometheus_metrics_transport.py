@@ -143,7 +143,8 @@ class TestHPAFailsLoudly:
 
         hpa = self._hpa()
         with patch(
-            "server.metrics.prometheus_metrics_hpa.query_metrics_via_api_server",
+            # Both fetch paths route through _entries_for, which lives here.
+            "server.metrics.prometheus_metrics.query_metrics_via_api_server",
             side_effect=AgentNotConnectedError("agent not connected", 400),
         ):
             with pytest.raises(ValueError):
@@ -154,7 +155,8 @@ class TestHPAFailsLoudly:
 
         hpa = self._hpa()
         with patch(
-            "server.metrics.prometheus_metrics_hpa.query_metrics_via_api_server",
+            # Both fetch paths route through _entries_for, which lives here.
+            "server.metrics.prometheus_metrics.query_metrics_via_api_server",
             side_effect=PromQLQueryError("bad query", 200),
         ):
             with pytest.raises(ValueError):

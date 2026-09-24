@@ -1,18 +1,12 @@
 import time
 from datetime import UTC, datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 from server.utils.utils import MetricsServerConfigs
 from server.utils.utils import generate_hourly_dict
 
 health_check_string = "|".join(MetricsServerConfigs.health_check_endpoints)
-
-# Prometheus Query API Endpoint
-PROMETHEUS_URL = "http://localhost:8429/api/v1/query_range"
-
-# Query for replica count (modify as needed)
-QUERY = "timestamp(kube_replicaset_status_replicas{ __CLUSTER__ })"
 
 # Define time parameters
 END_TIME = int(time.time())  # Current timestamp
@@ -33,6 +27,26 @@ class MetricsInput(BaseModel):
 
 
 class PrometheusQuery:
+    """One column of the prediction input, and how it is answered.
+
+    Every column now names a ``utilisation_key``: it asks for the metric by name and
+    api-server resolves the account's provider and builds the native query. Where a
+    metric exists in only one place — the eBPF HTTP counters are produced by NudgeBee's
+    node-agent — that is the layer's knowledge, not this file's, which is what lets a
+    provider that gains them later be implemented in one place.
+
+    A subclass without a key falls back to its own PromQL against Prometheus. Nothing
+    here uses that now; it remains for callers that pass raw query strings.
+
+    Columns land on a shared hourly grid (``get_data`` below), so one that cannot be
+    answered is zero-filled rather than missing, and the frame still forms.
+    """
+
+    #: Utilisation key this column maps to, or None for "PromQL against Prometheus".
+    utilisation_key: Optional[str] = None
+    #: Factor from the key's unit to this column's unit (bytes -> MiB, say).
+    utilisation_scale: float = 1.0
+
     def __init__(self, namespace, deployment_name) -> None:
         self.namespace = namespace
         self.deployment_name = deployment_name
@@ -56,6 +70,12 @@ class PrometheusQuery:
 
 
 class ReplicasCount(PrometheusQuery):
+    # kube_replicaset_spec_replicas (desired) rather than _status_replicas (current).
+    # They differ only while a rollout or a scale event is in flight; on an hourly grid
+    # over 14 days that is a handful of buckets, and desired is the better forecasting
+    # signal anyway — it is what the autoscaler decided, not what had finished starting.
+    utilisation_key = "replica_defined"
+
     def get_query(self) -> str:
         replicas_count = (
             f'kube_replicaset_status_replicas{{  __CLUSTER__  replicaset=~"{self.deployment_name}-.*", '
@@ -79,6 +99,16 @@ class ReplicasCount(PrometheusQuery):
 
 
 class RequestCount(PrometheusQuery):
+    # The key is answered from eBPF counters on Prometheus and from APM trace metrics
+    # on Datadog, and it excludes probe paths in both — that exclusion is part of what
+    # the key means, so this class no longer carries the list.
+    #
+    # It also fixes the column. The PromQL below averages container_http_requests_total
+    # over the window, and that metric is a COUNTER: the result is the average
+    # cumulative value, a ramp that resets when a pod restarts, not a rate. Measured on
+    # a dev workload doing 17.5 requests/second, it reported 338,157.
+    utilisation_key = "workload_http_request_rate"
+
     def get_query(self) -> str:
         request_count = (
             f"round(sum(avg_over_time(container_http_requests_total{{  __CLUSTER__  destination_workload_name="
@@ -89,6 +119,10 @@ class RequestCount(PrometheusQuery):
 
 
 class RequestDuration(PrometheusQuery):
+    # Mean latency in seconds, the same sum/count this computes, with the denominator
+    # guarded so an idle window is absent rather than +Inf.
+    utilisation_key = "workload_http_latency_mean"
+
     def get_query(self) -> str:
         request_duration = (
             f"round(sum(rate(container_http_requests_duration_seconds_total_sum{{ __CLUSTER__ "
@@ -102,6 +136,10 @@ class RequestDuration(PrometheusQuery):
 
 
 class MemUsage(PrometheusQuery):
+    # The key answers in bytes, as every utilisation key does; this column is MiB.
+    utilisation_key = "memory_usage"
+    utilisation_scale = 1 / (1024 * 1024)
+
     def get_query(self) -> str:
         mem_usage = (
             f'round(sum((avg_over_time(container_memory_working_set_bytes{{  __CLUSTER__  namespace="{self.namespace}",'
@@ -112,6 +150,8 @@ class MemUsage(PrometheusQuery):
 
 
 class CpuUsage(PrometheusQuery):
+    utilisation_key = "cpu_usage"
+
     def get_query(self) -> str:
         cpu_usage = (
             f'round(sum(rate(container_cpu_usage_seconds_total{{  __CLUSTER__  namespace="{self.namespace}",'

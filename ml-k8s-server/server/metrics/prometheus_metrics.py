@@ -1,11 +1,12 @@
 import json
 import logging
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 import pandas as pd
 import requests
 from server.metrics.api_server_metrics import (
+    query_utilisation_via_api_server,
     AgentNotConnectedError,
     query_metrics_via_api_server,
 )
@@ -70,18 +71,25 @@ def fetch_metrics(
                 # Reduce log verbosity for metrics queries
                 # logger.debug(f"fetching metrics for query : {query}")
                 try:
-                    entries = query_metrics_via_api_server(
+                    entries = _entries_for(
+                        query_obj=query_obj,
+                        query=query,
                         account_id=str(account_id),
                         tenant_id=effective_tenant,
-                        query=query,
                         start_time=start_time,
                         end_time=end_time,
                         step=step,
                         instant=instant,
                     )
                 except AgentNotConnectedError:
-                    logger.warning(f"Agent not connected for account {account_id}. Returning empty results.")
-                    return []
+                    # Only the eBPF columns need the agent. Losing them is a column of
+                    # zeros on the shared hourly grid, not a reason to drop the columns
+                    # the account's own provider just answered.
+                    logger.warning(
+                        f"Agent not connected for account {account_id}; "
+                        f"leaving this column empty and keeping the rest."
+                    )
+                    entries = []
 
                 if raw:
                     return entries
@@ -109,6 +117,73 @@ def fetch_metrics(
             return merge_lists(results)
         else:
             return results
+
+
+def _entries_for(
+    query_obj: Any,
+    query: str,
+    account_id: str,
+    tenant_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    step: Union[str, int, None],
+    instant: bool,
+) -> List[dict]:
+    """Answer one column, from whichever store can answer it.
+
+    A column that names a utilisation key is asked for BY NAME and the account's
+    default provider answers it. A column that does not carries its own PromQL and
+    goes to Prometheus, because it reads an eBPF metric that exists nowhere else.
+
+    Both come back in the same wire shape, so the callers that build MetricsInput and
+    the hourly grid below do not know which happened.
+    """
+    key = getattr(query_obj, "utilisation_key", None)
+    if not key or instant:
+        # instant stays on the PromQL path: it is used for one-off duration probes
+        # that pass a raw query string, not one of these columns.
+        return query_metrics_via_api_server(
+            account_id=account_id,
+            tenant_id=tenant_id,
+            query=query,
+            start_time=start_time,
+            end_time=end_time,
+            step=step,
+            instant=instant,
+        )
+
+    answered = query_utilisation_via_api_server(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        request={
+            "kind": "deployment",
+            "workload_namespace": query_obj.namespace,
+            "workload_name": query_obj.deployment_name,
+            "metrics": [key],
+        },
+        start_time=start_time,
+        end_time=end_time,
+        step=step,
+    )
+    series = answered.get(key) or []
+    scale = getattr(query_obj, "utilisation_scale", 1.0)
+    if scale == 1.0:
+        return series
+    return [{**s, "values": [_scaled(v, scale) for v in (s.get("values") or [])]} for s in series]
+
+
+def _scaled(value: Any, scale: float) -> Any:
+    """Convert one sample into the column's unit, leaving an unreadable one alone.
+
+    The wire carries Prometheus-formatted strings, so this parses and re-renders. A
+    value that will not parse is passed through rather than dropped: the hourly grid
+    treats whatever arrives as that bucket's reading, and inventing a zero there would
+    read as a measured idle hour.
+    """
+    try:
+        return repr(float(value) * scale)
+    except (TypeError, ValueError):
+        return value
 
 
 def prometheus_range_query(

@@ -4,8 +4,8 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from server.metrics.api_server_metrics import query_metrics_via_api_server
 from server.metrics.metrics import Metrics
+from server.metrics.prometheus_metrics import _entries_for
 from server.metrics.prometheus_queries import (
     CpuUsage,
     MemUsage,
@@ -86,17 +86,23 @@ class PrometheusMetricsHPA(Metrics):
         query: str,
         start_at: datetime,
         end_time: datetime,
+        query_obj: Any = None,
     ) -> List[MetricsInput]:
         """One window of the backward walk.
+
+        Routed the same way as the single-shot path: a column that names a utilisation
+        key is answered by the account's default provider, one that does not carries
+        its own PromQL to Prometheus because it reads an eBPF metric.
 
         Any failure propagates, because that is what this path has always done. The
         caller turns it into a ValueError so the queue message fails loudly rather than
         recording a forecast built from no data.
         """
-        entries = query_metrics_via_api_server(
+        entries = _entries_for(
+            query_obj=query_obj,
+            query=query,
             account_id=str(self.account_id),
             tenant_id=self.tenant_id,
-            query=query,
             start_time=start_at,
             end_time=end_time,
             step=STEP,
@@ -142,6 +148,7 @@ class PrometheusMetricsHPA(Metrics):
                             query=query,
                             start_at=current_start_time,
                             end_time=current_end_time,
+                            query_obj=query_obj,
                         )
                         if not data_list:
                             break
