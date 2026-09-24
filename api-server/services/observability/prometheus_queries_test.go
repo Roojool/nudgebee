@@ -201,7 +201,7 @@ func TestBuildPrometheusWorkloadQueries_DeploymentResourceMetrics(t *testing.T) 
 		{
 			name:     "workload_http_latency_p99 is one p99 line for the workload",
 			metric:   "workload_http_latency_p99",
-			expected: `histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ actual_destination_workload_name=~"web.*", actual_destination_workload_namespace="shop"}[5m])))`,
+			expected: `histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ destination_workload_name="web", actual_destination_workload_namespace="shop"}[5m])))`,
 		},
 		{
 			name:     "cpu_throttling from the node-agent's per-container counter",

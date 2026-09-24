@@ -352,20 +352,31 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 
 	// --- 2. Destination Filters ---
 	var destFilter, actualDestFilter string
+
+	// httpWorkloadScope is the one selector every eBPF HTTP key scopes with, so a
+	// workload's identity is decided once here instead of being re-invented per key.
+	// It is built unconditionally because the workload_http_* keys inline it and
+	// answer namespace-wide when no workload was named, where actualDestFilter is
+	// left empty instead.
+	httpWorkloadScope := fmt.Sprintf(`actual_destination_workload_namespace="%s"`, safeMeta.Namespace)
+	if safeMeta.Name != "" {
+		httpWorkloadScope = promWorkloadHTTPMatcher(safeMeta.Kind, safeMeta.Name) + ", " + httpWorkloadScope
+	}
+
 	if safeMeta.Namespace != "" && safeMeta.Name != "" {
 		if safeMeta.Regex {
 			destFilter = fmt.Sprintf(` destination_workload_namespace=~"%s", destination_workload_name=~"%s"`, safeMeta.Namespace, safeMeta.Name)
 		} else {
 			destFilter = fmt.Sprintf(` destination_workload_namespace="%s", destination_workload_name="%s"`, safeMeta.Namespace, safeMeta.Name)
 		}
-		actualDestFilter = fmt.Sprintf(` actual_destination_workload_namespace="%s", actual_destination_workload_name=~"%s.*"`, safeMeta.Namespace, safeMeta.Name)
+		actualDestFilter = " " + httpWorkloadScope
 	} else if safeMeta.Namespace != "" {
 		if safeMeta.Regex {
 			destFilter = fmt.Sprintf(` destination_workload_namespace=~"%s"`, safeMeta.Namespace)
 		} else {
 			destFilter = fmt.Sprintf(` destination_workload_namespace="%s"`, safeMeta.Namespace)
 		}
-		actualDestFilter = fmt.Sprintf(` actual_destination_workload_namespace="%s"`, safeMeta.Namespace)
+		actualDestFilter = " " + httpWorkloadScope
 	}
 
 	// --- 3. PVC Filters ---
@@ -580,7 +591,7 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// single p99 line at the chart's own resolution. Both this and cpu_throttling
 		// read the node-agent's eBPF metrics, so they answer only where that agent runs.
 		case "workload_http_latency_p99":
-			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s"}[5m])))`, safeMeta.Name, safeMeta.Namespace)
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum by (le) (rate(container_http_requests_duration_seconds_total_bucket{__CLUSTER__ %s}[5m])))`, httpWorkloadScope)
 		// Request rate and mean latency for the whole workload, probes excluded.
 		//
 		// Siblings of workload_http_latency_p99 above: one series, no path or method
@@ -592,18 +603,18 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		// metrics_health_endpoints.go for the measurement that forced it.
 		case "workload_http_request_rate":
 			queries[metricKey] = fmt.Sprintf(
-				`sum(rate(container_http_requests_total{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`]))`,
-				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex())
+				`sum(rate(container_http_requests_total{__CLUSTER__ %s, path!~"%s"}[`+rateW+`]))`,
+				httpWorkloadScope, healthCheckPathsRegex())
 		case "workload_http_latency_mean":
 			// sum/count, not a quantile: the mean is what a capacity model wants, and
 			// it is the one statistic a histogram gives exactly rather than by
 			// interpolation. Division is guarded by `> 0` on the denominator so an
 			// idle window is absent rather than +Inf.
 			queries[metricKey] = fmt.Sprintf(
-				`sum(rate(container_http_requests_duration_seconds_total_sum{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`]))`+
-					` / (sum(rate(container_http_requests_duration_seconds_total_count{__CLUSTER__ actual_destination_workload_name=~"%s.*", actual_destination_workload_namespace="%s", path!~"%s"}[`+rateW+`])) > 0)`,
-				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex(),
-				safeMeta.Name, safeMeta.Namespace, healthCheckPathsRegex())
+				`sum(rate(container_http_requests_duration_seconds_total_sum{__CLUSTER__ %s, path!~"%s"}[`+rateW+`]))`+
+					` / (sum(rate(container_http_requests_duration_seconds_total_count{__CLUSTER__ %s, path!~"%s"}[`+rateW+`])) > 0)`,
+				httpWorkloadScope, healthCheckPathsRegex(),
+				httpWorkloadScope, healthCheckPathsRegex())
 		case "cpu_throttling":
 			queries[metricKey] = fmt.Sprintf(`sum by (container_id) (rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__ container_id=~".*%s/%s.*"}[5m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request":
@@ -740,6 +751,37 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 	}
 	promApplyAggregate(queries, safeMeta.Aggregate, rangeW, stepW)
 	return queries
+}
+
+// promWorkloadHTTPMatcher selects one workload's eBPF HTTP series by identity.
+//
+// These series name the workload that was ADDRESSED and the pod that actually SERVED
+// under separate labels: destination_workload_name carries the controller (its
+// destination_workload_kind reads Deployment / StatefulSet / DaemonSet), while
+// actual_destination_workload_name carries the pod -- actual_destination_workload_kind
+// says "pod" on every one of them. A workload-scoped question has to read the workload
+// label. Reaching a workload's pods through the POD label needs a `<name>.*` prefix,
+// and that prefix also matches every pod of a workload whose name merely STARTS with
+// this one: measured on a dev cluster, `services-server` answered over 41 pods, 21 of
+// them `services-server-worker`'s, so the request rate was the two deployments' traffic
+// added together (0.19 = 0.17 + 0.02 req/s) and the mean latency sat 10.5% low because
+// the sibling's much faster calls diluted it.
+//
+// kind == "pod" is the one case that must NOT switch labels. The name is then a POD
+// name, which only actual_destination_workload_name carries -- it matches there
+// exactly and matches destination_workload_name not at all. The pod details page's
+// "Request & Latency" chart asks for http_status this way, so switching it would blank
+// that chart rather than narrow it.
+//
+// Known limitation, unchanged by this function and shared with the destination_*-scoped
+// keys that already existed (workload_http_error_rate, http_throughput): where two
+// workloads sit behind ONE Service, the agent stamps a single destination_workload_name
+// on that Service's traffic, so a canary is not separable from its stable deployment.
+func promWorkloadHTTPMatcher(kind, name string) string {
+	if kind == "pod" {
+		return fmt.Sprintf(`actual_destination_workload_name="%s"`, name)
+	}
+	return fmt.Sprintf(`destination_workload_name="%s"`, name)
 }
 
 // promPodNameAlternation renders an exact pod list as a PromQL alternation. The empty
