@@ -708,14 +708,14 @@ func normalizeHelmProxyRequest(req *WorkspaceExecuteRequest) error {
 		var value string
 		switch {
 		case arg == "--kube-context":
-			if i+1 >= len(argv) || argv[i+1] == "" {
+			if i+1 >= len(argv) || argv[i+1] == "" || strings.HasPrefix(argv[i+1], "-") {
 				return fmt.Errorf("helm --kube-context requires a value")
 			}
 			value = argv[i+1]
 			i++
 		case strings.HasPrefix(arg, "--kube-context="):
 			value = strings.TrimPrefix(arg, "--kube-context=")
-			if value == "" {
+			if value == "" || strings.HasPrefix(value, "-") {
 				return fmt.Errorf("helm --kube-context requires a value")
 			}
 		default:
