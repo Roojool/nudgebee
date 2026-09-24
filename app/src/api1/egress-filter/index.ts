@@ -60,6 +60,7 @@ export interface EgressCustomPattern {
 export interface EgressFilterConfig {
   mode: EgressFilterMode;
   enabled: boolean;
+  entropy_enabled: boolean;
   /** True when a per-tenant override row exists; false = env defaults in effect. */
   has_override: boolean;
   custom_patterns: EgressCustomPattern[];
@@ -116,6 +117,7 @@ export async function getEgressFilterConfig(signal?: AbortSignal): Promise<Egres
 export interface UpdateEgressFilterInput {
   mode?: EgressFilterMode;
   enabled?: boolean;
+  entropy_enabled?: boolean;
   // Nullable overrides — pass explicit null to clear back to inherit-env.
   pii_enabled?: boolean | null;
   pii_mode?: PIIMode | null;

@@ -257,6 +257,37 @@ func TestApplyTenantOverrides_FailsClosedOnBadOffsets(t *testing.T) {
 	assert.Len(t, out.Hits, 3, "malformed offsets must keep the hit (fail-closed)")
 }
 
+func TestApplyTenantOverrides_DropsEntropyWhenDisabledByDefault(t *testing.T) {
+	r := Result{Hits: []Hit{
+		{RuleID: "aws-access-key-id", Start: 0, End: 5},
+		{RuleID: "high-entropy-blob", Start: 10, End: 45},
+	}}
+	tcfg := &TenantConfig{EntropyEnabled: false}
+	out := applyTenantOverrides(r, "anytext-doesnt-matter-012345678901234567890123456789", tcfg)
+	require.Len(t, out.Hits, 1)
+	assert.Equal(t, "aws-access-key-id", out.Hits[0].RuleID)
+}
+
+func TestApplyTenantOverrides_KeepsEntropyWhenExplicitlyEnabled(t *testing.T) {
+	r := Result{Hits: []Hit{
+		{RuleID: "aws-access-key-id", Start: 0, End: 5},
+		{RuleID: "high-entropy-blob", Start: 10, End: 45},
+	}}
+	tcfg := &TenantConfig{EntropyEnabled: true}
+	out := applyTenantOverrides(r, "anytext-doesnt-matter-012345678901234567890123456789", tcfg)
+	require.Len(t, out.Hits, 2)
+}
+
+func TestApplyTenantOverrides_DropsEntropyWhenTenantConfigIsNil(t *testing.T) {
+	r := Result{Hits: []Hit{
+		{RuleID: "aws-access-key-id", Start: 0, End: 5},
+		{RuleID: "high-entropy-blob", Start: 10, End: 45},
+	}}
+	out := applyTenantOverrides(r, "anytext-doesnt-matter-012345678901234567890123456789", nil)
+	require.Len(t, out.Hits, 1)
+	assert.Equal(t, "aws-access-key-id", out.Hits[0].RuleID)
+}
+
 // --- PII effective-value helpers (V827) --------------------------------------
 //
 // The wrapper reads env baselines and per-tenant overrides through these

@@ -288,6 +288,10 @@ type appConfig struct {
 	// Whitespace around each value is trimmed; empty entries are skipped.
 	LlmServerEgressFilterAllowlist string `mapstructure:"llm_server_egressfilter_allowlist"`
 
+	// LlmServerEgressFilterEntropyEnabled sets the platform fallback for statistical
+	// high-entropy secret detection. Defaults to false (disabled) so entropy detection is opt-in.
+	LlmServerEgressFilterEntropyEnabled bool `mapstructure:"llm_server_egress_filter_entropy_enabled"`
+
 	// LlmServerMaxIndividualCallTimeoutMinutes caps the duration of a single LLM request.
 	// Prevents the system from hanging indefinitely if a provider (like Google AI) stalls.
 	LlmServerMaxIndividualCallTimeoutMinutes int `mapstructure:"llm_server_max_individual_call_timeout_minutes"`
@@ -1331,6 +1335,7 @@ func init() {
 	// LLM_SERVER_EGRESSFILTER_ALLOWLIST is silently ignored in any
 	// deployment that doesn't read a `.env` file (i.e. prod k8s).
 	viper.SetDefault("llm_server_egressfilter_allowlist", "")
+	viper.SetDefault("llm_server_egress_filter_entropy_enabled", false)
 	viper.SetDefault("llm_server_max_individual_call_timeout_minutes", 5)
 	viper.SetDefault("llm_server_global_retry_budget_minutes", 10)
 	viper.SetDefault("llm_thinking_level_native_enabled", true) // ON: the budget provably does not bind (62.9k thinking against an 8k budget, after #36172 shipped)
