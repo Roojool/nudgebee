@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	jira "github.com/andygrunwald/go-jira"
 )
 
 // Jira Data Center rejects personal access tokens over Basic with 401, so the
@@ -82,5 +84,28 @@ func TestIsJiraCloud(t *testing.T) {
 				t.Fatalf("IsJiraCloud = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsJiraCloud_CachesDeploymentType(t *testing.T) {
+	hits := 0
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deploymentType":"Cloud"}`))
+	}))
+	defer ts.Close()
+
+	client, err := jira.NewClient(ts.Client(), ts.URL)
+	if err != nil {
+		t.Fatalf("jira.NewClient: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if got, err := IsJiraCloud(client); err != nil || !got {
+			t.Fatalf("IsJiraCloud = %v, %v", got, err)
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("serverInfo hits = %d, want 1", hits)
 	}
 }

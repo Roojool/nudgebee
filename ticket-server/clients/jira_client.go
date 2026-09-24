@@ -3,6 +3,7 @@ package clients
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	jira "github.com/andygrunwald/go-jira"
@@ -44,10 +45,33 @@ func CreateJiraClient(authType, username, password, url string) (*jira.Client, e
 	return client, nil
 }
 
+// jiraDeploymentTTL bounds how long a detected deployment type is reused. The
+// type of an instance does not change, so this only limits how long a wrong
+// answer (e.g. a URL re-pointed at another instance) can linger.
+const jiraDeploymentTTL = time.Hour
+
+type jiraDeployment struct {
+	cloud   bool
+	expires time.Time
+}
+
+// jiraDeployments caches IsJiraCloud results by base URL. Failures are not cached.
+var jiraDeployments sync.Map
+
 // IsJiraCloud reports whether the instance is Jira Cloud rather than
 // Server/Data Center. The two differ in user identity (accountId vs name),
 // in which user-search parameters they accept, and in which endpoints exist.
+// The answer is cached per base URL to avoid a serverInfo round-trip per call.
 func IsJiraCloud(client *jira.Client) (bool, error) {
+	baseURL := client.GetBaseURL()
+	key := baseURL.String()
+	if v, ok := jiraDeployments.Load(key); ok {
+		d := v.(jiraDeployment)
+		if time.Now().Before(d.expires) {
+			return d.cloud, nil
+		}
+		jiraDeployments.Delete(key)
+	}
 	req, err := client.NewRequest("GET", "rest/api/2/serverInfo", nil)
 	if err != nil {
 		return false, err
@@ -58,5 +82,7 @@ func IsJiraCloud(client *jira.Client) (bool, error) {
 	if _, err := client.Do(req, &info); err != nil {
 		return false, err
 	}
-	return strings.EqualFold(info.DeploymentType, "Cloud"), nil
+	cloud := strings.EqualFold(info.DeploymentType, "Cloud")
+	jiraDeployments.Store(key, jiraDeployment{cloud: cloud, expires: time.Now().Add(jiraDeploymentTTL)})
+	return cloud, nil
 }

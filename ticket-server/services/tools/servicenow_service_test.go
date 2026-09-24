@@ -343,3 +343,57 @@ func TestFetchServiceNowIncidentCreateMeta_Structure(t *testing.T) {
 		t.Error("assignee field should be present even when the user fetch fails")
 	}
 }
+
+// List asks the Table API for one row past the page to learn whether another
+// page exists, and trims that row from the result.
+func TestServiceNowService_List_SetsHasMoreFromOverflowRow(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		rows        int
+		wantTickets int
+		wantHasMore bool
+		wantTotal   int
+	}{
+		{"more pages", 3, 2, true, 0},
+		{"exact last page", 2, 2, false, 12},
+		{"short last page", 1, 1, false, 11},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedQuery string
+			stub := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedQuery = r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				var recs []string
+				for i := 0; i < tt.rows; i++ {
+					recs = append(recs, `{"sys_id":"s","number":"INC00`+string(rune('0'+i))+`","short_description":"d","state":"1","urgency":"2","sys_created_on":"2026-05-04 18:29:04"}`)
+				}
+				_, _ = w.Write([]byte(`{"result":[` + strings.Join(recs, ",") + `]}`))
+			}))
+			defer stub.Close()
+			orig := http.DefaultTransport
+			http.DefaultTransport = stub.Client().Transport
+			defer func() { http.DefaultTransport = orig }()
+
+			svc := &ServiceNowService{}
+			cfg := models.TicketConfigurations{URL: stub.URL, Username: "u", Password: "p"}
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+			got, err := svc.List(ctx, cfg, models.ListParams{Limit: 2, Offset: 10})
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if !strings.Contains(capturedQuery, "sysparm_limit=3") {
+				t.Errorf("expected limit+1 in query, got %s", capturedQuery)
+			}
+			if len(got.Tickets) != tt.wantTickets {
+				t.Errorf("tickets = %d, want %d", len(got.Tickets), tt.wantTickets)
+			}
+			if got.HasMore != tt.wantHasMore {
+				t.Errorf("HasMore = %v, want %v", got.HasMore, tt.wantHasMore)
+			}
+			if got.Total != tt.wantTotal {
+				t.Errorf("Total = %d, want %d", got.Total, tt.wantTotal)
+			}
+		})
+	}
+}

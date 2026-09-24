@@ -584,7 +584,8 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		QueryParameters: &tableapi.TableRequestBuilder2GetQueryParameters{
 			Query:  query,
 			Fields: []string{"sys_id", "number", "short_description", "state", "urgency", "assigned_to", "sys_created_on"},
-			Limit:  params.Limit,
+			// One extra row tells us whether another page exists; it is trimmed below.
+			Limit:  params.Limit + 1,
 			Offset: params.Offset,
 		},
 	}
@@ -599,8 +600,16 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		return nil, fmt.Errorf("failed to get ServiceNow results: %w", err)
 	}
 
-	// Estimate total from results (Count() is no longer available in v2 API)
-	total := params.Offset + len(results)
+	hasMore := len(results) > params.Limit
+	if hasMore {
+		results = results[:params.Limit]
+	}
+	// The Table API has no cheap count, so the total is only known once the last
+	// page is reached; HasMore is the paging signal (see models.ListResult).
+	total := 0
+	if !hasMore {
+		total = params.Offset + len(results)
+	}
 
 	tickets := make([]models.Ticket, 0, len(results))
 	host := strings.TrimPrefix(config.URL, "https://")
@@ -635,6 +644,7 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 		Total:   total,
 		Limit:   params.Limit,
 		Offset:  params.Offset,
+		HasMore: hasMore,
 	}, nil
 }
 

@@ -191,7 +191,8 @@ type ListParams struct {
 
 // ListResult is the normalized response from listing tickets. HasMore is the
 // authoritative "another page exists" signal; Total is 0 when the platform
-// cannot count the full result set cheaply (cursor-paged APIs).
+// cannot count the full result set cheaply (cursor-paged APIs), and only an
+// approximation on Jira Cloud until the last page is reached.
 type ListResult struct {
 	Tickets []Ticket `json:"tickets"`
 	Total   int      `json:"total"`
