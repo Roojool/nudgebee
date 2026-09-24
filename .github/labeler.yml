@@ -64,6 +64,7 @@ file_labels:
 
   # ── LLM stack ──────────────────────────────────────────────────────────
   'service:llm':
+    - '^llm/gateway/.*'
     - '^llm/llm-server/.*'
     - '^llm/rag-server/.*'
     - '^llm/code-analysis/.*'

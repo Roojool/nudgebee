@@ -19,6 +19,7 @@ func TestResolveModelProvider(t *testing.T) {
 		{"openai/gpt-5", schemas.OpenAI, "gpt-5", true},
 		{"gemini/gemini-3.1-flash", schemas.Gemini, "gemini-3.1-flash", true},
 		{"google/gemini-3.1-flash", schemas.Gemini, "gemini-3.1-flash", true},
+		{"googleai/gemini-3.1-flash", schemas.Gemini, "gemini-3.1-flash", true},
 		{"OpenAI/gpt-5", schemas.OpenAI, "gpt-5", true}, // provider prefix is case-insensitive
 		// HuggingFace repo ids keep their own slash (split is on the first "/").
 		{"huggingface/meta-llama/Llama-3.1-8B-Instruct", schemas.HuggingFace, "meta-llama/Llama-3.1-8B-Instruct", true},
@@ -45,6 +46,7 @@ func TestResolveModelProvider(t *testing.T) {
 		// Vertex AI (`vertexai` is accepted too).
 		{"vertex/gemini-2.5-pro", schemas.Vertex, "gemini-2.5-pro", true},
 		{"vertexai/gemini-2.5-flash", schemas.Vertex, "gemini-2.5-flash", true},
+		{"vertexai_endpoint/some-custom-model", schemas.Vertex, "some-custom-model", true},
 		// Self-hosted OpenAI-compatible servers.
 		{"ollama/llama3.3", schemas.Ollama, "llama3.3", true},
 		{"vllm/meta-llama/Llama-3.1-8B-Instruct", schemas.VLLM, "meta-llama/Llama-3.1-8B-Instruct", true},
