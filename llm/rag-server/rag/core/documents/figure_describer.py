@@ -15,6 +15,7 @@ caption-only surrogate indexes a figure that can never be retrieved.
 import hashlib
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -94,6 +95,15 @@ def parse_description(content: str) -> Dict[str, str]:
     return out
 
 
+class _SkippedAfterNoVision(Exception):
+    """Stands in for a figure that was never sent, because an earlier one already
+    proved the model cannot accept images. Worded to match _NO_VISION_MARKERS so it
+    reaches the same verdict as the real provider error it stands for."""
+
+    def __init__(self) -> None:
+        super().__init__("model does not support image input")
+
+
 def looks_like_missing_vision(error: BaseException) -> bool:
     """Whether this failure means the model cannot see, rather than that the call
     went wrong."""
@@ -135,6 +145,43 @@ def _record_cost(account_id, collection_name, llm, total_tokens, call_count, fai
         )
     except Exception as exc:  # accounting must never fail an ingest
         logger.warning("figure_describer: could not record vision cost: %s", exc)
+
+
+def _describe_each(llm: Any, figures: List[Dict[str, Any]], unique: List[Tuple[str, List[int]]]) -> List[Any]:
+    """Describe one image per distinct hash, in parallel, stopping early if blind.
+
+    A model that cannot accept an image says so on the first call and will say it on
+    every one after, so the rest are skipped rather than bought: learning it once
+    costs one request instead of 22 on a Confluence space. A transient failure is
+    deliberately not treated this way — a timeout on one figure says nothing about
+    the next.
+    """
+    concurrency = max(1, min(Config.kb_vision_concurrency, len(unique)))
+    no_vision = threading.Event()
+
+    def run(entry):
+        digest, positions = entry
+        if no_vision.is_set():
+            return digest, ({"summary": "", "transcription": ""}, _SkippedAfterNoVision(), 0)
+        first = figures[positions[0]]
+        result = _describe_one(llm, {"mime_type": first["mime_type"], "data": first["data"]})
+        if result[1] is not None and looks_like_missing_vision(result[1]):
+            no_vision.set()
+        return digest, result
+
+    # The first alone. A wave of `concurrency` threads all launch before any of them
+    # answers, so a blind model still charged for the whole first wave before the
+    # verdict was in — 4 refusals at the default, not one.
+    results = [run(unique[0])]
+    rest = unique[1:]
+    if not rest:
+        return results
+    if no_vision.is_set():
+        results.extend(run(entry) for entry in rest)
+        return results
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        results.extend(pool.map(run, rest))
+    return results
 
 
 def describe_figures(
@@ -212,15 +259,7 @@ def describe_figures(
     if not unique:
         return len(figures), True
 
-    concurrency = max(1, min(Config.kb_vision_concurrency, len(unique)))
-
-    def run(entry):
-        digest, positions = entry
-        first = figures[positions[0]]
-        return digest, _describe_one(llm, {"mime_type": first["mime_type"], "data": first["data"]})
-
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        results = list(pool.map(run, unique))
+    results = _describe_each(llm, figures, unique)
 
     vision_available = True
     total_tokens = 0
@@ -228,13 +267,17 @@ def describe_figures(
     for digest, (description, error, tokens) in results:
         total_tokens += tokens
         if error is not None:
-            failures += 1
             if looks_like_missing_vision(error):
                 vision_available = False
+            # A figure never sent is not a call that failed. Counting it made the
+            # cost record say "8 of 1 figures could not be described".
+            if not isinstance(error, _SkippedAfterNoVision):
+                failures += 1
         for position in by_hash[digest]:
             figures[position].update(description)
 
-    _record_cost(account_id, collection_name, llm, total_tokens, len(unique), failures)
+    calls_made = sum(1 for _, (_, error, _) in results if not isinstance(error, _SkippedAfterNoVision))
+    _record_cost(account_id, collection_name, llm, total_tokens, calls_made, failures)
 
     if use_cache:
         figure_cache.store(account_id, figures, model, collection_name)

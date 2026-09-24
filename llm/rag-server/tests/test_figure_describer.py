@@ -9,6 +9,7 @@ from rag.core.documents.figure_describer import (
     parse_description,
 )
 from rag.core.types import LLMResult
+from utils.config import Config
 
 TAGGED = "<summary>A latency dashboard.</summary>\n<text>p99 1536Mi RB-K8S-MEM-007</text>"
 
@@ -111,6 +112,63 @@ def test_unsupported_modality_is_reported_as_a_missing_model():
     described, available = describe_figures("acct", [figure("AAAA")], llm=llm, use_cache=False)
 
     assert (described, available) == (0, False)
+
+
+def test_a_blind_model_is_asked_once_not_once_per_figure(monkeypatch):
+    # Every call after the first returns the same refusal, so paying for them buys
+    # nothing — 22 requests on one Confluence space to learn what the first said.
+    monkeypatch.setattr(Config, "kb_vision_concurrency", 1)
+    llm = FakeVisionLLM(error=ValueError("ValidationException: this model does not support image input"))
+    figures = [figure(data, index=i) for i, data in enumerate("ABCDE", start=1)]
+
+    described, available = describe_figures("acct", figures, llm=llm, use_cache=False)
+
+    assert (described, available) == (0, False)
+    assert len(llm.calls) == 1
+
+
+def test_a_blind_model_is_asked_once_even_in_parallel(monkeypatch):
+    # The real default. The earlier test pins concurrency to 1, which would let a
+    # whole first wave of refusals through unnoticed — the verdict has to be in
+    # before any parallelism starts.
+    monkeypatch.setattr(Config, "kb_vision_concurrency", 4)
+    llm = FakeVisionLLM(error=ValueError("ValidationException: this model does not support image input"))
+    figures = [figure(data, index=i) for i, data in enumerate("ABCDEFGH", start=1)]
+
+    described, available = describe_figures("acct", figures, llm=llm, use_cache=False)
+
+    assert (described, available) == (0, False)
+    assert len(llm.calls) == 1
+
+
+def test_a_transient_failure_still_costs_every_figure(monkeypatch):
+    # The opposite case, and the reason the skip keys off the verdict and not the
+    # mere presence of an error: a timeout on figure one says nothing about two.
+    monkeypatch.setattr(Config, "kb_vision_concurrency", 1)
+    llm = FakeVisionLLM(error=TimeoutError("read timed out"))
+    figures = [figure(data, index=i) for i, data in enumerate("ABC", start=1)]
+
+    described, available = describe_figures("acct", figures, llm=llm, use_cache=False)
+
+    assert (described, available) == (0, True)
+    assert len(llm.calls) == 3
+
+
+def test_the_cost_record_never_claims_more_failures_than_calls(monkeypatch):
+    # A figure that was never sent is not a call that failed. Counting it made the
+    # recorded message read "8 of 1 figures could not be described".
+    monkeypatch.setattr(Config, "kb_vision_concurrency", 4)
+    recorded = {}
+    monkeypatch.setattr(
+        "rag.core.documents.figure_describer._record_cost",
+        lambda account, collection, llm, tokens, calls, failures: recorded.update(calls=calls, failures=failures),
+    )
+    llm = FakeVisionLLM(error=ValueError("ValidationException: this model does not support image input"))
+    figures = [figure(data, index=i) for i, data in enumerate("ABCDEFGH", start=1)]
+
+    describe_figures("acct", figures, llm=llm, use_cache=False)
+
+    assert recorded == {"calls": 1, "failures": 1}
 
 
 def test_error_classification():

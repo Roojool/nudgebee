@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KBDocumentsModal from '@components/llm/KBDocumentsModal';
 import apiKnowledgeBase from '@api1/knowledge-base';
@@ -112,6 +112,83 @@ describe('KBDocumentsModal', () => {
     expect(rendered).toHaveTextContent('safe');
     expect(rendered.querySelector('script')).toBeNull();
     expect(rendered.querySelector('img')?.getAttribute('onerror')).toBeNull();
+  });
+
+  it('says so when a scraped page keeps its picture on a site we cannot sign in to', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p2',
+        title: 'Plain note',
+        content: '<p>Follow the matrix.</p><img src="https://wiki.example.com/download/attachments/1/m.png" alt="escalation matrix">',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    const rendered = await screen.findByTestId('kb-document-html');
+    const img = rendered.querySelector('img');
+    expect(img).not.toBeNull();
+
+    // jsdom never fetches, so the failure the reader would see is raised directly.
+    act(() => {
+      fireEvent.error(img);
+    });
+
+    const note = await screen.findByTestId('kb-document-image-unavailable');
+    // The alt text is kept: it is often the only description of the picture the page has.
+    expect(note).toHaveTextContent('Image unavailable — escalation matrix.');
+    expect(rendered.querySelector('img')).toBeNull();
+    // The rest of the page is untouched.
+    expect(rendered).toHaveTextContent('Follow the matrix.');
+    // This document has no url, so its title is plain text — do not send the reader
+    // to click something that is not a link.
+    expect(note.textContent).not.toContain('Open the page');
+  });
+
+  it('points the reader at the title when the page can be opened at its source', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p1',
+        title: 'Runbook: restart auth-svc',
+        content: '<img src="https://wiki.example.com/download/attachments/1/m.png" alt="escalation matrix">',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Runbook: restart auth-svc' }));
+
+    const rendered = await screen.findByTestId('kb-document-html');
+    act(() => {
+      fireEvent.error(rendered.querySelector('img'));
+    });
+
+    expect(await screen.findByTestId('kb-document-image-unavailable')).toHaveTextContent(
+      'Image unavailable — escalation matrix. Open the page from its title above to see it.'
+    );
+  });
+
+  it('leaves a picture alone until it actually fails', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p2',
+        title: 'Plain note',
+        content: '<img src="https://wiki.example.com/ok.png" alt="diagram">',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    const rendered = await screen.findByTestId('kb-document-html');
+    expect(rendered.querySelector('img')).not.toBeNull();
+    expect(screen.queryByTestId('kb-document-image-unavailable')).toBeNull();
   });
 
   it('renders a typed note as markdown', async () => {

@@ -117,6 +117,84 @@ const sanitizeStoredHtml = (html) => {
   }
 };
 
+// A scraped page keeps the site's own image URLs, and a wiki serves those only to a
+// browser already holding that site's session. The reader got a broken glyph and no
+// reason for it. This says what happened, where the picture was, and keeps the alt
+// text — often the only description of the picture the page carries.
+const unavailableImageNote = (doc, img, hasSourceLink) => {
+  const note = doc.createElement('span');
+  note.setAttribute('data-testid', 'kb-document-image-unavailable');
+  Object.assign(note.style, {
+    display: 'inline-block',
+    padding: `${ds.space[1]} ${ds.space[2]}`,
+    border: `1px dashed ${ds.gray[300]}`,
+    borderRadius: ds.radius.sm,
+    color: ds.gray[500],
+    fontSize: 'var(--ds-text-caption)',
+  });
+  const alt = (img.getAttribute('alt') || '').trim();
+  // Only offer the title when it is actually a link: a document with no url renders
+  // its title as plain text, and telling the reader to click it would send them
+  // hunting for something that is not there.
+  const wayOut = hasSourceLink ? ' Open the page from its title above to see it.' : '';
+  note.textContent = `${alt ? `Image unavailable — ${alt}.` : 'Image unavailable.'}${wayOut}`;
+  note.title = 'This page stores the image on the source site, which needs a sign-in this view does not have.';
+  return note;
+};
+
+const StoredHtml = ({ html, hasSourceLink }) => {
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return undefined;
+    }
+    const replace = (img) => {
+      if (img.parentNode) {
+        img.parentNode.replaceChild(unavailableImageNote(container.ownerDocument, img, hasSourceLink), img);
+      }
+    };
+    // `error` does not bubble, so it is caught on the way down instead of on the way up.
+    const onError = (event) => {
+      if (event.target?.tagName === 'IMG') {
+        replace(event.target);
+      }
+    };
+    container.addEventListener('error', onError, true);
+    // A load that already failed fires nothing further — the image reports itself
+    // complete with no intrinsic width — so those are swapped now rather than waited for.
+    container.querySelectorAll('img').forEach((img) => {
+      if (img.complete && img.naturalWidth === 0) {
+        replace(img);
+      }
+    });
+    return () => container.removeEventListener('error', onError, true);
+  }, [html, hasSourceLink]);
+
+  return (
+    <Box
+      ref={containerRef}
+      data-testid='kb-document-html'
+      sx={{
+        maxHeight: 360,
+        overflow: 'auto',
+        fontSize: 'var(--ds-text-body)',
+        '& img': { maxWidth: '100%' },
+        '& table': { borderCollapse: 'collapse', width: '100%' },
+        '& td, & th': { border: `1px solid ${ds.gray[200]}`, padding: `${ds.space[1]} ${ds.space[2]}` },
+        '& pre': { overflow: 'auto', background: ds.gray[100], padding: ds.space[2] },
+      }}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
+StoredHtml.propTypes = {
+  html: PropTypes.string.isRequired,
+  hasSourceLink: PropTypes.bool,
+};
+
 const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) => {
   const [documents, setDocuments] = useState([]);
   const [nextOffset, setNextOffset] = useState(null);
@@ -283,7 +361,7 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
     }
   };
 
-  const renderContent = (documentId) => {
+  const renderContent = (documentId, sourceUrl) => {
     const state = contents[documentId];
     if (!state || state.loading) return <Loader />;
     if (state.error) return <Banner tone='critical' message={state.error} />;
@@ -303,21 +381,7 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
       return <CodeBlock code={state.content} language='json' wrap maxHeight={360} />;
     }
     if (state.contentType === 'text/html') {
-      return (
-        <Box
-          data-testid='kb-document-html'
-          sx={{
-            maxHeight: 360,
-            overflow: 'auto',
-            fontSize: 'var(--ds-text-body)',
-            '& img': { maxWidth: '100%' },
-            '& table': { borderCollapse: 'collapse', width: '100%' },
-            '& td, & th': { border: `1px solid ${ds.gray[200]}`, padding: `${ds.space[1]} ${ds.space[2]}` },
-            '& pre': { overflow: 'auto', background: ds.gray[100], padding: ds.space[2] },
-          }}
-          dangerouslySetInnerHTML={{ __html: sanitizeStoredHtml(state.content) }}
-        />
-      );
+      return <StoredHtml html={sanitizeStoredHtml(state.content)} hasSourceLink={Boolean(sourceUrl)} />;
     }
     // Anything else was converted on the way in: a typed note, or a page the
     // indexer already turned into markdown.
@@ -436,7 +500,7 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
                       onClick={() => toggleContent(doc.id)}
                     />
                   </Box>
-                  {expanded && <Box sx={{ mt: ds.space[2] }}>{renderContent(doc.id)}</Box>}
+                  {expanded && <Box sx={{ mt: ds.space[2] }}>{renderContent(doc.id, doc.url)}</Box>}
                 </Box>
               );
             })}

@@ -13,7 +13,8 @@ from atlassian import Confluence
 from bs4 import BeautifulSoup, NavigableString
 from filelock import FileLock, Timeout
 from markdownify import MarkdownConverter  # type: ignore[import-untyped]
-from rag.core.documents import source_store
+from rag.core.documents import page_figures, source_store
+from rag.core.documents.figure_describer import describe_figures
 from rag.core.documents.processing import (
     handle_updated_documents,
     process_documents,
@@ -151,7 +152,13 @@ class _IndexMarkdownConverter(MarkdownConverter):
         # Alt text can carry meaning ("architecture diagram"); the src never
         # can. Confluence attachment and emoticon URLs are relative, so nothing
         # downstream resolves them — they are tokens spent on a dead link.
-        return (el.attrs.get("alt") or "").strip()
+        #
+        # A picture with no alt used to leave nothing at all, so a step explained
+        # inside a screenshot vanished without trace and the answer read as
+        # complete. The marker is what makes that gap visible; the picture itself
+        # is described separately, by page_figures.
+        alt = (el.attrs.get("alt") or "").strip()
+        return alt or "[image]"
 
 
 _MARKDOWN = _IndexMarkdownConverter()
@@ -379,7 +386,67 @@ def fetch_all_spaces(confluence):
     return space_keys
 
 
-def _process_integration(integration, tenant_id, embeddings, trigger_type="system_sync", triggered_by="system"):
+def build_page_figure_documents(account_id, fetcher_for, sources, collection_name):
+    """Describe the pictures on every scraped page and index each as its own chunk.
+
+    Works off the raw HTML the scrape already keeps for the source store, so the page
+    walk does not have to be threaded with anything. A figure gets its own chunk for
+    the same reason a PDF figure does: appended to its page it would be diluted by the
+    prose around it, and the transcription is the half that has to match a literal
+    string someone typed into a screenshot.
+    """
+    if not account_id or not sources:
+        return [], ""
+
+    # The scrape's account id comes from the database as a UUID; every consumer below
+    # — the cache key in particular — builds strings from it.
+    account_id = str(account_id)
+
+    if fetcher_for is None:
+        logger.warning("page_figures: no authenticated fetch available; pictures not described")
+        return [], "page images were not analysed"
+
+    figures_by_page = []
+    for source in sources:
+        found = page_figures.collect_page_figures(source.get("content") or "", fetcher_for(source))
+        if found:
+            figures_by_page.append((source, found))
+
+    every_figure = [figure for _, figures in figures_by_page for figure in figures]
+    if not every_figure:
+        return [], ""
+
+    described, vision_available = describe_figures(account_id, every_figure, collection_name=collection_name)
+
+    documents = []
+    for source, figures in figures_by_page:
+        for figure in figures:
+            text = page_figures.figure_chunk_text(source.get("title") or "", source.get("url") or "", figure)
+            if not text:
+                continue
+            metadata = {"page_id": source.get("source_id"), "url": source.get("url"), "is_figure": True}
+            if source.get("title"):
+                metadata["title"] = source["title"]
+            documents.append(Document(page_content=text, metadata=metadata))
+
+    logger.info(
+        "page_figures: %d picture(s) across %d page(s) -> %d described, %d indexed",
+        len(every_figure),
+        len(figures_by_page),
+        described,
+        len(documents),
+    )
+    warning = ""
+    if not vision_available:
+        warning = f"{len(every_figure)} page image(s) were not analysed: no vision-capable model is configured"
+    elif described < len(every_figure):
+        warning = f"{len(every_figure) - described} of {len(every_figure)} page image(s) could not be analysed"
+    return documents, warning
+
+
+def _process_integration(
+    integration, tenant_id, embeddings, trigger_type="system_sync", triggered_by="system", account_id=None
+):
     """Scrape one Confluence integration and embed it as a single load.
 
     rag-server owns the integration KB's status flip — set to 'active' on
@@ -410,6 +477,26 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
             space_keys = [space_key] if space_key else fetch_all_spaces(confluence)
             for sk in space_keys:
                 documents.extend(collect_confluence_space_documents(confluence, sk, stats, sources=sources))
+
+        # Pictures last, from the HTML the walk already kept. A page's own text is
+        # indexed whether or not the vision call works, so a provider outage costs
+        # the figures and not the sync.
+        confluence_base = (config.get("host") or "").rstrip("/")
+        figure_documents, figure_warning = build_page_figure_documents(
+            account_id,
+            lambda source: page_figures.confluence_attachment_fetcher(
+                confluence, str(source.get("source_id") or ""), confluence_base
+            ),
+            sources,
+            collection_name,
+        )
+        # Counted before the figures join them: a figure is a chunk of a page, not a
+        # page. The KB's Docs column means source documents — the same rule the load
+        # history follows — so folding figures in would inflate it by however many
+        # pictures the space happens to contain.
+        page_count = len(documents)
+        documents.extend(figure_documents)
+
         if stats["failed_pages"] or stats["empty_spaces"] or stats["failed_roots"]:
             logger.warning(
                 "Confluence integration %s scraped with gaps: %s unreadable pages, "
@@ -474,7 +561,9 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
         # Pages, not `document_ids`: process_documents chunks long documents, so
         # its ids are embedding units. The KB's document_count is the number the
         # list column shows beside a drilldown that lists one row per page.
-        update_integration_kb_load_result(integration_id, "active", len(documents))
+        # The load is active either way — the pages are indexed. A figure shortfall
+        # rides along so the KB reads "Ready with gaps" instead of looking complete.
+        update_integration_kb_load_result(integration_id, "active", page_count, error_message=figure_warning)
         return document_ids
     except Exception as e:
         logger.error(f"Failed to process Confluence integration {integration_id}: {e}")
@@ -548,7 +637,7 @@ def load_confluence_docs(
                 continue
             try:
                 integration_document_ids = _process_integration(
-                    integration, tenant_id, embeddings, trigger_type, triggered_by
+                    integration, tenant_id, embeddings, trigger_type, triggered_by, embedding_account_id
                 )
                 if integration_document_ids:
                     # Prune stale docs within this integration's collection only.
@@ -764,7 +853,7 @@ def collect_servicenow_kb_documents(snow_client, base_url, sources=None):
 
 
 def _process_servicenow_integration(
-    integration, tenant_id, embeddings, trigger_type="system_sync", triggered_by="system"
+    integration, tenant_id, embeddings, trigger_type="system_sync", triggered_by="system", account_id=None
 ):
     """Scrape one ServiceNow integration and embed it as a single load.
 
@@ -795,6 +884,21 @@ def _process_servicenow_integration(
         run_id = str(uuid.uuid4())
         sources: List[dict] = []
         documents = collect_servicenow_kb_documents(client, instance_url, sources=sources)
+
+        # Same pass as Confluence: an instruction inside a screenshot is indexed as
+        # its own chunk instead of being dropped with the picture.
+        failed_image_urls: set = set()
+        figure_documents, figure_warning = build_page_figure_documents(
+            account_id,
+            lambda source: page_figures.default_fetcher(
+                getattr(client, "session", None), instance_url, failed=failed_image_urls
+            ),
+            sources,
+            collection_name,
+        )
+        # Articles, not figures — see the Confluence path above.
+        article_count = len(documents)
+        documents.extend(figure_documents)
         document_ids: List[str] = []
         if documents:
             logger.info(f"Processing {len(documents)} ServiceNow KB documents into collection {collection_name}...")
@@ -822,7 +926,8 @@ def _process_servicenow_integration(
             # Confluence path above.
             source_store.store(collection_name, sources, run_id)
         # Articles, not `document_ids` — see the Confluence path above.
-        update_integration_kb_load_result(integration_id, "active", len(documents))
+        # Same as the Confluence path: a dropped picture is a gap, not a failure.
+        update_integration_kb_load_result(integration_id, "active", article_count, error_message=figure_warning)
         return document_ids
 
     except Exception as e:
@@ -896,7 +1001,7 @@ def load_servicenow_kb(
                 continue
             try:
                 integration_document_ids = _process_servicenow_integration(
-                    integration, tenant_id, embeddings, trigger_type, triggered_by
+                    integration, tenant_id, embeddings, trigger_type, triggered_by, embedding_account_id
                 )
                 if integration_document_ids:
                     collection_name = f"{integration_id}_knowledge_base"

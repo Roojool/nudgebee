@@ -105,7 +105,9 @@ def update_integration_kb_load_result(
     An integration can have one KB row per cloud account in its tenant, all
     backed by the same vector collection — so the update keys on integration_id
     rather than a single KB id. On failure error_message holds the reason; on
-    success it is cleared.
+    success it holds any shortfall worth reporting — a load that indexed the text
+    but dropped the pictures is active, not failed, and must still say so — and is
+    cleared when there is nothing to report.
     """
     try:
         engine = _get_kb_engine()
@@ -116,10 +118,15 @@ def update_integration_kb_load_result(
                         sql_text(
                             "UPDATE llm_knowledgebases SET status = :status, "
                             "document_count = :doc_count, last_loaded_at = NOW(), "
-                            "error_message = NULL, updated_at = NOW() "
+                            "error_message = :error_message, updated_at = NOW() "
                             "WHERE integration_id = :iid AND kb_type = 'integration'"
                         ),
-                        {"status": status, "doc_count": document_count, "iid": integration_id},
+                        {
+                            "status": status,
+                            "doc_count": document_count,
+                            "iid": integration_id,
+                            "error_message": error_message or None,
+                        },
                     )
                 else:
                     connection.execute(
