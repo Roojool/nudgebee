@@ -1,4 +1,3 @@
-// Not for OSS
 import { Page, Locator, expect } from "@playwright/test";
 import { LoginPage } from "../../../pages/LoginPage";
 // The in-scope account id, resolved from the CLUSTER the environment configures. Reused from
@@ -10,6 +9,9 @@ import { TriageRulesLocators } from "./triageRulesLocators";
 import {
   CLUSTER_DETAILS_PATH,
   CLUSTER_TRIAGE_RULES_FRAGMENT,
+  DELETE_MENU_ITEM,
+  EDIT_MENU_ITEM,
+  RETRO_MATCH_FIXTURE_TITLE,
   TRIAGE_RULES_FRAGMENT,
   TROUBLESHOOT_PATH,
 } from "./triageRulesConstants";
@@ -49,13 +51,6 @@ export async function settleListing(locators: TriageRulesLocators, timeout = 120
   await expect(locators.tableBody.or(locators.emptyState).first(), NO_LISTING_HINT).toBeAttached({ timeout });
 }
 
-// A name no other rule can hold, so every case stays order-free and safe to run twice against
-// the shared dev tenant. The random tail matters as much as the clock: two workers can enter
-// the same millisecond.
-export function uniqueRuleName(): string {
-  return `e2e-triage-rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
 // A regex that matches no real alert, so the suppression rule a case creates cannot change how
 // any genuine event is processed for the tenant while it briefly exists.
 export function inertAlertPattern(ruleName: string): string {
@@ -92,6 +87,17 @@ export async function openCreateModal(locators: TriageRulesLocators): Promise<vo
   await expect(locators.ruleNameField).toBeEditable();
 }
 
+// Opens the edit modal for a named rule through its row action menu, and waits for it to be
+// interactive on the rule's own pre-filled values — same reset-effect race as openCreateModal.
+export async function openEditModal(locators: TriageRulesLocators, name: string): Promise<void> {
+  await searchByName(locators, name);
+  const row = locators.rowByName(name);
+  await locators.rowMenuTrigger(row).click();
+  await locators.rowMenuItem(EDIT_MENU_ITEM).click();
+  await expect(locators.editRuleModalTitle).toBeVisible();
+  await expect(locators.ruleNameField).toHaveValue(name);
+}
+
 // Deletes a rule through the row action menu and proves it is gone from the listing. Written to
 // be callable from a cleanup path, so it tolerates the row already being absent — a create that
 // failed leaves nothing to delete, and that must not mask the original failure.
@@ -108,8 +114,65 @@ export async function deleteRuleByName(locators: TriageRulesLocators, name: stri
   if (!present) return;
 
   await locators.rowMenuTrigger(row).click();
-  await locators.deleteMenuItem().click();
+  await locators.rowMenuItem(DELETE_MENU_ITEM).click();
   await locators.deleteConfirmButton.click();
 
   await expect(locators.rowByName(name)).toHaveCount(0, { timeout: 60000 });
+}
+
+// API-level helper for the retroactive-apply case, which has to read and restore real
+// pre-existing events rather than a rule this suite created — no UI flow does either of those.
+// Goes through /api/graphql, sharing the authenticated storageState cookie with the browser
+// context, so it runs as the signed-in user through the same gateway the UI itself uses.
+// Mirrors the established `gql()` shape from tests/admin/Ownership/ownershipHelper.ts.
+async function gql(page: Page, query: string, operationName: string, variables: Record<string, unknown> = {}): Promise<any> {
+  const res = await page.request.post("/api/graphql", {
+    data: { query, operationName, variables },
+    headers: { "Content-Type": "application/json" },
+    failOnStatusCode: false,
+    // playwright.config.ts's actionTimeout (10s on dev) is tuned for UI interactions and is too
+    // tight for a real data query under load — this overrides it for this call specifically. A
+    // ceiling, not a fixed wait: adds nothing when the call is fast, which is the normal case.
+    timeout: 30000,
+  });
+  const text = await res.text();
+  let body: any;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${operationName} returned non-JSON (HTTP ${res.status()})`);
+  }
+  const err = body?.errors?.[0];
+  if (err) throw new Error(`${operationName} failed: ${err.message ?? JSON.stringify(err)}`);
+  return body?.data;
+}
+
+const FIND_OPEN_FIXTURE_EVENTS = `
+query TriageFixtureOpenEvents($accountId: String!, $title: String!) {
+  events_list(where: {_and: [{account_id: {_eq: $accountId}}, {title: {_eq: $title}}, {nb_status: {_eq: "OPEN"}}]}, limit: 500) {
+    rows { id }
+  }
+}`;
+
+const REOPEN_EVENT = `
+mutation TriageFixtureReopenEvent($event_id: String!) {
+  event_update_nb_status(event_id: $event_id, nb_status: "OPEN") {
+    success
+  }
+}`;
+
+// The exact real, currently-open events under the recurring test-alert fixture title, for this
+// account. Read once before a rule ever touches them, so cleanup can restore precisely these.
+export async function findOpenFixtureEventIds(page: Page, accountId: string): Promise<string[]> {
+  const data = await gql(page, FIND_OPEN_FIXTURE_EVENTS, "TriageFixtureOpenEvents", {
+    accountId,
+    title: RETRO_MATCH_FIXTURE_TITLE,
+  });
+  return (data?.events_list?.rows ?? []).map((row: { id: string }) => row.id);
+}
+
+// Reverts each event back to OPEN. Real events pre-dating this test, so a triage rule suppressing
+// them here must not leave them suppressed once the rule that touched them is gone.
+export async function reopenFixtureEvents(page: Page, eventIds: string[]): Promise<void> {
+  await Promise.all(eventIds.map((eventId) => gql(page, REOPEN_EVENT, "TriageFixtureReopenEvent", { event_id: eventId })));
 }

@@ -1,4 +1,3 @@
-// Not for OSS
 import { Page, Locator } from "@playwright/test";
 import { TroubleshootLocators } from "../TroubleshootLocators";
 import {
@@ -6,20 +5,26 @@ import {
   ACCOUNT_FILTER_LABEL,
   ALERT_NAME_LABEL,
   ALERT_NAME_PLACEHOLDER,
+  APPLY_TO_EXISTING_LABEL,
   CANCEL_LABEL,
   CLUSTER_TRIAGE_RULES_TAB_ID,
   CREATE_BUTTON_ID,
   CREATE_MODAL_TITLE,
   CREATE_SUBMIT_LABEL,
   DELETE_CONFIRM_LABEL,
-  DELETE_MENU_ITEM,
+  EDIT_MODAL_TITLE,
   EMPTY_STATE_ID,
+  EXPAND_ROW_LABEL,
+  EXPIRATION_HEADING,
+  EXPIRES_AT_FIELD_ID,
   LISTING_ID,
+  MATCHES_COLUMN_LABEL,
   ROW_MENU_LABEL,
   RULE_NAME_LABEL,
   RULE_NAME_PLACEHOLDER,
   RULE_TYPE_FILTER_ID,
   RULE_TYPE_FILTER_LABEL,
+  SCORE_ADJUSTMENT_LABEL,
   SEARCH_ID,
   SEARCH_PLACEHOLDER,
   STATUS_FILTER_ID,
@@ -75,14 +80,24 @@ export class TriageRulesLocators extends TroubleshootLocators {
   // Create / edit modal.
   readonly ruleModal: Locator;
   readonly ruleModalTitle: Locator;
+  readonly editRuleModalTitle: Locator;
   readonly ruleNameField: Locator;
   readonly alertNameField: Locator;
+  readonly scoreAdjustmentField: Locator;
+  readonly expirationToggle: Locator;
+  readonly expiresAtField: Locator;
+  readonly applyToExistingToggle: Locator;
+  readonly applyToExistingPreview: Locator;
   readonly modalSubmit: Locator;
   readonly modalCancel: Locator;
 
   // Delete confirmation and toasts.
   readonly deleteConfirmButton: Locator;
   readonly toastRegion: Locator;
+
+  // A row's own expandable drilldown. Only one row is ever expanded within a single test here,
+  // so an unscoped page-level match is unambiguous in practice.
+  readonly matchedEventsPanel: Locator;
 
   constructor(page: Page) {
     super(page);
@@ -153,8 +168,12 @@ export class TriageRulesLocators extends TroubleshootLocators {
     // and is what every field below scopes to.
     this.ruleModal = page.getByRole("dialog").first();
     // ds/Modal ids its title <h2> `alert-dialog-title`; the role+name rung is unavailable
-    // because the heading is not exposed as one, so this is scoped exact text.
+    // because the heading is not exposed as one, so this is scoped exact text. The same
+    // modal renders one of two titles depending on isCreate — a second locator for the
+    // Edit title rather than one that resolves to either, so a test names the state it
+    // actually expects instead of accepting whichever one shows up.
     this.ruleModalTitle = this.ruleModal.getByText(CREATE_MODAL_TITLE, { exact: true }).first();
+    this.editRuleModalTitle = this.ruleModal.getByText(EDIT_MODAL_TITLE, { exact: true }).first();
 
     // ds/Input renders a real <label htmlFor={inputId}>, so each field has a genuine accessible
     // name — rung 2. The placeholder fallback is scoped to the dialog for the same reason.
@@ -166,6 +185,36 @@ export class TriageRulesLocators extends TroubleshootLocators {
       .getByRole("textbox", { name: ALERT_NAME_LABEL, exact: true })
       .or(this.ruleModal.getByPlaceholder(ALERT_NAME_PLACEHOLDER))
       .first();
+    // A number input, so its ARIA role is "spinbutton" — not "textbox" like the fields above.
+    // Verified live rather than assumed, since guessing the wrong role here is a silent
+    // zero-match locator.
+    this.scoreAdjustmentField = this.ruleModal.getByRole("spinbutton", { name: SCORE_ADJUSTMENT_LABEL, exact: true }).first();
+
+    // The Expiration block's own expand toggle carries no text, aria-label or testid
+    // (BlockWithHeading.tsx:188) — the heading text is a direct child of the same container the
+    // button sits in, so the button is reached from that text's parent rather than by role+name.
+    // Verified live: this resolves to exactly one button before the section expands.
+    this.expirationToggle = this.ruleModal
+      .getByText(EXPIRATION_HEADING, { exact: true })
+      .locator("xpath=..")
+      .getByRole("button")
+      .first();
+    // The field's own <label> is not htmlFor-associated (CustomDateTimePicker.jsx), so its
+    // accessible name is its format mask, not a human label — deliberately id-only.
+    this.expiresAtField = this.ruleModal.locator(`#${EXPIRES_AT_FIELD_ID}`);
+
+    // The switch carries no label/aria-label at all (TriageRuleModal.tsx:544) — verified live
+    // that its aria-label/aria-labelledby are both null. Its description text sits two DOM levels
+    // above the switch itself (Typography inside a Box inside the flex Box the switch also sits
+    // in), not a wrapping FormControlLabel, so it is reached from that ancestor rather than the
+    // text's immediate parent.
+    this.applyToExistingToggle = this.ruleModal
+      .getByText(APPLY_TO_EXISTING_LABEL, { exact: true })
+      .locator("xpath=../..")
+      .getByRole("checkbox")
+      .first();
+    // Only rendered while applyToExisting is on, so it exists exactly when a test could read it.
+    this.applyToExistingPreview = this.ruleModal.getByText(/will be affected/).first();
 
     // Both action buttons carry ids, but the accessible name is the higher rung and is
     // unambiguous once scoped to the dialog.
@@ -198,6 +247,11 @@ export class TriageRulesLocators extends TroubleshootLocators {
     // out 30s on "element(s) not found". A CSS attribute match ignores the a11y tree and sees
     // the region in both states. Kept as one locator so both cases read toasts the same way.
     this.toastRegion = page.locator(`[role="region"][aria-label="${TOAST_REGION_LABEL}"]`).first();
+
+    // CustomTable's expandable drilldown row is its own <tabpanel>, mounted as a sibling row
+    // immediately after the one that owns it. Only one row is ever expanded within a single test
+    // here, so matching it unscoped at the page level is unambiguous in practice.
+    this.matchedEventsPanel = page.getByRole("tabpanel").first();
   }
 
   // Both rungs land on ds/FilterDropdown's own trigger button. The accessible name starts with
@@ -224,6 +278,24 @@ export class TriageRulesLocators extends TroubleshootLocators {
     return this.rows.filter({ has: this.page.getByText(name, { exact: true }) }).first();
   }
 
+  // A single row's own Matches cell. Reads the position off the table's own header row rather
+  // than trusting a fixed index — the multi-account view prepends an Account Name column ahead
+  // of every other one, so "Matches" sits at a different position there than on the cluster
+  // page. Async because it has to read the DOM first; every caller awaits it.
+  async matchesCellFor(row: Locator): Promise<Locator> {
+    const headers = this.page.locator(`#${TABLE_ID} thead th`);
+    await headers.first().waitFor({ state: "visible" });
+    const headerTexts = await headers.allInnerTexts();
+    const index = headerTexts.findIndex((text) => text.trim() === MATCHES_COLUMN_LABEL);
+    if (index === -1) throw new Error(`No "${MATCHES_COLUMN_LABEL}" column header found`);
+    return row.locator(`td:nth-child(${index + 1})`);
+  }
+
+  // A row's own expand/collapse toggle (CustomTable's showExpandable column).
+  expandRowButton(row: Locator): Locator {
+    return row.getByRole("button", { name: EXPAND_ROW_LABEL, exact: true }).first();
+  }
+
   // The "System" tag chips currently rendered. Exact text, because a rule's own name or its
   // match-criteria summary can legitimately contain the word as a substring ("NS: kube-system")
   // and only the chip is ever exactly "System".
@@ -237,15 +309,34 @@ export class TriageRulesLocators extends TroubleshootLocators {
     return row.getByRole("button", { name: ROW_MENU_LABEL }).first();
   }
 
-  // The Delete entry of an open row menu. ds/DropdownMenu forwards each item's id, but that id
-  // embeds the server-assigned rule id, which a test that just created the rule through the UI
-  // never learns — so the open menu's own item text is the handle, anchored so it cannot match
-  // a longer label. `:visible` keeps it off the closed menus every other row leaves mounted.
-  deleteMenuItem(): Locator {
+  // An entry of an open row menu, by its exact label. ds/DropdownMenu forwards each item's id,
+  // but that id embeds the server-assigned rule id, which a test that just created the rule
+  // through the UI never learns — so the open menu's own item text is the handle, anchored so
+  // it cannot match a longer label. `:visible` keeps it off the closed menus every other row
+  // leaves mounted. Shared by every row-menu action (Edit, Enable/Disable, Delete, the system
+  // rule override) rather than one method per label.
+  rowMenuItem(label: string): Locator {
     return this.page
       .locator('[role="menuitem"]:visible')
-      .filter({ hasText: new RegExp(`^${DELETE_MENU_ITEM}$`) })
+      .filter({ hasText: new RegExp(`^${label}$`) })
       .first();
+  }
+
+  // One of the create/edit modal's own Rule Type tabs (Suppression/Scoring/Classification).
+  // @shared/navigation/Tabs renders MUI <Tab> with role="tab" and the tabOption's text as its
+  // accessible name — same mechanism already proven for the page-level Triage Rules/Triage
+  // Inbox sub-tabs, verified live for this modal via a snapshot of the open tablist.
+  ruleTypeTab(label: string): Locator {
+    return this.ruleModal.getByRole("tab", { name: label, exact: true }).first();
+  }
+
+  // One of the create/edit modal's Action radios (Suppress/Drop under Suppression, False
+  // Positive/Duplicate under Classification). FormControlLabel wraps both the option's title and
+  // its description Typography inside the same <label>, so the radio's accessible name is the
+  // title followed by the description (e.g. "Duplicate Auto-classify as duplicate") — verified
+  // live — hence the anchored-start match rather than exact.
+  actionRadio(label: string): Locator {
+    return this.ruleModal.getByRole("radio", { name: new RegExp(`^${label}`) }).first();
   }
 
   // ds/FilterDropdown portals its options into a MUI Popover, so they are not inside the
