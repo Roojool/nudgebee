@@ -2083,6 +2083,20 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 		}
 		b.WriteString(". `code_analyzer` is available.\n")
 		b.WriteString("- When incident-window evidence supports a code defect, call `code_analyzer` in **explore mode** with the resource, time window, observed failure, causal mechanism, and distinctive log strings (including any filename:lineno). Ask it to verify the mechanism against the deployed revision and identify the exact repo-relative file(s). A log-string match alone does not establish a defect. Keep optional hardening suggestions in prose; they do not justify an automated change plan.\n")
+		// 09-20 benchmark, clean-run failures R0159 / R0167 / R0219 and the three
+		// llm-gateway runs: each prescribed a change that was already merged. The
+		// investigation never asks whether what it is about to recommend exists.
+		// The code stage does ask (codeOutcomeNoOp) but it runs afterwards, once
+		// the recommendation is already written.
+		b.WriteString("- Before you recommend a code change, establish whether it is already there: ask `code_analyzer` for the BEHAVIOUR you are about to request — the retry, the guard, the readiness check — not only for the failing code.\n")
+		// Only ~2.5% of workloads carry a revision annotation today and they are
+		// almost all ours, so this bullet is absent for most workloads. Keep it
+		// to the fact and the disclosure: which branch *should* be deployed is
+		// the operator's release policy, not something to infer here (prod
+		// legitimately lags the default branch under main -> test -> prod).
+		if caps.Source.Commit != "" {
+			fmt.Fprintf(&b, "- `%s` is the revision the running image was built from. Compare the code at that revision with the repository's default branch in the area you are about to change, and report what differs and which commit introduced it. Do not propose a change that another revision already contains; state where it already exists instead. Which revision ought to be deployed is not yours to decide.\n", caps.Source.Commit)
+		}
 	}
 	if caps.Deployment != nil {
 		fmt.Fprintf(&b, "The deployment values for `%s` are in `%s`: `%s`.\n", workload, caps.Deployment.Repo, caps.Deployment.ValuesPath)
