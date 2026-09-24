@@ -554,13 +554,15 @@ def list_collection_documents(collection_name: str, limit: int = 50, offset: str
 
 # The metadata key each scrape stamps its document id on. Source storage keys every
 # document on that same id, so this is the join between an indexed point and its stored
-# source. A new scrape adds its key here; nothing else needs to know about it.
-_SOURCE_ID_KEYS = ("source_id", "page_id", "sys_id")
+# source. A new scrape adds its key here. Public because search results must carry the
+# same keys (controllers/knowledge_document.py): llm-server keys a document's Fact/SOP
+# mark on them.
+SOURCE_ID_KEYS = ("source_id", "page_id", "sys_id")
 
 
 def _source_identifier(metadata: dict) -> str | None:
     """The id this document was stored under, or None when the scrape stamped none."""
-    for key in _SOURCE_ID_KEYS:
+    for key in SOURCE_ID_KEYS:
         value = metadata.get(key)
         # 0 is a legitimate id; "" and None are not. Truthiness alone would drop the
         # first, and `is not None` alone would keep the second and look a blank id up.
