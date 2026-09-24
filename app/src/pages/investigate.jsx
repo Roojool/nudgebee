@@ -183,6 +183,10 @@ const K8S_TABLE_NAMES = [
   'Pod events',
   'Pods running on the node',
   'StatefulSet events',
+  // Cluster over-commitment cards. Matched as substrings, so these two cover
+  // the CPU and memory variants and the truncated "(top 15)" title.
+  'over-commitment',
+  'requests by namespace',
 ];
 
 const CLOUD_TABLE_NAMES = [
