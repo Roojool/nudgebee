@@ -99,7 +99,7 @@ func kbDocumentsCollection(sc *security.RequestContext, accountId, kbId string) 
 		KBType        string  `db:"kb_type"`
 		IntegrationID *string `db:"integration_id"`
 	}
-	err = dbms.Db.Get(&kbMeta, "SELECT name, kb_type, integration_id FROM llm_knowledgebases WHERE id = $1 AND account_id = $2", kbId, accountId)
+	err = dbms.Db.GetContext(sc.GetContext(), &kbMeta, "SELECT name, kb_type, integration_id FROM llm_knowledgebases WHERE id = $1 AND account_id = $2", kbId, accountId)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", "", errors.New(errKBNotFound)
@@ -189,13 +189,14 @@ func documentTitle(doc ragKBDocument, kbName string) string {
 }
 
 // getRAG issues an authenticated GET to rag-server and decodes {"data": ...}
-// into out. It reports found=false on 404.
-func getRAG(path string, out any) (found bool, err error) {
+// into out. It reports found=false on 404. ctx is the caller's request context,
+// so an abandoned request stops waiting on rag-server.
+func getRAG(ctx context.Context, path string, out any) (found bool, err error) {
 	ragServerURL := config.Config.RAGServerUrl
 	if ragServerURL == "" {
 		return false, errors.New("kb: search index service not configured")
 	}
-	req, err := http.NewRequest(http.MethodGet, ragServerURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ragServerURL+path, nil)
 	if err != nil {
 		return false, fmt.Errorf("kb: failed to prepare search index request: %w", err)
 	}
@@ -249,7 +250,7 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 		}
 		return &KBDocumentsPage{
 			Items:   items,
-			Indexed: kbIndexHasDocuments(collection),
+			Indexed: kbIndexHasDocuments(sc.GetContext(), collection),
 		}, nil
 	}
 	if limit <= 0 {
@@ -265,7 +266,7 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 		Items      []ragKBDocument `json:"items"`
 		NextOffset *string         `json:"next_offset"`
 	}
-	found, err := getRAG(fmt.Sprintf("/collections/%s/documents?%s", url.PathEscape(collection), query.Encode()), &ragPage)
+	found, err := getRAG(sc.GetContext(), fmt.Sprintf("/collections/%s/documents?%s", url.PathEscape(collection), query.Encode()), &ragPage)
 	if err != nil {
 		return nil, err
 	}
@@ -309,11 +310,11 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 // clears it if the index is later dropped — so a knowledge base can claim documents
 // it no longer has. This asks the index itself. nil means the question could not be
 // answered, which is not the same as no.
-func kbIndexHasDocuments(collection string) *bool {
+func kbIndexHasDocuments(ctx context.Context, collection string) *bool {
 	var page struct {
 		Items []ragKBDocument `json:"items"`
 	}
-	found, err := getRAG(fmt.Sprintf("/collections/%s/documents?limit=1", url.PathEscape(collection)), &page)
+	found, err := getRAG(ctx, fmt.Sprintf("/collections/%s/documents?limit=1", url.PathEscape(collection)), &page)
 	if err != nil {
 		return nil
 	}
@@ -368,7 +369,7 @@ func GetKBDocumentSource(sc *security.RequestContext, accountId, kbId, contentHa
 		return nil, err
 	}
 	var source KBDocumentSource
-	found, err := getRAG(
+	found, err := getRAG(sc.GetContext(),
 		fmt.Sprintf("/collections/%s/source/%s", url.PathEscape(collection), url.PathEscape(contentHash)), &source)
 	if err != nil {
 		return nil, err
@@ -397,7 +398,7 @@ func uploadedKBSource(sc *security.RequestContext, accountId, kbId string) (*KBD
 		Data      string `db:"data"`
 		UpdatedAt string `db:"updated_at"`
 	}
-	err = dbms.Db.Get(&row, `SELECT name, COALESCE(data_filename, '') AS data_filename,
+	err = dbms.Db.GetContext(sc.GetContext(), &row, `SELECT name, COALESCE(data_filename, '') AS data_filename,
 	                                COALESCE(data_format, '') AS data_format, COALESCE(data, '') AS data,
 	                                COALESCE(updated_at::text, '') AS updated_at
 	                         FROM llm_knowledgebases
@@ -456,7 +457,7 @@ func ListKBRunDocuments(
 		Documents  []KBRunDocument `json:"documents"`
 		NextOffset *string         `json:"next_offset"`
 	}
-	found, err := getRAG(fmt.Sprintf("/collections/%s/runs/%s/documents?%s",
+	found, err := getRAG(sc.GetContext(), fmt.Sprintf("/collections/%s/runs/%s/documents?%s",
 		url.PathEscape(collection), url.PathEscape(runId), query.Encode()), &ragPage)
 	if err != nil {
 		return nil, err
@@ -486,7 +487,7 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 		return &KBDocument{Id: kbId, Title: title, Content: &content, ContentSource: &whole, ContentType: &contentType}, nil
 	}
 	var doc ragKBDocument
-	found, err := getRAG(fmt.Sprintf("/collections/%s/documents/%s", url.PathEscape(collection), url.PathEscape(documentId)), &doc)
+	found, err := getRAG(sc.GetContext(), fmt.Sprintf("/collections/%s/documents/%s", url.PathEscape(collection), url.PathEscape(documentId)), &doc)
 	if err != nil {
 		return nil, err
 	}

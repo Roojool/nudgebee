@@ -36,7 +36,7 @@ func TestGetRAGDecodesDataEnvelope(t *testing.T) {
 		Items      []ragKBDocument `json:"items"`
 		NextOffset *string         `json:"next_offset"`
 	}
-	found, err := getRAG("/collections/int-1_knowledge_base/documents?offset=cursor%2F1", &page)
+	found, err := getRAG(context.Background(), "/collections/int-1_knowledge_base/documents?offset=cursor%2F1", &page)
 	require.NoError(t, err)
 	assert.True(t, found)
 	require.Len(t, page.Items, 1)
@@ -53,13 +53,28 @@ func TestGetRAGNotFoundAndServerError(t *testing.T) {
 	})
 
 	var out map[string]any
-	found, err := getRAG("/collections/kb_1/documents", &out)
+	found, err := getRAG(context.Background(), "/collections/kb_1/documents", &out)
 	require.NoError(t, err)
 	assert.False(t, found)
 
 	status = http.StatusInternalServerError
-	_, err = getRAG("/collections/kb_1/documents", &out)
+	_, err = getRAG(context.Background(), "/collections/kb_1/documents", &out)
 	assert.Error(t, err)
+}
+
+// A caller that gave up must not keep waiting on rag-server.
+func TestGetRAGStopsWhenTheCallerCancels(t *testing.T) {
+	calls := 0
+	withRAGServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out map[string]any
+	_, err := getRAG(ctx, "/collections/kb_1/documents", &out)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, calls, "a cancelled request never reaches the index")
 }
 
 func TestDocumentTitlePrefersStoredTitle(t *testing.T) {

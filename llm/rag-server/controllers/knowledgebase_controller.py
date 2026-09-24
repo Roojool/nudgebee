@@ -334,7 +334,7 @@ async def search_kb(request: KBSearchRequest):
 
 
 @router.post("/kb/retrigger_integration")
-async def retrigger_integration_kb(request: KBRetriggerIntegrationRequest):
+def retrigger_integration_kb(request: KBRetriggerIntegrationRequest):
     """Re-scrape a single integration's knowledge base.
 
     Dispatches to the right scraper (Confluence/ServiceNow) in a background

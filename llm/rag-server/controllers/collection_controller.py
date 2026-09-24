@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/collections")
-async def list_collections(module: Optional[str] = Query(None)):
+def list_collections(module: Optional[str] = Query(None)):
     """List all collections, optionally filtered by module."""
     data = document_collection.list_collections(module=module)
     return {"data": data}
@@ -21,7 +21,7 @@ async def list_collections(module: Optional[str] = Query(None)):
 
 # Specific routes MUST come before generic route with path parameter
 @router.get("/collections/{collection_name}/query")
-async def query_collection(
+def query_collection(
     collection_name: str,
     query: str = Query(""),
     limit: int = Query(10),
@@ -37,7 +37,7 @@ async def query_collection(
 
 
 @router.get("/collections/{collection_name}/download")
-async def download_collection(collection_name: str):
+def download_collection(collection_name: str):
     """Download a collection as JSON file."""
     try:
         collection = document_collection.get_collection(collection_name)
@@ -60,7 +60,7 @@ async def download_collection(collection_name: str):
 
 
 @router.get("/collections/{collection_name}/documents")
-async def list_collection_documents(
+def list_collection_documents(
     collection_name: str,
     limit: int = Query(50, ge=1, le=200),
     offset: Optional[str] = Query(None),
@@ -76,7 +76,7 @@ async def list_collection_documents(
 
 
 @router.get("/collections/{collection_name}/documents/{document_id}")
-async def get_collection_document(collection_name: str, document_id: str):
+def get_collection_document(collection_name: str, document_id: str):
     """Get one document of a collection with its content."""
     try:
         document = document_collection.get_collection_document(collection_name, document_id)
@@ -91,7 +91,7 @@ async def get_collection_document(collection_name: str, document_id: str):
 
 
 @router.get("/collections/{collection_name}/source/{content_hash}")
-async def get_document_source(collection_name: str, content_hash: str):
+def get_document_source(collection_name: str, content_hash: str):
     """One document's source, exactly as it was fetched.
 
     What the collection holds is converted and chunked; this is the original. Served by
@@ -107,7 +107,7 @@ async def get_document_source(collection_name: str, content_hash: str):
 
 
 @router.get("/collections/{collection_name}/runs/{run_id}/documents")
-async def list_run_documents(
+def list_run_documents(
     collection_name: str,
     run_id: str,
     limit: int = Query(50, ge=1, le=200),
@@ -123,7 +123,7 @@ async def list_run_documents(
 
 # Generic route - MUST come after specific routes
 @router.get("/collections/{collection_name}")
-async def get_collection(collection_name: str):
+def get_collection(collection_name: str):
     """Get details of a specific collection."""
     collection = document_collection.get_collection(collection_name)
     if collection is None:
@@ -132,28 +132,28 @@ async def get_collection(collection_name: str):
 
 
 @router.delete("/collections")
-async def delete_all_collections():
+def delete_all_collections():
     """Delete all collections."""
     document_collection.delete_all_collections()
     return {"data": "ok"}
 
 
 @router.delete("/collections/{collection_name}")
-async def delete_collection(collection_name: str):
+def delete_collection(collection_name: str):
     """Delete a specific collection."""
     document_collection.delete_collection(collection_name)
     return {"data": "ok"}
 
 
 @router.delete("/collections/module/{module_name}")
-async def delete_module_collections(module_name: str):
+def delete_module_collections(module_name: str):
     """Delete all collections for a specific module."""
     document_collection.delete_module_collections(module_name)
     return {"data": "ok"}
 
 
 @router.post("/admin/configure-ondisk")
-async def configure_ondisk_storage():
+def configure_ondisk_storage():
     """
     Configure all collections to use on-disk storage.
 
@@ -195,7 +195,7 @@ async def configure_ondisk_storage():
 
 
 @router.post("/admin/export-qdrant-collections")
-async def export_qdrant_collections():
+def export_qdrant_collections():
     """
     Export all collections from Qdrant.
 
@@ -244,7 +244,7 @@ async def export_qdrant_collections():
 
 
 @router.post("/admin/import-qdrant-collections")
-async def import_qdrant_collections(import_data: dict):
+def import_qdrant_collections(import_data: dict):
     """
     Import collections into Qdrant.
 

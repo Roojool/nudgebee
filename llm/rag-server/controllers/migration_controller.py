@@ -26,7 +26,7 @@ _qdrant_migration_lock = threading.Lock()
 
 
 @router.post("/qdrant-to-qdrant/validate")
-async def validate_qdrant_migration():
+def validate_qdrant_migration():
     """
     Validate Qdrant→Qdrant migration prerequisites.
 
@@ -48,7 +48,7 @@ async def validate_qdrant_migration():
 
 
 @router.post("/qdrant-to-qdrant/start")
-async def start_qdrant_migration(batch_size: int = 25, force: bool = False):
+def start_qdrant_migration(batch_size: int = 25, force: bool = False):
     """
     Start migration from embedded Qdrant to standalone Qdrant.
 
@@ -138,7 +138,7 @@ async def get_qdrant_migration_status():
 
 
 @router.get("/qdrant-to-qdrant/stats")
-async def get_qdrant_migration_stats():
+def get_qdrant_migration_stats():
     """
     Get statistics about embedded and standalone Qdrant.
 
@@ -168,7 +168,7 @@ class RAGCollectionRenameRequest(BaseModel):
 
 
 @router.post("/rag-collections/get-mappings")
-async def get_rag_collection_mappings():
+def get_rag_collection_mappings():
     """
     Query database to get agent_id → kb_id mappings from V620 migration.
 

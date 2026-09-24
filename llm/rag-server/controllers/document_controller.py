@@ -234,7 +234,7 @@ def load_module_docs(module: Optional[str], account_ids: Optional[List[str]], fo
 
 
 @router.post("/load_docs")
-async def load_docs_api(request: LoadDocsRequest):
+def load_docs_api(request: LoadDocsRequest):
     """Load documents for a specific module or all modules."""
     account_ids = request.account_id
     module = request.module
@@ -363,7 +363,7 @@ async def load_account_module_docs_api(request: LoadAccountModuleDocsRequest):
 
 
 @router.post("/delete_account_module_docs")
-async def delete_account_module_docs_api(request: DeleteAccountModuleDocsRequest):
+def delete_account_module_docs_api(request: DeleteAccountModuleDocsRequest):
     """Delete a specific document for an account and module."""
     module = request.module
     account_id = request.account_id
@@ -396,7 +396,7 @@ async def delete_account_module_docs_api(request: DeleteAccountModuleDocsRequest
 
 
 @router.delete("/delete_collections")
-async def delete_collections():
+def delete_collections():
     """Delete all collections."""
     logger.info("Deleting collections")
     try:
