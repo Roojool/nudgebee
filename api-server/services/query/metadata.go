@@ -7067,6 +7067,7 @@ var table_metadata = map[string]TableDefinition{
 					nr.severity,
 					nr.delivery_mode,
 					nr.frequency,
+					nr.event_types,
 					nr.tenant_id::text as tenant_id,
 					u.display_name as created_by_display_name,
 					COALESCE(nrm.mappings, '[]'::json) as notification_rule_mappings
@@ -7148,6 +7149,10 @@ var table_metadata = map[string]TableDefinition{
 			"frequency": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "frequency",
+			},
+			"event_types": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "event_types",
 			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,

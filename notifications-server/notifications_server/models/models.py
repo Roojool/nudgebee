@@ -232,6 +232,7 @@ class NotificationRules(Base):
     delivery_mode = Column(String, nullable=True)
     frequency = Column(String, nullable=True)
     severity = Column(String, nullable=True)
+    event_types = Column(JSON, nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -250,6 +251,7 @@ class NotificationRules(Base):
             "delivery_mode": self.delivery_mode,
             "frequency": self.frequency,
             "severity": self.severity,
+            "event_types": self.event_types,
         }
 
     @classmethod
@@ -287,6 +289,7 @@ class NotificationRules(Base):
             delivery_mode=data.get("delivery_mode"),
             frequency=data.get("frequency"),
             severity=data.get("severity"),
+            event_types=data.get("event_types"),
         )
 
 

@@ -91,6 +91,7 @@ func (t *ApprovalTask) Execute(taskCtx types.TaskContext, params map[string]any)
 			Channel:   imChannel,
 			AccountID: taskCtx.GetAccountID(),
 			Platform:  imProvider,
+			EventType: notification.EventApprovalRequested,
 			Parameters: map[string]any{
 				"message":          params["message"],
 				"approval_token":   compoundToken,

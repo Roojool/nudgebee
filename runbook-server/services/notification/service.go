@@ -30,13 +30,33 @@ func validatePlatform(platform string) error {
 	return nil
 }
 
+// Event types stamped on every IM notification so notification rules can
+// select automation events individually. The rule source for all of them is
+// SourceAutomation.
+const (
+	SourceAutomation = "automation"
+
+	EventTaskCompleted     = "automation.task.completed"
+	EventTaskFailed        = "automation.task.failed"
+	EventTaskProgress      = "automation.task.progress"
+	EventPRCreated         = "automation.pr.created"
+	EventPRFailed          = "automation.pr.failed"
+	EventApprovalRequested = "automation.approval.requested"
+
+	// StatusSuppressed is notifications-server's reply when a rule dropped the
+	// message; the request succeeded but nothing was posted.
+	StatusSuppressed = "suppressed"
+)
+
 type SendImNotificationRequest struct {
-	Platform   string         `json:"platform" validate:"required"`
-	Channel    string         `json:"channel" validate:"required"`
-	ThreadId   string         `json:"thread_id"`
-	TeamId     string         `json:"team_id"`
-	Body       string         `json:"body"`
-	AccountID  string         `json:"account_id" validate:"required"`
+	Platform  string `json:"platform" validate:"required"`
+	Channel   string `json:"channel" validate:"required"`
+	ThreadId  string `json:"thread_id"`
+	TeamId    string `json:"team_id"`
+	Body      string `json:"body"`
+	AccountID string `json:"account_id" validate:"required"`
+	// EventType is one of the Event* constants above.
+	EventType  string         `json:"event_type" validate:"required,oneof=automation.task.completed automation.task.failed automation.task.progress automation.pr.created automation.pr.failed automation.approval.requested"`
 	Parameters map[string]any `json:"parameters"`
 }
 
@@ -81,32 +101,29 @@ func SendNotification(ctx *security.RequestContext, request SendImNotificationRe
 	for k, v := range request.Parameters {
 		params[k] = v
 	}
+	// The account id is what lets an account-scoped notification rule match.
+	params["account_id"] = request.AccountID
 
 	requestBody := map[string]any{
-		"kind":      "notification",
-		"type":      "generic",
-		"tenant_id": ctx.GetSecurityContext().GetTenantId(),
-		"channels": map[string]any{
-			request.Platform: []map[string]any{
-				requestParams,
-			},
-		},
+		"kind":       "notification",
+		"type":       "generic",
+		"tenant_id":  ctx.GetSecurityContext().GetTenantId(),
+		"source":     SourceAutomation,
+		"event_type": request.EventType,
 		"parameters": params,
-		"source":     "runbook",
 	}
 
 	if request.ThreadId != "" {
-		requestBody = map[string]any{
-			"kind":       "notification",
-			"type":       "generic",
-			"tenant_id":  ctx.GetSecurityContext().GetTenantId(),
-			"source":     "runbook",
-			"parameters": params,
-			"thread": map[string]any{
-				"platform":   request.Platform,
-				"channel_id": request.Channel,
-				"team_id":    request.TeamId,
-				"message_ts": request.ThreadId,
+		requestBody["thread"] = map[string]any{
+			"platform":   request.Platform,
+			"channel_id": request.Channel,
+			"team_id":    request.TeamId,
+			"message_ts": request.ThreadId,
+		}
+	} else {
+		requestBody["channels"] = map[string]any{
+			request.Platform: []map[string]any{
+				requestParams,
 			},
 		}
 	}

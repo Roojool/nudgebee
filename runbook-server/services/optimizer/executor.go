@@ -232,7 +232,8 @@ func isControllerType(kind string) bool {
 // link syntax (Slack/Google Chat use <url|label>, MS Teams uses [label](url));
 // an empty body skips that platform. Best-effort: per-platform failures are
 // logged, not returned. Reused by the completion summary and PR-ready follow-up.
-func (s *optimizerService) sendToConfiguredChannels(ao *model.AutoOptimize, buildBody func(platform string) string) {
+// eventType is the notification-rule event the message represents.
+func (s *optimizerService) sendToConfiguredChannels(ao *model.AutoOptimize, eventType string, buildBody func(platform string) string) {
 	sc := security.NewRequestContextForTenantAdmin(ao.TenantID.String())
 
 	for platform, config := range ao.Notification {
@@ -264,11 +265,14 @@ func (s *optimizerService) sendToConfiguredChannels(ao *model.AutoOptimize, buil
 			TeamId:    teamID,
 			Body:      body,
 			AccountID: ao.AccountID.String(),
+			EventType: eventType,
 		}
 
-		_, err := notification.SendNotification(sc, req)
+		resp, err := notification.SendNotification(sc, req)
 		if err != nil {
 			slog.Error("Failed to send notification", "platform", platform, "error", err)
+		} else if resp.Status == notification.StatusSuppressed {
+			slog.Info("Notification suppressed by a notification rule", "platform", platform, "event_type", eventType, "auto_optimize_id", ao.ID)
 		}
 	}
 }

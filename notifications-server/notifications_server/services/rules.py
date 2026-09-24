@@ -38,6 +38,34 @@ def is_valid_string(s):
 #   ai_cost            — the AI Cost Daily Report digest, one per tenant-day
 TENANT_WIDE_SOURCES = ("daily_recap", "optimize", "weekly_digest", "ai_cost")
 
+# Automation messages carry an account, but a rule may leave account_id empty
+# to cover every account (the matcher treats a null account as a wildcard).
+AUTOMATION_SOURCE = "automation"
+ACCOUNT_OPTIONAL_SOURCES = TENANT_WIDE_SOURCES + (AUTOMATION_SOURCE,)
+
+# The event types an automation rule may select. Kept in step with the Event*
+# constants in runbook-server's notification service and the catalogue in the
+# rule modal. Approval requests are absent on purpose: they are never
+# suppressible, so a rule has nothing to say about them.
+AUTOMATION_EVENT_TYPES = (
+    "automation.task.completed",
+    "automation.task.failed",
+    "automation.task.progress",
+    "automation.pr.created",
+    "automation.pr.failed",
+)
+
+
+def _validate_automation_fields(fields):
+    event_types = fields.get("event_types")
+    if not isinstance(event_types, list) or not event_types:
+        raise InvalidRuleError(Err.OS0010.value[0] % "event_types")
+    unknown = [e for e in event_types if e not in AUTOMATION_EVENT_TYPES]
+    if unknown:
+        raise InvalidRuleError(Err.OS0011.value[0] % f"event_types: {', '.join(map(str, unknown))}")
+    if fields.get("delivery_mode") == "batch":
+        raise InvalidRuleError(Err.OS0011.value[0] % "delivery_mode: batch is not available for automation rules")
+
 
 def validate_fields(fields, is_update=False):
     source = fields.get("source", None)
@@ -46,8 +74,10 @@ def validate_fields(fields, is_update=False):
         raise InvalidRuleError(Err.OS0011.value[0] % "name")
     if source is None:
         raise InvalidRuleError(Err.OS0010.value[0] % "source")
-    if not is_update and source not in TENANT_WIDE_SOURCES and fields.get("account_id") is None:
+    if not is_update and source not in ACCOUNT_OPTIONAL_SOURCES and fields.get("account_id") is None:
         raise InvalidRuleError(Err.OS0010.value[0] % "account_id")
+    if source == AUTOMATION_SOURCE:
+        _validate_automation_fields(fields)
     return None
 
 
@@ -226,6 +256,7 @@ class NotificationRulesService:
             "delivery_mode",
             "frequency",
             "severity",
+            "event_types",
         }
 
         for key, value in fields.items():

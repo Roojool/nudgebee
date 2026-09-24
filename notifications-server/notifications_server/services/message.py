@@ -151,17 +151,39 @@ def _ids_match(rule_id, payload_id):
 
 
 # Notification rules are keyed by category — the tabs in the UI: "troubleshoot",
-# "optimize", "slo", "cloud" (plus "auto_pilot"). A finding's `source`, however,
-# is the raw *ingestion* source (e.g. "prometheus", "anomaly", "ebpf", "traces",
-# "grafana", "newrelic"). Those never equal "troubleshoot", so
-# matching them verbatim against rule.source sends every troubleshoot finding to
-# the default channel (#28130). Map any source that is not itself a rule category
-# to "troubleshoot"; "cloud"/"optimize"/"slo" findings keep their category.
-RULE_SOURCE_CATEGORIES = {"troubleshoot", "optimize", "slo", "cloud", "auto_pilot"}
+# "optimize", "slo", "cloud". A finding's `source`, however, is the raw
+# *ingestion* source (e.g. "prometheus", "anomaly", "ebpf", "traces", "grafana",
+# "newrelic", or "automation" for workflow-stored events). Those never equal
+# "troubleshoot", so matching them verbatim against rule.source sends every
+# troubleshoot finding to the default channel (#28130). Map any source that is
+# not itself a rule category to "troubleshoot"; "cloud"/"optimize"/"slo" findings
+# keep their category. "automation" is deliberately absent: automation *rules*
+# select non-finding automation messages by event type, while automation
+# *findings* stay troubleshoot findings.
+RULE_SOURCE_CATEGORIES = {"troubleshoot", "optimize", "slo", "cloud"}
+
+# Non-finding messages from runbook-server. They carry a top-level `event_type`
+# and `parameters.account_id`; rules select them by event type.
+AUTOMATION_SOURCE = "automation"
+
+# An approval prompt suspends a workflow until a person answers, so no rule may
+# silence it — a dropped prompt is a run that never finishes.
+NON_SUPPRESSIBLE_EVENT_TYPES = {"automation.approval.requested"}
 
 
 def _finding_rule_source(source):
     return source if source in RULE_SOURCE_CATEGORIES else "troubleshoot"
+
+
+def _event_type_matches(rule, source, event_type):
+    """Automation rules must name the event types they cover; a rule with none
+    matches nothing (fail closed). Other sources ignore event types."""
+    if source != AUTOMATION_SOURCE:
+        return True
+    event_types = getattr(rule, "event_types", None)
+    if not event_types or not event_type:
+        return False
+    return event_type in event_types
 
 
 class NotificationRuleMatcher:
@@ -184,7 +206,7 @@ class NotificationRuleMatcher:
                 finding_params.get("aggregation_key"),
             )
 
-        if source in {"auto_pilot", "slo", "optimize"}:
+        if source in {AUTOMATION_SOURCE, "slo", "optimize"}:
             return (
                 source,
                 params.get("account_id"),
@@ -211,6 +233,7 @@ class NotificationRuleMatcher:
         finding_priority = None
         if type_ == "finding":
             finding_priority = ((kwargs.get("parameters") or {}).get("finding") or {}).get("priority")
+        event_type = kwargs.get("event_type")
 
         all_rules = await self.rules_service.get_notification_rules(tenant_id)
         if not all_rules:
@@ -227,6 +250,7 @@ class NotificationRuleMatcher:
                 and (rule.workload == workload or rule.workload is None)
                 and (rule.aggregation_key == aggregation_key or rule.aggregation_key is None)
                 and (type_ != "finding" or _severity_matches(rule.severity, finding_priority))
+                and _event_type_matches(rule, source, event_type)
                 and rule.is_active
             )
         ]
@@ -704,6 +728,18 @@ class MessageService:
 
         try:
             if thread:
+                # Threaded replies bypass rules, except automation messages: a
+                # rule that silences task chatter has to cover threaded posts too.
+                if source == AUTOMATION_SOURCE:
+                    async with BaseDB.async_session(self.engine)() as session:
+                        matched_rules, _ = await self.rule_matcher.match_notification_rules(
+                            session, tenant_id, type_, payload
+                        )
+                    rule_result = self._maybe_return_rule_effect(
+                        matched_rules, tenant_id, source=source, event_type=payload.get("event_type")
+                    )
+                    if rule_result is not None:
+                        return rule_result
                 return await self.send_threaded_reply(tenant_id, thread, parameters)
 
             if type_ == "finding_resolved":
@@ -734,7 +770,9 @@ class MessageService:
                             )
                         ]
 
-                rule_result = self._maybe_return_rule_effect(matched_rules, tenant_id)
+                rule_result = self._maybe_return_rule_effect(
+                    matched_rules, tenant_id, source=source, event_type=payload.get("event_type")
+                )
                 if rule_result is not None:
                     return rule_result
 
@@ -785,8 +823,11 @@ class MessageService:
         return None
 
     @staticmethod
-    def _maybe_return_rule_effect(matched_rules, tenant_id):
+    def _maybe_return_rule_effect(matched_rules, tenant_id, source=None, event_type=None):
         if not matched_rules:
+            return None
+
+        if event_type in NON_SUPPRESSIBLE_EVENT_TYPES:
             return None
 
         if is_suppressed(matched_rules):
@@ -798,7 +839,9 @@ class MessageService:
             reason = f"Notification snoozed until {expires_at}" if expires_at else "Notification snoozed"
             return [system_response("snoozed", reason)]
 
-        if is_batch_delivery(matched_rules):
+        # The batch digest is built from the events table, so a queued
+        # automation message would never be delivered.
+        if source != AUTOMATION_SOURCE and is_batch_delivery(matched_rules):
             return [system_response("queued", "Notification queued for batch delivery")]
 
         return None

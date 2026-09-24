@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"nudgebee/runbook/internal/model"
+	"nudgebee/runbook/services/notification"
 
 	"github.com/google/uuid"
 )
@@ -155,5 +156,36 @@ func TestResolutionSettled(t *testing.T) {
 	}
 	if !resolutionSettled([]model.RecommendationResolution{{Status: string(model.RecommendationResolutionStatusFailed)}}) {
 		t.Error("Failed should be settled")
+	}
+}
+
+func TestCompletionEventType(t *testing.T) {
+	complete := string(model.AutopilotTaskStatusComplete)
+	applied := task(complete, nil, nil, "app", "Deployment", "api")
+	failed := task(string(model.AutopilotTaskStatusFailed), nil, nil, "app", "Deployment", "cron")
+
+	if got := completionEventType([]model.AutoOptimizeTask{applied}); got != notification.EventTaskCompleted {
+		t.Fatalf("all applied: got %s", got)
+	}
+	// One failure makes the whole summary actionable.
+	if got := completionEventType([]model.AutoOptimizeTask{applied, failed}); got != notification.EventTaskFailed {
+		t.Fatalf("mixed run: got %s", got)
+	}
+}
+
+func TestPrsReadyEventType(t *testing.T) {
+	complete := string(model.AutopilotTaskStatusComplete)
+	ok := task(complete, uuidptr(), nil, "app", "Deployment", "web")
+	bad := task(complete, uuidptr(), nil, "app", "Deployment", "worker")
+	resolutions := map[uuid.UUID][]model.RecommendationResolution{
+		*ok.RecommendationID:  {{TypeReferenceID: "https://github.com/org/repo/pull/1"}},
+		*bad.RecommendationID: {{Status: string(model.RecommendationResolutionStatusFailed)}},
+	}
+
+	if got := prsReadyEventType([]model.AutoOptimizeTask{ok}, resolutions); got != notification.EventPRCreated {
+		t.Fatalf("all created: got %s", got)
+	}
+	if got := prsReadyEventType([]model.AutoOptimizeTask{ok, bad}, resolutions); got != notification.EventPRFailed {
+		t.Fatalf("one failed: got %s", got)
 	}
 }

@@ -35,7 +35,7 @@ def test_empty_or_missing_source_maps_to_troubleshoot():
 
 
 def test_rule_category_sources_pass_through():
-    for category in ("troubleshoot", "optimize", "slo", "cloud", "auto_pilot"):
+    for category in ("troubleshoot", "optimize", "slo", "cloud"):
         assert _finding_rule_source(category) == category
 
 
