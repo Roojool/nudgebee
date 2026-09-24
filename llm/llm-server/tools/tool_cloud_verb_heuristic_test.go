@@ -70,6 +70,7 @@ func TestInferAwsVerbType(t *testing.T) {
 		{"service name only, no recognized verb", "aws ec2", ""},
 		{"unknown verb falls through", "aws ec2 frobnicate --foo bar", ""},
 		{"without aws prefix", "ec2 describe-instances", core.ToolRequestTypeRead},
+		{"describe-addresses is read (add prefix does not collide)", "aws ec2 describe-addresses", core.ToolRequestTypeRead},
 	}
 
 	for _, tt := range tests {
@@ -195,6 +196,40 @@ func TestInferGcpVerbType(t *testing.T) {
 		{"only gcloud", "gcloud", ""},
 		{"unknown verb falls through", "gcloud compute instances frobnicate --zone us-central1-a", ""},
 		{"without gcloud prefix", "compute instances list", core.ToolRequestTypeRead},
+
+		// Addresses noun vs add verb
+		{"addresses list", "gcloud compute addresses list --project my-project", core.ToolRequestTypeRead},
+		{"addresses describe", "gcloud compute addresses describe my-ip --region us-central1", core.ToolRequestTypeRead},
+
+		// BigQuery query commands
+		{"bq query read select", "bq query --nouse_legacy_sql 'SELECT count(*) FROM my_dataset.my_table'", core.ToolRequestTypeRead},
+		{"bq query with flags with values preceding select", "bq query --max_rows 50 --project_id my-project 'SELECT count(*) FROM my_dataset.my_table'", core.ToolRequestTypeRead},
+		{"bq query with leading comment", "bq query '-- comment\nSELECT 1'", core.ToolRequestTypeRead},
+		{"bq query with CTE", "bq query --nouse_legacy_sql 'WITH summary AS (SELECT id FROM t) SELECT * FROM summary'", core.ToolRequestTypeRead},
+		{"bq query with destination table is update", "bq query --destination_table=my_ds.out 'SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query with destination kms key is update", "bq query --destination_kms_key=key 'SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query with destination schema is update", "bq query --destination_schema=schema.json 'SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query with short -d is update", "bq query -d my_ds.tbl 'SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query with append table is update", "bq query --append_table 'SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query insert is update", "bq query 'INSERT INTO my_ds.tbl VALUES (1)'", core.ToolRequestTypeUpdate},
+		{"bq query drop is update", "bq query 'DROP TABLE my_ds.tbl'", core.ToolRequestTypeUpdate},
+		{"bq query execute immediate is update", "bq query 'SELECT 1; EXECUTE IMMEDIATE \"DROP TABLE tbl\"'", core.ToolRequestTypeUpdate},
+		{"bq query multi-statement with call is update", "bq query 'SELECT 1; CALL dataset.mutating_procedure()'", core.ToolRequestTypeUpdate},
+		{"bq query multi-statement with drop is update", "bq query 'SELECT 1; DROP TABLE tbl'", core.ToolRequestTypeUpdate},
+		{"bq query multi-statement select is update", "bq query 'SELECT 1; SELECT 2'", core.ToolRequestTypeUpdate},
+		{"bq query call alone is update", "bq query 'CALL dataset.mutating_procedure()'", core.ToolRequestTypeUpdate},
+		{"bq query begin block is update", "bq query 'BEGIN SELECT 1; END;'", core.ToolRequestTypeUpdate},
+		{"bq query export data is update", "bq query 'EXPORT DATA OPTIONS(uri=\"gs://b/f*\") AS SELECT 1'", core.ToolRequestTypeUpdate},
+		{"bq query comment evasion delete is update", "bq query 'DELETE/*comment*/ FROM tbl'", core.ToolRequestTypeUpdate},
+		{"bq query trailing semicolon is read", "bq query 'SELECT 1;'", core.ToolRequestTypeRead},
+		{"bq query semicolon inside string literal is read", "bq query \"SELECT 'foo; bar' FROM tbl\"", core.ToolRequestTypeRead},
+		{"bq query hash comment is read", "bq query '# comment\nSELECT 1'", core.ToolRequestTypeRead},
+		{"bq query block comment is read", "bq query '/* comment */ SELECT 1'", core.ToolRequestTypeRead},
+		{"bq query with schedule is update", "bq query --schedule='every 24 hours' 'SELECT * FROM dataset.table'", core.ToolRequestTypeUpdate},
+		{"bq query with target dataset is update", "bq query --target_dataset=my_ds 'SELECT * FROM dataset.table'", core.ToolRequestTypeUpdate},
+		{"bq query with display name is update", "bq query --display_name='daily report' 'SELECT * FROM dataset.table'", core.ToolRequestTypeUpdate},
+		{"bq query with clobber is update", "bq query --clobber 'SELECT * FROM dataset.table'", core.ToolRequestTypeUpdate},
+		{"bq query with short -c is update", "bq query -c 'SELECT * FROM dataset.table'", core.ToolRequestTypeUpdate},
 	}
 
 	for _, tt := range tests {

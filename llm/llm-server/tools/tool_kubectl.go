@@ -28,8 +28,8 @@ var kubectlGlobalFlagsWithValue = map[string]bool{
 var kubectlReadVerbs = map[string]bool{
 	"api-resources": true, "api-versions": true, "cluster-info": true,
 	"describe": true, "diff": true, "explain": true, "get": true,
-	"logs": true, "options": true, "top": true, "version": true,
-	"wait": true,
+	"logs": true, "options": true, "port-forward": true, "proxy": true,
+	"top": true, "version": true, "wait": true,
 }
 
 var kubectlCreateVerbs = map[string]bool{"create": true, "expose": true, "run": true}

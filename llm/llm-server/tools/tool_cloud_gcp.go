@@ -6,6 +6,7 @@ import (
 	"nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
 	"strings"
+	"unicode"
 
 	"github.com/google/shlex"
 )
@@ -367,6 +368,12 @@ func (t GcpCliTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCall
 	return matches[0], nil
 }
 
+// matchGcpVerbPrefix ensures short prefixes (like "add", "set", "tag", "run", "put")
+// do not falsely match resource nouns like "addresses", "settings", "tags".
+func matchGcpVerbPrefix(verb, prefix string) bool {
+	return verb == prefix || strings.HasPrefix(verb, prefix+"-")
+}
+
 // classifyGcpVerb checks a single verb against GCP verb lists.
 // Returns the classified ToolRequestType, or empty string if no match.
 func classifyGcpVerb(verb string) core.ToolRequestType {
@@ -378,7 +385,7 @@ func classifyGcpVerb(verb string) core.ToolRequestType {
 		"query", "scan", "wait",
 	}
 	for _, p := range readPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchGcpVerbPrefix(verb, p) {
 			return core.ToolRequestTypeRead
 		}
 	}
@@ -398,7 +405,7 @@ func classifyGcpVerb(verb string) core.ToolRequestType {
 		"invoke", "execute", "request", "initiate",
 	}
 	for _, p := range createPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchGcpVerbPrefix(verb, p) {
 			return core.ToolRequestTypeCreate
 		}
 	}
@@ -415,7 +422,7 @@ func classifyGcpVerb(verb string) core.ToolRequestType {
 		"add", // e.g. add-iam-policy-binding
 	}
 	for _, p := range updatePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchGcpVerbPrefix(verb, p) {
 			return core.ToolRequestTypeUpdate
 		}
 	}
@@ -427,12 +434,221 @@ func classifyGcpVerb(verb string) core.ToolRequestType {
 		"deregister", "release",
 	}
 	for _, p := range deletePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchGcpVerbPrefix(verb, p) {
 			return core.ToolRequestTypeDelete
 		}
 	}
 
 	return "" // no match
+}
+
+// maskSqlStringsAndComments masks string literal contents and replaces SQL comments
+// (-- ...\n, # ...\n, /* ... */) with single whitespace.
+// Returns the sanitized SQL and a boolean indicating whether all quotes/comments were properly closed.
+func maskSqlStringsAndComments(sql string) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(sql))
+	n := len(sql)
+	i := 0
+
+	for i < n {
+		// Single-line comments: -- or #
+		if (i+1 < n && sql[i] == '-' && sql[i+1] == '-') || sql[i] == '#' {
+			b.WriteByte(' ')
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+			if i < n && sql[i] == '\n' {
+				b.WriteByte(' ')
+				i++
+			}
+			continue
+		}
+
+		// Block comments: /* ... */
+		if i+1 < n && sql[i] == '/' && sql[i+1] == '*' {
+			b.WriteByte(' ')
+			i += 2
+			closed := false
+			for i+1 < n {
+				if sql[i] == '*' && sql[i+1] == '/' {
+					i += 2
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return "", false // unclosed block comment
+			}
+			b.WriteByte(' ')
+			continue
+		}
+
+		// Quoted strings: triple-quoted (''' or """) or single-quoted (' or ")
+		// Check for raw string prefix (r'...' or R"...") or byte string prefix (b'...' or B"...")
+		if (sql[i] == 'r' || sql[i] == 'R' || sql[i] == 'b' || sql[i] == 'B') && i+1 < n && (sql[i+1] == '\'' || sql[i+1] == '"') {
+			b.WriteByte(' ')
+			i++
+		}
+
+		if i < n && (sql[i] == '\'' || sql[i] == '"') {
+			quoteChar := sql[i]
+			isTriple := i+2 < n && sql[i+1] == quoteChar && sql[i+2] == quoteChar
+
+			b.WriteString("''") // mask with empty string placeholder
+
+			if isTriple {
+				i += 3
+				closed := false
+				for i+2 < n {
+					if sql[i] == quoteChar && sql[i+1] == quoteChar && sql[i+2] == quoteChar {
+						i += 3
+						closed = true
+						break
+					}
+					if sql[i] == '\\' && i+1 < n {
+						i += 2
+						continue
+					}
+					i++
+				}
+				if !closed {
+					return "", false // unclosed triple quote
+				}
+			} else {
+				i++
+				closed := false
+				for i < n {
+					if sql[i] == quoteChar {
+						i++
+						closed = true
+						break
+					}
+					if sql[i] == '\\' && i+1 < n {
+						i += 2
+						continue
+					}
+					i++
+				}
+				if !closed {
+					return "", false // unclosed quote
+				}
+			}
+			continue
+		}
+
+		b.WriteByte(sql[i])
+		i++
+	}
+
+	return b.String(), true
+}
+
+// sanitizeAndValidateReadOnlyBigQuerySQL verifies that the given query is demonstrably
+// a single, pure read-only query statement (SELECT or WITH ... SELECT).
+// It rejects multi-statement SQL, DDL/DML, procedural calls (CALL/EXECUTE), unclosed
+// quotes/comments, and any mutating keywords.
+func sanitizeAndValidateReadOnlyBigQuerySQL(raw string) bool {
+	sanitized, ok := maskSqlStringsAndComments(raw)
+	if !ok {
+		return false // unclosed comments or string literals
+	}
+
+	// Single statement check:
+	// A trailing semicolon at the very end of the single statement is permitted (e.g. "SELECT 1;"),
+	// but any semicolon followed by non-whitespace/additional statements must fail closed.
+	if idx := strings.Index(sanitized, ";"); idx != -1 {
+		remainder := strings.TrimSpace(sanitized[idx+1:])
+		if remainder != "" {
+			return false // multi-statement SQL detected
+		}
+		sanitized = sanitized[:idx]
+	}
+
+	// Tokenize statement into alphanumeric/word tokens
+	fields := strings.FieldsFunc(sanitized, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '(' || r == ')' || r == ',' || r == '=' ||
+			r == '<' || r == '>' || r == '+' || r == '-' || r == '*' || r == '/' ||
+			r == '%' || r == '[' || r == ']' || r == '{' || r == '}' || r == ';'
+	})
+	if len(fields) == 0 {
+		return false
+	}
+
+	firstToken := strings.ToUpper(fields[0])
+	if firstToken != "SELECT" && firstToken != "WITH" {
+		return false
+	}
+
+	if firstToken == "WITH" {
+		hasSelect := false
+		for _, f := range fields[1:] {
+			if strings.EqualFold(f, "SELECT") {
+				hasSelect = true
+				break
+			}
+		}
+		if !hasSelect {
+			return false
+		}
+	}
+
+	// Disallowed mutating, procedural, scripting, and administrative keywords
+	disallowedKeywords := map[string]bool{
+		"CALL":     true,
+		"EXECUTE":  true,
+		"INSERT":   true,
+		"UPDATE":   true,
+		"DELETE":   true,
+		"MERGE":    true,
+		"CREATE":   true,
+		"DROP":     true,
+		"ALTER":    true,
+		"TRUNCATE": true,
+		"BEGIN":    true,
+		"EXPORT":   true,
+		"LOAD":     true,
+		"GRANT":    true,
+		"REVOKE":   true,
+		"ASSERT":   true,
+	}
+
+	for _, f := range fields {
+		if disallowedKeywords[strings.ToUpper(f)] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isReadOnlyBigQueryQuery inspects arguments following `bq query` to identify
+// pure SQL SELECT queries that do not mutate datasets or tables, nor configure scheduled/recurring jobs.
+func isReadOnlyBigQueryQuery(args []string) bool {
+	for _, arg := range args {
+		lower := strings.ToLower(arg)
+		if strings.HasPrefix(lower, "--destination") ||
+			strings.HasPrefix(lower, "--append_table") ||
+			strings.HasPrefix(lower, "--replace") ||
+			strings.HasPrefix(lower, "--clobber") ||
+			strings.HasPrefix(lower, "--schedule") ||
+			strings.HasPrefix(lower, "--target_dataset") ||
+			strings.HasPrefix(lower, "--display_name") ||
+			lower == "-d" ||
+			strings.HasPrefix(lower, "-d=") ||
+			strings.HasPrefix(lower, "-d:") ||
+			lower == "-c" {
+			return false
+		}
+	}
+
+	for _, arg := range args {
+		if sanitizeAndValidateReadOnlyBigQuerySQL(arg) {
+			return true
+		}
+	}
+	return false
 }
 
 // inferGcpVerbType classifies a GCP CLI command by its verb.
@@ -447,22 +663,20 @@ func inferGcpVerbType(command string) core.ToolRequestType {
 	if len(parts) < 2 {
 		return ""
 	}
-	// A BigQuery query always creates a server-side query job and may contain
-	// DML/DDL even when its leading SQL token looks read-only. Global bq flags may
-	// precede the subcommand, and some flags are boolean while others consume the
-	// next token. Rather than guessing flag arity (and potentially skipping the
-	// query token after a boolean flag such as --nosync), fail closed whenever an
-	// exact query token appears anywhere after bq. Use the shell-aware tokenizer
-	// so quoted SQL, descriptions, and payloads remain one token and cannot create
-	// a false match. If tokenization fails, keep the conservative Fields fallback:
-	// malformed quoting must not create an approval bypass.
+	// A BigQuery query creates a server-side query job and may contain DML/DDL.
+	// If it is an unambiguous SELECT query without destination table flags, treat as read.
+	// Otherwise, fail closed to update.
 	if strings.EqualFold(parts[0], "bq") {
 		bqParts, err := shlex.Split(strings.TrimSpace(command))
 		if err != nil {
 			bqParts = parts
 		}
-		for _, part := range bqParts[1:] {
+		for i, part := range bqParts[1:] {
 			if strings.EqualFold(part, "query") {
+				argsStart := i + 2
+				if argsStart <= len(bqParts) && isReadOnlyBigQueryQuery(bqParts[argsStart:]) {
+					return core.ToolRequestTypeRead
+				}
 				return core.ToolRequestTypeUpdate
 			}
 		}

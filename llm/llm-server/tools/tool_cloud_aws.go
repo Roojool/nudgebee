@@ -200,6 +200,12 @@ func cloudTargetProvenance(target core.ToolConfig) string {
 	return fmt.Sprintf("[account: %s]\n", target.Name)
 }
 
+// matchAwsVerbPrefix ensures short prefixes (like "add", "set", "tag", "run", "put")
+// do not falsely match resource nouns like "addresses", "settings", "tags".
+func matchAwsVerbPrefix(verb, prefix string) bool {
+	return verb == prefix || strings.HasPrefix(verb, prefix+"-")
+}
+
 // classifyAwsVerb checks a single verb against AWS verb lists.
 // Returns the classified ToolRequestType, or empty string if no match.
 func classifyAwsVerb(verb string) core.ToolRequestType {
@@ -223,7 +229,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"wait", // waits are polling, not mutations
 	}
 	for _, p := range readPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeRead
 		}
 	}
@@ -256,7 +262,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"request", "initiate",
 	}
 	for _, p := range createPrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeCreate
 		}
 	}
@@ -276,7 +282,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"stop", "start", // state changes, not resource creation/deletion
 	}
 	for _, p := range updatePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeUpdate
 		}
 	}
@@ -287,7 +293,7 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 		"revoke", "cancel", "purge", "destroy",
 	}
 	for _, p := range deletePrefixes {
-		if strings.HasPrefix(verb, p) {
+		if matchAwsVerbPrefix(verb, p) {
 			return core.ToolRequestTypeDelete
 		}
 	}

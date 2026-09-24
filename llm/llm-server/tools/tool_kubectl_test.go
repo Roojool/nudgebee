@@ -168,6 +168,8 @@ func TestInferKubectlVerbType(t *testing.T) {
 	}{
 		{"incomplete describe remains read", "kubectl describe pods -n nudgebee -l", core.ToolRequestTypeRead},
 		{"json wrapped describe", `{"command":"kubectl describe pods -n nudgebee -l"}`, core.ToolRequestTypeRead},
+		{"port-forward is read", "kubectl port-forward svc/my-svc 8080:80", core.ToolRequestTypeRead},
+		{"proxy is read", "kubectl proxy --port=8001", core.ToolRequestTypeRead},
 		{"global flags before read verb", "kubectl --context prod -n nudgebee get pods", core.ToolRequestTypeRead},
 		{"read config current-context", "kubectl config current-context", core.ToolRequestTypeRead},
 		{"read config get-contexts", "kubectl config get-contexts", core.ToolRequestTypeRead},
