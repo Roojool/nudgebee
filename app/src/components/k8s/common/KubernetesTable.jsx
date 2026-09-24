@@ -412,10 +412,9 @@ const getLimitsAndRequests = (query, memLimit, cpuLimit) => {
   return { memLimit: newMemLimit, cpuLimit: newCpuLimit, memReq, cpuReq };
 };
 
-const processChartData = (podGroupings, cpuLimit, memLimit, cpuReq, memReq, differenceInHours, gpuTrend) => {
+const processChartData = (podGroupings, cpuLimit, memLimit, cpuReq, memReq, differenceInHours) => {
   const cpuData = { data: [[], [], []], labels: [], timestamps: [] };
   const memData = { data: [[], [], []], labels: [], timestamps: [] };
-  const gpuData = { data: [[], [], [], []], labels: [] };
   const diskData = { data: [[], []], labels: [] };
 
   podGroupings.forEach((e) => {
@@ -431,13 +430,6 @@ const processChartData = (podGroupings, cpuLimit, memLimit, cpuReq, memReq, diff
       diskData.data[1].push(e.disk_total / (1024 * 1024 * 1024));
     }
 
-    if (gpuTrend) {
-      gpuData.data[0].push(e.sum_gpu_used);
-      gpuData.data[1].push(e.sum_gpu_temp);
-      gpuData.data[2].push(e.sum_gpu_mem_temp);
-      gpuData.data[3].push(e.sum_gpu_mem_usage);
-    }
-
     const label = differenceInHours > 24 ? getDateString(e.timestamp) : getTimeString(e.timestamp);
     cpuData.labels.push(label);
     memData.labels.push(label);
@@ -446,9 +438,6 @@ const processChartData = (podGroupings, cpuLimit, memLimit, cpuReq, memReq, diff
     memData.timestamps.push(ts);
     if (diskData.data[0].length > 0 && diskData.data[1].length > 0) {
       diskData.labels.push(label);
-    }
-    if (gpuTrend) {
-      gpuData.labels.push(label);
     }
   });
 
@@ -467,7 +456,7 @@ const processChartData = (podGroupings, cpuLimit, memLimit, cpuReq, memReq, diff
     });
   }
 
-  return { cpuData, memData, gpuData, diskData };
+  return { cpuData, memData, diskData };
 };
 
 export const KubernetesUtilizationCharts = ({ accountId, query = {}, selectedDateRange, memLimit, cpuLimit }) => {
@@ -571,7 +560,7 @@ export const KubernetesUtilizationCharts2 = ({
       const podGroupings = res?.data?.k8s_pod_groupings || [];
       const differenceInHours = (dateTimeRange.endDate - dateTimeRange.startDate) / (1000 * 60 * 60);
       const { memReq, cpuReq } = getLimitsAndRequests(query, memLimit, cpuLimit);
-      const processedChartData = processChartData(podGroupings, cpuLimit, memLimit, cpuReq, memReq, differenceInHours, query.gpuTrend);
+      const processedChartData = processChartData(podGroupings, cpuLimit, memLimit, cpuReq, memReq, differenceInHours);
 
       setCpuData(processedChartData.cpuData);
       setMemData(processedChartData.memData);

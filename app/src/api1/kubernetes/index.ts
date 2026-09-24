@@ -2641,14 +2641,7 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     for (const r of results) byKey[r.query_key] = { series_list_result: r.payload || [] };
     return byKey;
   },
-  async getK8sPodGroupings(
-    limit = 10,
-    query: any = {},
-    groupBy: string[] = ['tenant_id', 'account_id', 'timestamp'],
-    datasource = 'auto',
-    gpuTrend = false,
-    timeRangeInMinutes = 1
-  ) {
+  async getK8sPodGroupings(limit = 10, query: any = {}, groupBy: string[] = ['tenant_id', 'account_id', 'timestamp'], datasource = 'auto') {
     if (query?.account_id === 'demo' || query?.accountId === 'demo') {
       const podGroupingsDemo: any = await getMockData('k8s-pod-groupings');
       return {
@@ -2722,360 +2715,20 @@ query k8s_event_groupings($limit:Int,$offset:Int){
         },
       };
     }
-    const queries = [];
-    if ((query.containerName || query.container_name) && (query.podName || query.pod_name) && (query.namespaceName || query.namespace_name)) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(container_cpu_usage_seconds_total{ __CLUSTER__ container = "${query.containerName || query.container_name}", pod = "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(container_memory_working_set_bytes{ __CLUSTER__ container = "${query.containerName || query.container_name}", pod = "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", container = "${
-            query.containerName || query.container_name
-          }", pod = "${query.podName || query.pod_name}", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory", container = "${
-            query.containerName || query.container_name
-          }", pod = "${query.podName || query.pod_name}", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", container = "${
-            query.containerName || query.container_name
-          }", pod = "${query.podName || query.pod_name}", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", container = "${
-            query.containerName || query.container_name
-          }", pod = "${query.podName || query.pod_name}", namespace="${query.namespaceName || query.namespace_name}"})`,
-        }
-      );
-      if (gpuTrend) {
-        queries.push(
-          {
-            key: 'gpu_usage',
-            query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource="nvidia_com_gpu", container = "${
-              query.containerName || query.container_name
-            }", pod = "${query.podName || query.pod_name}", namespace="${query.namespaceName || query.namespace_name}"})`,
-          },
-          {
-            key: 'gpu_temp',
-            query: `sum(DCGM_FI_DEV_GPU_TEMP{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          },
-          {
-            key: 'gpu_mem_temp',
-            query: `sum(DCGM_FI_DEV_MEMORY_TEMP{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          },
-          {
-            key: 'gpu_mem_usage',
-            query: `sum(DCGM_FI_DEV_MEM_COPY_UTIL{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          }
-        );
-      }
-    } else if ((query.podName || query.pod_name) && (query.namespaceName || query.namespace_name)) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(container_cpu_usage_seconds_total{ __CLUSTER__ container != "", pod =~ "${query.podName || query.pod_name}", namespace="${
-            query.namespaceName || query.namespace_name
-          }"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(container_memory_working_set_bytes{ __CLUSTER__ container != "", pod =~ "${query.podName || query.pod_name}", namespace="${
-            query.namespaceName || query.namespace_name
-          }"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", container != "", pod =~ "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory", container != "", pod =~ "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", container != "", pod =~ "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", container != "", pod =~ "${
-            query.podName || query.pod_name
-          }", namespace="${query.namespaceName || query.namespace_name}"})`,
-        }
-      );
-      if (gpuTrend) {
-        queries.push(
-          {
-            key: 'gpu_usage',
-            query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource="nvidia_com_gpu", container != "", pod =~ "${
-              query.podName || query.pod_name
-            }", namespace="${query.namespaceName || query.namespace_name}"})`,
-          },
-          {
-            key: 'gpu_temp',
-            query: `sum(DCGM_FI_DEV_GPU_TEMP{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          },
-          {
-            key: 'gpu_mem_temp',
-            query: `sum(DCGM_FI_DEV_MEMORY_TEMP{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          },
-          {
-            key: 'gpu_mem_usage',
-            query: `sum(DCGM_FI_DEV_MEM_COPY_UTIL{ __CLUSTER__ exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-          }
-        );
-      }
-    } else if (
-      (query.workloadName || query.workload_name) &&
-      (query.namespaceName || query.namespace_name) &&
-      (query.containerName || query.container_name)
-    ) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(container_cpu_usage_seconds_total{ __CLUSTER__ container = "${query.containerName || query.container_name}", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(container_memory_working_set_bytes{ __CLUSTER__ container = "${query.containerName || query.container_name}", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", container = "${
-            query.containerName || query.container_name
-          }", pod =~ "${query.workloadName || query.workload_name}.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory",container = "${
-            query.containerName || query.container_name
-          }", pod =~ "${query.workloadName || query.workload_name}.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", container = "${
-            query.containerName || query.container_name
-          }", pod =~ "${query.workloadName || query.workload_name}.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", container = "${
-            query.containerName || query.container_name
-          }", pod =~ "${query.workloadName || query.workload_name}.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        }
-      );
-    } else if ((query.workloadName || query.workload_name) && (query.namespaceName || query.namespace_name)) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(container_cpu_usage_seconds_total{ __CLUSTER__ container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(container_memory_working_set_bytes{ __CLUSTER__ container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory",container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", container != "", pod =~ "${
-            query.workloadName || query.workload_name
-          }.*", namespace="${query.namespaceName || query.namespace_name}"})`,
-        }
-      );
-    } else if (query.namespaceName || query.namespace_name) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(container_cpu_usage_seconds_total{ __CLUSTER__ container != "", namespace="${
-            query.namespaceName || query.namespace_name
-          }"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(container_memory_working_set_bytes{__CLUSTER__ container != "", namespace="${query.namespaceName || query.namespace_name}"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", container != "", namespace="${
-            query.namespaceName || query.namespace_name
-          }"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory",container != "", namespace="${
-            query.namespaceName || query.namespace_name
-          }"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", container != "", namespace="${
-            query.namespaceName || query.namespace_name
-          }"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", container != "", namespace="${
-            query.namespaceName || query.namespace_name
-          }"})`,
-        }
-      );
-    } else if (query.internalIp) {
-      queries.push(
-        {
-          key: 'cpu_usage',
-          query: `sum(irate(node_cpu_seconds_total{ __CLUSTER__ mode != "idle", instance=~"${query.internalIp}.*"}[${timeRangeInMinutes}m])) OR sum(irate(node_resources_cpu_usage_seconds_total{ __CLUSTER__ mode != "idle", instance=~"${query.nodeName}.*"}[${timeRangeInMinutes}m]))`,
-        },
-        {
-          key: 'memory_usage',
-          query: `sum(node_memory_Active_bytes{__CLUSTER__ instance=~"${query.internalIp}.*"}) or sum(node_resources_memory_total_bytes{ __CLUSTER__ instance=~"${query.nodeName}.*"} - node_resources_memory_available_bytes{ __CLUSTER__ instance=~"${query.nodeName}.*"})`,
-        },
-        {
-          key: 'cpu_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "cpu", node=~"${query.nodeName}.*"})`,
-        },
-        {
-          key: 'memory_request',
-          query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource = "memory", node=~"${query.nodeName}.*"})`,
-        },
-        {
-          key: 'cpu_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "cpu", node=~"${query.nodeName}.*"})`,
-        },
-        {
-          key: 'memory_limit',
-          query: `sum(kube_pod_container_resource_limits{ __CLUSTER__ resource = "memory", node=~"${query.nodeName}.*"})`,
-        },
-        {
-          key: 'disk_total',
-          query: `sum(node_filesystem_size_bytes{ __CLUSTER__ mountpoint="/", instance=~"${query.internalIp}.*"}) or sum(kubelet_volume_stats_capacity_bytes{ __CLUSTER__ instance=~"${query.nodeName}.*"}) or sum(kubelet_volume_stats_capacity_bytes{ __CLUSTER__ instance=~"${query.nodeIp}.*"})`,
-        },
-        {
-          key: 'disk_used',
-          query: `(sum(node_filesystem_size_bytes{ __CLUSTER__ mountpoint="/", instance=~"${query.internalIp}.*"}) - sum(node_filesystem_free_bytes{ __CLUSTER__ mountpoint="/", instance=~"${query.internalIp}.*"})) or (sum(kubelet_volume_stats_capacity_bytes{ __CLUSTER__ instance=~"${query.nodeName}.*"}) - sum(kubelet_volume_stats_available_bytes{ __CLUSTER__ instance=~"${query.nodeName}.*"})) or (sum(kubelet_volume_stats_capacity_bytes{ __CLUSTER__ instance=~"${query.nodeIp}.*"}) - sum(kubelet_volume_stats_available_bytes{ __CLUSTER__ instance=~"${query.nodeIp}.*"}))`,
-        }
-      );
-      if (gpuTrend) {
-        queries.push(
-          {
-            key: 'gpu_usage',
-            query: `sum(kube_pod_container_resource_requests{ __CLUSTER__ resource="nvidia_com_gpu", container != "",container != "POD", node=~"${query.nodeName}.*"})`,
-          },
-          {
-            key: 'gpu_temp',
-            query: `sum(DCGM_FI_DEV_GPU_TEMP{ __CLUSTER__ instance=~"${query.internalIp}.*"})`,
-          },
-          {
-            key: 'gpu_mem_temp',
-            query: `sum(DCGM_FI_DEV_MEMORY_TEMP{ __CLUSTER__ instance=~"${query.internalIp}.*"})`,
-          },
-          {
-            key: 'gpu_mem_usage',
-            query: `sum(DCGM_FI_DEV_MEM_COPY_UTIL{ __CLUSTER__ instance=~"${query.internalIp}.*"})`,
-          }
-        );
-        if (gpuTrend) {
-          queries.push(
-            {
-              key: 'gpu_usage',
-              query: `sum(kube_pod_container_resource_requests{resource="nvidia_com_gpu", container != "", pod =~ "${
-                query.podName || query.pod_name
-              }", namespace="${query.namespaceName || query.namespace_name}"})`,
-            },
-            {
-              key: 'gpu_temp',
-              query: `sum(DCGM_FI_DEV_GPU_TEMP{exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-            },
-            {
-              key: 'gpu_mem_temp',
-              query: `sum(DCGM_FI_DEV_MEMORY_TEMP{exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-            },
-            {
-              key: 'gpu_mem_usage',
-              query: `sum(DCGM_FI_DEV_MEM_COPY_UTIL{exported_pod=~"${query.podName ?? query.pod_name}.*"})`,
-            }
-          );
-        }
-      }
-    }
-
-    let result: any[] = [];
-    const promqlParsed = await this.promqlSeriesListByKey(query.accountId || query.account_Id, queries, time1, time2);
-    if (promqlParsed) {
-      const metrics = ['cpu_usage', 'memory_usage', 'cpu_request', 'memory_request', 'cpu_limit', 'memory_limit', 'disk_used', 'disk_total'];
-      const hasData = metrics.some((metric) => promqlParsed[metric]?.series_list_result?.length > 0);
-
-      if (hasData) {
-        const firstAvailableMetric = metrics.find((metric) => promqlParsed[metric]?.series_list_result?.length > 0);
-
-        if (firstAvailableMetric) {
-          result = promqlParsed[firstAvailableMetric].series_list_result[0].timestamps.map((timestamp: any, index: any) => ({
-            timestamp: formatDateTime(timestamp),
-            avg_cpu_used: parseFloat(promqlParsed.cpu_usage?.series_list_result[0]?.values?.[index]),
-            avg_memory_used: parseFloat(promqlParsed.memory_usage?.series_list_result[0]?.values?.[index]),
-            avg_cpu_request: parseFloat(promqlParsed.cpu_request?.series_list_result[0]?.values?.[index]),
-            avg_cpu_limit: parseFloat(promqlParsed.cpu_limit?.series_list_result[0]?.values?.[index]),
-            avg_memory_request: parseFloat(promqlParsed.memory_request?.series_list_result[0]?.values?.[index]),
-            avg_memory_limit: parseFloat(promqlParsed.memory_limit?.series_list_result[0]?.values?.[index]),
-            sum_gpu_used: parseFloat(promqlParsed.gpu_usage?.series_list_result[0]?.values?.[index]),
-            sum_gpu_temp: parseFloat(promqlParsed.gpu_temp?.series_list_result[0]?.values?.[index]),
-            sum_gpu_mem_temp: parseFloat(promqlParsed.gpu_temp?.series_list_result[0]?.values?.[index]),
-            sum_gpu_mem_usage: parseFloat(promqlParsed.gpu_mem_usage?.series_list_result[0]?.values?.[index]),
-            disk_total: parseFloat(promqlParsed.disk_total?.series_list_result[0]?.values?.[index]),
-            disk_used: parseFloat(promqlParsed.disk_used?.series_list_result[0]?.values?.[index]),
-            pod_cost: '',
-            account_id: query.accountId || query.account_Id,
-          }));
-        }
-      }
-    }
+    // Cost is not a Prometheus metric, and this function never pretended otherwise:
+    // the branch that used to live here built ~30 PromQL queries for CPU, memory,
+    // requests, limits and disk, then set `pod_cost: ''` on every row it produced.
+    // Its only caller is the cost chart in KubernetesTable, which reads `pod_cost`
+    // and `timestamp` — so all those queries fed a flat 0.00 line, and every real
+    // number on that chart comes from the Hasura rows returned above.
+    //
+    // Deleted rather than migrated to utilisation keys: there is no key for cost, and
+    // adding one would not help, because the chart's numbers already come from the
+    // other branch. A range short enough to miss that branch simply has no cost data,
+    // which an empty series says honestly and a row of zeroes does not.
     return {
       data: {
-        k8s_pod_groupings: result,
+        k8s_pod_groupings: [],
       },
     };
   },
@@ -3165,6 +2818,9 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       data.kind = 'pod';
       data.workload_namespace = query.namespaceName || query.namespace_name;
       data.workload_name = query.pod_name || query.podName || query.workload_name;
+      // Forwarded here too, not only on the workload branch below: asking about one
+      // container of one pod otherwise widened to every container in that pod.
+      if (query.containerName || query.container_name) data.container_name = query.containerName || query.container_name;
     } else if ((query.workloadName || query.workload_name) && (query.namespaceName || query.namespace_name)) {
       data.kind = query.workloadType;
       data.workload_namespace = query.namespaceName || query.namespace_name;
@@ -3219,10 +2875,6 @@ query k8s_event_groupings($limit:Int,$offset:Int){
         pod_count: parseFloat(podCountVals[index]) || null,
         max_pod_cpu_used: parseFloat(cpuMaxPodVals[index]) || null,
         max_pod_memory_used: parseFloat(memMaxPodVals[index]) || null,
-        sum_gpu_used: null,
-        sum_gpu_temp: null,
-        sum_gpu_mem_temp: null,
-        sum_gpu_mem_usage: null,
         disk_total: null,
         disk_used: null,
         pod_cost: '',
