@@ -388,15 +388,24 @@ func esPerPodScale(src esMetricSource, meta RequestMetadata) float64 {
 	return src.Scale
 }
 
-// esPerPodHistogramSeries returns one time series per pod (and container) from the
-// ordinary histogram response.
+// esPerPodHistogramSeries returns one time series per group from the ordinary
+// histogram response.
 //
 // This is what a per-pod key answers with no Aggregate. Without it the key fell
 // through to the summed workload total, which is the same shape cpu_usage returns and
 // is indistinguishable from it - a chart labelled "per pod" drawing one workload line.
 // The Prometheus builder groups by (container, pod) whatever the aggregate is; only
 // the collapse is optional, never the grouping.
-func esPerPodHistogramSeries(sr *esUtilSourceResult, scale float64, base map[string]string) []Result {
+//
+// The labels come from the SOURCE's GroupBy, not from the position of the level. They
+// used to be hardcoded "pod" and "container", which is right only while every per-pod
+// source happens to group by exactly those. pvc_used_by_claim groups by namespace and
+// claim, so its series came back labelled pod=<namespace>, container=<claim>: correct
+// values under names nothing looks for. Volume rightsizing reads
+// `persistentvolumeclaim`, found no such label on any series, and produced no
+// recommendation for any volume on an Elasticsearch account - with the data present
+// and correct in the response the whole time.
+func esPerPodHistogramSeries(sr *esUtilSourceResult, src esMetricSource, scale float64, base map[string]string) []Result {
 	type series struct {
 		pod, container string
 		ts             []int64
@@ -437,7 +446,7 @@ func esPerPodHistogramSeries(sr *esUtilSourceResult, scale float64, base map[str
 	for _, key := range order {
 		s := byGroup[key]
 		results = append(results, Result{
-			Metric:     esPerPodLabels(base, esPerPodHistogramLabels(s.pod, s.container)),
+			Metric:     esPerPodLabels(base, esPerPodHistogramLabels(src, s.pod, s.container)),
 			Timestamps: s.ts,
 			Values:     s.values,
 		})
@@ -445,13 +454,26 @@ func esPerPodHistogramSeries(sr *esUtilSourceResult, scale float64, base map[str
 	return results
 }
 
-// esPerPodHistogramLabels adapts the histogram path's pod/container pair to the label
-// map the collapsed path builds. That path groups at most two levels, so it never
-// carries a namespace.
-func esPerPodHistogramLabels(pod, container string) map[string]string {
-	labels := map[string]string{"pod": pod}
-	if container != "" {
-		labels["container"] = container
+// esPerPodHistogramLabels names each grouping level after the field it was grouped by.
+//
+// The histogram response carries the levels positionally - g0 and g1 - so the names
+// have to come from the source that asked for them. esPerPodLevelLabel is the same
+// mapping the collapsed path uses, which is why a key answers with one set of labels
+// whether or not an aggregate was requested; they disagreed before, and only the
+// collapsed half was right.
+//
+// A level whose field has no name is dropped rather than guessed at: an unidentifiable
+// series is easier to notice than a confidently mislabelled one.
+func esPerPodHistogramLabels(src esMetricSource, level0, level1 string) map[string]string {
+	labels := map[string]string{}
+	values := []string{level0, level1}
+	for i, value := range values {
+		if value == "" || i >= len(src.GroupBy) {
+			continue
+		}
+		if name := esPerPodLevelLabel(src, src.GroupBy[i]); name != "" {
+			labels[name] = value
+		}
 	}
 	return labels
 }

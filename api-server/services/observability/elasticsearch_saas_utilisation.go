@@ -625,26 +625,79 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	return esUtilMetric{}, false
 }
 
+// esUtilHistogramBucketBudget caps how many date_histogram buckets one search may
+// ask for.
+//
+// Elasticsearch refuses a search that would build more than `search.max_buckets`
+// (65,536 by default), and the buckets it counts are time buckets MULTIPLIED by the
+// groups inside each one — so a request that is fine for one key is not for another.
+// What makes it worth capping rather than catching is how long the refusal takes.
+// Measured against the dev cluster on a per-claim key:
+//
+//	1 day  at 75s   1,152 buckets     7.5s   answered
+//	3 days at 75s   3,456 buckets    42.2s   refused
+//	7 days at 75s   8,064 buckets   187.6s   refused
+//
+// The HTTP client gives up after 30s (elasticsearch_saas.go), so api-server never
+// receives the refusal — it reports a timeout, and Elasticsearch goes on building
+// buckets for up to three minutes for a caller that has already hung up. Detecting
+// too_many_buckets_exception in the response cannot work, because the response never
+// arrives. The only place left to act is before the query is sent.
+//
+// 1,000 sits under the largest interval measured to answer. It is not a guarantee:
+// the limit is buckets x groups and the group count is not known until the results
+// come back, so a key with thousands of groups can still exceed it. It bounds the
+// time-bucket half, which is the half a caller controls.
+const esUtilHistogramBucketBudget = 1000
+
 // esUtilStepSeconds picks the date_histogram interval. meta.Step is already derived
 // from the picker range by promAggWindow ("300s"); parse it rather than deriving a
 // second, differently-rounded window, so ES buckets line up with what the Prometheus
 // path would have produced for the same picker range.
+//
+// An EXPLICIT step is widened until the window fits the bucket budget; the derived
+// form is not touched. The derived form already spreads ~300 points across the range
+// and its searches are what every chart runs today, so budgeting it too would change
+// the resolution of queries that were never the problem. An explicit step has no such
+// ceiling: a caller asking for 75s sampling over two weeks asks for 16,128 buckets.
 func esUtilStepSeconds(meta RequestMetadata, startMs, endMs int64) int64 {
+	rangeSec := (endMs - startMs) / 1000
+
 	if s := strings.TrimSuffix(meta.Step, "s"); s != "" && s != meta.Step {
 		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
-			return v
+			return esUtilFitBuckets(v, rangeSec)
 		}
 	}
-	rangeSec := (endMs - startMs) / 1000
 	if rangeSec <= 0 {
 		return 300
 	}
+	// The derived form is left exactly as it was, budget and all. It already spreads
+	// ~300 points across the range and stops at 1800s, and the searches it produces
+	// are the ones every chart runs today. Applying the budget here as well widened
+	// a 30-day window past that ceiling, which is a resolution change to queries that
+	// were never the problem.
 	step := rangeSec / 300
 	if step < 60 {
 		step = 60
 	}
 	if step > 1800 {
 		step = 1800
+	}
+	return step
+}
+
+// esUtilFitBuckets widens a step until the window fits esUtilHistogramBucketBudget.
+//
+// Widening rather than refusing: a coarser answer is one a chart can still draw and a
+// consumer can still read, where the alternative is a 30-second wait and nothing. The
+// step only ever grows, so a request that already fits is returned untouched and no
+// existing query text moves.
+func esUtilFitBuckets(step, rangeSec int64) int64 {
+	if step <= 0 || rangeSec <= 0 {
+		return step
+	}
+	if buckets := rangeSec / step; buckets > esUtilHistogramBucketBudget {
+		step = (rangeSec + esUtilHistogramBucketBudget - 1) / esUtilHistogramBucketBudget
 	}
 	return step
 }
@@ -1240,7 +1293,7 @@ func parseESUtilisationResponse(resp *esUtilAggResponse, m esUtilMetric, meta Re
 			// No Aggregate, so no collapse - but the grouping still holds. Falling
 			// through to the summed path below would return one workload line under
 			// a key whose name promises one series per pod.
-			if series := esPerPodHistogramSeries(sr, esPerPodScale(src, meta), labels); len(series) > 0 {
+			if series := esPerPodHistogramSeries(sr, src, esPerPodScale(src, meta), labels); len(series) > 0 {
 				return esUtilOutcome{Series: series, SourceIdx: i, DocsMatched: matched,
 					TruncatedDocs: esUtilTruncatedDocs(sr)}, nil
 			}
