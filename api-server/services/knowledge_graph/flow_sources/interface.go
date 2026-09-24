@@ -179,6 +179,11 @@ func (e *CentralizedExternalServiceEnricher) EnrichExternalServices(
 			// Try all matching strategies
 			matchResult := e.findMatchingNode(name, ctx)
 
+			// Observational only — never gates the match below.
+			if matchResult.ShadowDiff != nil {
+				e.recordShadowDiff(matchResult.ShadowDiff, extSvc, accountID, tenantID)
+			}
+
 			if matchResult.Matched {
 				matchedCount++
 				edge := e.createLinkEdge(extSvc, matchResult.Node, matchResult.MatchedBy, matchResult.RelationshipHint, accountID, tenantID)
@@ -302,17 +307,74 @@ func (e *CentralizedExternalServiceEnricher) findMatchingNode(name string, ctx *
 		return NoMatch()
 	}
 
+	// A strategy may attach a shadow diff whether or not it matched, so carry
+	// the first one across the loop rather than losing it when an unmatched
+	// result is discarded.
+	var shadowDiff *MatchShadowDiff
 	for _, strategy := range e.strategies {
-		if result := strategy.Match(name, ctx); result.Matched {
+		result := strategy.Match(name, ctx)
+		if shadowDiff == nil && result.ShadowDiff != nil {
+			shadowDiff = result.ShadowDiff
+		}
+		if result.Matched {
 			e.logger.Debug("Strategy matched",
 				"strategy", strategy.Name(),
 				"name", name,
 				"matched_by", result.MatchedBy)
+			result.ShadowDiff = shadowDiff
 			return result
 		}
 	}
 
-	return NoMatch()
+	unmatched := NoMatch()
+	unmatched.ShadowDiff = shadowDiff
+	return unmatched
+}
+
+// recordShadowDiff persists one k8s-DNS matching disagreement for later review.
+// Fire-and-forget by construction, mirroring recordUncertainClassificationIfAny
+// in the traces flow source: a short timeout off context.Background() rather
+// than the build's request context, because a cancelled build must not turn
+// this into an error path, and no error is returned so no caller can let it
+// affect build success.
+func (e *CentralizedExternalServiceEnricher) recordShadowDiff(
+	diff *MatchShadowDiff,
+	extSvc *core.DbNode,
+	accountID, tenantID string,
+) {
+	dbManager, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		e.logger.Warn("skipping k8s-dns shadow diff record: no db manager", "error", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	cluster, _ := extSvc.Properties["cluster"].(string)
+
+	core.RecordUncertainClassification(ctx, dbManager, core.UncertainClassificationCandidate{
+		TenantID:           tenantID,
+		Source:             "ebpf",
+		ClassificationKind: "node_match",
+		CandidateType:      diff.CurrentMatchedBy,
+		CandidateName:      diff.Hostname,
+		CandidateNamespace: diff.ParsedNamespace,
+		CandidateCluster:   cluster,
+		ReasonCode:         diff.ReasonCode,
+		ReasonDescription:  "stricter name+namespace k8s-DNS matching would not have produced the edge the current name-only fallback produced",
+		Evidence: map[string]interface{}{
+			"hostname":               diff.Hostname,
+			"parsed_service":         diff.ParsedService,
+			"parsed_namespace":       diff.ParsedNamespace,
+			"current_node_key":       diff.CurrentNodeKey,
+			"current_node_namespace": diff.CurrentNodeNamespace,
+			"current_matched_by":     diff.CurrentMatchedBy,
+			"strict_node_key":        diff.StrictNodeKey,
+			"candidate_count":        diff.CandidateCount,
+			"cloud_account_id":       accountID,
+			"external_service_key":   extSvc.UniqueKey,
+		},
+	})
 }
 
 // createLinkEdge creates an edge linking external service to matched node.

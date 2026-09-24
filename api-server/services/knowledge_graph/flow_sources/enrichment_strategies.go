@@ -104,6 +104,25 @@ func (s *K8sInternalDNSStrategy) Name() string {
 	return "k8s_internal_dns"
 }
 
+// k8sDNSNodeTypesToTry is the node-type search order, highest-fidelity first.
+var k8sDNSNodeTypesToTry = []core.NodeType{
+	core.NodeTypeK8sService,
+	core.NodeTypeService,
+	core.NodeTypeWorkload,
+	core.NodeTypePod,
+}
+
+// Match returns the live matching answer, unchanged. Alongside it, it evaluates
+// a stricter name+namespace-only rule and, where the two disagree, attaches a
+// MatchShadowDiff so the enricher can record the disagreement for review.
+//
+// Shadow mode is deliberate sequencing, not indecision. The live ladder's
+// name-only fallback is known to produce wrong edges (measured: every observed
+// instance bound a caller to a same-named node in an unrelated namespace), but
+// the measurement could only see matches that survived collapse onto a k8s
+// node on one dev tenant. Deleting the fallback outright would change topology
+// fleet-wide on that evidence. Running the strict rule in shadow first yields
+// the fleet data to justify — or refute — the deletion, at zero topology risk.
 func (s *K8sInternalDNSStrategy) Match(name string, ctx *MatchingContext) EnrichmentMatchResult {
 	// Skip if not K8s internal DNS pattern
 	if !s.parser.IsK8sInternalDNS(name) && !s.parser.LooksLikeK8sServiceName(name) {
@@ -116,15 +135,22 @@ func (s *K8sInternalDNSStrategy) Match(name string, ctx *MatchingContext) Enrich
 		return NoMatch()
 	}
 
-	// Node types to search (in priority order)
-	nodeTypesToTry := []core.NodeType{
-		core.NodeTypeK8sService,
-		core.NodeTypeService,
-		core.NodeTypeWorkload,
-		core.NodeTypePod,
-	}
+	current := s.currentMatch(ctx, info)
+	strict, strictReason, candidateCount := s.strictMatch(name, ctx, info)
 
-	for _, nodeType := range nodeTypesToTry {
+	if diff := buildShadowDiff(name, info, current, strict, strictReason, candidateCount); diff != nil {
+		current.ShadowDiff = diff
+	}
+	return current
+}
+
+// currentMatch is the live ladder, byte-for-byte the behaviour that shipped
+// before shadow mode: per node type, name+namespace in the same account, then
+// name alone in the same account, then name alone in any account. The last two
+// steps discard the parsed namespace entirely — that is what the strict rule
+// below exists to measure.
+func (s *K8sInternalDNSStrategy) currentMatch(ctx *MatchingContext, info K8sServiceInfo) EnrichmentMatchResult {
+	for _, nodeType := range k8sDNSNodeTypesToTry {
 		// Try with namespace if available
 		if info.Namespace != "" {
 			if result := s.matchWithNamespace(ctx, nodeType, info); result.Matched {
@@ -144,6 +170,116 @@ func (s *K8sInternalDNSStrategy) Match(name string, ctx *MatchingContext) Enrich
 	}
 
 	return NoMatch()
+}
+
+// strictMatch is the candidate rule: bind only on name+namespace, preferring
+// the caller's own account, and decline rather than guess. It returns the
+// match, the reason it declined (empty when it matched), and how many
+// candidates the any-account step saw.
+//
+// Unlike currentMatch it exhausts every node type within an account scope
+// before widening the scope, so a same-cluster answer always beats a
+// cross-cluster one of a more specific type.
+func (s *K8sInternalDNSStrategy) strictMatch(
+	name string,
+	ctx *MatchingContext,
+	info K8sServiceInfo,
+) (result EnrichmentMatchResult, reasonCode string, candidateCount int) {
+	// A region-truncated AWS endpoint reaches this strategy only because
+	// truncation removed the "amazonaws" substring LooksLikeK8sServiceName
+	// screens on. IsAWSHostname reconstructs the chopped suffix, so it
+	// recognises both the truncated and full forms. Checked first so these get
+	// their own reason code rather than a misleading "namespace not found".
+	if s.classifier.IsAWSHostname(name) {
+		return NoMatch(), ShadowReasonAWSEndpointShaped, 0
+	}
+	if info.Namespace == "" {
+		return NoMatch(), ShadowReasonNoNamespace, 0
+	}
+
+	for _, nodeType := range k8sDNSNodeTypesToTry {
+		if r := s.matchWithNamespace(ctx, nodeType, info); r.Matched {
+			return r, "", 1
+		}
+	}
+
+	for _, nodeType := range k8sDNSNodeTypesToTry {
+		r, count := s.matchWithNamespaceAnyAccount(ctx, nodeType, info)
+		if count > 1 {
+			return NoMatch(), ShadowReasonNamespaceAmbiguous, count
+		}
+		if r.Matched {
+			return r, "", count
+		}
+	}
+
+	return NoMatch(), ShadowReasonNamespaceNotFound, 0
+}
+
+// matchWithNamespaceAnyAccount matches name+namespace without an account
+// filter, for the legitimate cross-cluster case where the caller's own account
+// has no such service. It returns the candidate count so the caller can refuse
+// on ambiguity instead of silently taking whichever node FindNode ordered
+// first — with equal-confidence exact matches that choice is slice order, so
+// it can differ between builds.
+func (s *K8sInternalDNSStrategy) matchWithNamespaceAnyAccount(
+	ctx *MatchingContext,
+	nodeType core.NodeType,
+	info K8sServiceInfo,
+) (EnrichmentMatchResult, int) {
+	results := ctx.NodeMatcher.FindNodes(MatchCriteria{
+		NodeType: nodeType,
+		PropertyMatches: []PropertyMatch{
+			{PropertyPath: "name", Value: info.ServiceName, MatchType: core.MatchTypeExact, CaseSensitive: false},
+			{PropertyPath: "namespace", Value: info.Namespace, MatchType: core.MatchTypeExact, CaseSensitive: false},
+		},
+	})
+	if len(results) != 1 {
+		return NoMatch(), len(results)
+	}
+	return Match(results[0].Node, fmt.Sprintf("k8s_dns_any_account:%s/%s", info.Namespace, info.ServiceName)), 1
+}
+
+// buildShadowDiff returns a diff only when the two rules disagree. Agreement —
+// including the overwhelmingly common case where both decline, because most
+// external hostnames are not in-cluster services and never will be — produces
+// nil and writes nothing. That is what keeps this off the hot path: the review
+// table records behaviour changes, not every failed lookup.
+func buildShadowDiff(
+	name string,
+	info K8sServiceInfo,
+	current, strict EnrichmentMatchResult,
+	strictReason string,
+	candidateCount int,
+) *MatchShadowDiff {
+	if !current.Matched && !strict.Matched {
+		return nil
+	}
+	if current.Matched && strict.Matched && current.Node == strict.Node {
+		return nil
+	}
+
+	diff := &MatchShadowDiff{
+		Hostname:        name,
+		ParsedService:   info.ServiceName,
+		ParsedNamespace: info.Namespace,
+		ReasonCode:      strictReason,
+		CandidateCount:  candidateCount,
+	}
+	if current.Matched {
+		diff.CurrentNodeKey = current.Node.UniqueKey
+		diff.CurrentMatchedBy = current.MatchedBy
+		if ns, ok := current.Node.Properties["namespace"].(string); ok {
+			diff.CurrentNodeNamespace = ns
+		}
+	}
+	if strict.Matched {
+		diff.StrictNodeKey = strict.Node.UniqueKey
+		// Both matched but disagreed, so the decline reason is empty; label the
+		// row for what actually happened.
+		diff.ReasonCode = ShadowReasonStricterPickedOther
+	}
+	return diff
 }
 
 func (s *K8sInternalDNSStrategy) matchWithNamespace(ctx *MatchingContext, nodeType core.NodeType, info K8sServiceInfo) EnrichmentMatchResult {
