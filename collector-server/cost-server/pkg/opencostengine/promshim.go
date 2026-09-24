@@ -221,13 +221,23 @@ func (s *PrometheusShim) fetchMetric(ctx context.Context, accountID, promql stri
 		"action": map[string]any{"name": "metrics_query"},
 		"input": map[string]any{
 			"request": map[string]any{
-				"account_id":             accountID,
-				"metric_provider":        "prometheus",
-				"metric_provider_source": "agent",
-				"queries":                map[string]string{shimQueryKey: promql},
-				"start_time":             startMs,
-				"end_time":               endMs,
-				"instant":                instant,
+				"account_id": accountID,
+				// The provider stays pinned: these are OpenCost's own PromQL strings,
+				// and handing them to Datadog or Elasticsearch would not parse.
+				//
+				// The SOURCE is deliberately not pinned. Naming both makes
+				// getLogsMetricsTracesProviderWithIntegration skip resolution
+				// entirely, which forced every query down the agent relay — so an
+				// account whose Prometheus is connected over HTTP, with no agent in
+				// the cluster, got "agent not connected" for every allocation query
+				// and produced no cost at all. Leaving it empty lets the account's
+				// own Prometheus integration decide, and still falls back to the
+				// agent when that is what the account has.
+				"metric_provider": "prometheus",
+				"queries":         map[string]string{shimQueryKey: promql},
+				"start_time":      startMs,
+				"end_time":        endMs,
+				"instant":         instant,
 			},
 		},
 		// Super-admin context (empty tenant/user + role=admin) so metrics_query's
