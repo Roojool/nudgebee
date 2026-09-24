@@ -436,6 +436,13 @@ func (r *RightsizeRules) applyMemoryBuffer(request, limit *float64, recommendati
 	if limit != nil {
 		if base := r.parseToFloatBytes(addInfo["actual_recommended_limit"]); base != nil {
 			newLim := *base * (1 + bufferPct/100.0)
+			// actual_recommended_limit is the sampled peak; the engine's own
+			// limit is floored at the cgroup high-water mark, which catches
+			// peaks between scrapes. Never buffer below that floor.
+			recommended, _ := recommendation["recommended"].(map[string]any)
+			if floor := r.parseToFloatBytes(recommended["limit"]); floor != nil && *floor > newLim {
+				newLim = *floor
+			}
 			limit = &newLim
 		}
 	}

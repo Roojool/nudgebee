@@ -128,6 +128,39 @@ func TestRightsizeRules_ApplyMemoryRules(t *testing.T) {
 	assert.Equal(t, "240Mi", *lim)
 }
 
+// Numbers from a real k8s-collector recommendation: the engine floors the
+// limit at the cgroup high-water (310Mi) + 15% = 357Mi, but
+// actual_recommended_limit is the sampled peak (281.4Mi). Buffering the
+// sampled peak alone produced limit == request == 324Mi, just 4% over the
+// high-water mark.
+func TestRightsizeRules_MemoryBufferKeepsHighWaterLimitFloor(t *testing.T) {
+	rules := &RightsizeRules{Memory: map[string]any{"buffer_pct": 15.0}}
+
+	recommendation := map[string]any{
+		"recommended": map[string]any{
+			"request": 339738624.0,
+			"limit":   374341632.0,
+		},
+		"add_info": map[string]any{
+			"actual_recommended_request": 295071744.0,
+			"actual_recommended_limit":   295071744.0,
+			"memory_high_water_mark":     325410816.0,
+		},
+	}
+	allocated := map[string]any{
+		"request": 524288000.0,
+		"limit":   1610612736.0,
+	}
+
+	req, lim, errs := rules.ApplyMemoryRules("k8s-collector", recommendation, allocated)
+
+	assert.Len(t, errs, 0)
+	assert.NotNil(t, req)
+	assert.Equal(t, "339332505", *req) // 281.4Mi sampled peak + 15%
+	assert.NotNil(t, lim)
+	assert.Equal(t, "357Mi", *lim) // engine's high-water floor wins
+}
+
 func TestRightsizeRules_ManualScale(t *testing.T) {
 	rules := &RightsizeRules{
 		CPU: map[string]any{
