@@ -97,9 +97,45 @@ func ComputeLogSummary(logs []map[string]any) map[string]any {
 func LogLinesSummary(output string, maxInsights int) LogLinesDigest {
 	var entries []LogEntry
 	for _, raw := range strings.Split(output, "\n") {
-		entries = append(entries, LogEntry{Line: raw})
+		ts, line := splitContainerLogTimestamp(raw)
+		entries = append(entries, LogEntry{Line: line, Timestamp: ts})
 	}
 	return SummarizeLogEntries(entries, maxInsights)
+}
+
+// splitContainerLogTimestamp peels the RFC3339 timestamp the kubelet prefixes to
+// each line when logs are read with timestamps on, returning it separately from
+// the line's own text.
+//
+// The agent reads container logs without that flag today, which is why 58% of
+// stored pod-log evidence (dev, week to 2026-09-23) carries no time at all and no
+// audit can say which window it covers. Taking the prefix off here rather than
+// leaving it on the line matters for more than the timestamp: everything below
+// parses the line as JSON or logfmt from its first character, so a prefixed
+// `{"msg":…}` would stop being structured and every line would land in its own
+// group. Payloads without the prefix are unchanged, so this holds for old and new
+// agents alike — which it must, since on-prem agents upgrade on their own
+// schedule.
+func splitContainerLogTimestamp(line string) (string, string) {
+	head, rest, found := strings.Cut(line, " ")
+	if !found {
+		return "", line
+	}
+	// Shape first, because this runs on every line of every payload and most
+	// lines are not timestamped: an RFC3339 timestamp is at least
+	// "2006-01-02T15:04:05Z" and always carries its dashes in the same places, so
+	// two byte comparisons reject an ordinary log line ~14x cheaper than letting
+	// time.Parse discover it (87.7us -> 6.4us per 1000 unprefixed lines).
+	// time.Parse still decides; this only skips the ones that cannot pass it.
+	if len(head) < 20 || head[4] != '-' || head[7] != '-' {
+		return "", line
+	}
+	// Only the kubelet's own form: a bare date, or a `2026-09-17 09:16:54+00:00`
+	// the container itself wrote, must stay part of the text.
+	if _, err := time.Parse(time.RFC3339Nano, head); err != nil {
+		return "", line
+	}
+	return head, rest
 }
 
 // LogEntry is one log record to group. Level and Timestamp are what the log source
@@ -125,6 +161,13 @@ func SummarizeLogEntries(entries []LogEntry, maxInsights int) LogLinesDigest {
 
 	digest := LogLinesDigest{TotalLines: len(lines)}
 	levelCounts := map[string]int{}
+	// The span the payload as a whole covers, so the evidence can say which window
+	// it is evidence *of*. Without it a stale card is indistinguishable from a
+	// fresh one: agent log evidence is a tail of the container's lifetime, not a
+	// window around the event, and 54 of the 239 timestamped pod-log evidences on
+	// dev in the week to 2026-09-23 ended more than 5 minutes before their event —
+	// one of them 68 days before.
+	var overall seenRange
 
 	// Grouped with the same per-line key the Log Groups feature uses, applied to the
 	// text a person reads rather than the raw line: a structured line's timestamp and
@@ -168,6 +211,7 @@ func SummarizeLogEntries(entries []LogEntry, maxInsights int) LogLinesDigest {
 		}
 		if ts := firstNonEmpty(entry.Timestamp, fields["time"], fields["ts"], fields["timestamp"], fields["@timestamp"]); ts != "" {
 			g.seen.add(ts)
+			overall.add(ts)
 		}
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
@@ -194,6 +238,7 @@ func SummarizeLogEntries(entries []LogEntry, maxInsights int) LogLinesDigest {
 			"example":    g.example,
 		})
 	}
+	digest.FirstSeen, digest.LastSeen = overall.first, overall.last
 	digest.Summary = map[string]any{
 		"total_lines":     len(lines),
 		"level_breakdown": levelCounts,
@@ -244,6 +289,10 @@ type LogLinesDigest struct {
 	Groups     []LogLineGroup
 	Insights   []PlaybookActionResponseInsight
 	TotalLines int
+	// FirstSeen and LastSeen are the span the whole payload covers, verbatim from
+	// the lines, and empty when no line carried a parseable timestamp.
+	FirstSeen string
+	LastSeen  string
 }
 
 // LogLineGroup is one group of log lines that say the same thing.

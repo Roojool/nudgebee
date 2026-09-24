@@ -218,3 +218,61 @@ func TestSummarizeAgentLogPayload(t *testing.T) {
 	assert.Nil(t, d.Summary, "undecodable payload yields no summary")
 	assert.Empty(t, d.Insights)
 }
+
+// Once the agent reads logs with timestamps on, every line arrives as
+// "<RFC3339Nano> <line>". Grouping, level detection and structured-field parsing
+// all read the line from its first character, so the prefix has to come off — and
+// it is what finally dates the evidence.
+func TestLogLinesSummary_KubeletTimestampPrefix(t *testing.T) {
+	output := strings.Join([]string{
+		`2026-09-23T15:20:41.100000000Z {"level":"info","msg":"payment-worker starting"}`,
+		`2026-09-23T15:20:46.200000000Z {"level":"error","msg":"DB_URL is not set"}`,
+		`2026-09-23T15:20:46.300000000Z {"level":"error","msg":"DB_URL is not set"}`,
+	}, "\n")
+
+	digest := LogLinesSummary(output, 3)
+
+	assert.Equal(t, 3, digest.TotalLines)
+	assert.Equal(t, "2026-09-23T15:20:41.100000000Z", digest.FirstSeen)
+	assert.Equal(t, "2026-09-23T15:20:46.300000000Z", digest.LastSeen)
+	// The prefix must not reach the grouping key, or the two identical errors
+	// become two groups and the JSON stops being read as JSON.
+	if assert.NotEmpty(t, digest.Groups) {
+		assert.Equal(t, "DB_URL is not set", digest.Groups[0].Text)
+		assert.Equal(t, 2, digest.Groups[0].Count)
+		assert.Equal(t, "error", digest.Groups[0].Level)
+	}
+}
+
+// Old agents send no prefix and must keep working unchanged — they will outlive
+// the fix on every on-prem install.
+func TestLogLinesSummary_UntimestampedPayloadUnchanged(t *testing.T) {
+	digest := LogLinesSummary("payment-worker starting\nFATAL: DB_URL is not set\n", 3)
+
+	assert.Equal(t, 2, digest.TotalLines)
+	assert.Empty(t, digest.FirstSeen)
+	assert.Empty(t, digest.LastSeen)
+}
+
+// A container that writes its own timestamp in a form the kubelet does not use
+// keeps it: "2026-09-17 09:16:54.467258+00:00 [debug] …" is one line of text.
+func TestSplitContainerLogTimestamp(t *testing.T) {
+	cases := []struct{ name, line, wantTS, wantLine string }{
+		{"kubelet prefix", "2026-09-23T15:20:46.200000000Z boom", "2026-09-23T15:20:46.200000000Z", "boom"},
+		{"rabbitmq own format", "2026-09-17 09:16:54.467258+00:00 [debug] hi", "", "2026-09-17 09:16:54.467258+00:00 [debug] hi"},
+		{"plain line", "Application started", "", "Application started"},
+		{"single token", "starting", "", "starting"},
+		{"date only", "2026-09-23 boom", "", "2026-09-23 boom"},
+		// Rejected by the cheap shape check rather than by time.Parse — same answer.
+		{"too short to be rfc3339", "2026-09-23T15:20 boom", "", "2026-09-23T15:20 boom"},
+		{"right length, wrong shape", "2026/09/23T15:20:46Z boom", "", "2026/09/23T15:20:46Z boom"},
+		{"rfc3339 with offset", "2026-09-23T15:20:46.2+05:30 boom", "2026-09-23T15:20:46.2+05:30", "boom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, line := splitContainerLogTimestamp(tc.line)
+			assert.Equal(t, tc.wantTS, ts)
+			assert.Equal(t, tc.wantLine, line)
+		})
+	}
+}

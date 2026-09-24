@@ -44,23 +44,42 @@ func (a *podLogAction) CanAutoExecute(ctx PlaybookActionContext) bool {
 }
 
 func (a *podLogAction) AutoExecute(ctx PlaybookActionContext) (PlaybookActionResponse, error) {
+	return a.Execute(ctx, podLogAutoParams(ctx.GetEvent()))
+}
+
+// podLogAutoParams is what an event asks the agent for. Split out from
+// AutoExecute because every branch in it — which container instance, which
+// window — is a decision about whether the stored evidence describes the
+// incident, and Execute's own path needs a live relay to reach.
+func podLogAutoParams(event PlaybookEvent) map[string]any {
 	// Resolve namespace: SubjectNamespace is canonical, Labels is fallback
-	namespace := ctx.GetEvent().SubjectNamespace
-	if namespace == "" && ctx.GetEvent().Labels != nil {
-		namespace = ctx.GetEvent().Labels["namespace"]
+	namespace := event.SubjectNamespace
+	if namespace == "" && event.Labels != nil {
+		namespace = event.Labels["namespace"]
 	}
 	params := map[string]any{
-		"name":      ctx.GetEvent().SubjectName,
+		"name":      event.SubjectName,
 		"namespace": namespace,
 	}
 	// The subject container of these classes has already exited by the time
 	// enrichment runs — hitting the live container returns the replacement's
 	// startup banner, a NotReady error, or nothing. Ask for the dying
 	// container's stderr instead.
-	if terminatedContainerAggKeys[ctx.GetEvent().AggregationKey] {
+	if terminatedContainerAggKeys[event.AggregationKey] {
 		params["previous"] = true
 	}
-	return a.Execute(ctx, params)
+	// Anchor the read to the event's own window instead of taking whatever tail
+	// the agent defaults to. Unanchored, the payload is a slice of the
+	// container's whole lifetime: measured on dev over the week to 2026-09-23,
+	// 54 of the 239 timestamped pod-log evidences ended more than five minutes
+	// before their event and the worst ended 68 days before — a quiet
+	// container's startup banner, stored as if it were the incident's output.
+	// ResolveQueryWindow anchors on the termination when the cluster gave us
+	// one, so a crashed container gets the hour before it died rather than the
+	// hour before now. Execute drops the window again if it returns nothing.
+	start, _ := event.ResolveQueryWindow(0)
+	params["since_time"] = int(start.Unix())
+	return params
 }
 
 // terminatedContainerAggKeys is the set of event classes whose subject
@@ -117,6 +136,36 @@ func (a *podLogAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 		}
 	}
 
+	// A window that matched nothing is not the same as a container with nothing
+	// to say: the container may simply have been quiet for the last hour, and on
+	// an account with no configured log source the agent is the only thing that
+	// can answer at all. Drop the window and take the tail, marked so nobody
+	// reads it as the incident's output.
+	outsideWindow := false
+	if params.SinceTime > 0 && !usableAgentLogOutput(data) {
+		unwindowed := params
+		unwindowed.SinceTime = 0
+		ctx.GetLogger().Info("k8s_pod_log_enricher: no logs inside the event window, falling back to the container tail",
+			"pod", params.Name, "namespace", params.Namespace, "since_time", params.SinceTime)
+		if tailResponse, tailInfo, tailErr := a.fetch(ctx, unwindowed, usedPrevious); tailErr == nil {
+			if tailData, ok := tailResponse["data"].(string); ok && usableAgentLogOutput(tailData) {
+				relayResponse, additionalInfo, data, outsideWindow = tailResponse, tailInfo, tailData, true
+			}
+		}
+	}
+
+	// The retries above rescue the previous-container and empty-window cases;
+	// what is left here is a container that genuinely returned nothing. Storing it produces a log card
+	// that decodes to an empty gzip — 258 of 1179 agent log evidences on dev over
+	// the week to 2026-09-23 — and, because this action belongs to
+	// eventrule.logActions, suppresses the account's configured log source for
+	// that event. Nil is the honest answer: no evidence, category still open.
+	if !usableAgentLogOutput(data) {
+		ctx.GetLogger().Info("k8s_pod_log_enricher: no usable container logs, leaving log collection to the configured source",
+			"pod", params.Name, "namespace", params.Namespace, "previous", usedPrevious)
+		return nil, nil
+	}
+
 	filename, ok := relayResponse["filename"].(string)
 	if !ok {
 		ctx.GetLogger().Error("relay: unable to process request", "response", slog.AnyValue(relayResponse))
@@ -144,6 +193,12 @@ func (a *podLogAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 	if params.SinceTime > 0 {
 		additionalInfo["since_time"] = params.SinceTime
 	}
+	// Says plainly that what follows is not from the window we asked for, so a
+	// reader (and the investigation prompt) can discount it rather than treat a
+	// week-old line as evidence about this incident.
+	if outsideWindow {
+		additionalInfo["outside_event_window"] = true
+	}
 	if params.TailLines > 0 {
 		additionalInfo["tail_lines"] = params.TailLines
 	}
@@ -156,6 +211,14 @@ func (a *podLogAction) Execute(ctx PlaybookActionContext, rawParams map[string]a
 	if len(logDigest.Groups) > 0 {
 		additionalInfo["log_groups"] = logDigest.Groups
 		additionalInfo["log_total_lines"] = logDigest.TotalLines
+	}
+	// What window this payload is evidence of. The agent answers with a tail of the
+	// container's lifetime, not a window around the event, so without this a card
+	// holding last month's startup banner looks exactly like one holding the crash.
+	// Empty until the agent reads logs with timestamps on.
+	if logDigest.FirstSeen != "" {
+		additionalInfo["log_window_start"] = logDigest.FirstSeen
+		additionalInfo["log_window_end"] = logDigest.LastSeen
 	}
 
 	return PlaybookActionResponseFile{

@@ -654,3 +654,77 @@ func TestKubectlLogsFailed(t *testing.T) {
 		})
 	}
 }
+
+// A CronJob's run is its own workload. Resolving to the CronJob made LokiSource
+// query `pod=~"nightly-report-.*"`, which matches every run it has ever made —
+// 69 of 976 job_failure findings on dev carried a different run's output.
+func TestGetEventWorkload_CronJobRunIsItsOwnWorkload(t *testing.T) {
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "job",
+		SubjectName:      "nightly-report-29836288",
+		SubjectOwner:     "nightly-report",
+		SubjectOwnerKind: "cronjob", // agent events lowercase it
+	})
+
+	assert.Equal(t, "nightly-report-29836288", got)
+}
+
+func TestGetEventWorkload_OwnerStillWinsForPods(t *testing.T) {
+	// The reason the owner is preferred at all: a pod name carries a ReplicaSet
+	// hash that no storage column holds.
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "pod",
+		SubjectName:      "checkout-66cbdd8d5-w6kxc",
+		SubjectOwner:     "checkout",
+		SubjectOwnerKind: "Deployment",
+	})
+
+	assert.Equal(t, "checkout", got)
+}
+
+func TestGetEventWorkload_JobOwnedByItselfIsUnchanged(t *testing.T) {
+	// A standalone Job owns itself; both branches agree, and must keep agreeing.
+	got := getEventWorkload(playbooks.PlaybookEvent{
+		SubjectType:      "job",
+		SubjectName:      "thumbnail-backfill",
+		SubjectOwner:     "thumbnail-backfill",
+		SubjectOwnerKind: "Job",
+	})
+
+	assert.Equal(t, "thumbnail-backfill", got)
+}
+
+// The window a log card covers has to be on the card, or a reader cannot tell a
+// card holding the incident from one holding the last eight quiet minutes.
+func TestBuildLogsActionResponse_StampsTheWindowItCovers(t *testing.T) {
+	logs := []OutputLog{
+		{Timestamp: "2026-09-23T15:21:10.116953175Z", Message: "recovery-path test: failing on purpose", Severity: "error"},
+		{Timestamp: "2026-09-23T15:26:01.281073849Z", Message: "nightly-report: generating report", Severity: "info"},
+	}
+
+	resp := buildLogsActionResponse(logs, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.NotNil(t, resp)
+	assert.Equal(t, "2026-09-23T15:21:10.116953175Z", resp.AdditionalInfo["log_window_start"])
+	assert.Equal(t, "2026-09-23T15:26:01.281073849Z", resp.AdditionalInfo["log_window_end"])
+}
+
+// Provider rows arrive newest-first, so the stamp must order by time, not arrival.
+func TestBuildLogsActionResponse_WindowIsOrderedByTimeNotArrival(t *testing.T) {
+	logs := []OutputLog{
+		{Timestamp: "2026-09-23T15:26:01Z", Message: "later line", Severity: "info"},
+		{Timestamp: "2026-09-23T15:21:10Z", Message: "earlier line", Severity: "info"},
+	}
+
+	resp := buildLogsActionResponse(logs, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.Equal(t, "2026-09-23T15:21:10Z", resp.AdditionalInfo["log_window_start"])
+	assert.Equal(t, "2026-09-23T15:26:01Z", resp.AdditionalInfo["log_window_end"])
+}
+
+// Lines with no timestamp at all must not invent a window.
+func TestBuildLogsActionResponse_NoWindowWhenLinesAreUndated(t *testing.T) {
+	resp := buildLogsActionResponse([]OutputLog{{Message: "boom"}}, "", map[string]any{}, 3, nil, nil, nil)
+
+	assert.NotContains(t, resp.AdditionalInfo, "log_window_start")
+}

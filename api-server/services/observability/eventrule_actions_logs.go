@@ -543,7 +543,18 @@ func buildLogsActionResponse(logs []OutputLog, title string, additionalInfo map[
 	if summary := playbooks.ComputeLogSummary(outputLogsToInsightMaps(logs)); summary != nil {
 		additionalInfo["log_summary"] = summary
 	}
-	putLogGroups(additionalInfo, summarizeOutputLogs(logs, 0))
+	digest := summarizeOutputLogs(logs, 0)
+	putLogGroups(additionalInfo, digest)
+	// What window these lines actually cover, which is not the window that was
+	// asked for: the provider returns its most recent N inside the range, so a
+	// 60-minute request routinely comes back as the last ~8 minutes, and a
+	// long-lived event re-enriched later gets lines from hours after it started.
+	// The pod-log path stamps the same keys; without them here, the majority of
+	// log evidence still cannot say what it is evidence of.
+	if digest.FirstSeen != "" {
+		additionalInfo["log_window_start"] = digest.FirstSeen
+		additionalInfo["log_window_end"] = digest.LastSeen
+	}
 	insight := extractLogInsights(logs, maxInsights)
 	metadata := map[string]any{
 		"query-result-version": "1.0",
@@ -1586,6 +1597,16 @@ func getEventNamespace(event playbooks.PlaybookEvent) string {
 // pre-date the upstream resolver (and any path that bypasses it) still
 // produce a best-effort query rather than nothing.
 func getEventWorkload(event playbooks.PlaybookEvent) string {
+	// A CronJob is the exception: its owner is one level too high. The subject
+	// `nightly-report-29836288` owned by CronJob `nightly-report` resolved to the
+	// CronJob, and LokiSource's generator turns that into `pod=~"nightly-report-.*"`
+	// — which matches every run the CronJob has ever made. 69 of 976 job_failure
+	// findings on dev in the week to 2026-09-23 were captioned with a *different*
+	// run's output that way. The run's own name is already workload-shaped (a Job
+	// name carries no ReplicaSet hash), so it needs no owner lookup.
+	if strings.EqualFold(event.SubjectOwnerKind, "cronjob") && event.SubjectName != "" {
+		return event.SubjectName
+	}
 	if event.SubjectOwner != "" {
 		return event.SubjectOwner
 	}

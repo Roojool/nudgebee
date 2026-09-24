@@ -1682,8 +1682,12 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 				ActionArgs:      map[string]any{},
 			})
 
-			// Mark log action as executed so subsequent log actions are skipped
-			if logActions[actionName] {
+			// Mark log action as executed so subsequent log actions are skipped.
+			// Only a response counts: these actions are mutually exclusive, so an
+			// agent attempt that came back with nothing used to close the category
+			// and the account's configured source (Loki, SigNoz, CloudWatch) was
+			// never asked, leaving the event with no logs at all.
+			if logActions[actionName] && result != nil {
 				hasLogAction = true
 			}
 
