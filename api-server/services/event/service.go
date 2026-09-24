@@ -2947,6 +2947,7 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		// the label it resolves from is both present in the payload and later
 		// rewritten by an enricher.
 		applySubjectFallbacks(&webhookEvent)
+		applyNodeSubjectCorrection(sc, &webhookEvent)
 
 		if webhookEvent.CreatedAt == nil {
 			webhookEvent.CreatedAt = &start
@@ -3065,6 +3066,57 @@ func applySubjectFallbacks(webhookEvent *Event) {
 			}
 		}
 	}
+}
+
+// applyNodeSubjectCorrection repoints a node-scoped alert at the node it is
+// actually about. Prometheus stamps every series an exporter emits with that
+// exporter's own pod/namespace labels, so alerts like NodeSystemSaturation and
+// NodeCPUHighUsage arrive claiming to be about a node-exporter pod: the
+// investigation then shows that pod's CPU chart, its logs and its events, none
+// of which describe the node whose saturation fired the alert.
+//
+// core.ResolveNodeSubject returns "" unless the alert's rule expression is
+// node-scoped AND the current subject is an exporter, so an alert genuinely
+// about the exporter keeps its subject. It also returns "" when no node name can
+// be resolved, in which case the event is left exactly as it arrived rather than
+// half-rewritten.
+//
+// Runs on the new-event path only. Occurrences that attach to an existing chain
+// keep the subject the chain was opened with.
+func applyNodeSubjectCorrection(sc *security.RequestContext, webhookEvent *Event) {
+	alertName := webhookEvent.AggregationKey
+	if v := webhookEvent.Labels["nb_alert_name"]; v != "" {
+		alertName = v
+	} else if v := webhookEvent.Labels["alertname"]; v != "" {
+		alertName = v
+	}
+
+	nodeName := integrationcore.ResolveNodeSubject(sc, webhookEvent.AccountId, integrationcore.NodeSubjectInput{
+		AlertName:        alertName,
+		SubjectName:      webhookEvent.SubjectName,
+		SubjectType:      webhookEvent.SubjectType,
+		SubjectNamespace: webhookEvent.SubjectNamespace,
+		Labels:           webhookEvent.Labels,
+	})
+	if nodeName == "" {
+		return
+	}
+
+	sc.GetLogger().Info("event: repointed node-scoped alert from exporter to node",
+		"alert", alertName, "from", webhookEvent.SubjectName, "to", nodeName,
+		"account_id", webhookEvent.AccountId)
+
+	webhookEvent.SubjectType = "node"
+	webhookEvent.SubjectName = nodeName
+	webhookEvent.SubjectNode = nodeName
+	// The namespace, owner and service key all described the exporter pod. A node
+	// is cluster-scoped, so leaving them would keep correlating this event with
+	// the monitoring namespace's workloads.
+	webhookEvent.SubjectNamespace = ""
+	webhookEvent.SubjectOwner = ""
+	webhookEvent.SubjectOwnerKind = ""
+	webhookEvent.ServiceKey = ""
+	webhookEvent.CloudResourceId = ""
 }
 
 // runPlaybookEnrichment executes the event's playbook and applies every

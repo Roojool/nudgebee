@@ -154,8 +154,48 @@ func TestSubjectNodeName(t *testing.T) {
 	assert.Equal(t, "n1", SubjectNodeName(PlaybookEvent{SubjectType: "node", SubjectName: "n1"}))
 	// Label fallback when neither canonical field is set (alert-driven events).
 	assert.Equal(t, "n2", SubjectNodeName(PlaybookEvent{Labels: map[string]string{"node": "n2"}}))
+	// A bare `instance` is kept — some rules relabel a real node name into it.
 	assert.Equal(t, "n3", SubjectNodeName(PlaybookEvent{Labels: map[string]string{"instance": "n3"}}))
+	// A scrape target is not a node name and must never reach the relay.
+	assert.Equal(t, "", SubjectNodeName(PlaybookEvent{Labels: map[string]string{"instance": "10.128.0.14:9100"}}))
+	// An IPv6 scrape target is also a target, colons and all.
+	assert.Equal(t, "", SubjectNodeName(PlaybookEvent{Labels: map[string]string{"instance": "[fe80::1]:9100"}}))
+	// A bare IPv6 address carries no port, so it is kept like any other bare value.
+	assert.Equal(t, "fe80::1", SubjectNodeName(PlaybookEvent{Labels: map[string]string{"instance": "fe80::1"}}))
 	assert.Equal(t, "", SubjectNodeName(PlaybookEvent{}))
+}
+
+// TestEventIsAboutNode — the node enrichers used to run for exactly one
+// aggregation key (node_not_ready), so no prometheus node alert could ever get
+// node capacity, node conditions or the pods on the node. They now decide from
+// the event's subject.
+func TestEventIsAboutNode(t *testing.T) {
+	// A prometheus node alert whose subject has been corrected to the node.
+	assert.True(t, EventIsAboutNode(PlaybookEvent{
+		AggregationKey: "NodeSystemSaturation",
+		SubjectType:    "node",
+		SubjectName:    "gke-pool-abc",
+	}))
+	// The original kubewatch event keeps working even without subject_type.
+	assert.True(t, EventIsAboutNode(PlaybookEvent{
+		AggregationKey: "node_not_ready",
+		SubjectNode:    "gke-pool-abc",
+	}))
+	// A pod alert carries the node it runs on, but the pod is the subject.
+	assert.False(t, EventIsAboutNode(PlaybookEvent{
+		AggregationKey: "KubePodCrashLooping",
+		SubjectType:    "pod",
+		SubjectName:    "checkout-api-abc",
+		SubjectNode:    "gke-pool-abc",
+	}))
+	// Node-typed but unresolvable: must not run, or the relay is asked for a
+	// node that does not exist.
+	assert.False(t, EventIsAboutNode(PlaybookEvent{
+		AggregationKey: "NodeSystemSaturation",
+		SubjectType:    "node",
+		Labels:         map[string]string{"instance": "10.128.0.14:9100"},
+	}))
+	assert.False(t, EventIsAboutNode(PlaybookEvent{}))
 }
 
 func TestNodeNameFromPodDict(t *testing.T) {

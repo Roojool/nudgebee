@@ -743,6 +743,16 @@ func unlocatedScopeFor(event *models.Event) unlocatedScope {
 			label:           "AWS",
 		}
 	}
+	// A node alert has no namespace, so the namespace predicate below would put
+	// every node alert in the cluster into one shared "" bucket and co-time-attach
+	// them to each other. The node is the boundary that alert actually carries.
+	if node := strings.TrimSpace(deref(event.SubjectNode)); node != "" && strings.EqualFold(strings.TrimSpace(deref(event.SubjectType)), "node") {
+		return unlocatedScope{
+			leaderPredicate: "lower(coalesce(btrim(l.subject_node), '')) = $5",
+			arg:             strings.ToLower(node),
+			label:           fmt.Sprintf("node %q", node),
+		}
+	}
 	ns, _ := chronicSubjectIdentity(event)
 	return unlocatedScope{
 		leaderPredicate: "lower(coalesce(btrim(l.subject_namespace), '')) = $5",

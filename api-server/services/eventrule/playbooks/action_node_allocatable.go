@@ -10,10 +10,7 @@ import (
 type nodeAllocatableAction struct{}
 
 func (a *nodeAllocatableAction) CanAutoExecute(ctx PlaybookActionContext) bool {
-	if ctx.GetEvent().AggregationKey != "node_not_ready" {
-		return false
-	}
-	return SubjectNodeName(ctx.GetEvent()) != ""
+	return EventIsAboutNode(ctx.GetEvent())
 }
 
 func (a *nodeAllocatableAction) AutoExecute(ctx PlaybookActionContext) (PlaybookActionResponse, error) {

@@ -96,6 +96,39 @@ func TestUnlocatedScopeFor(t *testing.T) {
 	assert.Equal(t, "", none.arg)
 }
 
+// TestUnlocatedScopeForNodeAlerts — a node alert carries no namespace, so the
+// namespace rule would drop every node alert in the cluster into one shared ""
+// bucket and let them co-time-attach to each other. The node is the boundary
+// such an alert actually has.
+func TestUnlocatedScopeForNodeAlerts(t *testing.T) {
+	src := func(s string) *string { return &s }
+
+	node := unlocatedScopeFor(&models.Event{
+		Source:      src("prometheus"),
+		SubjectType: src("node"),
+		SubjectNode: src("GKE-Pool-ABC"),
+	})
+	assert.Contains(t, node.leaderPredicate, "subject_node")
+	assert.NotContains(t, node.leaderPredicate, "subject_namespace")
+	assert.Equal(t, "gke-pool-abc", node.arg, "node normalised the way the SQL side is")
+
+	// A node-typed event with no node name has nothing better than the namespace
+	// rule — it must not produce a predicate matching on an empty node.
+	noName := unlocatedScopeFor(&models.Event{Source: src("prometheus"), SubjectType: src("node")})
+	assert.Contains(t, noName.leaderPredicate, "subject_namespace")
+
+	// subject_node is also set on pod events (the node the pod runs on). Those
+	// keep the namespace rule — the pod's namespace is the tighter boundary.
+	pod := unlocatedScopeFor(&models.Event{
+		Source:           src("prometheus"),
+		SubjectType:      src("pod"),
+		SubjectNode:      src("gke-pool-abc"),
+		SubjectNamespace: src("checkout"),
+	})
+	assert.Contains(t, pod.leaderPredicate, "subject_namespace")
+	assert.Equal(t, "checkout", pod.arg)
+}
+
 // TestTimingFallbackAllowed — co-timing is only for alerts the graph cannot
 // place. Configuration changes never use it; AWS alarms always may.
 func TestTimingFallbackAllowed(t *testing.T) {
