@@ -26,6 +26,7 @@ import { Button } from '@ui/Button';
 import SearchInput from '@ui/SearchInput';
 import { DropdownMenu } from '@ui/DropdownMenu';
 import { Toggle } from '@ui/Toggle';
+import { Modal } from '@ui/Modal';
 import { useRouter } from 'next/router';
 import { getUserSession } from '@lib/auth';
 
@@ -86,6 +87,9 @@ const ConversationList = ({
   const [loading, setLoading] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [hoveredItemId, setHoveredItemId] = useState(null);
+  // Set to the conversation awaiting delete confirmation. A chat is the only record
+  // of an investigation's reasoning, and the delete is not recoverable.
+  const [pendingDelete, setPendingDelete] = useState(null);
   // Scope (whose conversations) and state (Waiting/Saved) are independent
   // axes — the old All/Mine/Saved/Waiting tabs flattened them into one
   // exclusive row, which made "my waiting conversations" inexpressible.
@@ -272,30 +276,37 @@ const ConversationList = ({
       });
   };
 
+  const confirmDelete = () => {
+    const data = pendingDelete;
+    if (!data) return;
+    setPendingDelete(null);
+    apiAskNudgebee
+      .deleteConversation({
+        conversation_id: data.id,
+      })
+      .then((res) => {
+        const response = res?.data?.data?.ai_delete_llm_conversation_by_id?.data?.success ?? false;
+        if (response) {
+          setRawConversations((prevConversations) => prevConversations.filter((convo) => convo.id !== data.id));
+          snackbar.success('Conversation deleted successfully');
+          if (data.sessionId == router.query?.session_id) {
+            triggerHandleNewChat();
+          }
+        } else {
+          snackbar.error('Failed to delete conversation');
+        }
+      })
+      .catch((error) => {
+        console.error('Error deleting conversation:', error);
+        snackbar.error('An error occurred while deleting the conversation');
+      });
+  };
+
   const onMenuClick = (menuItem, data) => {
     if (menuItem.id === 'share') {
       handleShare();
     } else if (menuItem.id === 'delete') {
-      apiAskNudgebee
-        .deleteConversation({
-          conversation_id: data.id,
-        })
-        .then((res) => {
-          const response = res?.data?.data?.ai_delete_llm_conversation_by_id?.data?.success ?? false;
-          if (response) {
-            setRawConversations((prevConversations) => prevConversations.filter((convo) => convo.id !== data.id));
-            snackbar.success('Conversation deleted successfully');
-            if (data.sessionId == router.query?.session_id) {
-              triggerHandleNewChat();
-            }
-          } else {
-            snackbar.error('Failed to delete conversation');
-          }
-        })
-        .catch((error) => {
-          console.error('Error deleting conversation:', error);
-          snackbar.error('An error occurred while deleting the conversation');
-        });
+      setPendingDelete(data);
     } else if (menuItem.id === 'toggle-save') {
       handleLike(data.id, likedConversations.includes(data.id));
     }
@@ -876,6 +887,33 @@ const ConversationList = ({
           )}
         </Box>
       </Box>
+
+      <Modal
+        open={Boolean(pendingDelete)}
+        handleClose={() => setPendingDelete(null)}
+        onClose={() => setPendingDelete(null)}
+        title='Delete conversation'
+        width='sm'
+      >
+        <Box sx={{ padding: ds.space[5] }}>
+          <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)' }}>
+            Delete this conversation? Its questions, answers and investigation history are removed permanently.
+          </Typography>
+          {pendingDelete ? (
+            <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', mt: ds.space[3], overflowWrap: 'anywhere' }}>
+              {pendingDelete.title || pendingDelete.name}
+            </Typography>
+          ) : null}
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3], mt: ds.space[4] }}>
+            <Button tone='secondary' size='sm' onClick={() => setPendingDelete(null)}>
+              Cancel
+            </Button>
+            <Button tone='danger' size='sm' onClick={confirmDelete} data-testid='confirm-delete-conversation'>
+              Delete
+            </Button>
+          </Box>
+        </Box>
+      </Modal>
     </Box>
   );
 };

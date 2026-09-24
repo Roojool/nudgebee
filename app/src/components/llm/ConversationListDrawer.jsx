@@ -10,6 +10,8 @@ import { Skeleton } from '@ui/Skeleton';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import { ds } from '@utils/colors';
+import { Button } from '@ui/Button';
+import { Modal } from '@ui/Modal';
 import { toast as snackbar } from '@ui/Toast';
 import { getUserSession } from '@lib/auth';
 
@@ -39,6 +41,9 @@ const ConversationListDrawer = ({
   const [rawConversations, setRawConversations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [hoveredItemId, setHoveredItemId] = useState(null);
+  // Set to the conversation awaiting delete confirmation. A chat is the only record
+  // of an investigation's reasoning, and the delete is not recoverable.
+  const [pendingDelete, setPendingDelete] = useState(null);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 
@@ -292,22 +297,29 @@ const ConversationListDrawer = ({
     return items;
   };
 
+  const confirmDelete = () => {
+    const data = pendingDelete;
+    if (!data) return;
+    setPendingDelete(null);
+    apiAskNudgebee
+      .deleteConversation({ conversation_id: data.id })
+      .then((res) => {
+        const success = res?.data?.data?.ai_delete_llm_conversation_by_id?.data?.success ?? false;
+        if (success) {
+          setRawConversations((prev) => prev.filter((c) => c.id !== data.id));
+          snackbar.success('Conversation deleted');
+        } else {
+          snackbar.error('Failed to delete conversation');
+        }
+      })
+      .catch(() => {
+        snackbar.error('Error deleting conversation');
+      });
+  };
+
   const onMenuClick = (menuItem, data) => {
     if (menuItem.id === 'delete') {
-      apiAskNudgebee
-        .deleteConversation({ conversation_id: data.id })
-        .then((res) => {
-          const success = res?.data?.data?.ai_delete_llm_conversation_by_id?.data?.success ?? false;
-          if (success) {
-            setRawConversations((prev) => prev.filter((c) => c.id !== data.id));
-            snackbar.success('Conversation deleted');
-          } else {
-            snackbar.error('Failed to delete conversation');
-          }
-        })
-        .catch(() => {
-          snackbar.error('Error deleting conversation');
-        });
+      setPendingDelete(data);
     } else if (menuItem.id === 'toggle-save') {
       handleLike(data.id, likedConversations.includes(data.id));
     }
@@ -321,7 +333,14 @@ const ConversationListDrawer = ({
   };
 
   return (
-    <ClickAwayListener onClickAway={() => onClose?.()}>
+    <ClickAwayListener
+      onClickAway={() => {
+        // The confirm dialog portals outside the Popper, so its clicks read as
+        // "away". Don't tear the drawer down while a decision is pending.
+        if (pendingDelete) return;
+        onClose?.();
+      }}
+    >
       <Popper open={isVisible} anchorEl={triggerButtonRef?.current} placement='bottom-end' sx={{ zIndex: 1300 }}>
         <Box
           ref={scrollContainerRef}
@@ -472,6 +491,33 @@ const ConversationListDrawer = ({
               </Box>
             )}
           </List>
+
+          <Modal
+            open={Boolean(pendingDelete)}
+            handleClose={() => setPendingDelete(null)}
+            onClose={() => setPendingDelete(null)}
+            title='Delete conversation'
+            width='sm'
+          >
+            <Box sx={{ padding: ds.space[5] }}>
+              <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-gray-700)' }}>
+                Delete this conversation? Its questions, answers and investigation history are removed permanently.
+              </Typography>
+              {pendingDelete ? (
+                <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', mt: ds.space[3], overflowWrap: 'anywhere' }}>
+                  {pendingDelete.title || pendingDelete.name}
+                </Typography>
+              ) : null}
+              <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: ds.space[3], mt: ds.space[4] }}>
+                <Button tone='secondary' size='sm' onClick={() => setPendingDelete(null)}>
+                  Cancel
+                </Button>
+                <Button tone='danger' size='sm' onClick={confirmDelete} data-testid='confirm-delete-conversation-drawer'>
+                  Delete
+                </Button>
+              </Box>
+            </Box>
+          </Modal>
         </Box>
       </Popper>
     </ClickAwayListener>
