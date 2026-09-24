@@ -187,6 +187,7 @@ const K8S_TABLE_NAMES = [
   // the CPU and memory variants and the truncated "(top 15)" title.
   'over-commitment',
   'requests by namespace',
+  'Autoscaler status',
 ];
 
 const CLOUD_TABLE_NAMES = [
