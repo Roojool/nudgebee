@@ -569,6 +569,53 @@ func GetLogsMetricsTracesProvider(ctx *security.RequestContext, accountId, logPr
 	return provider, source, err
 }
 
+// scopeToAccountTenant returns ctx re-scoped to the tenant that owns accountId,
+// or ctx unchanged when it already carries a tenant.
+//
+// Service-to-service callers authenticate with an action token and a role-only
+// session, so api-server builds them a super-admin context with no tenant —
+// cost-server's Prometheus shim is the one in production. Almost every read
+// behind a metrics request is tenant-scoped: provider resolution filters
+// integrations on i.tenant_id (Postgres rejects the empty string as a uuid),
+// and the user sources then read their connection config through
+// ListIntegrationConfigs, which refuses an empty tenant outright. Resolving
+// once here, rather than at each of those reads, is what makes the whole
+// request work; a metrics request names exactly one account, so there is no
+// cross-tenant scope to preserve.
+//
+// An account whose tenant cannot be read logs and returns ctx unchanged. That
+// request then fails exactly as it does today, one layer lower down — which is
+// the point: this widens what works, and must not narrow it. Refusing here
+// instead would turn every caller whose account is not a cloud account into a
+// new failure for the sake of a better error message.
+func scopeToAccountTenant(ctx *security.RequestContext, accountId string) *security.RequestContext {
+	if ctx == nil || ctx.GetSecurityContext() == nil || accountId == "" {
+		return ctx
+	}
+	if ctx.GetSecurityContext().GetTenantId() != "" {
+		return ctx
+	}
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		ctx.GetLogger().Error("observability: cannot reach the database to resolve an account's tenant",
+			"account_id", accountId, "error", err)
+		return ctx
+	}
+	var tenantId string
+	if err := dbms.Db.Get(&tenantId, `SELECT tenant::varchar FROM cloud_accounts WHERE id::varchar = $1`, accountId); err != nil {
+		ctx.GetLogger().Error("observability: cannot resolve the tenant of an account",
+			"account_id", accountId, "error", err)
+		return ctx
+	}
+	securityContext := security.NewSecurityContextForTenantAdmin(tenantId)
+	if securityContext == nil {
+		ctx.GetLogger().Error("observability: cannot build a tenant context for an account",
+			"account_id", accountId, "tenant_id", tenantId)
+		return ctx
+	}
+	return security.NewRequestContext(ctx.GetContext(), securityContext, ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+}
+
 // getLogsMetricsTracesProviderWithIntegration resolves the provider/source
 // pair for an account and also returns the integration DTO that produced the
 // match (when one exists), so callers that need additional config from the
@@ -3021,6 +3068,7 @@ var metricsSourceForAccount = getMetricsSourceForAccount
 var utilisationProviderForAccount = GetLogsMetricsTracesProvider
 
 func FetchMetricsQuery(ctx *security.RequestContext, fetchMetricsRequest FetchMetricsRequest) (OutputMetricQuery, error) {
+	ctx = scopeToAccountTenant(ctx, fetchMetricsRequest.AccountId)
 	source, err := metricsSourceForAccount(ctx, fetchMetricsRequest.AccountId, fetchMetricsRequest.MetricProvider, fetchMetricsRequest.MetricProviderSource)
 	if err != nil {
 		return OutputMetricQuery{}, err
@@ -3166,6 +3214,8 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	if req.AccountId == "" {
 		return OutputMetricQuery{}, fmt.Errorf("account_id is required")
 	}
+
+	ctx = scopeToAccountTenant(ctx, req.AccountId)
 
 	metricsProvider, integrationSource, err := utilisationProviderForAccount(ctx, req.AccountId, req.MetricProvider, "metrics", req.MetricProviderSource)
 	if err != nil {
