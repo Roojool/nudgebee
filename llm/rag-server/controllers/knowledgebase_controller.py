@@ -158,6 +158,10 @@ async def _create_pdf_kb(request: KBCreateRequest, collection_name: str) -> dict
         trigger_type=request.trigger_type,
         source="user_kb",
         warning=warning,
+        # One uploaded file is one document. build_pdf_documents has already broken it
+        # into passages for retrieval, and counting those reported a six-page PDF as
+        # eight documents — a number matching neither the file nor its pages.
+        source_document_count=1,
     )
     if not document_ids:
         # process_documents swallows embedding and storage failures and returns no ids.
@@ -170,7 +174,7 @@ async def _create_pdf_kb(request: KBCreateRequest, collection_name: str) -> dict
     return {
         "status": "success",
         "collection": collection_name,
-        "document_count": len(document_ids),
+        "document_count": 1,
         "warning": warning,
     }
 
@@ -214,6 +218,12 @@ async def create_kb(request: KBCreateRequest):
             documents = add_knowledge_context_tags(documents, request.context_tags)
             logger.info(f"Loaded {len(documents)} documents for KB {request.kb_id}")
 
+            # A typed note is one document. _KBLoader splits it a line at a time so each
+            # line is its own retrieval unit, which is a good way to search it and a
+            # misleading way to count it. The other formats are left alone: a JSON or CSV
+            # knowledge base really is many records.
+            source_document_count = 1 if request.format == "text" else None
+
             # Get embeddings for the account (run in thread as it may do I/O)
             embeddings = await asyncio.to_thread(get_embeddings, request.account_id)
 
@@ -229,14 +239,16 @@ async def create_kb(request: KBCreateRequest):
                 triggered_by=request.triggered_by,
                 trigger_type=request.trigger_type,
                 source="user_kb",
+                source_document_count=source_document_count,
             )
 
-            logger.info(f"Successfully created KB collection: {collection_name} with {len(documents)} documents")
+            recorded = source_document_count if source_document_count is not None else len(documents)
+            logger.info(f"Successfully created KB collection: {collection_name} with {recorded} documents")
 
             return {
                 "status": "success",
                 "collection": collection_name,
-                "document_count": len(documents),
+                "document_count": recorded,
             }
 
         finally:

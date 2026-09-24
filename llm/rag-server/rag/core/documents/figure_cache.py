@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "kb_figure_descriptions"
 
+# Collection-level metadata marking this as cache storage rather than an embedding
+# index, so a collection sweep can tell the two apart. Nothing reads the name.
+MODULE = "kb_figures"
+
 # Bump when FIGURE_PROMPT changes in a way that should re-describe existing
 # figures. Part of the key, so an old description is never served for a new
 # prompt — and so bumping it is a deliberate act rather than a silent one.
@@ -70,12 +74,77 @@ def _client():
 
 def _ensure_collection(client) -> None:
     if client.collection_exists(COLLECTION_NAME):
-        return
+        _heal_wrong_dimension(client)
+    else:
+        _create(client)
+    # After either path, so a collection that predates the index — or one the heal
+    # declined to touch because it holds points — gets one too. Creating an index that
+    # already exists is a no-op, so this is one cheap call per ingest.
+    _ensure_payload_index(client)
+
+
+def _ensure_payload_index(client) -> None:
+    """Index the field the only filtered read matches on.
+
+    ``forget_collection`` deletes by ``parent_collection`` when a knowledge base goes
+    away. Unindexed, Qdrant scans every payload to find them.
+    """
+    try:
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME, field_name="parent_collection", field_schema="keyword"
+        )
+    except Exception:
+        # A slower cleanup is not worth failing an ingest over.
+        logger.warning("figure_cache: could not ensure the parent_collection index", exc_info=True)
+
+
+def _create(client) -> None:
     client.create_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=_VECTOR_SIZE, distance=Distance.COSINE),
+        metadata={"module": MODULE},
     )
     logger.info("figure_cache: created %s", COLLECTION_NAME)
+
+
+def _heal_wrong_dimension(client) -> None:
+    """Recreate a cache collection that something rebuilt at an embedder's dimension.
+
+    The cache keeps descriptions behind a 1-dimension placeholder vector. A sweep that
+    treats it as an embedding collection leaves it at 384 or 1536, every upsert then fails
+    on vector size, and ``store`` swallows that — so the cache stays empty and every
+    ingest re-describes every figure at full price. Only an empty collection is replaced:
+    points at another dimension were never written by this module.
+    """
+    try:
+        info = client.get_collection(COLLECTION_NAME)
+        params = info.config.params.vectors
+        size = getattr(params, "size", None)
+        # No `size is None` escape: a named-vector collection reports None here, and
+        # this module only ever creates a single unnamed vector — so that shape is
+        # just as unwritable as a wrong dimension and wants the same repair.
+        if size == _VECTOR_SIZE:
+            return
+        points = info.points_count or 0
+        if points:
+            logger.error(
+                "figure_cache: %s has vector size %s (expected %s) and %d point(s); leaving it alone. "
+                "Descriptions cannot be cached until it is rebuilt.",
+                COLLECTION_NAME,
+                size,
+                _VECTOR_SIZE,
+                points,
+            )
+            return
+        client.delete_collection(collection_name=COLLECTION_NAME)
+        logger.warning(
+            "figure_cache: %s was empty at vector size %s; recreating at %s", COLLECTION_NAME, size, _VECTOR_SIZE
+        )
+        _create(client)
+    except Exception:
+        # Drop-and-recreate cannot be atomic in Qdrant. Reporting a failed heal here beats
+        # it surfacing later as an unexplained missing collection; the next store retries.
+        logger.error("figure_cache: could not heal %s", COLLECTION_NAME, exc_info=True)
 
 
 def load(account_id: str, content_hashes: Iterable[str], model: str) -> Dict[str, Dict[str, str]]:

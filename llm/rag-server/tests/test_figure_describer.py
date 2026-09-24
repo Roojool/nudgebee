@@ -158,3 +158,30 @@ def test_everything_cached_skips_the_model_entirely(monkeypatch):
 
     assert llm.calls == []
     assert (described, available) == (1, True)
+
+
+def test_no_usable_credential_leaves_figures_undescribed_rather_than_failing(monkeypatch, caplog):
+    """A config failure is 'no vision', not 'your PDF is broken'.
+
+    get_llm raises when an account has no usable credential — including one whose
+    stored key cannot be decrypted. The caller turns an exception here into a 400
+    telling the uploader their file is corrupt, so this has to degrade the way an
+    image-blind provider already does.
+    """
+    from rag.core.documents import figure_describer
+
+    import rag.core.embeddings.generator as generator
+
+    def explode(_account_id):
+        raise ValueError("Missing required config values for provider 'googleai': llm_provider_api_key")
+
+    monkeypatch.setattr(generator, "get_llm", explode)
+
+    described, vision_available = figure_describer.describe_figures(
+        figures=[{"data": "iVBOR", "content_hash": "h1"}],
+        account_id="acct",
+    )
+
+    assert described == 0
+    assert vision_available is False
+    assert any("no usable provider" in r.message for r in caplog.records)

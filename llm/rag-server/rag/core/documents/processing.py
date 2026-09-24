@@ -615,6 +615,7 @@ def process_documents(
     tenant_id=None,
     warning=None,
     run_id=None,
+    source_document_count=None,
 ):
     """
     Process multiple documents asynchronously with batch embedding.
@@ -669,7 +670,17 @@ def process_documents(
     # collection._is_listed_point), so it stays in source-document units. The
     # chunks below are embedding and retrieval units, and the tracker's own
     # counts stay in those.
-    source_document_count = len(documents)
+    # How many documents a person would say this load covered. Usually one per item
+    # handed in, but a caller that has already split one thing into several — a PDF
+    # broken into passages, a note split per line — passes the real figure, so the
+    # knowledge base does not report a six-page file as eight documents.
+    if source_document_count is None:
+        source_document_count = len(documents)
+    # The load ledger is a separate unit and has to stay one. Its own document_count
+    # counts what was embedded, so the figure it is compared against must count what
+    # was submitted for embedding — mixing a source count into that pair makes the
+    # history render "8 / 1" and claim a completed load dropped seven documents.
+    submitted_document_count = len(documents)
     documents = _chunk_long_documents(documents)
 
     # Initialize tracker with load metadata
@@ -680,7 +691,7 @@ def process_documents(
         triggered_by=triggered_by,
         trigger_type=trigger_type,
         module=module,
-        expected_document_count=source_document_count,
+        expected_document_count=submitted_document_count,
         run_id=run_id,
     )
     tracker.start_timer()

@@ -48,6 +48,7 @@ from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tu
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from rag.core.documents.figure_cache import MODULE as FIGURE_MODULE
 from rag.core.documents.source_store import MODULE as SOURCE_MODULE
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,17 @@ class MigrationUnavailable(RuntimeError):
 
 # Collection-metadata key holding the model that produced the vectors.
 MODEL_KEY = "embedding_model"
+
+# Collections that keep their payloads behind a fixed placeholder vector rather than
+# embeddings. Rebuilt at the embedder's dimension they can no longer be written to, and
+# both of them swallow the resulting upsert failure — so the store silently stays empty.
+#
+# Recognised two ways on purpose. The dimension is the durable rule: an embedding index is
+# never one-dimensional, so a placeholder store added later is excluded without anyone
+# having to remember this list. The module names catch the ones a previous run already
+# rebuilt to 384 or 1536, which no longer look like placeholder storage from the outside.
+PLACEHOLDER_VECTOR_SIZE = 1
+PLACEHOLDER_MODULES = {SOURCE_MODULE, FIGURE_MODULE}
 
 # Small batches keep each upsert inside the default httpx read timeout; the
 # retag migration hit intermittent ReadTimeouts at 128 points per upsert.
@@ -264,12 +276,9 @@ def _describe(client: QdrantClient, name: str) -> Optional[Tuple[int, Distance, 
         logger.warning("embedding_migration: %s uses named vectors, skipping", name)
         return None
     metadata = getattr(info.config, "metadata", None) or {}
-    if metadata.get("module") == SOURCE_MODULE:
-        # Source storage keeps verbatim documents behind a 1-dimension placeholder, not
-        # embeddings. Rebuilt at the embedder's dimension it can no longer be written to,
-        # and source_store swallows that upsert failure — so the store silently stays
-        # empty until someone notices documents rendering as fragments.
-        logger.info("embedding_migration: %s is source storage, not an index; skipping", name)
+    module = metadata.get("module")
+    if params.size == PLACEHOLDER_VECTOR_SIZE or module in PLACEHOLDER_MODULES:
+        logger.info("embedding_migration: %s is placeholder storage (module=%s), not an index; skipping", name, module)
         return None
     return params.size, params.distance, metadata, info.points_count or 0
 

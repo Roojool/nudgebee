@@ -145,7 +145,7 @@ func TestGetKBDocumentSourceServesAnUploadedTextFile(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestKBStoredTextServesAManualKBFromTheDatabase(t *testing.T) {
+func TestKBManualKBServesTheWholeNoteFromTheDatabase(t *testing.T) {
 	// Chunking leaves the index holding slices, but a manual KB's whole text was
 	// never lost — llm-server stored it before rag-server indexed anything.
 	db, mock, err := sqlmock.New()
@@ -158,17 +158,20 @@ func TestKBStoredTextServesAManualKBFromTheDatabase(t *testing.T) {
 	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
 
 	whole := "Step 1: drain the node.\n\nStep 2: cordon it.\n\nStep 3: page the on-call."
-	mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+	mock.ExpectQuery(`SELECT name, data`).
 		WithArgs("kb-1", "account-a").
-		WillReturnRows(sqlmock.NewRows([]string{"data"}).AddRow(whole))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).AddRow("Runbook", whole, true, "text", ""))
 
-	got, err := kbStoredText(context.Background(), "account-a", "kb-1")
+	title, content, contentType, ok, err := kbManualKB(context.Background(), "account-a", "kb-1", true)
 	require.NoError(t, err)
-	assert.Equal(t, whole, got)
+	assert.True(t, ok)
+	assert.Equal(t, "Runbook", title)
+	assert.Equal(t, whole, content)
+	assert.Equal(t, "text/markdown", contentType)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestKBStoredTextIsEmptyWhenTheKBIsNotManualText(t *testing.T) {
+func TestKBManualKBDeclinesForAnIntegrationKB(t *testing.T) {
 	// The query filters on kb_type/data_format, so an integration KB or an
 	// uploaded file matches no row — and "no row" must read as "nothing to
 	// serve", not as an error that would fail the whole document view.
@@ -181,17 +184,17 @@ func TestKBStoredTextIsEmptyWhenTheKBIsNotManualText(t *testing.T) {
 	}
 	t.Cleanup(func() { knowledgeDatabase = oldDatabase })
 
-	mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+	mock.ExpectQuery(`SELECT name, data`).
 		WithArgs("kb-2", "account-a").
 		WillReturnError(sql.ErrNoRows)
 
-	got, err := kbStoredText(context.Background(), "account-a", "kb-2")
+	_, _, _, ok, err := kbManualKB(context.Background(), "account-a", "kb-2", true)
 	require.NoError(t, err)
-	assert.Equal(t, "", got)
+	assert.False(t, ok, "an integration KB or an upload must fall through to rag-server")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestKBStoredTextTreatsEmptyAndNullAsNothingToServe(t *testing.T) {
+func TestKBManualKBTreatsEmptyAndNullAsNothingToServe(t *testing.T) {
 	// A manual KB can exist with no text in it — one such row is live on dev, and
 	// the column is nullable. Either way there is nothing better than what the
 	// index already returned, so the caller must keep that rather than blank the
@@ -200,8 +203,8 @@ func TestKBStoredTextTreatsEmptyAndNullAsNothingToServe(t *testing.T) {
 		name string
 		row  *sqlmock.Rows
 	}{
-		{"empty string", sqlmock.NewRows([]string{"data"}).AddRow("")},
-		{"null", sqlmock.NewRows([]string{"data"}).AddRow(nil)},
+		{"empty string", sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).AddRow("Runbook", "", false, "text", "")},
+		{"null", sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).AddRow("Runbook", nil, false, "text", "")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -213,14 +216,115 @@ func TestKBStoredTextTreatsEmptyAndNullAsNothingToServe(t *testing.T) {
 			}
 			t.Cleanup(func() { knowledgeDatabase = oldDatabase })
 
-			mock.ExpectQuery(`SELECT data FROM llm_knowledgebases`).
+			mock.ExpectQuery(`SELECT name, data`).
 				WithArgs("kb-3", "account-a").
 				WillReturnRows(tc.row)
 
-			got, err := kbStoredText(context.Background(), "account-a", "kb-3")
+			_, _, _, ok, err := kbManualKB(context.Background(), "account-a", "kb-3", true)
 			require.NoError(t, err)
-			assert.Equal(t, "", got)
+			assert.False(t, ok, "nothing stored means fall through, not a blank document")
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+// mockKBDatabase points the knowledge queries at sqlmock and returns the mock.
+func mockKBDatabase(t *testing.T) sqlmock.Sqlmock {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	old := knowledgeDatabase
+	knowledgeDatabase = func(common.DatabaseManagerType) (*common.DatabaseManager, error) {
+		return &common.DatabaseManager{Db: sqlx.NewDb(db, "postgresql")}, nil
+	}
+	t.Cleanup(func() { knowledgeDatabase = old })
+	return mock
+}
+
+func expectManualNote(mock sqlmock.Sqlmock, kbID, accountID, name, text string) {
+	mock.ExpectQuery(`SELECT name, kb_type, integration_id FROM llm_knowledgebases`).
+		WithArgs(kbID, accountID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "kb_type", "integration_id"}).AddRow(name, "manual", nil))
+	// The listing asks for has_data without the blob; the get path asks for both. The
+	// same stub answers either, since sqlmock matches on the leading columns.
+	mock.ExpectQuery(`SELECT name, `).
+		WithArgs(kbID, accountID).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).
+			AddRow(name, text, true, "text", ""))
+}
+
+func TestAManualNoteListsAsOneDocument(t *testing.T) {
+	// rag-server indexes a typed note one line per point, so asking it would list a
+	// 54-line runbook as 54 documents. These tests also prove rag is never called:
+	// no rag-server URL is configured here, so any call would error.
+	mock := mockKBDatabase(t)
+	expectManualNote(mock, "kb-1", "account-a", "Payment runbook", "## Steps\n- drain the node\n- cordon it")
+
+	page, err := ListKBDocuments(security.NewRequestContextForSuperAdmin(), "account-a", "kb-1", 50, "")
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1, "a typed note is one document, whatever the index split it into")
+	assert.Equal(t, "kb-1", page.Items[0].Id)
+	assert.Equal(t, "Payment runbook", page.Items[0].Title)
+	assert.Nil(t, page.NextOffset)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAManualNoteHasNoSecondPage(t *testing.T) {
+	// The one document is returned for the first page only. Handing it back for every
+	// offset would have a paging caller append the same document again and again.
+	mock := mockKBDatabase(t)
+	expectManualNote(mock, "kb-1", "account-a", "Payment runbook", "## Steps")
+
+	page, err := ListKBDocuments(security.NewRequestContextForSuperAdmin(), "account-a", "kb-1", 50, "some-offset")
+	require.NoError(t, err)
+	assert.Empty(t, page.Items)
+}
+
+func TestAManualNoteIsServedWholeFromTheDatabase(t *testing.T) {
+	whole := "## Steps\n- drain the node\n- cordon it\n- page the on-call"
+	mock := mockKBDatabase(t)
+	expectManualNote(mock, "kb-1", "account-a", "Payment runbook", whole)
+
+	doc, err := GetKBDocument(security.NewRequestContextForSuperAdmin(), "account-a", "kb-1", "kb-1")
+	require.NoError(t, err)
+	require.NotNil(t, doc.Content)
+	assert.Equal(t, whole, *doc.Content, "the note is served entire, not one indexed line of it")
+	require.NotNil(t, doc.ContentSource)
+	assert.Equal(t, "source", *doc.ContentSource)
+	assert.Equal(t, "Payment runbook", doc.Title)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestKBManualKBServesAnUploadedPDFAsTheFile(t *testing.T) {
+	// The text of a PDF only ever lives in the index; the file itself is the only
+	// copy llm-server holds. Serving it means the document survives the index being
+	// dropped — which is exactly what happened to sop_k8s_01_crashloopbackoff.
+	mock := mockKBDatabase(t)
+	mock.ExpectQuery(`SELECT name, data`).
+		WithArgs("kb-pdf", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).
+			AddRow("sop_k8s_01_crashloopbackoff", "JVBERi0xLjQK", true, "pdf", "sop-k8s-01-crashloopbackoff.pdf"))
+
+	title, content, contentType, ok, err := kbManualKB(context.Background(), "account-a", "kb-pdf", true)
+	require.NoError(t, err)
+	assert.True(t, ok, "an uploaded PDF must not fall through to an index that may be gone")
+	assert.Equal(t, "application/pdf", contentType)
+	assert.Equal(t, "JVBERi0xLjQK", content, "the stored file is served as-is, base64 and all")
+	assert.Equal(t, "sop-k8s-01-crashloopbackoff.pdf", title, "the filename names the document")
+}
+
+func TestKBManualKBServesJSONAsJSON(t *testing.T) {
+	mock := mockKBDatabase(t)
+	mock.ExpectQuery(`SELECT name, data`).
+		WithArgs("kb-json", "account-a").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "data", "has_data", "data_format", "data_filename"}).
+			AddRow("incidents", `[{"id":1}]`, true, "json", ""))
+
+	title, content, contentType, ok, err := kbManualKB(context.Background(), "account-a", "kb-json", true)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "application/json", contentType)
+	assert.Equal(t, `[{"id":1}]`, content)
+	assert.Equal(t, "incidents", title)
 }

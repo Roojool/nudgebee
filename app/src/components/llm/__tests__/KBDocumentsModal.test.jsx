@@ -1,15 +1,21 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import KBDocumentsModal from '@components/llm/KBDocumentsModal';
 import apiKnowledgeBase from '@api1/knowledge-base';
 
 jest.mock('@api1/knowledge-base', () => ({
   __esModule: true,
-  default: { getKBDocuments: jest.fn(), getKBDocument: jest.fn(), setKBDocumentCategory: jest.fn() },
+  default: { getKBDocuments: jest.fn(), getKBDocument: jest.fn(), setKBDocumentCategory: jest.fn(), retriggerKB: jest.fn() },
 }));
 
 const renderModal = (props = {}) =>
   render(<KBDocumentsModal open onClose={jest.fn()} accountId='acct-1' kbId='kb-1' kbName='Confluence' {...props} />);
+
+// jsdom implements neither of these; the component needs them to show a stored PDF.
+beforeAll(() => {
+  global.URL.createObjectURL = jest.fn(() => 'blob:mock-pdf');
+  global.URL.revokeObjectURL = jest.fn();
+});
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -64,6 +70,188 @@ describe('KBDocumentsModal', () => {
     await user.click(screen.getByRole('button', { name: 'View content of Plain note' }));
     expect(await screen.findByText(/restart with kubectl/)).toBeInTheDocument();
     expect(apiKnowledgeBase.getKBDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a scraped page as HTML, not as a wall of tags', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p2',
+        title: 'Plain note',
+        content: '<ul><li><p>Auto-apply Migrations</p></li></ul>',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    const rendered = await screen.findByTestId('kb-document-html');
+    expect(rendered).toBeInTheDocument();
+    // The text survives; the markup around it does not reach the reader.
+    expect(rendered).toHaveTextContent('Auto-apply Migrations');
+    expect(rendered.querySelector('li')).not.toBeNull();
+    expect(rendered.textContent).not.toContain('<ul>');
+  });
+
+  it('strips anything executable out of a scraped page', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p2',
+        title: 'Plain note',
+        content: '<p>safe</p><script>window.pwned = 1</script><img src=x onerror="window.pwned=1">',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    const rendered = await screen.findByTestId('kb-document-html');
+    expect(rendered).toHaveTextContent('safe');
+    expect(rendered.querySelector('script')).toBeNull();
+    expect(rendered.querySelector('img')?.getAttribute('onerror')).toBeNull();
+  });
+
+  it('renders a typed note as markdown', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: { id: 'p2', title: 'Plain note', content: '## Steps\n- drain the node', content_type: 'text/markdown' },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    expect(await screen.findByTestId('kb-document-markdown')).toBeInTheDocument();
+  });
+
+  it('says so when nothing is indexed, and offers to rebuild it on the same line', async () => {
+    // A knowledge base can keep its document_count after the index is dropped, so the
+    // count alone would have the reader believe documents exist when none do.
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: { items: [{ id: 'kb-1', title: 'sop.pdf', url: null }], nextOffset: null, indexed: false },
+      errors: [],
+    });
+    apiKnowledgeBase.retriggerKB.mockResolvedValue({ data: { status: 'queued' }, errors: [] });
+    const user = userEvent.setup();
+    renderModal();
+
+    expect(await screen.findByTestId('kb-not-indexed')).toBeInTheDocument();
+    // Named the same as the three-dots menu item, because it is the same operation.
+    await user.click(screen.getByRole('button', { name: 'Retrigger' }));
+    expect(apiKnowledgeBase.retriggerKB).toHaveBeenCalledWith('acct-1', 'kb-1');
+  });
+
+  it('shows the PDF viewer and nothing else', async () => {
+    // A `//` line written inside JSX children is not a comment, it is text, and it
+    // shipped to every reader of a PDF knowledge base. Assert the view carries the
+    // document and the download link, and no stray source text.
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: { items: [{ id: 'kb-1', title: 'sop.pdf', url: null }], nextOffset: null, indexed: true },
+      errors: [],
+    });
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: { id: 'kb-1', title: 'sop.pdf', content: 'JVBERi0xLjQK', content_type: 'application/pdf' },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of sop.pdf' }));
+
+    const view = await screen.findByTestId('kb-document-pdf');
+    expect(view).not.toHaveTextContent('//');
+    expect(view).toHaveTextContent('Download sop.pdf');
+  });
+
+  it("sends a stored page's own links to a new tab", async () => {
+    // The page came from someone's wiki and its links point back there. In the same
+    // tab they take the reader out of the app; rel keeps the opened tab from
+    // reaching back through window.opener.
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: {
+        id: 'p2',
+        title: 'Plain note',
+        content: '<p>See <a href="https://wiki.example.com/page">the page</a></p>',
+        content_type: 'text/html',
+      },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    const link = (await screen.findByTestId('kb-document-html')).querySelector('a');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('can be retried after the call throws', async () => {
+    // The re-entry guard is a ref, so a throw that skipped its release would not stall
+    // one click — it would disable the button for the life of the component.
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: { items: [{ id: 'kb-1', title: 'sop.pdf', url: null }], nextOffset: null, indexed: false },
+      errors: [],
+    });
+    apiKnowledgeBase.retriggerKB.mockRejectedValueOnce(new Error('network down')).mockResolvedValue({ data: {}, errors: [] });
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+    renderModal();
+
+    expect(await screen.findByTestId('kb-not-indexed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Retrigger' }));
+    await screen.findByText('Failed to start reindexing');
+
+    await user.click(screen.getByRole('button', { name: 'Retrigger' }));
+    expect(apiKnowledgeBase.retriggerKB).toHaveBeenCalledTimes(2);
+    console.error.mockRestore();
+  });
+
+  it('rebuilds once however fast the button is clicked', async () => {
+    // The banner's action has no disabled state, so nothing but the handler stops a
+    // second click from dropping and rebuilding the collection a second time.
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: { items: [{ id: 'kb-1', title: 'sop.pdf', url: null }], nextOffset: null, indexed: false },
+      errors: [],
+    });
+    let release;
+    apiKnowledgeBase.retriggerKB.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+    const user = userEvent.setup();
+    renderModal();
+
+    expect(await screen.findByTestId('kb-not-indexed')).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Retrigger' });
+    await user.click(button);
+    await user.click(screen.getByRole('button', { name: 'Retriggering…' }));
+
+    expect(apiKnowledgeBase.retriggerKB).toHaveBeenCalledTimes(1);
+    await act(async () => release({ data: { status: 'queued' }, errors: [] }));
+  });
+
+  it('shows no warning when the index is healthy', async () => {
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: { items: [{ id: 'p1', title: 'A page', url: null }], nextOffset: null, indexed: true },
+      errors: [],
+    });
+    renderModal();
+    expect(await screen.findByText('A page')).toBeInTheDocument();
+    expect(screen.queryByTestId('kb-not-indexed')).not.toBeInTheDocument();
+  });
+
+  it('renders an uploaded PDF from its stored file', async () => {
+    const user = userEvent.setup();
+    apiKnowledgeBase.getKBDocument.mockResolvedValue({
+      data: { id: 'p2', title: 'sop.pdf', content: 'JVBERi0xLjQK', content_type: 'application/pdf' },
+      errors: [],
+    });
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: 'View content of Plain note' }));
+
+    expect(await screen.findByTestId('kb-document-pdf')).toBeInTheDocument();
   });
 
   it('appends the next page on Load more', async () => {

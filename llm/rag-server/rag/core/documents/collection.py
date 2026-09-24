@@ -590,12 +590,18 @@ def get_collection_document(collection_name: str, point_id: str) -> dict | None:
     # chunk's text — a page renders as the ~400 characters of its first fragment. The
     # verbatim document lives in source storage, keyed by the id the chunk already
     # carries, so prefer it and say plainly when it is missing.
+    # What the text is, so a reader is shown a rendered page rather than its markup.
+    # Anything we serve from the index has already been converted on the way in;
+    # only a stored source is still in the form the site returned it.
+    content_type = "text/markdown"
+
     if metadata.get("parent_id") and not metadata.get("parent_content"):
         source_id = _source_identifier(metadata)
         stored = source_store.get_by_source_id(collection_name, source_id) if source_id else None
         if stored and stored.get("content"):
             content = stored["content"]
             content_source = "source"
+            content_type = stored.get("content_type") or "text/html"
         else:
             content_source = "fragment"
 
@@ -608,4 +614,5 @@ def get_collection_document(collection_name: str, point_id: str) -> dict | None:
         # Which of the three the text above is, so a reader is never shown a fragment
         # that looks like a whole document.
         "content_source": content_source,
+        "content_type": content_type,
     }

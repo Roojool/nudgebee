@@ -11,6 +11,11 @@ from types import SimpleNamespace
 from qdrant_client.models import Distance, VectorParams
 
 from rag.core.documents import collection, embedding_migration, source_store
+from rag.core.types import Document
+
+
+class _Embeddings:
+    model = "test-model"
 
 
 class _Client:
@@ -253,3 +258,72 @@ def test_a_swallowed_store_failure_logs_its_traceback(caplog):
     record = next(r for r in caplog.records if "store failed" in r.message)
     assert record.exc_info is not None, "the traceback is the whole point of the log line"
     assert "Vector dimension error" in logging.Formatter().formatException(record.exc_info)
+
+
+def test_a_declared_source_count_does_not_reach_the_load_ledger(monkeypatch):
+    """The knowledge base counts files; the load ledger counts embedding work.
+
+    The ledger stores a pair — embedded and submitted — and renders "8 / 1" whenever
+    they differ, meaning a load dropped documents. Feeding the file count into one
+    half of that pair makes a load that succeeded completely report a shortfall.
+    """
+    from rag.core.documents import processing
+
+    captured = {}
+
+    class SpyTracker:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def start_timer(self):
+            raise RuntimeError("stop after construction")
+
+    monkeypatch.setattr(processing, "EmbeddingTracker", SpyTracker)
+    # Eight passages built from one six-page PDF — what build_pdf_documents hands over.
+    passages = [Document(page_content=f"passage {i}", metadata={}) for i in range(8)]
+
+    try:
+        processing.process_documents(
+            documents=passages,
+            embeddings=_Embeddings(),
+            account_id=None,
+            module="knowledge_base",
+            collection_name="coll",
+            vector_store=object(),
+            source_document_count=1,
+        )
+    except RuntimeError:
+        pass
+
+    assert captured["expected_document_count"] == 8, "the ledger's pair stays in embedding units"
+
+
+def test_without_a_declared_count_the_documents_handed_in_are_counted(monkeypatch):
+    """The default is unchanged: one document per item, counted before chunking."""
+    from rag.core.documents import processing
+
+    captured = {}
+
+    class SpyTracker:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def start_timer(self):
+            raise RuntimeError("stop after construction")
+
+    monkeypatch.setattr(processing, "EmbeddingTracker", SpyTracker)
+    pages = [Document(page_content="paragraph. " * 500, metadata={}) for _ in range(3)]
+
+    try:
+        processing.process_documents(
+            documents=pages,
+            embeddings=_Embeddings(),
+            account_id=None,
+            module="knowledge_base",
+            collection_name="coll",
+            vector_store=object(),
+        )
+    except RuntimeError:
+        pass
+
+    assert captured["expected_document_count"] == 3

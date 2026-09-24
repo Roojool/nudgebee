@@ -21,9 +21,11 @@ const (
 	kbDocumentsMaxLimit     = 200
 	errKBDocumentNotFound   = "kb: document not found, the knowledge base may have been re-synced"
 
-	// What Content is: one indexed chunk, or the whole document as it was stored.
-	contentSourceFragment = "fragment"
+	// What Content is when llm-server sets it itself: the whole stored document.
+	// rag-server supplies "indexed" and "fragment" for what it serves.
 	contentSourceOriginal = "source"
+	// A typed note is written as prose with markdown headings and lists.
+	contentTypeMarkdown = "text/markdown"
 )
 
 // KBDocument is one stored document of a knowledge base. Content is only
@@ -37,6 +39,10 @@ type KBDocument struct {
 	// (the whole document as stored on the point), or "fragment" (one chunk,
 	// because no source was kept for it). Empty on a listing.
 	ContentSource *string `json:"content_source,omitempty"`
+	// What Content is, so the reader gets a rendered page rather than its markup.
+	// A stored source keeps the form the site returned it in, usually text/html;
+	// anything served from the index was converted on the way in.
+	ContentType *string `json:"content_type,omitempty"`
 	// DocumentKey is the handle a Fact/SOP mark is stored against (see
 	// DocumentKey). Empty when the document cannot be marked individually.
 	DocumentKey string `json:"document_key"`
@@ -50,6 +56,10 @@ type KBDocument struct {
 type KBDocumentsPage struct {
 	Items      []KBDocument `json:"items"`
 	NextOffset *string      `json:"next_offset"`
+	// Whether the search index actually holds anything for this knowledge base.
+	// nil when rag-server could not be reached: an outage must not be reported as
+	// "nothing is indexed", which is a different and alarming claim.
+	Indexed *bool `json:"indexed,omitempty"`
 }
 
 type ragKBDocument struct {
@@ -58,6 +68,7 @@ type ragKBDocument struct {
 	Url           *string `json:"url"`
 	Content       *string `json:"content"`
 	ContentSource *string `json:"content_source"`
+	ContentType   *string `json:"content_type"`
 	SourceId      *string `json:"source_id"`
 }
 
@@ -79,7 +90,7 @@ func kbDocumentsCollection(sc *security.RequestContext, accountId, kbId string) 
 	if !sc.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeRead) {
 		return "", "", errors.New(errKBUnauthorized)
 	}
-	dbms, err := common.GetDatabaseManager(common.Metastore)
+	dbms, err := knowledgeDatabase(common.Metastore)
 	if err != nil {
 		return "", "", fmt.Errorf("kb: failed to get database manager: %w", err)
 	}
@@ -98,36 +109,74 @@ func kbDocumentsCollection(sc *security.RequestContext, accountId, kbId string) 
 	return kbMeta.Name, kbCollectionName(kbMeta.KBType, kbMeta.IntegrationID, kbId), nil
 }
 
-// kbStoredText returns a manual knowledge base's own text, which llm-server
-// stored in llm_knowledgebases.data before rag-server ever indexed it. Chunking
-// leaves the index holding only slices, but for these KBs the whole document was
-// never lost — it is still in the database, so it is served from there rather
-// than from a chunk.
+// kbManualKB returns a knowledge base someone created by hand: its title, its
+// stored content and what that content is.
 //
-// Plain text only. An uploaded file is kept encoded and is served as a file, not
-// as document text. Returns "" when there is nothing to serve.
-func kbStoredText(ctx context.Context, accountId, kbId string) (string, error) {
+// Everything a person typed or uploaded is held here by llm-server, which stored it
+// before rag-server indexed anything. Reading it back from the database means the
+// document view survives the index being re-chunked, rebuilt or dropped — and for an
+// uploaded file it is the only copy, since only the text pulled out of it is indexed.
+//
+// ok is false for an integration knowledge base, whose content genuinely lives in
+// rag-server, and for a manual one with nothing stored.
+// withContent selects the stored file itself. The listing wants only a title and
+// whether anything is stored, and an upload runs to megabytes of base64 — reading
+// the blob out of Postgres to discard it would cost that on every modal open.
+func kbManualKB(ctx context.Context, accountId, kbId string, withContent bool) (title, content, contentType string, ok bool, err error) {
 	dbms, err := knowledgeDatabase(common.Metastore)
 	if err != nil {
-		return "", fmt.Errorf("kb: failed to get database manager: %w", err)
+		return "", "", "", false, fmt.Errorf("kb: failed to get database manager: %w", err)
 	}
-	var data *string
+	var row struct {
+		Name     string  `db:"name"`
+		Data     *string `db:"data"`
+		HasData  bool    `db:"has_data"`
+		Format   string  `db:"data_format"`
+		Filename string  `db:"data_filename"`
+	}
+	dataColumn := `NULL AS data`
+	if withContent {
+		dataColumn = `data`
+	}
 	err = dbms.Db.GetContext(
 		ctx,
-		&data,
-		"SELECT data FROM llm_knowledgebases WHERE id = $1 AND account_id = $2 AND kb_type = 'manual' AND data_format = 'text'",
+		&row,
+		fmt.Sprintf(`SELECT name, %s, (llm_knowledgebases.data IS NOT NULL AND llm_knowledgebases.data <> '') AS has_data,
+		        COALESCE(data_format, 'text') AS data_format,
+		        COALESCE(data_filename, '') AS data_filename
+		   FROM llm_knowledgebases
+		  WHERE id = $1 AND account_id = $2 AND kb_type = 'manual'`, dataColumn),
 		kbId, accountId,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
+			return "", "", "", false, nil
 		}
-		return "", fmt.Errorf("kb: failed to fetch knowledgebase content: %w", err)
+		return "", "", "", false, fmt.Errorf("kb: failed to fetch knowledgebase content: %w", err)
 	}
-	if data == nil {
-		return "", nil
+	if !row.HasData {
+		// Nothing stored to serve; fall through to rag-server rather than show a blank.
+		return "", "", "", false, nil
 	}
-	return *data, nil
+	title = row.Name
+	switch row.Format {
+	case "pdf":
+		// Held as base64 of the file itself, so the reader gets the document rather
+		// than the text someone pulled out of it.
+		contentType = "application/pdf"
+		if row.Filename != "" {
+			title = row.Filename
+		}
+	case "json":
+		contentType = "application/json"
+	default:
+		// A typed note is written as prose, with markdown headings and lists.
+		contentType = contentTypeMarkdown
+	}
+	if row.Data != nil {
+		content = *row.Data
+	}
+	return title, content, contentType, true, nil
 }
 
 // documentTitle falls back to the KB name for stored documents that carry no
@@ -187,6 +236,22 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 	if err != nil {
 		return nil, err
 	}
+	if title, _, _, ok, kbErr := kbManualKB(sc.GetContext(), accountId, kbId, false); kbErr != nil {
+		return nil, kbErr
+	} else if ok {
+		// One knowledge base someone made by hand is one document — whatever the index
+		// split it into, and whether or not the index still exists. There is never a
+		// second page, so an offset means the caller has already been handed it; the
+		// one document would otherwise repeat for every offset asked for.
+		items := []KBDocument{{Id: kbId, Title: title}}
+		if offset != "" {
+			items = []KBDocument{}
+		}
+		return &KBDocumentsPage{
+			Items:   items,
+			Indexed: kbIndexHasDocuments(collection),
+		}, nil
+	}
 	if limit <= 0 {
 		limit = kbDocumentsDefaultLimit
 	}
@@ -206,6 +271,9 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 	}
 	page := &KBDocumentsPage{Items: []KBDocument{}}
 	if !found {
+		// No collection at all: the index is gone, whatever the row still claims.
+		noIndex := false
+		page.Indexed = &noIndex
 		return page, nil
 	}
 	keys := make([]string, 0, len(ragPage.Items))
@@ -227,7 +295,30 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 		page.Items[i].NoteCategory = categories[page.Items[i].DocumentKey]
 	}
 	page.NextOffset = ragPage.NextOffset
+	// An offset means an earlier page was served, so the index holds documents even
+	// when this last page came back empty — reading that as "nothing is indexed"
+	// would put the rebuild banner over a healthy knowledge base.
+	hasDocuments := len(page.Items) > 0 || offset != ""
+	page.Indexed = &hasDocuments
 	return page, nil
+}
+
+// kbIndexHasDocuments reports whether rag-server holds anything for a collection.
+//
+// The knowledge base row keeps a document_count from its last load, and nothing
+// clears it if the index is later dropped — so a knowledge base can claim documents
+// it no longer has. This asks the index itself. nil means the question could not be
+// answered, which is not the same as no.
+func kbIndexHasDocuments(collection string) *bool {
+	var page struct {
+		Items []ragKBDocument `json:"items"`
+	}
+	found, err := getRAG(fmt.Sprintf("/collections/%s/documents?limit=1", url.PathEscape(collection)), &page)
+	if err != nil {
+		return nil
+	}
+	has := found && len(page.Items) > 0
+	return &has
 }
 
 // KBDocumentSource is a document as it was fetched, before conversion and chunking.
@@ -388,6 +479,12 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 	if err != nil {
 		return nil, err
 	}
+	if title, content, contentType, ok, kbErr := kbManualKB(sc.GetContext(), accountId, kbId, true); kbErr != nil {
+		return nil, kbErr
+	} else if ok {
+		whole := contentSourceOriginal
+		return &KBDocument{Id: kbId, Title: title, Content: &content, ContentSource: &whole, ContentType: &contentType}, nil
+	}
 	var doc ragKBDocument
 	found, err := getRAG(fmt.Sprintf("/collections/%s/documents/%s", url.PathEscape(collection), url.PathEscape(documentId)), &doc)
 	if err != nil {
@@ -396,18 +493,6 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 	if !found {
 		return nil, errors.New(errKBDocumentNotFound)
 	}
-	content, contentSource := doc.Content, doc.ContentSource
-	if contentSource != nil && *contentSource == contentSourceFragment {
-		stored, err := kbStoredText(sc.GetContext(), accountId, kbId)
-		if err != nil {
-			return nil, err
-		}
-		if stored != "" {
-			whole := contentSourceOriginal
-			content, contentSource = &stored, &whole
-		}
-	}
-
 	key := ragDocumentKey(collection, doc)
 	var category string
 	if key != "" {
@@ -421,9 +506,10 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 		Id:            doc.Id,
 		Title:         documentTitle(doc, kbName),
 		Url:           doc.Url,
+		Content:       doc.Content,
+		ContentSource: doc.ContentSource,
+		ContentType:   doc.ContentType,
 		DocumentKey:   key,
 		NoteCategory:  category,
-		Content:       content,
-		ContentSource: contentSource,
 	}, nil
 }

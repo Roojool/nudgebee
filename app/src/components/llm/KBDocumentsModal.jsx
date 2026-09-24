@@ -12,7 +12,54 @@ import { Banner } from '@ui/Banner';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import { Label } from '@ui/Label';
 import Loader from '@shared/Loader';
+import MarkDowns from '@shared/viewers/MarkDowns';
+import DOMPurify from 'dompurify';
 import { ds } from '@utils/colors';
+
+// A stored PDF arrives base64-encoded. Browsers refuse a `data:` URI in a frame, so
+// it is turned into a blob the frame can load, and revoked when the panel closes.
+const PdfDocument = ({ base64, title }) => {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let objectUrl;
+    try {
+      const binary = atob(base64);
+      // A loop rather than Uint8Array.from(binary, fn): an upload runs to 5 MiB, so
+      // the mapped form is millions of callback invocations on the main thread for a
+      // conversion that happens every time the document is opened.
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      setUrl(objectUrl);
+    } catch (err) {
+      // The banner below tells the reader the file could not be read; this says why,
+      // since a decode failure here means what was stored is not the file we think.
+      console.error('kb: stored PDF could not be decoded', err);
+      setUrl(null);
+    }
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [base64]);
+
+  if (!url) {
+    return <Banner tone='critical' message='This file could not be read. Re-upload it to view it here.' />;
+  }
+  // Not sandboxed: the only sandbox that still loads a blob: URL has to keep
+  // allow-same-origin, which a frame can then use to drop its own sandbox — so it
+  // bought nothing, and Brave blocked the frame outright. The download link below
+  // is the way out for anyone who would rather not view it inline.
+  return (
+    <Box data-testid='kb-document-pdf'>
+      <iframe src={url} title={title} style={{ width: '100%', height: 360, border: 'none' }} />
+      <Link href={url} download={title}>
+        Download {title}
+      </Link>
+    </Box>
+  );
+};
+
+PdfDocument.propTypes = { base64: PropTypes.string.isRequired, title: PropTypes.string };
 
 const errorMessage = (response, fallback) => response?.errors?.[0]?.message || fallback;
 
@@ -47,6 +94,29 @@ const CATEGORY_OPTIONS = [
 // page when it has one), a Fact/SOP mark that decides how agents treat the
 // document, and an eye toggle that loads and shows the stored content inline.
 // Content is fetched on demand and cached per document.
+// A wiki page's own links point back at the site it came from. Left alone they
+// navigate the reader out of the app and lose the modal, so they are sent to a new
+// tab — with rel, because an opened tab can otherwise reach back through opener.
+// The hook is added and removed around the one call rather than registered globally:
+// DOMPurify is shared with every other view that sanitizes, and a global hook would
+// silently rewrite their links too.
+const openLinksInANewTab = (node) => {
+  if (node.tagName === 'A' && node.hasAttribute('href')) {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+};
+
+const sanitizeStoredHtml = (html) => {
+  DOMPurify.addHook('afterSanitizeAttributes', openLinksInANewTab);
+  try {
+    return DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'rel'] });
+  } finally {
+    // Removed by identity, so this can only ever take back the hook added above.
+    DOMPurify.removeHook('afterSanitizeAttributes', openLinksInANewTab);
+  }
+};
+
 const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) => {
   const [documents, setDocuments] = useState([]);
   const [nextOffset, setNextOffset] = useState(null);
@@ -54,6 +124,12 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+  const [indexed, setIndexed] = useState(null);
+  const [rebuilding, setRebuilding] = useState(false);
+  // State lags a click by a render, so two fast clicks can both read reindexing as
+  // false and fire two rebuilds. The ref is set in the same tick as the first.
+  const reindexingRef = useRef(false);
+  const [reindexing, setReindexing] = useState(false);
   const [contents, setContents] = useState({});
   // Marks are held by document_key rather than id so they survive paging and so
   // the optimistic value and the server's agree on one handle.
@@ -88,6 +164,7 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
           setDocuments(response.data.items);
           setCategories(seedCategories({}, response.data.items));
           setNextOffset(response.data.nextOffset);
+          setIndexed(response.data.indexed);
         } else {
           setError(errorMessage(response, 'Failed to load documents'));
         }
@@ -160,9 +237,50 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
       if (key !== requestKey.current) return;
       setContents((prev) => ({
         ...prev,
-        [documentId]: response.data ? { content: response.data.content || '' } : { error: errorMessage(response, 'Failed to load document content') },
+        [documentId]: response.data
+          ? { content: response.data.content || '', contentType: response.data.content_type, title: response.data.title }
+          : { error: errorMessage(response, 'Failed to load document content') },
       }));
     });
+  };
+
+  // The index can be dropped without the knowledge base row noticing, so offer the
+  // rebuild here — where someone discovers the gap — rather than only in the menu.
+  const handleReindex = async () => {
+    // A Banner action has no disabled state, so re-entry is guarded here: a second
+    // click mid-flight would drop and rebuild the collection twice over.
+    if (reindexingRef.current) return;
+    reindexingRef.current = true;
+    const key = requestKey.current;
+    setReindexing(true);
+    try {
+      const response = await apiKnowledgeBase.retriggerKB(accountId, kbId);
+      // The modal is reused across knowledge bases, so a reply that lands after the
+      // reader moved on would clear the new one's banner or show the old one's error.
+      if (key !== requestKey.current) return;
+      setReindexing(false);
+      if (response?.errors?.length) {
+        setError(errorMessage(response, 'Failed to start reindexing'));
+        return;
+      }
+      // Not setIndexed(true): the rebuild has only been queued, and it takes minutes.
+      // Dropping the warning with nothing in its place reads as "fixed" and leaves the
+      // list and counts below it stale with no hint that they are.
+      setIndexed(null);
+      setRebuilding(true);
+    } catch (err) {
+      // The API layer returns its errors rather than throwing, so this is unreachable
+      // today. It is here because the guard above is a ref: a throw that skipped the
+      // release would not stall one click, it would disable the button for good.
+      console.error('kb: retrigger threw', err);
+      if (key !== requestKey.current) return;
+      setReindexing(false);
+      setError('Failed to start reindexing');
+    } finally {
+      // Runs on every path, including the early returns, so switching knowledge base
+      // mid-flight cannot leave the guard stuck on either.
+      reindexingRef.current = false;
+    }
   };
 
   const renderContent = (documentId) => {
@@ -172,12 +290,69 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
     if (!state.content) {
       return <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>This document has no stored content.</Typography>;
     }
-    return <CodeBlock code={state.content} language='text' wrap maxHeight={360} />;
+    // A scraped page is stored in the form the site returned it, so it arrives as
+    // HTML and has to be rendered to be readable — as markup it is a wall of tags.
+    // Sanitized rather than trusted: this is third-party content from someone's wiki.
+    // Relative images and links point back at that site and will not resolve here.
+    // An uploaded file is served from the database, so it still opens when the
+    // index has been rebuilt or dropped — the file is the only copy we keep.
+    if (state.contentType === 'application/pdf') {
+      return <PdfDocument base64={state.content} title={state.title || 'document.pdf'} />;
+    }
+    if (state.contentType === 'application/json') {
+      return <CodeBlock code={state.content} language='json' wrap maxHeight={360} />;
+    }
+    if (state.contentType === 'text/html') {
+      return (
+        <Box
+          data-testid='kb-document-html'
+          sx={{
+            maxHeight: 360,
+            overflow: 'auto',
+            fontSize: 'var(--ds-text-body)',
+            '& img': { maxWidth: '100%' },
+            '& table': { borderCollapse: 'collapse', width: '100%' },
+            '& td, & th': { border: `1px solid ${ds.gray[200]}`, padding: `${ds.space[1]} ${ds.space[2]}` },
+            '& pre': { overflow: 'auto', background: ds.gray[100], padding: ds.space[2] },
+          }}
+          dangerouslySetInnerHTML={{ __html: sanitizeStoredHtml(state.content) }}
+        />
+      );
+    }
+    // Anything else was converted on the way in: a typed note, or a page the
+    // indexer already turned into markdown.
+    return (
+      <Box sx={{ maxHeight: 360, overflow: 'auto' }} data-testid='kb-document-markdown'>
+        <MarkDowns data={state.content} />
+      </Box>
+    );
   };
 
   return (
     <Modal open={open} handleClose={onClose} title={`Documents: ${kbName || ''}`} width='md'>
       <Box sx={{ padding: ds.space[4] }} data-testid='kb-documents-modal'>
+        {rebuilding && !loading && (
+          <Box sx={{ mb: ds.space[3] }} data-testid='kb-rebuilding'>
+            <Banner tone='info' message='Rebuilding the index. This takes a few minutes; reopen this window to see the result.' />
+          </Box>
+        )}
+        {indexed === false && !rebuilding && !loading && (
+          <Box sx={{ mb: ds.space[3] }} data-testid='kb-not-indexed'>
+            <Banner
+              tone='warning'
+              message='Nothing is indexed, so the assistant cannot retrieve from this knowledge base. Its stored content still shows below.'
+              actionsPlacement='inline'
+              actions={[
+                {
+                  // The same operation as the three-dots menu, so it carries the same
+                  // name — two words for one action invites "what is the difference?".
+                  label: reindexing ? 'Retriggering…' : 'Retrigger',
+                  onClick: handleReindex,
+                },
+              ]}
+            />
+          </Box>
+        )}
         {loading ? (
           <Loader />
         ) : error && documents.length === 0 ? (

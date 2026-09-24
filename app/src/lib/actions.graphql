@@ -9605,6 +9605,8 @@ type KBDocument {
   document_key: String!
   note_category: String
   content: String
+  content_source: String
+  content_type: String
 }
 
 input UpsertKBDocumentCategoryRequest {
@@ -9629,6 +9631,7 @@ type UpsertKBDocumentCategoryResponse {
 type KBDocumentsPage {
   items: [KBDocument!]!
   next_offset: String
+  indexed: Boolean
 }
 
 type ListKBDocumentsResponse {

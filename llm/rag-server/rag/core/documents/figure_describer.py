@@ -163,7 +163,28 @@ def describe_figures(
         # import time, and this module is importable without one.
         from rag.core.embeddings.generator import get_llm
 
-        llm = get_llm(account_id)
+        try:
+            llm = get_llm(account_id)
+        except Exception as exc:
+            # No usable credential for this account. That is the same outcome as a
+            # provider that cannot see — figures go undescribed — and must not travel
+            # up as an exception, because the caller reads one as "this PDF is corrupt"
+            # and tells the uploader their file is unreadable.
+            # Broad on purpose: a missing credential raises ValueError, but a failed
+            # decrypt or a database blip raises something else, and any of them
+            # reaching the caller is read as "this PDF is corrupt".
+            #
+            # The traceback follows that split rather than the call. An account with no
+            # credential configured is an expected state and its message says all there
+            # is to say; anything else is a fault this broad catch would otherwise hide,
+            # and is worth the stack.
+            logger.warning(
+                "figure_describer: no usable provider, %d figures left undescribed: %s",
+                len(figures),
+                exc,
+                exc_info=not isinstance(exc, ValueError),
+            )
+            return 0, False
     if not supports_vision(llm):
         logger.info(
             "figure_describer: provider %s cannot accept images; %d figures left undescribed",
