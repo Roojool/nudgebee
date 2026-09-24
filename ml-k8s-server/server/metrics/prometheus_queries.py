@@ -6,8 +6,6 @@ from pydantic import BaseModel
 from server.utils.utils import MetricsServerConfigs
 from server.utils.utils import generate_hourly_dict
 
-health_check_string = "|".join(MetricsServerConfigs.health_check_endpoints)
-
 # Define time parameters
 END_TIME = int(time.time())  # Current timestamp
 STEP = 3600  # Step size in seconds (1 hour) for Prometheus queries
@@ -76,13 +74,6 @@ class ReplicasCount(PrometheusQuery):
     # signal anyway — it is what the autoscaler decided, not what had finished starting.
     utilisation_key = "replica_defined"
 
-    def get_query(self) -> str:
-        replicas_count = (
-            f'kube_replicaset_status_replicas{{  __CLUSTER__  replicaset=~"{self.deployment_name}-.*", '
-            f'namespace="{self.namespace}"}}'
-        )
-        return replicas_count
-
     def get_data(
         self, data: List[MetricsInput], start_time: datetime, end_time: datetime, duration_in_days: int | None = None
     ):
@@ -109,30 +100,11 @@ class RequestCount(PrometheusQuery):
     # a dev workload doing 17.5 requests/second, it reported 338,157.
     utilisation_key = "workload_http_request_rate"
 
-    def get_query(self) -> str:
-        request_count = (
-            f"round(sum(avg_over_time(container_http_requests_total{{  __CLUSTER__  destination_workload_name="
-            f'"{self.deployment_name}", path!~"{health_check_string}"}}[{self.time_range}])) '
-            f"by (destination_workload_name))"
-        )
-        return request_count
-
 
 class RequestDuration(PrometheusQuery):
     # Mean latency in seconds, the same sum/count this computes, with the denominator
     # guarded so an idle window is absent rather than +Inf.
     utilisation_key = "workload_http_latency_mean"
-
-    def get_query(self) -> str:
-        request_duration = (
-            f"round(sum(rate(container_http_requests_duration_seconds_total_sum{{ __CLUSTER__ "
-            "destination_workload_name="
-            f'"{self.deployment_name}", path!~"{health_check_string}"}}[{self.time_range}])>=0 /'
-            f"rate(container_http_requests_duration_seconds_total_count{{ __CLUSTER__ destination_workload_name=~"
-            f'"{self.deployment_name}", path!~"{health_check_string}"}}[{self.time_range}])>=0) '
-            f"by (destination_workload_name),0.001)"
-        )
-        return request_duration
 
 
 class MemUsage(PrometheusQuery):
@@ -140,21 +112,6 @@ class MemUsage(PrometheusQuery):
     utilisation_key = "memory_usage"
     utilisation_scale = 1 / (1024 * 1024)
 
-    def get_query(self) -> str:
-        mem_usage = (
-            f'round(sum((avg_over_time(container_memory_working_set_bytes{{  __CLUSTER__  namespace="{self.namespace}",'
-            f'pod=~"{self.deployment_name}.*"}}['
-            f"{self.time_range}])/1024)/1024) by (service),0.01)"
-        )
-        return mem_usage
-
 
 class CpuUsage(PrometheusQuery):
     utilisation_key = "cpu_usage"
-
-    def get_query(self) -> str:
-        cpu_usage = (
-            f'round(sum(rate(container_cpu_usage_seconds_total{{  __CLUSTER__  namespace="{self.namespace}",'
-            f'pod=~"{self.deployment_name}.*"}}[{self.time_range}])) by (service),0.0001)'
-        )
-        return cpu_usage

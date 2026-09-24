@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from server.metrics.metrics import Metrics
-from server.metrics.prometheus_metrics import _entries_for
+from server.metrics.prometheus_metrics import _entries_for, _query_label
 from server.metrics.prometheus_queries import (
     CpuUsage,
     MemUsage,
@@ -129,10 +129,7 @@ class PrometheusMetricsHPA(Metrics):
                     current_start_time = current_end_time - timedelta(seconds=STEP * BATCH_SIZE)
                     results = []
                     while True:
-                        if isinstance(query_obj, str):
-                            query = query_obj
-                        else:
-                            query = query_obj.get_query()
+                        query = _query_label(query_obj)
                         logger.info(
                             (
                                 f"fetching metrics for query : {query} for "

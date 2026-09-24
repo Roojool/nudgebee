@@ -64,10 +64,7 @@ def fetch_metrics(
             effective_tenant = tenant_id or resolve_tenant_id(account_id)
 
             for query_obj in queries_obj:
-                if isinstance(query_obj, str):
-                    query = query_obj
-                else:
-                    query = query_obj.get_query()
+                query = _query_label(query_obj)
                 # Reduce log verbosity for metrics queries
                 # logger.debug(f"fetching metrics for query : {query}")
                 try:
@@ -117,6 +114,21 @@ def fetch_metrics(
             return merge_lists(results)
         else:
             return results
+
+
+def _query_label(query_obj: Any) -> str:
+    """What to send, or — for a column answered by key — what to call it in a log.
+
+    A keyed column has no PromQL of its own any more: api-server builds the native
+    query from the key name. Returning the key keeps the log lines identifying which
+    column is being fetched, and _entries_for ignores this value for such a column.
+    """
+    if isinstance(query_obj, str):
+        return query_obj
+    key = getattr(query_obj, "utilisation_key", None)
+    if key:
+        return str(key)
+    return str(query_obj.get_query())
 
 
 def _entries_for(

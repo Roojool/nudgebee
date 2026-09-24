@@ -28,35 +28,6 @@ logger = logging.getLogger(__name__)
 # HTTP status codes that warrant retrying an outbound request.
 RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 
-default_health_check_endpoints = [
-    "/actuator/health",
-    "/healthcheck",
-    "/health",
-    "/status",
-    "/health/live",
-    "/health/ready",
-    "/ping",
-    "/check",
-    "/alive",
-    "/readiness",
-    "/probe",
-    "/heartbeat",
-    "/statuscheck",
-    "/diagnostics",
-    "/isalive",
-    "/isready",
-    "/probe/health",
-    "/probe/liveness",
-    "/probe/readiness",
-    "/probe/heartbeat",
-    "/probe/status",
-    "/probe/alive",
-    "/probe/check",
-    "/api/health",
-    "/healthz",
-    "/livez",
-]
-
 
 def handle_df_for_nan(df: pd.DataFrame) -> pd.DataFrame:
     df.fillna(0, inplace=True)
@@ -243,11 +214,6 @@ class MetricsServerConfigs:
     secret = os.environ.get("RELAY_SERVER_SECRET_KEY", "")
     if not secret:
         raise ValueError("RELAY_SERVER_SECRET_KEY environment variable not set")
-    __health_checks = os.getenv("APP_HEALTH_ENDPOINTS", None)
-    if __health_checks:
-        additional_endpoints = __health_checks.split(",")
-        default_health_check_endpoints.extend(additional_endpoints)
-    health_check_endpoints = list(set(default_health_check_endpoints))
 
 
 class ApiServerMetricsConfigs:
