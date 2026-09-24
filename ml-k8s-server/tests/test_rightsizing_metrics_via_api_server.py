@@ -184,6 +184,19 @@ class TestElasticsearchThroughApiServer:
         assert aggs["app-abc-1"].timestamp > 0
 
 
+def _claim_map(svc, series):
+    """Run one claim key through the service, answering with `series`."""
+    import asyncio
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    with patch(
+        "server.recommendation.volume_rightsizing.query_utilisation_via_api_server",
+        return_value={"pvc_used_by_claim": series},
+    ):
+        return asyncio.run(svc._query_claim_metric("pvc_used_by_claim", timedelta(minutes=10)))
+
+
 class TestUnreadableReadingsAreSkippedNotFatal:
     """One unreadable point must not cost a claim its usage or a workload its scan.
 
@@ -202,16 +215,46 @@ class TestUnreadableReadingsAreSkippedNotFatal:
             "server.recommendation.volume_rightsizing.DatabaseEngine.get_engine",
             return_value=MagicMock(),
         ):
-            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant", metrics_provider="datadog")
+            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant")
 
-        usage = svc._build_datadog_usage_map(
+        usage = _claim_map(
+            svc,
             [
                 {
-                    "metric": {"persistentvolumeclaim": "data-loki-0", "kube_namespace": "loki"},
+                    "metric": {"persistentvolumeclaim": "data-loki-0", "namespace": "loki"},
                     # Newest last. The newest reading is unreadable, the one before it is good.
                     "values": [7_000_000_000.0, 8_000_000_000.0, "not-a-number"],
                 }
-            ]
+            ],
+        )
+        assert usage == {"data-loki-0_loki": pytest.approx(8_000_000_000.0)}
+
+    def test_a_nan_reading_is_skipped_like_an_unreadable_one(self):
+        """`float("NaN")` parses happily, unlike "nope".
+
+        A NaN usage compares false against every threshold downstream, so the claim is
+        sized as though it were empty — a full volume reported as having room. The walk
+        keeps going back for a real reading instead.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from server.recommendation.volume_rightsizing import VolumeRightsizingService
+
+        with patch(
+            "server.recommendation.volume_rightsizing.DatabaseEngine.get_engine",
+            return_value=MagicMock(),
+        ):
+            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant")
+
+        usage = _claim_map(
+            svc,
+            [
+                {
+                    "metric": {"persistentvolumeclaim": "data-loki-0", "namespace": "loki"},
+                    # Newest last: NaN, then Inf, then a real reading before them.
+                    "values": [8_000_000_000.0, "Inf", "NaN"],
+                }
+            ],
         )
         assert usage == {"data-loki-0_loki": pytest.approx(8_000_000_000.0)}
 
@@ -224,15 +267,16 @@ class TestUnreadableReadingsAreSkippedNotFatal:
             "server.recommendation.volume_rightsizing.DatabaseEngine.get_engine",
             return_value=MagicMock(),
         ):
-            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant", metrics_provider="datadog")
+            svc = VolumeRightsizingService(account_id="acct", tenant_id="tenant")
 
-        usage = svc._build_datadog_usage_map(
+        usage = _claim_map(
+            svc,
             [
                 {
-                    "metric": {"persistentvolumeclaim": "data-loki-0", "kube_namespace": "loki"},
+                    "metric": {"persistentvolumeclaim": "data-loki-0", "namespace": "loki"},
                     "values": ["nope", None, "also-nope"],
                 }
-            ]
+            ],
         )
         assert usage == {}, "no usage is the honest answer; a zero would shrink the claim"
 

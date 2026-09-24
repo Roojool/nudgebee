@@ -14,22 +14,12 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Dict, List, Optional, Any
 
-import requests
-from server.utils.utils import ApiServerMetricsConfigs, DatabaseEngine, get_trace
+from server.utils.utils import DatabaseEngine, get_trace
 from server.utils.utils import MetricsServerConfigs
-from server.metrics.api_server_metrics import (
-    METRIC_PROVIDER_DATADOG,
-    METRIC_PROVIDER_ELASTICSEARCH,
-    query_metrics_via_api_server,
-)
-from server.metrics.prometheus_metrics import prometheus_range_query
-from server.recommendation.elasticsearch_client import ElasticsearchTransport
-from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
-    entries_from_datadog_response,
-)
+from server.metrics.api_server_metrics import query_utilisation_via_api_server
 from server.recommendation.storage_pricing import FALLBACK_STORAGE_RATE_PER_GB_MONTH, resolve_storage_pricing
 from sqlalchemy import text
 
@@ -161,6 +151,9 @@ class VolumeRightsizingService:
         self.tenant_id = tenant_id
         self.engine = DatabaseEngine.get_engine()
         self.prometheus_url = MetricsServerConfigs.url
+        # Accepted and no longer read: the claim keys are answered by the account's
+        # default provider. Kept on the signature so the trigger contract does not
+        # change in this PR; it goes with the Datadog/ES credential fields.
         self.metrics_provider = metrics_provider or "prometheus"
         self.datadog_api_key = datadog_api_key
         self.datadog_app_key = datadog_app_key
@@ -246,28 +239,19 @@ class VolumeRightsizingService:
         ctx_logger = self._get_contextual_logger(namespace_filter)
         with tracer.start_as_current_span("get_volume_usage_data") as span:
             try:
-                if self.metrics_provider == "datadog":
-                    return await self._get_volume_usage_data_datadog(namespace_filter, ctx_logger, span)
-
-                if self.metrics_provider == "ES":
-                    return await self._get_volume_usage_data_elasticsearch(namespace_filter, ctx_logger, span)
-
-                # Prometheus path (default)
-                current_usage_query = (
-                    "max by (persistentvolumeclaim, namespace) (kubelet_volume_stats_used_bytes{ __CLUSTER__ })"
+                # One path for every provider. The claim keys are answered by whatever
+                # the account's default metrics provider is, so this no longer asks
+                # which one that is — the three branches this replaces each wrote the
+                # same three questions in a different query language.
+                #
+                # Current and capacity are the last reading over ten minutes; the peak
+                # is the max over seven days. Same key, different window and collapse,
+                # which is why there are two keys rather than four.
+                current_usage_map, capacity_map, usage_7_days_map = await asyncio.gather(
+                    self._query_claim_metric("pvc_used_by_claim", timedelta(minutes=10), namespace_filter),
+                    self._query_claim_metric("pvc_capacity_by_claim", timedelta(minutes=10), namespace_filter),
+                    self._query_claim_metric("pvc_used_by_claim", timedelta(days=7), namespace_filter, aggregate="max"),
                 )
-                usage_7_days_query = "max_over_time(kubelet_volume_stats_used_bytes{ __CLUSTER__ }[7d])"
-                capacity_query = (
-                    "max by (persistentvolumeclaim, namespace) (kubelet_volume_stats_capacity_bytes{ __CLUSTER__ })"
-                )
-
-                current_usage_data = await self._query_prometheus_range(current_usage_query, timedelta(minutes=10))
-                usage_7_days_data = await self._query_prometheus_range(usage_7_days_query, timedelta(days=7))
-                capacity_data = await self._query_prometheus_range(capacity_query, timedelta(minutes=10))
-
-                current_usage_map = self._build_usage_map(current_usage_data)
-                usage_7_days_map = self._build_usage_map(usage_7_days_data)
-                capacity_map = self._build_usage_map(capacity_data)
 
                 pvc_metadata = await self._get_pvc_metadata(namespace_filter)
 
@@ -313,401 +297,67 @@ class VolumeRightsizingService:
                 ctx_logger.error(f"Failed to get volume usage data: {e}")
                 raise
 
-    async def _get_volume_usage_data_elasticsearch(self, namespace_filter, ctx_logger, span) -> List[VolumeUsageData]:
-        """Per-PVC usage and capacity from the Elastic Agent `volume` metricset.
+    async def _query_claim_metric(
+        self,
+        key: str,
+        duration: timedelta,
+        namespace_filter: Optional[str] = None,
+        aggregate: str = "",
+    ) -> Dict[str, float]:
+        """One claim metric, keyed `{pvc}_{namespace}` as the caller below expects.
 
-        The metricset emits one document per mounted volume and sets
-        `kubernetes.persistentvolumeclaim.name` only on PVC-backed volumes, so an
-        `exists` on that field both identifies the claim and excludes the rest. That
-        exclusion is required, not tidy: configMap/projected/emptyDir mounts report the
-        NODE's filesystem size, so including them makes a small claim look enormous.
-
-        Two searches mirror the Prometheus pair — a recent window for "current" and a
-        7-day window for the peak — and capacity is read from the recent one.
+        Returns {} rather than raising: a scan covering every claim in a cluster must
+        not end because one window could not be fetched, and an empty map reads as
+        "no data for these claims", which is what a failed query has always meant here.
         """
-        via_api_server = ApiServerMetricsConfigs.via_api_server
-        # api-server resolves the account's Elasticsearch and its password, so neither
-        # reaches this service. The body is the same one either way.
-        transport = None if via_api_server else ElasticsearchTransport.from_config(self.elasticsearch)
-
-        async def usage_maps(minutes: int) -> Tuple[Dict[str, float], Dict[str, float]]:
-            now = datetime.now(timezone.utc)
-            body = self._es_volume_body(minutes, namespace_filter, now=now)
-            if via_api_server:
-                loop = asyncio.get_running_loop()
-                entries = await loop.run_in_executor(
-                    self._executor,
-                    lambda: query_metrics_via_api_server(
-                        account_id=self.account_id,
-                        tenant_id=self.tenant_id,
-                        query=json.dumps(body),
-                        start_time=now - timedelta(minutes=minutes),
-                        end_time=now,
-                        metric_provider=METRIC_PROVIDER_ELASTICSEARCH,
-                        request={"query_type": "dsl", "batch": True},
-                    ),
-                )
-            elif transport is None:
-                # Only reachable with the rollback flag off and no connection in the
-                # request. An ES account has no Prometheus to fall back to, so this has
-                # to fail loudly rather than read as "these claims have no usage".
-                raise ValueError(f"no Elasticsearch connection was supplied for account {self.account_id}")
-            else:
-                entries = entries_from_es_volume_aggregations(await transport.async_search(body, self._executor))
-            return self._build_es_usage_maps(entries)
-
-        # The two windows are independent searches, so they go out together. Two is also
-        # the whole fan-out — the executor backing them is already capped at 4 workers —
-        # so no extra semaphore is needed to keep this off a customer's cluster.
-        (current_used, capacity), (peak_used, _) = await asyncio.gather(
-            usage_maps(ES_CURRENT_WINDOW_MINUTES),
-            usage_maps(ES_PEAK_WINDOW_MINUTES),
-        )
-
-        pvc_metadata = await self._get_pvc_metadata(namespace_filter)
-
-        volume_data: List[VolumeUsageData] = []
-        for pvc_key, metadata in pvc_metadata.items():
-            try:
-                pvc_name = metadata["name"]
-                namespace = metadata["namespace"]
-                if namespace_filter and namespace != namespace_filter:
-                    continue
-
-                usage_key = f"{pvc_name}_{namespace}"
-                capacity_gb = capacity.get(usage_key, 0.0) / (1024**3)
-                if capacity_gb <= 0:
-                    # No volume document for this claim — it may be unmounted, or the
-                    # agent may not run on its node. Recommending against a capacity of
-                    # zero would propose shrinking every such claim to nothing.
-                    continue
-
-                volume_data.append(
-                    VolumeUsageData(
-                        pvc_name=pvc_name,
-                        namespace=namespace,
-                        capacity_gb=capacity_gb,
-                        current_usage_gb=current_used.get(usage_key, 0.0) / (1024**3),
-                        usage_7_days_gb=((val / (1024**3)) if (val := peak_used.get(usage_key)) is not None else None),
-                        pv_name=metadata.get("pv_name", ""),
-                        storage_class=metadata.get("storage_class", ""),
-                        metadata=metadata,
-                    )
-                )
-            except Exception as e:
-                ctx_logger.warning(f"Failed to process PVC {pvc_key}: {e}")
-                continue
-
-        span.set_attribute("pvc.volume_data_count", len(volume_data))
-        ctx_logger.info(f"Retrieved usage data for {len(volume_data)} volumes from Elasticsearch")
-        return volume_data
-
-    def _es_volume_body(
-        self, minutes: int, namespace_filter: Optional[str], now: Optional[datetime] = None
-    ) -> Dict[str, Any]:
-        """One search: namespace -> claim -> max(used), max(capacity) over the window.
-
-        The window is a fixed pair of timestamps rather than Elasticsearch date math,
-        because api-server ANDs its own range clause onto this body. Date math would be
-        resolved against a second, later clock — Elasticsearch's — so the two would
-        intersect to something narrower than either, by however long the request took.
-        """
-        now = now or datetime.now(timezone.utc)
-        start = now - timedelta(minutes=minutes)
-        filters: List[Dict[str, Any]] = [
-            {"exists": {"field": ES_PVC_FIELD}},
-            {"range": {"@timestamp": {"gte": start.isoformat(), "lte": now.isoformat()}}},
-        ]
+        # No `kind`: a claim belongs to a namespace, not to a workload, and the claim
+        # keys ignore it — verified live, the same 25 claims come back for deployment,
+        # statefulset or nothing at all. Sending one would imply a scope that is not there.
+        request: Dict[str, Any] = {"metrics": [key]}
         if namespace_filter:
-            filters.append({"term": {ES_NAMESPACE_FIELD: namespace_filter}})
-        return {
-            "size": 0,
-            "query": {"bool": {"filter": filters}},
-            "aggs": {
-                "ns": {
-                    "terms": {"field": ES_NAMESPACE_FIELD, "size": ES_MAX_NAMESPACES},
-                    "aggs": {
-                        "pvc": {
-                            "terms": {"field": ES_PVC_FIELD, "size": ES_MAX_PVCS},
-                            "aggs": {
-                                "used": {"max": {"field": ES_VOLUME_USED_FIELD}},
-                                "capacity": {"max": {"field": ES_VOLUME_CAPACITY_FIELD}},
-                            },
-                        }
-                    },
-                }
-            },
-        }
+            request["workload_namespace"] = namespace_filter
 
-    def _build_es_usage_maps(self, entries: List[dict]) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Group the flattened series into the {pvc}_{namespace} maps used above."""
-        used_map: Dict[str, float] = {}
-        capacity_map: Dict[str, float] = {}
-        # Skip, do not abort: one unreadable series must not cost every other claim its
-        # recommendation. A claim that is skipped simply has no entry, which the caller
-        # already treats as "no data for this claim" rather than as a zero.
-        for entry in entries or []:
-            labels = entry.get("metric") or {}
-            namespace, pvc_name = labels.get("ns"), labels.get("pvc")
-            if not namespace or not pvc_name:
-                continue
-            values = entry.get("values") or []
-            if not values or values[-1] is None:
-                continue
-            key = f"{pvc_name}_{namespace}"
-            try:
-                value = float(values[-1])
-            except (TypeError, ValueError):
-                logger.warning(f"Elasticsearch volume aggregation: unreadable value for {key}; skipping")
-                continue
-            if labels.get("__name__") == "used":
-                used_map[key] = value
-            elif labels.get("__name__") == "capacity":
-                capacity_map[key] = value
-        return used_map, capacity_map
-
-    async def _query_prometheus_range(self, query: str, duration: timedelta) -> List[Dict]:
-        """Execute Prometheus range query."""
+        end = datetime.now(UTC)
         try:
-            total_minutes = int(duration.total_seconds() / 60)
-            response_data = prometheus_range_query(
-                promql_query=query,
-                account_id=self.account_id,
-                duration_minutes=total_minutes,
-                step="1m",
-                tenant_id=self.tenant_id,
+            answered = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: query_utilisation_via_api_server(
+                    account_id=str(self.account_id),
+                    tenant_id=self.tenant_id,
+                    request=request,
+                    start_time=end - duration,
+                    end_time=end,
+                    aggregate=aggregate,
+                ),
             )
-            return response_data if response_data and isinstance(response_data, list) else []
         except Exception as e:
-            logger.error(f"Prometheus query failed for query: {query[:100]}..., error: {str(e)}")
-            return []
+            logger.error(f"volume metrics query failed for {key}: {e}")
+            return {}
 
-    def _build_usage_map(self, prometheus_data: List[Dict]) -> Dict[str, float]:
-        """Build usage map from Prometheus data.
-
-        The relay returns a `series_list_result` shape: each series has
-        separate `timestamps: [...]` and `values: ["str", "str", ...]` arrays
-        (values are scalar value strings, NOT [ts, val] pairs). For instant
-        queries the agent emits `vector_result` items with `value: [ts, "str"]`
-        — both shapes are handled here.
-        """
-        usage_map = {}
-        for item in prometheus_data:
-            try:
-                metric = item.get("metric", {})
-                pvc_name = metric.get("persistentvolumeclaim")
-                namespace = metric.get("namespace")
-                if not (pvc_name and namespace):
-                    continue
-                key = f"{pvc_name}_{namespace}"
-                values = item.get("values")
-                if values:
-                    last = values[-1]
-                    # range query — series_list_result: scalar value strings
-                    # instant query path may also land here as [ts, "val"] pairs;
-                    # accept both rather than guess.
-                    raw = last[1] if isinstance(last, (list, tuple)) else last
-                    usage_map[key] = float(raw)
-                    continue
-                value = item.get("value")
-                if value:
-                    usage_map[key] = float(value[1])
-            except (ValueError, IndexError, KeyError, TypeError) as e:
-                logger.warning(f"Failed to parse Prometheus metric: {item}, error: {e}")
-                continue
-        logger.info(f"Built usage map with {len(usage_map)} entries")
-        return usage_map
-
-    def _query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
-        """Run one Datadog query and return series as {metric, timestamps, values}."""
-        if ApiServerMetricsConfigs.via_api_server:
-            # api-server resolves the account's Datadog integration and its keys, so
-            # none of them have to reach this service.
-            return query_metrics_via_api_server(
-                account_id=self.account_id,
-                tenant_id=self.tenant_id,
-                query=query,
-                start_time=datetime.fromtimestamp(from_ts, tz=timezone.utc),
-                end_time=datetime.fromtimestamp(to_ts, tz=timezone.utc),
-                metric_provider=METRIC_PROVIDER_DATADOG,
-            )
-        headers: dict[str, str] = {}
-        if self.datadog_api_key:
-            headers["DD-API-KEY"] = self.datadog_api_key
-        if self.datadog_app_key:
-            headers["DD-APPLICATION-KEY"] = self.datadog_app_key
-        resp = requests.get(
-            f"https://{self.datadog_site}/api/v1/query",
-            headers=headers,
-            params={
-                "from": str(from_ts),
-                "to": str(to_ts),
-                "query": query,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return entries_from_datadog_response(resp.json())
-
-    async def _async_query_datadog(self, query: str, from_ts: int, to_ts: int) -> List[dict]:
-        """Async wrapper around _query_datadog."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            lambda: self._query_datadog(query, from_ts, to_ts),
-        )
-
-    def _build_datadog_usage_map(self, entries: List[dict]) -> Dict[str, float]:
-        """Build the {pvc}_{namespace} usage map from Datadog series."""
         usage_map: Dict[str, float] = {}
-        for series in entries or []:
-            tag_map = series.get("metric") or {}
-            pvc_name = tag_map.get("persistentvolumeclaim", "")
-            namespace = tag_map.get("kube_namespace", "")
-            if not pvc_name or not namespace:
+        for series in answered.get(key) or []:
+            metric = series.get("metric") or {}
+            claim, namespace = metric.get("persistentvolumeclaim"), metric.get("namespace")
+            values = series.get("values") or []
+            if not (claim and namespace and values):
                 continue
-
-            # The last reading, not the last position: the trailing interval of a
-            # 10-minute window is usually a gap, and reading it as a zero would drop
-            # the claim or shrink it. A reading that cannot be read as a number is
-            # skipped the same way, so the scan keeps walking back to an older one
-            # rather than leaving the claim with no usage at all.
-            for value in reversed(series.get("values") or []):
-                if value is None:
-                    continue
+            # Backwards for the most recent READABLE reading, not simply the last one.
+            # Raised in review of #38823: giving up on the claim because the newest
+            # sample would not parse reads downstream as "this claim has no usage",
+            # which shrinks or drops a volume that is actually full.
+            for raw in reversed(values):
                 try:
-                    usage_map[f"{pvc_name}_{namespace}"] = float(value)
+                    reading = float(raw)
                 except (TypeError, ValueError):
                     continue
+                # float("NaN") parses happily. A NaN usage compares false against every
+                # threshold downstream, so the claim would be sized as though it were
+                # empty; keep walking back for a real reading instead.
+                if math.isnan(reading) or math.isinf(reading):
+                    continue
+                usage_map[f"{claim}_{namespace}"] = reading
                 break
-
-        logger.info(f"Built Datadog usage map with {len(usage_map)} entries")
         return usage_map
-
-    async def _get_volume_usage_data_datadog(
-        self, namespace_filter: Optional[str], ctx_logger, span
-    ) -> List[VolumeUsageData]:
-        """Get volume usage data from Datadog."""
-        now = datetime.utcnow()
-        from_ts = int((now - timedelta(minutes=10)).timestamp())
-        to_ts = int(now.timestamp())
-        from_ts_7d = int((now - timedelta(days=7)).timestamp())
-
-        ns_filter = f"kube_namespace:{namespace_filter}," if namespace_filter else ""
-
-        current_usage_query = (
-            f"max:kubernetes.kubelet.volume.stats.used_bytes{{{ns_filter}*}}"
-            f" by {{persistentvolumeclaim,kube_namespace}}"
-        )
-        capacity_query = (
-            f"max:kubernetes.kubelet.volume.stats.capacity_bytes{{{ns_filter}*}}"
-            f" by {{persistentvolumeclaim,kube_namespace}}"
-        )
-        usage_7_days_query = (
-            f"max:kubernetes.kubelet.volume.stats.used_bytes{{{ns_filter}*}}"
-            f".rollup(max, 604800)"
-            f" by {{persistentvolumeclaim,kube_namespace}}"
-        )
-
-        try:
-            current_data, capacity_data, usage_7d_data = await asyncio.gather(
-                self._async_query_datadog(current_usage_query, from_ts, to_ts),
-                self._async_query_datadog(capacity_query, from_ts, to_ts),
-                self._async_query_datadog(usage_7_days_query, from_ts_7d, to_ts),
-            )
-        except Exception as e:
-            ctx_logger.error(f"Datadog volume metrics query failed: {e}")
-            return []
-
-        current_usage_map = self._build_datadog_usage_map(current_data)
-        capacity_map = self._build_datadog_usage_map(capacity_data)
-        usage_7_days_map = self._build_datadog_usage_map(usage_7d_data)
-
-        logger.info(
-            f"Datadog volume maps - current_usage: {len(current_usage_map)} keys, "
-            f"capacity: {len(capacity_map)} keys, usage_7d: {len(usage_7_days_map)} keys"
-        )
-        if current_usage_map and not usage_7_days_map:
-            logger.warning(
-                f"Datadog 7-day usage map is empty while current usage has data. "
-                f"7d query: {usage_7_days_query}, from: {from_ts_7d}, to: {to_ts}, "
-                f"7d response series count: {len(usage_7d_data.get('series', []))}, "
-                f"7d response status: {usage_7d_data.get('status')}, "
-                f"7d response errors: {usage_7d_data.get('errors')}"
-            )
-        elif usage_7_days_map and current_usage_map:
-            current_keys_sample = list(current_usage_map.keys())[:3]
-            usage_7d_keys_sample = list(usage_7_days_map.keys())[:3]
-            logger.info(f"Datadog key samples - current: {current_keys_sample}, 7d: {usage_7d_keys_sample}")
-
-        # Get PVC metadata from relay server (same as Prometheus path)
-        pvc_metadata = await self._get_pvc_metadata(namespace_filter)
-
-        volume_data = []
-        # If we have PVC metadata from relay server, use it
-        if pvc_metadata:
-            for pvc_key, metadata in pvc_metadata.items():
-                try:
-                    pvc_name = metadata["name"]
-                    namespace = metadata["namespace"]
-                    if namespace_filter and namespace != namespace_filter:
-                        continue
-                    usage_key = f"{pvc_name}_{namespace}"
-                    current_usage_gb = current_usage_map.get(usage_key, 0.0) / (1024**3)
-                    usage_7_days_gb = (
-                        (val / (1024**3)) if (val := usage_7_days_map.get(usage_key)) is not None else None
-                    )
-                    capacity_gb = capacity_map.get(usage_key, 0.0) / (1024**3)
-                    if capacity_gb > 0:
-                        volume_data.append(
-                            VolumeUsageData(
-                                pvc_name=pvc_name,
-                                namespace=namespace,
-                                capacity_gb=capacity_gb,
-                                current_usage_gb=current_usage_gb,
-                                usage_7_days_gb=usage_7_days_gb,
-                                pv_name=metadata.get("pv_name", ""),
-                                storage_class=metadata.get("storage_class", ""),
-                                metadata=metadata,
-                            )
-                        )
-                except Exception as e:
-                    ctx_logger.warning(f"Failed to process PVC {pvc_key}: {e}")
-                    continue
-        else:
-            # Fallback: build volume data directly from Datadog metrics (no relay server metadata)
-            all_keys = set(current_usage_map.keys()) | set(capacity_map.keys())
-            for key in all_keys:
-                try:
-                    parts = key.rsplit("_", 1)
-                    if len(parts) != 2:
-                        continue
-                    pvc_name, namespace = parts
-                    if namespace_filter and namespace != namespace_filter:
-                        continue
-                    current_usage_gb = current_usage_map.get(key, 0.0) / (1024**3)
-                    usage_7_days_gb = (val / (1024**3)) if (val := usage_7_days_map.get(key)) is not None else None
-                    capacity_gb = capacity_map.get(key, 0.0) / (1024**3)
-                    if capacity_gb > 0:
-                        volume_data.append(
-                            VolumeUsageData(
-                                pvc_name=pvc_name,
-                                namespace=namespace,
-                                capacity_gb=capacity_gb,
-                                current_usage_gb=current_usage_gb,
-                                usage_7_days_gb=usage_7_days_gb,
-                                pv_name="",
-                                storage_class="",
-                                metadata={"name": pvc_name, "namespace": namespace},
-                            )
-                        )
-                except Exception as e:
-                    ctx_logger.warning(f"Failed to process Datadog PVC {key}: {e}")
-                    continue
-
-        span.set_attribute("pvc.volume_data_count", len(volume_data))
-        ctx_logger.info(f"Retrieved usage data for {len(volume_data)} volumes from Datadog")
-        return volume_data
 
     async def _get_pvc_metadata(self, namespace_filter: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Get PVC metadata from Kubernetes API via relay server."""
