@@ -79,15 +79,11 @@ export class InvestigateLocators extends TroubleshootEventsLocators {
       .or(page.getByRole("button", { name: "Expand details panel" }))
       .first();
 
-    // The 'Where' row label is the cheapest proof the expanded sidebar body is
-    // mounted rather than the collapsed rail. Deliberately no .or(): it is a
-    // literal from the sidebar's own markup and any wider text match would find
-    // the word elsewhere on the investigation.
-    this.sidebarWhereLabel = page.getByText("Where", { exact: true });
-
-    // Deliberately no .or(): the subject name this wraps is event data, so the
-    // only wider handle would be a text match on a value that changes per event.
+    // No .or(): the subject name is event data, so any wider text match would be unstable.
     this.podNameLink = page.getByTestId("pod-name-link").first();
+
+    // The subject row's label is its type ("Pod", "Ec2 Instance"), so its testid is the only stable anchor for the expanded body.
+    this.sidebarWhereLabel = this.podNameLink;
 
     // Label text carries a live count ('Show More (7)'), so the fallback matches
     // the stable half only.

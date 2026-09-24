@@ -76,7 +76,6 @@ These were found broken while tagging (cross-checked against a real nightly full
 
 | File | Why |
 |---|---|
-| `CloudAccount/{AWS,Azure,GCP}/Services/*Services.spec.ts` | "Resources → Details tab" — identical failure across all 3 providers, likely one shared bug |
 | `CloudAccount/Azure/BlobContainer/AzureBlobContainerSummary.spec.ts` | Confirmed failing on the nightly run |
 | `ClusterDetails/Optimize/OptimizeRightSizing.spec.ts` | 2 tests ("Recommendation Dropdown", "...→ Resolution") confirmed failing |
 | `admin/Integrations/GCP.spec.ts` | Root-caused: CI's `GCP_SERVICE_ACCOUNT_KEY` secret fails client-side JSON validation, so "Check Permissions" never enables |

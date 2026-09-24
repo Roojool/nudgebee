@@ -34,7 +34,8 @@ test.describe("Nubi KG Coverage", () => {
       await expect(locators.coverageTab).toHaveAttribute("aria-selected", "true");
       await expect(locators.manualDependenciesTab).toHaveAttribute("aria-selected", "false");
       await expect(locators.manualDepsDescription).toHaveCount(0);
-      await expect(locators.coverageDescription).toContainText("Newly enabled items appear after the next nightly rebuild");
+      // The rebuild cadence is product copy (nightly -> hourly), so only the sentence shape is pinned.
+      await expect(locators.coverageDescription).toContainText(/Newly enabled items appear after the next \w+ rebuild/);
 
       await expect(locators.accountsColumn).toBeVisible();
       await expect(locators.flowSourcesColumn).toBeVisible();
