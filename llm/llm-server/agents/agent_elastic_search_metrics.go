@@ -395,6 +395,7 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 	instructions := []string{
 		"**Your Primary Goal:** Answer user questions about metrics stored in Elasticsearch / Opensearch.",
 		"**Your Method:** Construct an Elasticsearch DSL query (JSON) and execute it via `es_metrics_query`. You MUST provide both `index` (the index pattern) and `query` (the DSL body) fields in the tool input.",
+		"If the user supplies an exact Elasticsearch field path, use it verbatim in the first query. The short `metric` labels in tool output are a projection of results, not evidence that the source index uses those labels as field paths.",
 		fmt.Sprintf("**Target Indices:** You MUST only query these metric indices: '%s'. NEVER query log indices (e.g. 'fluentk8-*', 'logs-*', 'logs-kubernetes.*', 'logs-apm.*', 'logs-aws.cloudtrail-*').", strings.Join(availableIndices, ", ")),
 	}
 
@@ -457,13 +458,15 @@ func (e ElasticSearchMetricsAgent) buildSystemPrompt(
 		"  4. Verify field naming conventions (`.keyword` suffix / `exists` filter) match the schema.",
 		"  5. Try a different (more specific) index pattern.",
 		"  NEVER retry the same query unchanged. Maximum 4 retries total.",
+		"Keep earlier positive results when a later query returns zero. Report the conflicting query outcomes and their exact filters; a later zero does not erase previously observed matches.",
+		"**Query errors:** An `es_metrics_query` error means the query did not establish whether matching metrics exist. If the error says invalid DSL, replace placeholder or fabricated keys with real Elasticsearch clauses (for example `query.bool.filter` containing `term`, `exists`, or `range` objects), then execute the corrected query. Do not repeat the same invalid query. If a corrected query still cannot be executed, say that the query failed and do not claim the index has no data.",
 		"**Final Answer:** Summarize metric values (peak / avg / latest) in a concise SRE-style report. Do NOT return the raw DSL.",
 	)
 
 	// --- Constraints (schema-aware) ---
 	constraints := []string{
 		"You MUST execute every query via `es_metrics_query` before answering.",
-		"For custom/non-standard metrics, you MUST discover field names via a `size:1` sample document or `metrics_labels_list` BEFORE writing the final query.",
+		"For custom/non-standard metrics with no user-supplied exact field path, discover field names via a `size:1` sample document or `metrics_labels_list` BEFORE writing the final query.",
 		tsRule,
 		"NEVER use `size:0` or `aggs` in queries — use filter queries only.",
 		"NEVER return the generated DSL as the final answer — users want metric values.",
@@ -856,13 +859,41 @@ func (e ElasticSearchMetricsAgent) UpdateToolResponseForPlanner(toolRequest core
 		}
 
 		query, _ := result["query"].(string)
+		note, _ := result["note"].(string)
+		docsMatched, hasMatchCount := result["docs_matched"].(float64)
 		payload, ok := result["payload"].([]any)
 		if !ok || len(payload) == 0 {
-			fmt.Fprintf(&sb, "Query: %s\nResult: No data found (empty payload)\n\n", query)
+			fmt.Fprintf(&sb, "Query: %s\n", query)
+			if hasMatchCount && docsMatched >= 0 {
+				fmt.Fprintf(&sb, "Result: Elasticsearch reports %.0f matching documents (the count may be a lower bound); no metric series returned.\n", docsMatched)
+				if docsMatched == 0 {
+					sb.WriteString("A zero match for this query does not establish that the index has no relevant data.\n")
+				}
+			} else {
+				sb.WriteString("Result: No metric series returned; document match count unavailable.\n")
+			}
+			if note != "" {
+				fmt.Fprintf(&sb, "Note: %s\n", note)
+			}
+			sb.WriteString("\n")
 			continue
 		}
 
-		fmt.Fprintf(&sb, "Query: %s\nSeries count: %d\n", query, len(payload))
+		fmt.Fprintf(&sb, "Query: %s\n", query)
+		if totalSeries, ok := result["total_series"].(float64); ok && totalSeries > float64(len(payload)) {
+			fmt.Fprintf(&sb, "Series count: %.0f (showing %d)\n", totalSeries, len(payload))
+		} else {
+			fmt.Fprintf(&sb, "Series count: %d\n", len(payload))
+		}
+		if hasMatchCount && docsMatched >= 0 {
+			fmt.Fprintf(&sb, "Elasticsearch reports %.0f matching documents (the count may be a lower bound).\n", docsMatched)
+		}
+		if note != "" {
+			fmt.Fprintf(&sb, "Note: %s\n", note)
+		}
+		if cappedNotice, _ := result["capped_notice"].(string); cappedNotice != "" {
+			fmt.Fprintf(&sb, "Limit: %s\n", cappedNotice)
+		}
 
 		maxSeries := 5
 		if len(payload) > maxSeries {

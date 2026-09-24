@@ -111,6 +111,11 @@ func parseESMetricsQueryInput(command string) (indexPattern string, queryObj any
 		return "", nil, "Missing required 'query' field. Provide the Elasticsearch DSL query body.",
 			fmt.Errorf("es_metrics_query: missing query field")
 	}
+	if err := validateESMetricsQueryShape(queryObj); err != nil {
+		return "", nil,
+			fmt.Sprintf("Invalid Elasticsearch DSL: %s. Build a new query using a real query clause, for example {\"query\":{\"bool\":{\"filter\":[{\"exists\":{\"field\":\"metric.value\"}}]}}}.", err),
+			fmt.Errorf("es_metrics_query: invalid DSL: %w", err)
+	}
 
 	// Ensure queryObj is wrapped in {"query": ...} so api-server receives a valid ES _search body.
 	if qMap, isMap := queryObj.(map[string]any); isMap && qMap != nil {
@@ -218,6 +223,64 @@ func (m ESMetricsQueryTool) Call(nbRequestContext core.NbToolContext, input core
 		Type:   core.NBToolResponseTypeJson,
 		Status: core.NBToolResponseStatusSuccess,
 	}, nil
+}
+
+// validateESMetricsQueryShape catches malformed model output that is valid JSON but
+// cannot be an ES query. Keep this narrow: Elasticsearch remains the authority for
+// the full DSL, including provider-specific clauses.
+func validateESMetricsQueryShape(input any) error {
+	body, ok := input.(map[string]any)
+	if !ok || body == nil {
+		return fmt.Errorf("query must be a JSON object")
+	}
+	clause := body
+	if q, hasQuery := body["query"]; hasQuery {
+		var valid bool
+		clause, valid = q.(map[string]any)
+		if !valid || clause == nil {
+			return fmt.Errorf("query clause must be a JSON object")
+		}
+	}
+	for key := range clause {
+		if strings.HasPrefix(key, "bool_") || strings.HasPrefix(key, "query_bool_") {
+			return fmt.Errorf("%s is not an Elasticsearch query clause; use bool with nested filter clauses", key)
+		}
+	}
+	if _, bad := clause["filter"]; bad {
+		return fmt.Errorf("filter must be inside a bool query")
+	}
+	return validateESMetricsBoolClause(clause)
+}
+
+func validateESMetricsBoolClause(clause map[string]any) error {
+	rawBool, hasBool := clause["bool"]
+	if !hasBool {
+		return nil
+	}
+	boolClause, ok := rawBool.(map[string]any)
+	if !ok || boolClause == nil {
+		return fmt.Errorf("bool query must be a JSON object")
+	}
+	for _, name := range []string{"filter", "must", "must_not", "should"} {
+		raw, exists := boolClause[name]
+		if !exists {
+			continue
+		}
+		children := []any{raw}
+		if list, ok := raw.([]any); ok {
+			children = list
+		}
+		for _, child := range children {
+			query, ok := child.(map[string]any)
+			if !ok || query == nil {
+				return fmt.Errorf("bool.%s must contain query objects", name)
+			}
+			if err := validateESMetricsQueryShape(query); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // collectESMetricsErrors returns a joined error text if any result in the batch

@@ -532,6 +532,9 @@ func (o *NBReActPlanner4) Plan(
 		}
 
 		actions, finish, perr := o.parseCompletion(result.Choices[0])
+		if perr == nil && finish == nil && o.agentName() == "elastic_search_metrics" {
+			o.useFirstExplicitMetricsQuery(actions, intermediateSteps)
+		}
 		// Tool calls to dispatch, or a hard parse error: hand straight back to
 		// the executor. Only a final answer (finish != nil) is critiqued.
 		if perr != nil || finish == nil {
@@ -1513,6 +1516,9 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 		obs = TruncateMiddle(step.Observation, maxObs/2, maxObs/2)
 	} else {
 		obs = SummarizeObservation(o.ctx, step, o.request, step.Observation)
+	}
+	if step.Action.Tool == "es_metrics_query" && step.Action.NativeToolInput != "" && step.Action.NativeToolInput != step.Action.ToolInput {
+		obs = "Execution note: the metrics tool used these arguments instead of the model's function call: " + TruncateMiddle(step.Action.ToolInput, 2048, 512) + "\nResult: " + obs
 	}
 	if ev := strings.TrimSpace(step.SubAgentEvidence); ev != "" {
 		obs = obs + "\n\n" + ev
