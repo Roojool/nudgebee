@@ -120,6 +120,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
+    // A scoped key carries its scopes in the session so the gateway can hold every call
+    // to them (rpcGateway actionAllowedByTokenScopes). Absence (NULL) is what means full
+    // access; an empty array is carried as-is and allows nothing.
+    if (Array.isArray(userAccount.scopes)) {
+      (claims as Record<string, unknown>).token_scopes = userAccount.scopes;
+    }
+
     const jwt = await encodeSessionJWT(
       {
         id: userAccount.user?.id,

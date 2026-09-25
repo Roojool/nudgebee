@@ -2,11 +2,24 @@ import React from 'react';
 import { Typography } from '@mui/material';
 import { Button } from '@ui/Button';
 import { EmptyState } from '@ui/EmptyState';
+import Tooltip from '@ui/Tooltip';
 import CustomTable from '@shared/tables/CustomTable';
 import dayjs from 'dayjs';
 import { carriesGatewayTraffic, KIND_LABELS } from './keyKinds';
 
 const formatDate = (date) => dayjs(date).format('MMM DD, YYYY HH:mm');
+
+// A platform key with no scopes has its owner's full access; otherwise list what it may call.
+const AccessCell = ({ scopes }) => {
+  if (!scopes?.length) return <Typography variant='body2'>Full access</Typography>;
+  return (
+    <Tooltip title={scopes.join(', ')}>
+      <Typography variant='body2' component='span'>
+        {`${scopes.length} ${scopes.length === 1 ? 'scope' : 'scopes'}`}
+      </Typography>
+    </Tooltip>
+  );
+};
 
 // One key kind's rows. Gateway-reaching kinds also show the key's caps and its spend.
 const TokenList = ({ tokens, kind, onRevoke }) => {
@@ -17,7 +30,8 @@ const TokenList = ({ tokens, kind, onRevoke }) => {
     return <EmptyState title={`No ${KIND_LABELS[kind]} keys yet`} size='section' />;
   }
 
-  const headers = ['Name', 'Created', 'Last used', 'Expires', ...(showQuotas ? ['Limits', 'This month'] : []), ''];
+  const showAccess = kind === 'platform';
+  const headers = ['Name', 'Created', 'Last used', 'Expires', ...(showAccess ? ['Access'] : []), ...(showQuotas ? ['Limits', 'This month'] : []), ''];
 
   const tableData = rows.map((t) => {
     const row = [
@@ -26,6 +40,9 @@ const TokenList = ({ tokens, kind, onRevoke }) => {
       { text: t.accessed_at ? formatDate(t.accessed_at) : '—' },
       { text: t.expires_at ? formatDate(t.expires_at) : 'never' },
     ];
+    if (showAccess) {
+      row.push({ text: t.scopes?.length ? t.scopes.join(', ') : 'Full access', component: <AccessCell scopes={t.scopes} /> });
+    }
     if (showQuotas) {
       row.push({
         text: (t.limits || []).map((l) => `${l.value} ${l.metric}/${l.period}${l.model ? ` (${l.model})` : ''}`).join(', ') || '—',

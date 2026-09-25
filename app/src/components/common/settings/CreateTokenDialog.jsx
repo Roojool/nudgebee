@@ -4,9 +4,13 @@ import { Modal } from '@ui/Modal';
 import { Button } from '@ui/Button';
 import { Input } from '@ui/Input';
 import { Select } from '@ui/Select';
+import { ToggleGroup } from '@ui/ToggleGroup';
+import { Callout } from '@ui/Callout';
 import { ds } from 'src/utils/colors';
 import dayjs from 'dayjs';
+import { getTokenScopeCatalog } from '@api1/roles';
 import { carriesGatewayTraffic, KIND_LABELS } from './keyKinds';
+import { permKey, PermissionMatrix, ScopeTabs } from './PermissionMatrix';
 
 const EXPIRY_OPTIONS = [
   { label: '30 days', value: '30' },
@@ -56,7 +60,72 @@ const LimitEditor = ({ limits, onChange }) => {
   );
 };
 
-// Platform keys carry an expiry and nothing else; the server 400s on limits it cannot
+const ACCESS_OPTIONS = [
+  { value: 'full', label: 'Full access' },
+  { value: 'restricted', label: 'Restricted' },
+];
+
+const SCOPE_GROUPS = [
+  { scope: 'tenant', tabLabel: 'Tenant-level' },
+  { scope: 'account', tabLabel: 'Account-level' },
+];
+
+// Which modules a platform key may call. Same grid and same Read/Write coupling as the
+// custom-role editor, over the catalog minus what a scoped key can never reach.
+const ScopePicker = ({ selected, onChange }) => {
+  const [catalog, setCatalog] = React.useState(null);
+  const [tab, setTab] = React.useState('account');
+
+  React.useEffect(() => {
+    let live = true;
+    getTokenScopeCatalog().then((c) => live && setCatalog(c));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const toggle = (module, cls) => {
+    const key = permKey(module, cls);
+    const next = new Set(selected);
+    if (next.has(key)) {
+      next.delete(key);
+      // Write requires Read — removing Read cascades to Write for the same module.
+      if (cls === 'Read') next.delete(permKey(module, 'Write'));
+    } else {
+      next.add(key);
+      if (cls === 'Write') next.add(permKey(module, 'Read'));
+    }
+    onChange(next);
+  };
+
+  const entries = catalog ?? [];
+  const scopeByModule = new Map(entries.map((e) => [e.module, e.scope]));
+  const counts = { tenant: 0, account: 0 };
+  for (const key of selected) {
+    const scope = scopeByModule.get(key.split(':')[0]);
+    if (scope) counts[scope] += 1;
+  }
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }} data-testid='token-scope-picker'>
+      <Callout message='AI and automation runs started by this key use your full access, not just these scopes.' />
+      <ScopeTabs groups={SCOPE_GROUPS} value={tab} onChange={setTab} counts={counts} idPrefix='token-scope-tab' ariaLabel='Scope level' />
+      {tab === 'account' && (
+        <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>
+          Most account-level modules also need Accounts: Read to look up the account they act on.
+        </Typography>
+      )}
+      <PermissionMatrix
+        entries={entries.filter((e) => e.scope === tab)}
+        selected={selected}
+        toggle={toggle}
+        emptyMessage={catalog === null ? 'Loading scopes…' : 'No modules in this group.'}
+      />
+    </Box>
+  );
+};
+
+// Platform keys carry an expiry and optional scopes; the server 400s on limits it cannot
 // meter, so unusable rows are dropped here rather than sent to be rejected.
 const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
   const [name, setName] = React.useState('');
@@ -64,6 +133,8 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
   const [customValue, setCustomValue] = React.useState('');
   const [customUnit, setCustomUnit] = React.useState('hours');
   const [limits, setLimits] = React.useState([]);
+  const [access, setAccess] = React.useState('full');
+  const [scopes, setScopes] = React.useState(() => new Set());
 
   const reset = () => {
     setName('');
@@ -71,6 +142,8 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
     setCustomValue('');
     setCustomUnit('hours');
     setLimits([]);
+    setAccess('full');
+    setScopes(new Set());
   };
 
   const handleClose = () => {
@@ -93,11 +166,20 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
     // Held as a string while editing so the field can be cleared; coerced here because
     // the API takes a number.
     const usable = limits.filter((l) => Number(l.value) > 0).map((l) => ({ ...l, value: Number(l.value) }));
-    onCreate({ name: name.trim(), kind, expiresAt, limits: carriesGatewayTraffic(kind) ? usable : [] });
+    // Omitted, not empty, for full access: the server stores no scopes as NULL.
+    const restricted = kind === 'platform' && access === 'restricted';
+    onCreate({
+      name: name.trim(),
+      kind,
+      expiresAt,
+      limits: carriesGatewayTraffic(kind) ? usable : [],
+      scopes: restricted ? [...scopes].sort() : null,
+    });
     reset();
   };
 
-  const createDisabled = !name.trim() || (expiryDays === 'custom' && !customValid);
+  const restrictedEmpty = kind === 'platform' && access === 'restricted' && scopes.size === 0;
+  const createDisabled = !name.trim() || (expiryDays === 'custom' && !customValid) || restrictedEmpty;
   const title = `New ${KIND_LABELS[kind]} key`;
 
   return (
@@ -137,6 +219,21 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
           </Typography>
         )}
         {carriesGatewayTraffic(kind) && <LimitEditor limits={limits} onChange={setLimits} />}
+        {kind === 'platform' && (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+            <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700] }}>Access</Typography>
+            <ToggleGroup
+              selection='single'
+              size='sm'
+              ariaLabel='Key access'
+              value={access}
+              onChange={setAccess}
+              options={ACCESS_OPTIONS}
+              id='token-access-toggle'
+            />
+            {access === 'restricted' && <ScopePicker selected={scopes} onChange={setScopes} />}
+          </Box>
+        )}
       </Box>
     </Modal>
   );

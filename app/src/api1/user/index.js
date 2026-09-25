@@ -229,6 +229,7 @@ query ListUserTokens {
       created_at
       accessed_at
       expires_at
+      scopes
       limits { metric period value model }
       usage { requests tokens cost_usd }
     }
@@ -237,12 +238,13 @@ query ListUserTokens {
 `;
 
 const CREATE_USER_TOKEN = `
-mutation CreateUserToken($name: String!, $kind: String, $expires_at: String, $limits: [TokenLimitInput!]) {
-  users_create_token(user: {name: $name, kind: $kind, expires_at: $expires_at, limits: $limits}) {
+mutation CreateUserToken($name: String!, $kind: String, $expires_at: String, $limits: [TokenLimitInput!], $scopes: [String!]) {
+  users_create_token(user: {name: $name, kind: $kind, expires_at: $expires_at, limits: $limits, scopes: $scopes}) {
     token
     name
     kind
     expires_at
+    scopes
   }
 }
 `;
@@ -756,13 +758,14 @@ const apiUser = {
       };
     }
   },
-  createUserToken: async function ({ name, kind, expiresAt = null, limits = [] }) {
+  createUserToken: async function ({ name, kind, expiresAt = null, limits = [], scopes = null }) {
     try {
       const response = await queryGraphQL(CREATE_USER_TOKEN, 'CreateUserToken', {
         name,
         kind,
         expires_at: expiresAt,
         limits,
+        scopes,
       });
       return {
         data: response?.data?.data?.users_create_token,

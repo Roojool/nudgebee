@@ -90,3 +90,25 @@ test('an all-access key is exchanged for a session', async () => {
   await handler(req, res);
   expect(res.statusCode).toBe(200);
 });
+
+// Scopes reach the gateway through the session: a scoped key's JWT must carry them, and a
+// full-access key's must not (absence is what means full access).
+const encodeSessionJWT = jest.requireMock('@lib/internal').encodeSessionJWT as jest.Mock;
+
+test('a scoped key carries its scopes into the session claims', async () => {
+  encodeSessionJWT.mockClear();
+  mockGetUser.mockResolvedValue(authRow({ scopes: ['tickets:Read', 'tickets:Write'] }));
+  const res = makeRes();
+  await handler(req, res);
+  expect(res.statusCode).toBe(200);
+  expect(encodeSessionJWT.mock.calls[0][1].token_scopes).toEqual(['tickets:Read', 'tickets:Write']);
+});
+
+test('a full-access key carries no token_scopes claim', async () => {
+  encodeSessionJWT.mockClear();
+  mockGetUser.mockResolvedValue(authRow({ scopes: null }));
+  const res = makeRes();
+  await handler(req, res);
+  expect(res.statusCode).toBe(200);
+  expect(encodeSessionJWT.mock.calls[0][1]).not.toHaveProperty('token_scopes');
+});

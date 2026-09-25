@@ -50,7 +50,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
     }
   };
 
-  const createToken = async ({ name, kind, expiresAt, limits }) => {
+  const createToken = async ({ name, kind, expiresAt, limits, scopes }) => {
     if (!name) {
       snackbar.error('Token name is required');
       return;
@@ -58,7 +58,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
 
     try {
       setLoading(true);
-      const response = await apiUser.createUserToken({ name, kind, expiresAt, limits });
+      const response = await apiUser.createUserToken({ name, kind, expiresAt, limits, scopes });
 
       if (response.errors && response.errors.length > 0) {
         snackbar.error(`Failed to create API token - ${parseHttpResponseBodyMessage(response)}`);

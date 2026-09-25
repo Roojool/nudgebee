@@ -1,5 +1,7 @@
 package user
 
+import "github.com/lib/pq"
+
 type UserCreateRequest struct {
 	Username   string `json:"username" mapstructure:"username" validate:"required"`
 	Firstname  string `json:"firstname" mapstructure:"firstname" validate:"required"`
@@ -31,13 +33,17 @@ type UserTokenCreateRequest struct {
 	ExpiresAt *string `json:"expires_at" mapstructure:"expires_at"`
 	// Limits need a gateway-reaching key; 400 on a platform key.
 	Limits []TokenLimit `json:"limits" mapstructure:"limits"`
+	// Scopes restrict a platform key to `<module>:<Read|Write|Execute>` keys; empty means
+	// the owner's full access. 400 on any other kind.
+	Scopes []string `json:"scopes" mapstructure:"scopes"`
 }
 
 type UserTokenCreateResponse struct {
-	Name      string  `json:"name" mapstructure:"name"`
-	Token     string  `json:"token" mapstructure:"token"`
-	Kind      string  `json:"kind" mapstructure:"kind"`
-	ExpiresAt *string `json:"expires_at" mapstructure:"expires_at"`
+	Name      string   `json:"name" mapstructure:"name"`
+	Token     string   `json:"token" mapstructure:"token"`
+	Kind      string   `json:"kind" mapstructure:"kind"`
+	ExpiresAt *string  `json:"expires_at" mapstructure:"expires_at"`
+	Scopes    []string `json:"scopes" mapstructure:"scopes"`
 }
 
 type UserTokenDeleteRequest struct {
@@ -68,16 +74,17 @@ type UserAuthTokenResponse struct {
 }
 
 type UserAuthToken struct {
-	Id         string       `json:"id" db:"id"`
-	Name       string       `json:"name" db:"name"`
-	Provider   string       `json:"provider" db:"provider"`
-	Kind       string       `json:"kind" db:"kind"`
-	Status     string       `json:"status" db:"status"`
-	CreatedAt  string       `json:"created_at" db:"created_at"`
-	AccessedAt *string      `json:"accessed_at" db:"accessed_at"`
-	ExpiresAt  *string      `json:"expires_at" db:"expires_at"`
-	Limits     []TokenLimit `json:"limits"`
-	Usage      *TokenUsage  `json:"usage"`
+	Id         string         `json:"id" db:"id"`
+	Name       string         `json:"name" db:"name"`
+	Provider   string         `json:"provider" db:"provider"`
+	Kind       string         `json:"kind" db:"kind"`
+	Status     string         `json:"status" db:"status"`
+	CreatedAt  string         `json:"created_at" db:"created_at"`
+	AccessedAt *string        `json:"accessed_at" db:"accessed_at"`
+	ExpiresAt  *string        `json:"expires_at" db:"expires_at"`
+	Scopes     pq.StringArray `json:"scopes" db:"scopes"`
+	Limits     []TokenLimit   `json:"limits"`
+	Usage      *TokenUsage    `json:"usage"`
 }
 
 // TokenUsage is a gateway key's consumption in the current calendar month.

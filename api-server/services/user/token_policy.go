@@ -2,6 +2,7 @@ package user
 
 import (
 	"fmt"
+	"regexp"
 
 	"nudgebee/services/common"
 )
@@ -72,6 +73,47 @@ func validateLimitsForKind(kind string, limits []TokenLimit) error {
 		}
 	}
 	return nil
+}
+
+// scopePattern matches a permission-catalog key (app/src/lib/permissionCatalog.ts
+// permissionKey). Whether the module exists is the gateway's call: an unknown module
+// grants nothing there, so it cannot widen a key.
+var scopePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*:(Read|Write|Execute)$`)
+
+// maxScopes bounds the list well above the catalog's size; it only stops a runaway payload.
+const maxScopes = 500
+
+// normalizeScopes validates a key's scopes and returns them deduplicated. Omitted (nil)
+// means the owner's full access. An explicit empty list is rejected rather than read as
+// full access: a caller sending [] most plausibly means "nothing", and widening that
+// silently is the wrong way to fail. Only a platform key may carry scopes: the AI Gateway
+// never reads them, so on a gateway or all key they would read as protection that is not
+// applied (the same reasoning as limits on a platform key, D8).
+func normalizeScopes(kind string, scopes []string) ([]string, error) {
+	if scopes == nil {
+		return nil, nil
+	}
+	if len(scopes) == 0 {
+		return nil, common.ErrorBadRequest("scopes is empty, which would allow nothing; omit scopes for a full-access key")
+	}
+	if kind != KindPlatform {
+		return nil, common.ErrorBadRequest("scopes can only be set on a platform key (kind=platform); the AI Gateway does not enforce them")
+	}
+	if len(scopes) > maxScopes {
+		return nil, common.ErrorBadRequest(fmt.Sprintf("too many scopes (max %d)", maxScopes))
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		if !scopePattern.MatchString(s) {
+			return nil, common.ErrorBadRequest(fmt.Sprintf("invalid scope %q (expected <module>:Read, <module>:Write or <module>:Execute)", s))
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 // validateDeleteRequest accepts either identifier, preferring the id.

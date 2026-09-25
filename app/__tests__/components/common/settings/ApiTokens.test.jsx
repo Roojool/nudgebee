@@ -144,6 +144,17 @@ jest.mock('@api1/user/', () => ({
   },
 }));
 
+const mockGetTokenScopeCatalog = jest.fn();
+jest.mock('@api1/roles', () => ({
+  getTokenScopeCatalog: (...args) => mockGetTokenScopeCatalog(...args),
+}));
+
+const SCOPE_CATALOG = [
+  { module: 'tickets', scope: 'account', classes: ['Read', 'Write'], actions: {} },
+  { module: 'workflows', scope: 'account', classes: ['Read', 'Write', 'Execute'], actions: {} },
+  { module: 'users', scope: 'tenant', classes: ['Read', 'Write'], actions: {} },
+];
+
 jest.mock('src/utils/common', () => ({
   parseHttpResponseBodyMessage: jest.fn().mockReturnValue('Error occurred'),
 }));
@@ -160,6 +171,7 @@ describe('ApiTokens', () => {
     mockListUserTokens.mockResolvedValue({ data: [] });
     mockCreateUserToken.mockResolvedValue({ data: { token: 'new-token-value-xyz' } });
     mockDeleteUserToken.mockResolvedValue({ data: {} });
+    mockGetTokenScopeCatalog.mockResolvedValue(SCOPE_CATALOG);
   });
 
   it('renders modal when open is true', async () => {
@@ -261,6 +273,59 @@ describe('ApiTokens', () => {
     await userEvent.type(screen.getByLabelText(/name/i), 'nbctl');
     await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
     expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ name: 'nbctl', kind: 'platform', limits: [] }));
+  });
+
+  it('a full-access platform key sends no scopes', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'platform', scopes: null }));
+    expect(mockGetTokenScopeCatalog).not.toHaveBeenCalled();
+  });
+
+  it('a restricted platform key sends the ticked scopes; unticking Read clears Write', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    expect(await screen.findByText(/started by this key use your full access/i)).toBeInTheDocument();
+    // Write stays disabled until Read is ticked, as in the role editor.
+    expect(await screen.findByRole('checkbox', { name: /tickets — write/i })).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: /tickets — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /tickets — write/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — write/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — read/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /automations — execute/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'platform', scopes: ['tickets:Read', 'tickets:Write', 'workflows:Execute'] })
+    );
+  });
+
+  it('keeps Create disabled for a restricted key with no scope ticked', async () => {
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    await screen.findByRole('checkbox', { name: /tickets — read/i });
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+  });
+
+  it('shows each platform key as full access or its scope count', async () => {
+    const base = { status: 'active', created_at: '2026-09-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [], kind: 'platform' };
+    mockListUserTokens.mockResolvedValue({
+      data: [
+        { ...base, id: '1', name: 'open', scopes: null },
+        { ...base, id: '2', name: 'narrow', scopes: ['tickets:Read', 'tickets:Write'] },
+      ],
+    });
+    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
+    expect(await screen.findByText('Full access')).toBeInTheDocument();
+    expect(screen.getByText('2 scopes')).toBeInTheDocument();
   });
 
   it('a custom expiry in hours sends an expires_at roughly that far ahead', async () => {

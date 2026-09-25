@@ -521,6 +521,10 @@ func CreateUserAuthToken(context *security.RequestContext, tokenCreateRequest Us
 	if err := validateLimitsForKind(kind, tokenCreateRequest.Limits); err != nil {
 		return UserTokenCreateResponse{}, err
 	}
+	scopes, err := normalizeScopes(kind, tokenCreateRequest.Scopes)
+	if err != nil {
+		return UserTokenCreateResponse{}, err
+	}
 
 	// if token with same name and kind exists return error. Scoped by kind (not just
 	// name/provider) because the unique index is (user, name, provider, kind) — a user
@@ -589,10 +593,10 @@ func CreateUserAuthToken(context *security.RequestContext, tokenCreateRequest Us
 
 	var keyID string
 	if err := tx.QueryRowx(
-		`INSERT INTO user_auths ("user", tenant_id, name, credential, token_sha256, provider_type, provider, status, kind, accessed_at, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, 'credentials', 'token', 'active', $6, NULL, $7) RETURNING id::text`,
+		`INSERT INTO user_auths ("user", tenant_id, name, credential, token_sha256, provider_type, provider, status, kind, accessed_at, expires_at, scopes)
+		 VALUES ($1, $2, $3, $4, $5, 'credentials', 'token', 'active', $6, NULL, $7, $8) RETURNING id::text`,
 		context.GetSecurityContext().GetUserId(), context.GetSecurityContext().GetTenantId(),
-		tokenCreateRequest.Name, hashedToken, tokenSha256, kind, expiresAt).Scan(&keyID); err != nil {
+		tokenCreateRequest.Name, hashedToken, tokenSha256, kind, expiresAt, scopesColumn(scopes)).Scan(&keyID); err != nil {
 		return UserTokenCreateResponse{}, err
 	}
 
@@ -617,7 +621,8 @@ func CreateUserAuthToken(context *security.RequestContext, tokenCreateRequest Us
 		TargetID:      context.GetSecurityContext().GetUserId(),
 		TableName:     "user_auths",
 		NewData: map[string]any{"user": context.GetSecurityContext().GetUserId(), "name": tokenCreateRequest.Name,
-			"provider_type": "credentials", "provider": "token", "kind": kind, "expires_at": tokenCreateRequest.ExpiresAt},
+			"provider_type": "credentials", "provider": "token", "kind": kind, "expires_at": tokenCreateRequest.ExpiresAt,
+			"scopes": scopes},
 	})
 
 	// return token
@@ -626,7 +631,17 @@ func CreateUserAuthToken(context *security.RequestContext, tokenCreateRequest Us
 		Name:      tokenCreateRequest.Name,
 		Kind:      kind,
 		ExpiresAt: tokenCreateRequest.ExpiresAt,
+		Scopes:    scopes,
 	}, nil
+}
+
+// scopesColumn maps "no scopes" to SQL NULL, which is what the gateway reads as full access.
+// An empty array would read as a key that may call nothing.
+func scopesColumn(scopes []string) any {
+	if len(scopes) == 0 {
+		return nil
+	}
+	return pq.StringArray(scopes)
 }
 
 func DeleteUserAuthToken(context *security.RequestContext, tokenDeleteRequest UserTokenDeleteRequest) (UserTokenDeleteResponse, error) {
@@ -1029,7 +1044,7 @@ func ListUserAuthTokens(context *security.RequestContext) (UserAuthTokenResponse
 	}
 
 	rows, err := databaseManager.Db.Queryx(
-		`SELECT id, name, provider, kind, status, created_at, accessed_at, expires_at
+		`SELECT id, name, provider, kind, status, created_at, accessed_at, expires_at, scopes
 		   FROM user_auths
 		  WHERE tenant_id = $1 AND "user" = $2 AND provider_type = 'credentials' AND provider = 'token'`,
 		context.GetSecurityContext().GetTenantId(), context.GetSecurityContext().GetUserId())

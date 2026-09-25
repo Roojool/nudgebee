@@ -143,3 +143,52 @@ func TestTightestCeiling(t *testing.T) {
 	_, ok = tightestCeiling(ceilings, "requests", "minute")
 	assert.False(t, ok)
 }
+
+func TestNormalizeScopes(t *testing.T) {
+	// Omitted scopes is full access on any kind — the column stays NULL.
+	s, err := normalizeScopes(KindPlatform, nil)
+	assert.Nil(t, err)
+	assert.Nil(t, s)
+	s, err = normalizeScopes(KindAll, nil)
+	assert.Nil(t, err)
+	assert.Nil(t, s)
+
+	// An explicit empty list must not silently become full access.
+	for _, kind := range []string{KindPlatform, KindAll, KindGateway} {
+		_, err = normalizeScopes(kind, []string{})
+		assert.NotNil(t, err, kind)
+	}
+
+	s, err = normalizeScopes(KindPlatform, []string{"tickets:Read", "workflows:Write", "tickets:Read", "ai_tools:Execute"})
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"tickets:Read", "workflows:Write", "ai_tools:Execute"}, s)
+}
+
+func TestNormalizeScopesRejectsNonPlatformKinds(t *testing.T) {
+	// The AI Gateway never reads scopes, so on a key that reaches it they would read as a
+	// restriction that is not applied.
+	for _, kind := range []string{KindGateway, KindAll} {
+		_, err := normalizeScopes(kind, []string{"tickets:Read"})
+		assert.NotNil(t, err, kind)
+	}
+}
+
+func TestNormalizeScopesRejectsMalformed(t *testing.T) {
+	for _, bad := range []string{"tickets", "tickets:read", "tickets:Admin", ":Read", "Tickets:Read", "scoped:tickets:Read", "tickets:Read ", ""} {
+		_, err := normalizeScopes(KindPlatform, []string{bad})
+		assert.NotNil(t, err, bad)
+	}
+	tooMany := make([]string, maxScopes+1)
+	for i := range tooMany {
+		tooMany[i] = "tickets:Read"
+	}
+	_, err := normalizeScopes(KindPlatform, tooMany)
+	assert.NotNil(t, err)
+}
+
+func TestScopesColumn(t *testing.T) {
+	// Empty must be NULL: an empty array would read as a key that may call nothing.
+	assert.Nil(t, scopesColumn(nil))
+	assert.Nil(t, scopesColumn([]string{}))
+	assert.NotNil(t, scopesColumn([]string{"tickets:Read"}))
+}

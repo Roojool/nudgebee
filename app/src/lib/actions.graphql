@@ -4729,6 +4729,7 @@ input UserTokenCreateRequest {
   kind: String
   expires_at: String
   limits: [TokenLimitInput!]
+  scopes: [String!]
 }
 
 input UserTokenDeleteRequest {
@@ -8355,6 +8356,7 @@ type UserTokenCreateResponse {
   token: String!
   kind: String
   expires_at: String
+  scopes: [String]
 }
 
 type UserTokenDeleteResponse {
@@ -8380,6 +8382,7 @@ type UserAuthToken {
   created_at: timestamp
   accessed_at: timestamp
   expires_at: timestamp
+  scopes: [String]
   limits: [TokenLimit]
   usage: TokenUsage
 }
@@ -12484,6 +12487,7 @@ type UserAuthByUsernameRowResponse {
   user_attrs: Json
   auth_accounts: Json
   tenants: Json
+  scopes: Json
 }
 
 type Query {

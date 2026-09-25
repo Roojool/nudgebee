@@ -73,6 +73,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         } else {
           const parsedToken = await decodeSessionJWT(token);
           const p = parsedToken.payload as Record<string, unknown>;
+          // A scoped API key is limited to the RPC actions its scopes cover. This
+          // proxy reaches the cluster directly (pod shell, kubectl) with no action
+          // to match a scope against, so a scoped key is refused outright.
+          if (Array.isArray(p.token_scopes)) {
+            authSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'Scoped API key' });
+            res.status(403).json({ error: 'token_scope_denied', description: "A scoped API key can't use the relay proxy; use a full-access key" });
+            return;
+          }
           userDetails.userId = (p.user_id as string) || '';
           userDetails.tenantId = (p.tenant_id as string) || '';
         }

@@ -10,9 +10,16 @@ export async function getSessionTokenResilient(req: NextApiRequest): Promise<JWT
   return readSessionToken(req);
 }
 
+// These routes call backends directly, not through forwardAction, so a scoped API key's
+// scopes would never be checked here. Such a key is treated as unauthenticated.
+function isScopedKey(auth: AuthContext | null): boolean {
+  return !!auth && Array.isArray(auth.jwt.tokenScopes);
+}
+
 // Identity for integration OAuth routes: session cookie or encrypted bearer, plus the resilient cookie read.
 export async function resolveRequestJwt(req: NextApiRequest): Promise<JWT | null> {
   const auth = await authenticateRequest(req);
+  if (isScopedKey(auth)) return null;
   if (auth?.jwt) return auth.jwt;
   return getSessionTokenResilient(req);
 }
@@ -22,6 +29,7 @@ export async function resolveRequestJwt(req: NextApiRequest): Promise<JWT | null
 // fallback yields an empty token, which those callers treat as "no bearer to forward".
 export async function resolveRequestAuth(req: NextApiRequest): Promise<AuthContext | null> {
   const auth = await authenticateRequest(req);
+  if (isScopedKey(auth)) return null;
   if (auth?.jwt) return auth;
   const jwt = await getSessionTokenResilient(req);
   return jwt ? { token: '', jwt } : null;

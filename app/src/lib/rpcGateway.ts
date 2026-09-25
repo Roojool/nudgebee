@@ -15,6 +15,7 @@ import { isSessionRevoked } from '@lib/sessionRevocation';
 import { loadActionInputSchema, loadRpcRoutes, type RpcRoute, type SchemaFieldInfo } from '@lib/rpcRoutes';
 import { elevateRoles } from '@lib/authHooks';
 import { pickDefaultRole } from '@lib/rolePriority';
+import { isTokenScopeBlockedAction } from '@lib/permissionCatalog';
 
 // Shared primitives for the RPC-bypass path. Used by both /api/rpc
 // (JSON-RPC envelope) and /api/graphql (GraphQL envelope when the bypass is
@@ -130,6 +131,7 @@ function synthesizeJwtFromBearer(rawJwt: string): Promise<JWT | null> {
         namespacedAccountIds: (p.namespaced_account_ids as string[]) ?? [],
         namespacedReadOnlyAccountIds: (p.namespaced_readonly_account_ids as string[]) ?? [],
       };
+      if (Array.isArray(p.token_scopes)) synth.tokenScopes = p.token_scopes;
       return synth as unknown as JWT;
     })
     .catch(() => null);
@@ -189,6 +191,9 @@ export type SessionVariables = {
   // upstream Go handlers re-resolve grants from the DB (NewSecurityContext) and
   // do NOT trust this list for their own re-validation.
   permissions: string[];
+  // Present only for a scoped API key: the `<module>:<Class>` keys it was limited
+  // to at creation (user_auths.scopes). Every call must also match one of them.
+  token_scopes?: string[];
   user_id: string;
   tenant_id: string;
 };
@@ -216,13 +221,15 @@ export function buildSessionVariables(jwt: JWT): SessionVariables {
   if (jwt.isSuperAdminReadonly && !allowedRoles.includes('super_admin_readonly')) {
     allowedRoles.push('super_admin_readonly');
   }
-  return {
+  const vars: SessionVariables = {
     role: defaultRole,
     allowed_roles: allowedRoles,
     permissions: (jwt.permissions as string[]) || [],
     user_id: userId,
     tenant_id: tenantId,
   };
+  if (Array.isArray(jwt.tokenScopes)) vars.token_scopes = jwt.tokenScopes as string[];
+  return vars;
 }
 
 // Substitutes `{{ENV_VAR}}` placeholders in an action's handler URL, reporting any
@@ -296,6 +303,17 @@ export function actionHasCustomGrant(actionName: string, route: Pick<RpcRoute, '
   );
 }
 
+// actionAllowedByTokenScopes is the scoped-API-key gate. It narrows, never widens:
+// forwardAction applies it IN ADDITION to the role/grant gate, so a key reaches an
+// action only when its owner may call it AND one of the key's scopes covers it.
+// Same matcher as custom grants (Write⇒Read), so a scope means exactly what the
+// same box means in the role editor. Unclassified actions fail closed, and
+// credential/role management is refused outright (isTokenScopeBlockedAction).
+export function actionAllowedByTokenScopes(actionName: string, route: Pick<RpcRoute, 'permission' | 'handler'>, tokenScopes: string[]): boolean {
+  if (isTokenScopeBlockedAction(actionName)) return false;
+  return actionHasCustomGrant(actionName, route, tokenScopes);
+}
+
 export type ForwardOptions = {
   method: string;
   params: Record<string, unknown>;
@@ -326,6 +344,8 @@ export type ForwardError =
   | { kind: 'handler_unresolved'; method: string; handler: string; missingEnv: string[] }
   | { kind: 'no_tenant_role'; method: string }
   | { kind: 'forbidden'; method: string; role: string; allowedRoles: string[] }
+  // A scoped API key called an action none of its scopes cover.
+  | { kind: 'token_scope_denied'; method: string }
   | { kind: 'upstream_unreachable'; method: string; url: string; detail: string }
   // The caller disconnected (opts.signal aborted) before the upstream answered.
   // Nobody reads the response, so this is logged at info, not as an error.
@@ -346,6 +366,13 @@ export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult
   // account_admin]` whose `defaultRole` is `tenant_admin_readonly` would
   // otherwise be falsely denied from `account_admin`-only actions even
   // though they genuinely have account_admin. super_admin sessions bypass.
+  // Scoped API key: checked first and with no bypass (super-admin, tenant-agnostic),
+  // because it narrows whatever the owner could otherwise do.
+  const tokenScopes = opts.sessionVariables.token_scopes;
+  if (tokenScopes && !actionAllowedByTokenScopes(opts.method, route, tokenScopes)) {
+    return { ok: false, error: { kind: 'token_scope_denied', method: opts.method } };
+  }
+
   const role = opts.sessionVariables.role || '';
   const allowedRoles = opts.sessionVariables.allowed_roles || [];
   const isSuperAdmin = allowedRoles.includes('super_admin');
@@ -718,6 +745,8 @@ export async function tryBypassGraphQL(opts: {
         err.extensions = { code: 'FORBIDDEN', role: r.error.role, allowedRoles: r.error.allowedRoles };
       } else if (r.error.kind === 'no_tenant_role') {
         err.extensions = { code: 'NO_TENANT_ROLE' };
+      } else if (r.error.kind === 'token_scope_denied') {
+        err.extensions = { code: 'TOKEN_SCOPE_DENIED' };
       } else if (r.error.kind === 'upstream_error') {
         err.extensions = { upstream: { status: r.error.status, body: r.error.payload } };
       }
@@ -806,6 +835,8 @@ function forwardErrorMessage(err: ForwardError): string {
       return NO_TENANT_ROLE_MESSAGE;
     case 'forbidden':
       return err.role ? `Role '${err.role}' is not permitted to invoke '${err.method}'` : `Your permissions do not allow '${err.method}'`;
+    case 'token_scope_denied':
+      return tokenScopeDeniedMessage(err.method);
     case 'upstream_unreachable':
       console.error('%s', `[graphql-gateway] upstream_unreachable method=${err.method} url=${err.url} detail=${err.detail}`);
       return `Upstream unreachable for ${err.method}`;
@@ -818,6 +849,10 @@ function forwardErrorMessage(err: ForwardError): string {
     case 'upstream_error':
       return extractUpstreamErrorDetail(err.payload) || genericMessageForStatus(err.status);
   }
+}
+
+export function tokenScopeDeniedMessage(method: string): string {
+  return `This API key's scopes do not allow '${method}'. Create a key with the needed module scope in Settings → API Tokens.`;
 }
 
 function genericMessageForStatus(status: number): string {
