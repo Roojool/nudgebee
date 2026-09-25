@@ -4,9 +4,10 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import IntegrityError, ProgrammingError
+from sqlalchemy.orm import load_only
+from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 
 from notifications_server.exceptions.common_exc import BeeHTTPError
 from notifications_server.exceptions.exceptions import Err
@@ -22,6 +23,52 @@ LOG = logging.getLogger(__name__)
 
 # PostgreSQL unique violation error code
 UNIQUE_VIOLATION = "23505"
+
+# Undefined column / undefined table. Pods of a new release can start before
+# its migration has run, so the model may map a column the database lacks yet.
+MISSING_SCHEMA_SQLSTATES = {"42703", "42P01"}
+
+_warned_missing_schema = False
+
+
+def _is_missing_schema(exc):
+    orig = getattr(exc, "orig", None)
+    return (getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)) in MISSING_SCHEMA_SQLSTATES
+
+
+async def _existing_rule_columns(session):
+    result = await session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = :table AND table_schema = ANY (current_schemas(false))"
+        ),
+        {"table": NotificationRules.__tablename__},
+    )
+    return {row[0] for row in result}
+
+
+async def _load_rules_with_existing_columns(session, tenant_id):
+    """Load active rules selecting only the columns the database has. Columns the
+    model maps but the database lacks are set to None on each loaded rule, so a
+    newly added column must give None its pre-migration meaning in the matcher,
+    never "match everything"."""
+    present = await _existing_rule_columns(session)
+    column_attrs = inspect(NotificationRules).column_attrs
+    loadable = [attr for attr in column_attrs if attr.columns[0].name in present]
+    missing = [attr.key for attr in column_attrs if attr.columns[0].name not in present]
+    if not loadable:
+        # The table itself does not exist yet, so there are no rules to load.
+        return [], missing
+    result = await session.execute(
+        select(NotificationRules)
+        .options(load_only(*[getattr(NotificationRules, attr.key) for attr in loadable]))
+        .filter_by(tenant_id=tenant_id, is_active=True)
+    )
+    rules = result.scalars().all()
+    for rule in rules:
+        for key in missing:
+            set_committed_value(rule, key, None)
+    return rules, missing
 
 
 def is_valid_string(s):
@@ -211,6 +258,12 @@ class NotificationRulesService:
                 return {"error": str(e), "status_code": e.status_code}
 
             except Exception as e:
+                if isinstance(e, ProgrammingError) and _is_missing_schema(e):
+                    LOG.warning("Notification rule save attempted before its migration was applied: %s", e)
+                    return {
+                        "error": "Notification rules are being upgraded. Try again in a minute.",
+                        "status_code": 503,
+                    }
                 LOG.exception("Unexpected error saving notification rule: %s", e)
                 return {"error": "Unable to save or update notification rule", "status_code": 500}
 
@@ -372,9 +425,34 @@ class NotificationRulesService:
             try:
                 result = await session.execute(select(NotificationRules).filter_by(tenant_id=tenant_id, is_active=True))
                 rules = result.scalars().all()
-                if rules and self.cache and self.cache.redis_client:
-                    self.cache.cache_notification_rules(tenant_id, rules)
-                return rules
+            except ProgrammingError as e:
+                if not _is_missing_schema(e):
+                    LOG.exception("Error getting notification rules for tenant %s: %s", tenant_id, e)
+                    return []
+                # The failed statement aborted the transaction; nothing else runs until rollback.
+                await session.rollback()
+                return await self._get_rules_before_migration(session, tenant_id)
             except Exception as e:
                 LOG.exception("Error getting notification rules for tenant %s: %s", tenant_id, e)
                 return []
+            if rules and self.cache and self.cache.redis_client:
+                self.cache.cache_notification_rules(tenant_id, rules)
+            return rules
+
+    @staticmethod
+    async def _get_rules_before_migration(session, tenant_id):
+        """Rules for the window between a release's pods starting and its migration
+        running. Not cached: the next load after the migration reads the full shape."""
+        global _warned_missing_schema
+        try:
+            rules, missing = await _load_rules_with_existing_columns(session, tenant_id)
+        except Exception as e:
+            LOG.exception("Error getting notification rules for tenant %s with the existing columns: %s", tenant_id, e)
+            return []
+        if not _warned_missing_schema:
+            LOG.warning(
+                "notification_rules lacks mapped columns %s; loading the existing columns until the migration runs",
+                missing,
+            )
+            _warned_missing_schema = True
+        return rules
