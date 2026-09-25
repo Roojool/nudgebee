@@ -21,12 +21,17 @@ import (
 	servicenowsdkgo "github.com/michaeldcanady/servicenow-sdk-go"
 	"github.com/michaeldcanady/servicenow-sdk-go/credentials"
 	tableapi "github.com/michaeldcanady/servicenow-sdk-go/table-api"
+	nethttplibrary "github.com/microsoft/kiota-http-go"
 )
 
 const (
 	servicenowGetTimeout = 10 * time.Second
 	servicenowGetMaxBody = 4 << 20 // 4 MiB — incident records can be large with full enrichment
 )
+
+// servicenowRequestTimeout bounds every SDK-backed ServiceNow HTTP request, so an
+// unresponsive instance cannot hold a ticket-service slot open. A var so tests can shorten it.
+var servicenowRequestTimeout = 60 * time.Second
 
 type ServiceNowService struct{}
 
@@ -272,9 +277,14 @@ func getRecordStringValue(record *tableapi.TableRecord, key string) (string, err
 func newServiceNowTableBuilder(config models.TicketConfigurations, tableName string) (*tableapi.TableRequestBuilder2[*tableapi.TableRecord], error) {
 	cred := credentials.NewBasicProvider(config.Username, config.Password)
 	baseURL := "https://" + strings.TrimPrefix(config.URL, "https://")
+	// Start from kiota's default client so its retry and redirect middleware stay; a bare
+	// http.Client would drop them. Only the per-request timeout is set.
+	httpClient := nethttplibrary.GetDefaultClient()
+	httpClient.Timeout = servicenowRequestTimeout
 	client, err := servicenowsdkgo.NewServiceNowServiceClient(
 		servicenowsdkgo.WithAuthenticationProvider(cred),
 		servicenowsdkgo.WithURL(baseURL),
+		servicenowsdkgo.WithHTTPClient(httpClient),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ServiceNow client: %w", err)
@@ -505,7 +515,7 @@ func (s *ServiceNowService) Resolve(ctx *gin.Context, config models.TicketConfig
 	}
 	response, err := tableBuilder.Get(ctx, getConfig)
 	if err != nil {
-		return fmt.Errorf("incident not found: %s", incidentID)
+		return fmt.Errorf("failed to look up incident %s: %w", incidentID, err)
 	}
 	results, _ := response.GetResult()
 	if len(results) == 0 {
@@ -555,7 +565,7 @@ func updateServiceNowIncidentFields(ctx context.Context, config models.TicketCon
 	}
 	response, err := tableBuilder.Get(ctx, getConfig)
 	if err != nil {
-		return fmt.Errorf("incident not found: %s", incidentID)
+		return fmt.Errorf("failed to look up incident %s: %w", incidentID, err)
 	}
 	results, _ := response.GetResult()
 	if len(results) == 0 {
@@ -979,39 +989,31 @@ func (s *ServiceNowService) Update(ctx *gin.Context, config models.TicketConfigu
 		return fmt.Errorf("invalid ticket ID: %w", err)
 	}
 
+	fields := map[string]string{}
 	if updateFields.Severity != "" {
-		if err := updateServiceNowIncidentFields(ctx, config, ticketID, map[string]string{
-			"urgency": getServiceNowPriority(updateFields.Severity),
-			"impact":  getServiceNowImpact(updateFields.Severity),
-		}); err != nil {
-			return err
-		}
+		fields["urgency"] = getServiceNowPriority(updateFields.Severity)
+		fields["impact"] = getServiceNowImpact(updateFields.Severity)
 	}
-
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
 		if len(assignees) > 1 {
 			return fmt.Errorf("only a single assignee is supported for ServiceNow; %d were provided", len(assignees))
 		}
-		if err := updateServiceNowIncidentField(ctx, config, ticketID, "assigned_to", assignees[0]); err != nil {
-			return err
-		}
+		fields["assigned_to"] = assignees[0]
 	}
-
 	if updateFields.Description != "" {
-		if err := updateServiceNowIncidentField(ctx, config, ticketID, "description", markdownToPlainText(updateFields.Description)); err != nil {
-			return err
-		}
+		fields["description"] = markdownToPlainText(updateFields.Description)
 	}
-
 	// ServiceNow does not have a native labels concept; labels are ignored for this platform.
-
 	if updateFields.Status != "" {
-		if err := s.Transition(ctx, config, ticketID, updateFields.Status); err != nil {
-			return err
-		}
+		fields["state"] = serviceNowStateCode(updateFields.Status)
+	}
+	if len(fields) == 0 {
+		return nil
 	}
 
-	return nil
+	// One PUT, so a failure leaves the incident untouched and NudgeBee's row (synced only
+	// on success) still matches it. Field-by-field writes left it half-changed.
+	return updateServiceNowIncidentFields(ctx, config, ticketID, fields)
 }
 
 // Transition changes the state of a ServiceNow incident
@@ -1020,25 +1022,26 @@ func (s *ServiceNowService) Transition(ctx *gin.Context, config models.TicketCon
 		return fmt.Errorf("invalid ticket ID: %w", err)
 	}
 
-	// Map common status names to ServiceNow states
-	state := ""
+	return updateServiceNowIncidentState(ctx, config, ticketID, serviceNowStateCode(status))
+}
+
+// serviceNowStateCode maps a common status name to a ServiceNow incident state code;
+// anything else is passed through, so a numeric state code works directly.
+func serviceNowStateCode(status string) string {
 	switch strings.ToLower(status) {
 	case "new", "open":
-		state = "1"
+		return "1"
 	case "in progress", "in_progress", "acknowledged":
-		state = "2"
+		return "2"
 	case "on hold", "on_hold":
-		state = "3"
+		return "3"
 	case "resolved":
-		state = "6"
+		return "6"
 	case "closed":
-		state = "7"
+		return "7"
 	case "canceled", "cancelled":
-		state = "8"
+		return "8"
 	default:
-		// If it's a number, use it directly
-		state = status
+		return status
 	}
-
-	return updateServiceNowIncidentState(ctx, config, ticketID, state)
 }

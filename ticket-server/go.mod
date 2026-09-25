@@ -16,6 +16,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.12.3
 	github.com/michaeldcanady/servicenow-sdk-go v1.12.1
+	github.com/microsoft/kiota-http-go v1.5.6
 	github.com/redis/go-redis/v9 v9.22.0
 	gitlab.com/gitlab-org/api/client-go v1.46.0
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.71.0
@@ -55,7 +56,6 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-sqlite3 v1.14.38 // indirect
 	github.com/microsoft/kiota-abstractions-go v1.9.4 // indirect
-	github.com/microsoft/kiota-http-go v1.5.6 // indirect
 	github.com/microsoft/kiota-serialization-form-go v1.1.3 // indirect
 	github.com/microsoft/kiota-serialization-json-go v1.1.4 // indirect
 	github.com/microsoft/kiota-serialization-multipart-go v1.1.2 // indirect
