@@ -402,9 +402,9 @@ func (a *argoCDHistoryAction) Execute(ctx PlaybookActionContext, rawParams map[s
 	insights := []PlaybookActionResponseInsight{}
 
 	// Show when the last deployment occurred before the event
-	if response.LastSyncedAt != nil && ctx.GetEvent().StartedAt != nil {
+	if alertStart := ctx.GetEvent().AlertStart(); response.LastSyncedAt != nil && alertStart != nil {
 		deploymentTime := *response.LastSyncedAt
-		eventStartTime := *ctx.GetEvent().StartedAt
+		eventStartTime := *alertStart
 
 		if deploymentTime.Before(eventStartTime) {
 			timeBefore := eventStartTime.Sub(deploymentTime)

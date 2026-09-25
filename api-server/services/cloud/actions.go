@@ -1912,7 +1912,9 @@ func (a *cloudDeploymentDiffAction) Execute(ctx playbooks.PlaybookActionContext,
 	deployedAt := time.UnixMilli(newest.CreateTime).UTC()
 
 	insights := []playbooks.PlaybookActionResponseInsight{}
-	if started := ctx.GetEvent().StartedAt; started != nil && newest.CreateTime > 0 {
+	// The alert start, not StartedAt (the query window start, 10 minutes early): a
+	// revision deployed in those 10 minutes came out negative and got no insight.
+	if started := ctx.GetEvent().AlertStart(); started != nil && newest.CreateTime > 0 {
 		delta := started.Sub(deployedAt)
 		if delta >= 0 {
 			sev := "info"
@@ -2411,9 +2413,11 @@ func (a *cloudAzureActivityLogAction) AutoExecute(ctx playbooks.PlaybookActionCo
 		return nil, err
 	}
 
+	// The alert start, not StartedAt: that is the query window start, 10 minutes
+	// early, and ending there dropped the operations just before the alert.
 	eventTime := time.Now().UTC()
-	if ctx.GetEvent().StartedAt != nil {
-		eventTime = *ctx.GetEvent().StartedAt
+	if t := ctx.GetEvent().AlertStart(); t != nil {
+		eventTime = *t
 	}
 
 	cmd := fmt.Sprintf(

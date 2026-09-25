@@ -2656,7 +2656,11 @@ var clusterKeys = []string{"cluster", "k8s_cluster"}
 var endTimeKeys = []string{"end", "ends_at", "ended_at"}
 var startTimeKeys = []string{"start", "starts_at", "started_at"}
 
-func getPlaybookStartEndTime(e Event) (time.Time, time.Time) {
+// getPlaybookStartEndTime returns the playbook's observability window and the
+// alert start it was derived from. The window starts playbookLeadIn before the
+// alert so metric and log queries cover the lead-up; detected is the alert
+// start itself, for enrichers that ask what happened before the alert.
+func getPlaybookStartEndTime(e Event) (start, end, detected time.Time) {
 	var startTime, endTime time.Time
 	if e.StartsAt != nil {
 		startTime = *e.StartsAt
@@ -2695,11 +2699,12 @@ func getPlaybookStartEndTime(e Event) (time.Time, time.Time) {
 	if startTime.IsZero() {
 		startTime = endTime.Add(-time.Hour)
 	}
-	// set start time as -10 minutes
-	startTime = startTime.Add(-10 * time.Minute)
 
-	return startTime.UTC(), endTime.UTC()
+	return startTime.Add(-playbookLeadIn).UTC(), endTime.UTC(), startTime.UTC()
 }
+
+// playbookLeadIn is how far before the alert the playbook window starts.
+const playbookLeadIn = 10 * time.Minute
 
 func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string) (string, error) {
 	start := time.Now().UTC()
@@ -3148,7 +3153,7 @@ func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eve
 	if webhookEvent.FindingType == "configuration_change" {
 		sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", eventId, "aggregation_key", webhookEvent.AggregationKey)
 	} else {
-		eventruleStart, eventruleEnd := getPlaybookStartEndTime(*webhookEvent)
+		eventruleStart, eventruleEnd, eventruleDetected := getPlaybookStartEndTime(*webhookEvent)
 
 		// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
 		// nb_alert_name is set during webhook enrichment and contains the correct alert name.
@@ -3170,6 +3175,7 @@ func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eve
 			Annotations: map[string]string{},
 			StartedAt:   &eventruleStart,
 			EndedAt:     &eventruleEnd,
+			DetectedAt:  &eventruleDetected,
 			IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
 				webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
 			Source:                  webhookEvent.Source,
@@ -3474,7 +3480,7 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 		}
 	}
 
-	eventruleStart, eventruleEnd := getPlaybookStartEndTime(Event{
+	eventruleStart, eventruleEnd, eventruleDetected := getPlaybookStartEndTime(Event{
 		StartsAt: event.StartsAt,
 		EndsAt:   event.EndsAt,
 		Labels:   labels,
@@ -3508,6 +3514,7 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 		Annotations: map[string]string{},
 		StartedAt:   &eventruleStart,
 		EndedAt:     &eventruleEnd,
+		DetectedAt:  &eventruleDetected,
 		IncidentAt: resolveIncidentAt(sc, *event.AggregationKey, accountId,
 			*event.SubjectName, subjectNamespace, common.StrVal(event.SubjectType), event.StartsAt),
 		Source:           *event.Source,
