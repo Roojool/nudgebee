@@ -52,6 +52,8 @@ const getDisplayName = (name) => {
 
 // The status each page opens on; relaxed to "all" once if it returns nothing.
 const DEFAULT_STATUS_FILTER = 'enabled';
+// LLM configs list at most this many linked accounts before collapsing the rest.
+const VISIBLE_ACCOUNT_CHIPS = 2;
 
 // Maps integration name to the config key that holds its primary connection info
 const integrationConnectionKey = {
@@ -494,19 +496,40 @@ const ListIntegrations = ({ integrationName }) => {
   };
 
   // LLM only: other integration types are one-per-account, so they keep the
-  // plain text list and gain nothing from chips.
+  // plain text list and gain nothing from chips. One config can serve many
+  // accounts, so only the first few are shown and the rest collapse into a
+  // "+N more" chip whose tooltip lists every account.
   const accountChips = (item) => {
     const linked = linkedAccounts(item).filter((a) => a?.cloud_account_name);
     if (linked.length === 0) {
       return <span>-</span>;
     }
+    const visible = linked.slice(0, VISIBLE_ACCOUNT_CHIPS);
+    const hiddenCount = linked.length - visible.length;
     return (
       <Stack direction='row' spacing={0.5} useFlexGap flexWrap='wrap'>
-        {linked.map((acc, i) => (
+        {visible.map((acc, i) => (
           <Chip key={`${acc.cloud_account_name}-${i}`} size='sm' variant='tag' tone='neutral'>
             {acc.cloud_account_name}
           </Chip>
         ))}
+        {hiddenCount > 0 && (
+          <Tooltip
+            title={
+              <Stack spacing={0.5}>
+                {linked.map((acc, i) => (
+                  <span key={`${acc.cloud_account_name}-${i}`}>{acc.cloud_account_name}</span>
+                ))}
+              </Stack>
+            }
+          >
+            <span tabIndex={0} aria-label={`Linked accounts: ${linked.map((acc) => acc.cloud_account_name).join(', ')}`}>
+              <Chip size='sm' variant='tag' tone='subtle'>
+                {`+${hiddenCount} more`}
+              </Chip>
+            </span>
+          </Tooltip>
+        )}
       </Stack>
     );
   };
