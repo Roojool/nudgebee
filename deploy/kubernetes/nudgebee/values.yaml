@@ -341,6 +341,21 @@ rabbitmq:
     tag: 3.13.7-debian-12-r5-nb1
   extraConfiguration: |-
     consumer_timeout = 3600000
+  # Ready = the AMQP listener accepts connections (the check the RabbitMQ
+  # cluster operator uses), not the chart's default "no resource alarms". A
+  # disk or memory alarm is flow control: RabbitMQ blocks publishers until
+  # consumers drain it. Failing readiness on an alarm took the broker out of
+  # its Service, so consumers could not reconnect to drain, the alarm could
+  # never clear on its own, and every client got ECONNREFUSED until someone
+  # freed the disk by hand -- which is how a customer install went down.
+  customReadinessProbe:
+    tcpSocket:
+      port: amqp
+    initialDelaySeconds: 10
+    timeoutSeconds: 20
+    periodSeconds: 30
+    failureThreshold: 3
+    successThreshold: 1
   auth:
     password: 'password'
     securePassword: false
@@ -435,6 +450,24 @@ rabbitmq:
           annotations:
             summary: RabbitMQ unroutable messages
             description: 'A queue has unroutable messages'
+
+        - alert: RabbitmqDiskSpaceLow
+          expr: 'rabbitmq_disk_space_available_bytes{namespace="{{ .Release.Namespace }}"} < 1073741824'
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RabbitMQ disk space low
+            description: 'Under 1GiB free on the RabbitMQ volume; publishers are blocked once it reaches the disk_free_limit'
+
+        - alert: RabbitmqMessagesDropped
+          expr: 'increase(rabbitmq_global_messages_dead_lettered_maxlen_total{namespace="{{ .Release.Namespace }}",dead_letter_strategy="disabled"}[15m]) > 0'
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: RabbitMQ is dropping messages at a queue length cap
+            description: 'A capped queue (k8s_agent_*, policy nb-collector-agent-queues) is full and dropping its oldest messages: its consumers are not keeping up. Dropped discovery batches leave inventory stale until a whole snapshot gets through.'
 # ---------------------------------------------------------------------------
 # Install-time setup. The two parts are independent: an install can
 # pre-provision its admin without bundling an agent, or bundle an agent and let

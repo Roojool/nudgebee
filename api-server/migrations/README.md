@@ -61,7 +61,10 @@ Shell scripts run sequentially after RabbitMQ is healthy:
 
 ```
 001_remove_autopilot_queues.sh
+002_collector_queue_limits.sh
 ```
+
+They configure the broker and must be idempotent: they re-run on every deploy. The runner waits at most 3 minutes for the management API, then skips them with a warning, and a failing script is logged and skipped rather than failing the Job — the next deploy applies it.
 
 Skipped when `MIGRATE_SKIP_RABBITMQ=1` (used by local smoke-test flows).
 
@@ -76,7 +79,7 @@ The migration job is a Helm `pre-install,pre-upgrade` hook. On every deploy, the
    - Neither present (fresh DB) → apply from scratch.
 3. `atlas migrate apply -c file://atlas.hcl --env default --url ... --tx-mode file` — applies pending migrations. Out-of-order arrivals are applied via `--exec-order non-linear` (atlas.hcl).
 4. Calls the API server to reload the agent playbook (skipped if `MIGRATE_SKIP_PLAYBOOK=1`).
-5. Waits for RabbitMQ, runs each `migrations/rabbitmq/*.sh` (skipped if `MIGRATE_SKIP_RABBITMQ=1`).
+5. Waits up to 3 minutes for RabbitMQ, then runs each `migrations/rabbitmq/*.sh`; neither an unreachable broker nor a failing script fails the Job (skipped if `MIGRATE_SKIP_RABBITMQ=1`).
 
 CI in `nudgebee-infra` builds + pushes the migration image and runs `helm upgrade ... --wait --wait-for-jobs`, which blocks until the Job exits 0.
 

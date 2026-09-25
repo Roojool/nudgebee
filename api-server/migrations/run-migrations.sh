@@ -194,12 +194,30 @@ if [ "${MIGRATE_SKIP_RABBITMQ:-0}" = "1" ]; then
     echo "Skipping RabbitMQ migrations (MIGRATE_SKIP_RABBITMQ=1)"
 else
     echo "Running RabbitMQ migrations..."
-    until curl -sf -u "$RABBIT_MQ_USERNAME:$RABBIT_MQ_PASSWORD" "http://$RABBIT_MQ_HOST:15672/api/overview" > /dev/null; do
+    # Bounded, and never fatal. These scripts only configure the broker and are
+    # idempotent, so a run skipped here is applied by the next deploy. The wait
+    # used to be unbounded: a broker that never comes back (down, moved, wrong
+    # credentials) held the Job open forever, and on-prem that Job is a
+    # post-install,post-upgrade Helm hook with backoffLimit: 0 -- the upgrade
+    # hangs instead of finishing. A failing script was fatal for the same
+    # reason, since the runner is under `set -e`.
+    rabbit_ready=0
+    rabbit_deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$rabbit_deadline" ]; do
+      if curl -sf --max-time 5 -u "$RABBIT_MQ_USERNAME:$RABBIT_MQ_PASSWORD" "http://$RABBIT_MQ_HOST:15672/api/overview" > /dev/null; then
+        rabbit_ready=1
+        break
+      fi
       echo "Waiting for RabbitMQ management API..."
       sleep 3
     done
-    for script in ./migrations/rabbitmq/*.sh; do
-      echo "running: $script"
-      sh "$script"
-    done
+    if [ "$rabbit_ready" = "1" ]; then
+      for script in ./migrations/rabbitmq/*.sh; do
+        echo "running: $script"
+        sh "$script" || echo "WARN: $script failed; continuing (it re-runs on the next deploy)" >&2
+      done
+    else
+      echo "WARN: RabbitMQ management API at $RABBIT_MQ_HOST:15672 unreachable for 3m;" \
+           "skipping RabbitMQ migrations (they re-run on the next deploy)." >&2
+    fi
 fi
