@@ -161,6 +161,13 @@ export class OwnershipLocators extends CommonLocators {
     return this.ruleRow(name).getByRole("button", { name: "More actions" }).first();
   }
 
+  // Centered first: a kebab on a row near the viewport bottom sits under the floating Nubi launcher.
+  async openRowMenu(name: string): Promise<void> {
+    const btn = this.rowMenuBtn(name);
+    await btn.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    await btn.click();
+  }
+
   // A row action inside the open kebab menu. DropdownMenu keeps its items mounted
   // (keepMounted), so :visible is what separates the open menu from every closed
   // one, and getByRole("menuitem") matches zero for the aria-hidden reason above.

@@ -1,6 +1,7 @@
 import { Page, expect } from "@playwright/test";
 import { LoginPage } from "../../pages/LoginPage";
 import { DashboardsLocators } from "./dashboardsLocators";
+import { waitForGraphQLAndValidate } from "../utils/GraphQLNetworkWatcher";
 
 /**
  * Prefix every dashboard this suite creates carries. Kept distinctive so the
@@ -40,7 +41,14 @@ export async function createDashboard(locators: DashboardsLocators, title: strin
   await expect(locators.titleInput).toBeVisible();
   await locators.titleInput.fill(title);
   if (description) await locators.descriptionInput.fill(description);
-  await locators.saveBtn.click();
+  // Waits on the create itself: the toast alone cannot tell a slow save from a failed one.
+  await waitForGraphQLAndValidate(
+    locators.saveBtn.page(),
+    async () => {
+      await locators.saveBtn.click();
+    },
+    { testName: `Dashboards - create ${title}`, operationNames: ["CreateDashboard"] }
+  );
   await expect(locators.createdToast).toBeVisible();
 }
 

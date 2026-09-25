@@ -127,6 +127,13 @@ export class GroupingLocators extends ApplicationGroupLocators {
     await this.page.locator(`#${WORKLOADS_TABLE}-body`).or(this.workloadsEmptyState).first().waitFor({ state: "attached", timeout });
   }
 
+  // Row enrichment writes back a stale snapshot of the rows, so a search that lands before it finishes gets overwritten.
+  workloadsEnrichmentDone(timeout = 90000): Promise<boolean> {
+    const op = (name: string) =>
+      this.page.waitForResponse((r) => (r.request().postData() ?? "").includes(name), { timeout });
+    return Promise.all([op("listAutoOptimize"), op("RecommendationWorkloadCount")]).then(() => true, () => false);
+  }
+
   // SearchInput commits on Enter (onEnterPress) — typing alone filters nothing.
   async searchWorkloads(term: string): Promise<void> {
     await this.workloadsSearch.click();

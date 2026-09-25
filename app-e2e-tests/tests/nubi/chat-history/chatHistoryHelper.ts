@@ -189,5 +189,6 @@ export async function deleteConversationIfPresent(
 
   await openRowMenu(locators, locators.conversationRows.first());
   await locators.deleteMenuItem.click();
+  await locators.confirmDeleteBtn.click();
   await expect(locators.conversationRows).toHaveCount(0, { timeout: 30000 });
 }

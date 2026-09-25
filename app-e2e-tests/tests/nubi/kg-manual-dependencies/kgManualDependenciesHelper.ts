@@ -234,10 +234,11 @@ export async function deleteDeclaration(page: Page, locators: KgManualDependenci
     page,
     async () => {
       await locators.confirmDeleteBtn.click();
-      await locators.confirmDeleteDialog.waitFor({ state: "detached", timeout: 30000 });
     },
     { testName: "KG Manual Dependencies - delete a declaration", operationNames: [OP_DELETE, OP_LIST], timeoutMs: 45000 }
   );
+  // Outside the watcher: the dialog only closes once the delete succeeds, so a slow or failed delete must surface as the watcher's API result.
+  await locators.confirmDeleteDialog.waitFor({ state: "detached", timeout: 30000 });
   await waitForListLoaded(locators);
 }
 

@@ -176,6 +176,7 @@ test.describe("Nubi Chat History Rail", () => {
 
         await openRowMenu(locators, locators.conversationRows.first());
         await locators.deleteMenuItem.click();
+        await locators.confirmDeleteBtn.click();
 
         await expect(locators.deletedSnackbar).toBeVisible({ timeout: 30000 });
         await expect(locators.conversationRows).toHaveCount(0, { timeout: 30000 });
@@ -215,6 +216,8 @@ test.describe("Nubi Chat History Rail", () => {
         }
       }).toPass({ timeout: 90000, intervals: [2000, 3000, 5000] });
 
+      // The pointer rests on a row after picking Chats, and that row's interactive tooltip covers the trigger.
+      await page.mouse.move(0, 0);
       await locators.typeMenuTrigger.click();
       await locators.typeMenuItem("All types").click();
       await expect(locators.typeMenuTrigger).toContainText("Type: All", { timeout: 30000 });

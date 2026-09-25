@@ -413,7 +413,12 @@ export async function selectAssignee(
     console.log("GITHUB_ASSIGNEE is not assignable on this repo - fell back to a repo-offered assignee");
   }
 
-  await page.keyboard.press("Escape");
+  // Escape only while the options popup is still open; with it already closed, Escape dismisses the whole action dialog.
+  if (await locators.assigneeSearchInput.isVisible()) {
+    await page.keyboard.press("Escape");
+    await expect(locators.assigneeSearchInput).toBeHidden({ timeout: 10000 });
+  }
+  await expect(locators.dialog).toBeVisible();
   await expect(locators.assigneeDropdown).toContainText(selected, { timeout: 10000 });
   console.log(`Selected assignee from ${source}`);
 }

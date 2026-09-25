@@ -135,6 +135,7 @@ test("Cluster Details->Monitoring-> Alert Manager -> Filter by Status Enabled", 
   await setup(page);
   await searchAlert(page, ALERT_NAME);
   const alertRow = page.locator("tr", { hasText: ALERT_NAME });
+  await expect(alertRow).toBeVisible({ timeout: 30000 });
   const isDisabled = await alertRow.locator("td").filter({ hasText: /disabled/i })
     .count().then(n => n > 0).catch(() => false);
   if (isDisabled) {
