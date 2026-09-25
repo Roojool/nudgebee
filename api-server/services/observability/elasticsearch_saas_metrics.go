@@ -383,6 +383,7 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 	// Resolved at most once per request and shared by every query in it: the mapping
 	// lookup is a network round trip, and req.Queries can hold several entries.
 	var indexFields []OutputMetricLabels
+	var indexFieldsErr error
 	var fetchedIndexFields bool
 
 	for queryKey, queryDSL := range req.Queries {
@@ -484,10 +485,17 @@ func (e *ElasticSaasMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 		// returns a plausible row count from a query that filtered on nothing at all,
 		// so it is reported even when the payload is non-empty.
 		if !fetchedIndexFields {
-			indexFields, _ = esFetchMetricFields(cfg, index)
+			indexFields, indexFieldsErr = esFetchMetricFields(cfg, index)
 			fetchedIndexFields = true
 		}
-		if unknown := esUnknownQueryFields(indexFields, queryDSL); len(unknown) > 0 {
+		if indexFieldsErr != nil {
+			// Say the check did not run. Skipping it quietly reads as "every field in
+			// this query exists", which is the one thing we cannot tell.
+			if qr.Note != "" {
+				qr.Note += " "
+			}
+			qr.Note += fmt.Sprintf("Field names in this query were not checked against %s, because its fields could not be listed (%v).", index, indexFieldsErr)
+		} else if unknown := esUnknownQueryFields(indexFields, queryDSL); len(unknown) > 0 {
 			if qr.Note != "" {
 				qr.Note += " "
 			}
@@ -717,6 +725,18 @@ func (e *ElasticSaasMetricSource) FetchMetricsLabels(ctx *security.RequestContex
 // matching indices and carrying each field's type. Split from FetchMetricsLabels so the
 // merge can be tested against a stub Elasticsearch without a database-backed config.
 func esFetchMetricFields(cfg *ElasticsearchConfig, index string) ([]OutputMetricLabels, error) {
+	if esIndexIsRemote(index) {
+		fields, err := esFetchFieldCaps(cfg, index)
+		if err != nil {
+			return nil, err
+		}
+		output := make([]OutputMetricLabels, 0, len(fields))
+		for _, f := range fields {
+			output = append(output, OutputMetricLabels{Label: f.Field, Attributes: f.Attributes})
+		}
+		return esRequireMetricFields(output, index)
+	}
+
 	// Fetch field names from the index mapping.
 	resp, err := esRequest("GET", fmt.Sprintf("%s/%s/_mapping", cfg.Url, index), "", cfg) //nolint:bodyclose
 	if err != nil {
@@ -781,7 +801,19 @@ func esFetchMetricFields(cfg *ElasticsearchConfig, index string) ([]OutputMetric
 	// the order Elasticsearch happened to enumerate its indices in.
 	sort.Slice(output, func(i, j int) bool { return output[i].Label < output[j].Label })
 
-	return output, nil
+	return esRequireMetricFields(output, index)
+}
+
+// esRequireMetricFields turns an empty field list into an error. A metrics index with
+// no fields is not a real answer: it is a pattern that matched nothing, or a listing the
+// cluster could not serve. Returned as success, it told the agent the index had no
+// dimensions to filter on and switched off the unknown-field check, so every guessed
+// field name went out unchallenged.
+func esRequireMetricFields(fields []OutputMetricLabels, index string) ([]OutputMetricLabels, error) {
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no fields found for index %q: the pattern matched no index, or its fields could not be listed. Fetch a sample document from the index to see its fields", index)
+	}
+	return fields, nil
 }
 
 // normalizeESMetricsWhere rewrites string equality field names to use the .keyword

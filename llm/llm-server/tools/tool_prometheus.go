@@ -1197,15 +1197,23 @@ func (m ListMetricsLabelsTool) Call(nbRequestContext core.NbToolContext, input c
 		provider = m.Provider
 	}
 
-	seriesName := query
-	if strings.EqualFold(provider, "ES") {
-		idxPattern := getESMetricIndexPattern(nbRequestContext, m.DefaultIndex)
-		if idxPattern != "" && !strings.Contains(query, "*") && !strings.Contains(query, "?") {
-			seriesName = idxPattern
+	labelsResponse, err := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, query)
+
+	// On Elasticsearch the input is an index, but the model sometimes passes a metric
+	// name instead. That used to be detected by "no wildcard in it" and swapped for the
+	// configured index BEFORE asking — which also swapped every exact index name,
+	// including remote-cluster ones (`cluster:index`), and returned the configured
+	// index's fields labelled as the requested index's. Ask for what was requested
+	// first, fall back only when it cannot be read, and say that a fallback happened.
+	var fallbackNote string
+	if err != nil && strings.EqualFold(provider, "ES") {
+		if idxPattern := getESMetricIndexPattern(nbRequestContext, m.DefaultIndex); idxPattern != "" && idxPattern != query {
+			if fallback, fallbackErr := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, idxPattern); fallbackErr == nil {
+				fallbackNote = fmt.Sprintf("%q could not be read as an index (%v). These are the fields of the configured metrics index %q instead.", query, err, idxPattern)
+				labelsResponse, err = fallback, nil
+			}
 		}
 	}
-
-	labelsResponse, err := services_server.ListMetricsSeriesLabels(*nbRequestContext.Ctx, nbRequestContext.AccountId, provider, seriesName)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("unable to fetch metrics labels", "error", err.Error())
 		return core.NBToolResponse{
@@ -1214,7 +1222,11 @@ func (m ListMetricsLabelsTool) Call(nbRequestContext core.NbToolContext, input c
 		}, err
 	}
 
-	dataResponse, err := common.MarshalJson(labelsResponse)
+	var payload any = labelsResponse
+	if fallbackNote != "" {
+		payload = map[string]any{"note": fallbackNote, "labels": labelsResponse.Labels}
+	}
+	dataResponse, err := common.MarshalJson(payload)
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("metrics: unable to marshal final data", "error", err.Error())
 		return core.NBToolResponse{
