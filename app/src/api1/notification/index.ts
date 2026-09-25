@@ -1,5 +1,6 @@
 import { gqlStringify, queryGraphQL, unwrapGraphQL } from '@lib/HttpService';
 import apiIntegrations from '@api1/integrations';
+import { safeJSONParse } from 'src/utils/common';
 
 export const LIST_INSTALLED_NOTIFICATION_TOOLS = `query ListInstalledNotificationTools {
     messagingplatforms_list {
@@ -213,8 +214,10 @@ const apiNotifications = {
     try {
       const constructedQuery = GET_NOTIFICATION_RULE_EVENT_TYPES.replaceAll('__WHERE__', gqlStringify({ id: { _eq: ruleId } }));
       const response = await queryGraphQL(constructedQuery, 'GetNotificationRuleEventTypes', {});
-      const eventTypes = response?.data?.data?.notifications_list_rules?.rows?.[0]?.event_types;
-      return Array.isArray(eventTypes) ? eventTypes : [];
+      const raw = response?.data?.data?.notifications_list_rules?.rows?.[0]?.event_types;
+      // The rules list returns json columns as encoded strings.
+      const eventTypes = typeof raw === 'string' ? safeJSONParse(raw) : raw;
+      return Array.isArray(eventTypes) ? eventTypes.filter((e: unknown): e is string => typeof e === 'string') : [];
     } catch (error) {
       console.log(error);
       return [];
