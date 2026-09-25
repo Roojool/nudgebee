@@ -624,6 +624,25 @@ async def save_or_update_rule(data: Dict[Any, Any]):
     return JSONResponse(response, status_code=201)
 
 
+@router.post("/rules/order", status_code=201, dependencies=[Depends(verify_action_token)])
+async def update_rule_order(data: Dict[Any, Any]):
+    service = NotificationRulesService(engine)
+    response = await service.update_rule_order(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/invalidate-cache", dependencies=[Depends(verify_action_token)])
+async def invalidate_rules_cache(body: Dict[Any, Any]):
+    """Drop a tenant's cached notification rules. Called by api-server after it
+    deletes a rule, so the deleted rule stops applying without the cache TTL."""
+    tenant = body.get("tenant_id")
+    if not tenant:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    NotificationRulesService(engine).invalidate_cached_rules(tenant)
+    return JSONResponse({"success": True})
+
+
 @router.post("/emails/send", status_code=201, dependencies=[Depends(verify_action_token)])
 async def send_email(payload: Dict[Any, Any]):
     """

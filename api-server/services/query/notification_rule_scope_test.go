@@ -151,7 +151,7 @@ func TestNotificationRuleScope_DB(t *testing.T) {
 		id uuid PRIMARY KEY, tenant_id uuid NOT NULL, account_id uuid, source text, created_at timestamp DEFAULT now(),
 		cluster text, description text, aggregation_key text, expires_at timestamp, workload text, name text,
 		namespace text, is_suppressed boolean, created_by uuid, severity text, delivery_mode text, frequency text,
-		event_types json, scope_mode text NOT NULL)`)
+		event_types json, scope_mode text NOT NULL, position integer, continue_matching boolean)`)
 	mustExec(`CREATE TABLE notification_rule_mappings (id uuid PRIMARY KEY, rule_id uuid, platform text, channels json)`)
 	mustExec(`CREATE TABLE notification_rule_accounts (rule_id uuid, account_id uuid, tenant_id uuid, PRIMARY KEY (rule_id, account_id))`)
 

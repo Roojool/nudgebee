@@ -237,6 +237,11 @@ class NotificationRules(Base):
     # notification_rule_accounts rows (loaded onto the instance as account_ids);
     # account_id is only a compatibility mirror for older clients.
     scope_mode = Column(String, nullable=True)
+    # Rules of one source are evaluated by ascending position: the first match
+    # decides unless it has continue_matching. NULL means a row written without
+    # an order (see _rule_order_key).
+    position = Column(Integer, nullable=True)
+    continue_matching = Column(Boolean, nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -258,6 +263,9 @@ class NotificationRules(Base):
             "event_types": self.event_types,
             "scope_mode": self.scope_mode,
             "account_ids": getattr(self, "account_ids", None),
+            "position": self.position,
+            "continue_matching": self.continue_matching,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
     @classmethod
@@ -297,6 +305,8 @@ class NotificationRules(Base):
             severity=data.get("severity"),
             event_types=data.get("event_types"),
             scope_mode=data.get("scope_mode"),
+            position=data.get("position"),
+            continue_matching=data.get("continue_matching"),
         )
         rule.account_ids = data.get("account_ids")
         return rule

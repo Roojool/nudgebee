@@ -248,7 +248,8 @@ class _Session:
                 return _Rows([r.account_id for r in self.rule_accounts])
             return _Rows(self.rule_accounts)
         if "FROM notification_rules" in sql:
-            return _Rows(self.rules)
+            # A flushed rule is visible to later queries in the same transaction.
+            return _Rows(self.rules + [o for o in self.added if isinstance(o, NotificationRules)])
         raise AssertionError(f"unexpected statement: {sql}")
 
     def add(self, obj):

@@ -4,7 +4,7 @@ import logging
 
 from notifications_server.configs.settings import settings
 from notifications_server.schemas import SendMessageRequest
-from notifications_server.services.message import MessageService, NotificationRuleMatcher
+from notifications_server.services.message import MessageService, NotificationRuleMatcher, resolve_outcome
 from notifications_server.models.db_base import BaseDB
 from notifications_server.models.enums import ReactionTypes
 from notifications_server.processors.factory import ProcessorFactory
@@ -39,35 +39,35 @@ class NotificationProcessor:
 
         return emails, exclusion_emails
 
-    async def _get_configured_email_rules(self, tenant_id: str, kwargs: dict) -> tuple[list[str], list[str]]:
-        """Get configured email addresses and exclusions for a tenant
-        using the unified rule matcher (cached rules + mappings)."""
+    async def _get_configured_email_rules(self, tenant_id: str, kwargs: dict):
+        """Email recipients and exclusions from the rules that receive this task,
+        and whether the task's own recipients still apply; None when a rule stops
+        the task (suppress or an active snooze)."""
         source = kwargs.get("source", "")
         if not source:
-            return [], []
+            return [], [], True
 
         try:
             async with BaseDB.async_session(self.engine)() as session:
                 matched_rules, _ = await self._rule_matcher.match_notification_rules(session, tenant_id, source, kwargs)
 
-            email_rules = [r for r in matched_rules if r.get("platform") == "email"]
-            if not email_rules:
-                return [], []
+            outcome = resolve_outcome(matched_rules, source=source, honour_batch=False)
+            if outcome.response is not None:
+                return None
 
-            # Combine channels from all matching email rules
             all_emails = []
             all_exclusion_emails = []
-            for rule in email_rules:
-                channels = rule.get("channels")
-                if channels:
-                    emails, exclusions = self._parse_email_channels(channels)
-                    all_emails.extend(emails)
-                    all_exclusion_emails.extend(exclusions)
+            for rule in outcome.targets:
+                if rule.get("platform") != "email" or not rule.get("channels"):
+                    continue
+                emails, exclusions = self._parse_email_channels(rule["channels"])
+                all_emails.extend(emails)
+                all_exclusion_emails.extend(exclusions)
 
-            return all_emails, all_exclusion_emails
+            return all_emails, all_exclusion_emails, outcome.use_defaults
         except Exception as e:
             LOG.exception("Error fetching email rules for tenant %s: %s", tenant_id, e)
-            return [], []
+            return [], [], True
 
     @staticmethod
     def _parse_and_validate_task(task: dict) -> SendMessageRequest:
@@ -86,10 +86,12 @@ class NotificationProcessor:
     async def perform_email(self, email_task):
         LOG.debug("processing new email task %s", email_task)
         processor_email = ProcessorFactory.get(ReactionTypes.EMAIL)
-        email_list = email_task.get("email") or []
-        configured_emails, exclusion_emails = await self._get_configured_email_rules(
-            email_task.get("tenant_id"), email_task
-        )
+        email_rules = await self._get_configured_email_rules(email_task.get("tenant_id"), email_task)
+        if email_rules is None:
+            LOG.info("Email task %s stopped by a notification rule", email_task.get("template_type"))
+            return
+        configured_emails, exclusion_emails, use_defaults = email_rules
+        email_list = (email_task.get("email") or []) if use_defaults else []
         email_list.extend(configured_emails)
         exclusion_set = {e.strip().lower() for e in exclusion_emails}
         final_email_list = list({e.strip().lower() for e in email_list} - exclusion_set)

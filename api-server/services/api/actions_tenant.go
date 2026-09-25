@@ -783,6 +783,7 @@ func handleTenantAction(actionPayload *ActionRequest, c *gin.Context, tracer *tr
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return
 		}
+		notifyRulesCacheInvalidate(ctx.GetSecurityContext().GetTenantId())
 		c.JSON(200, resp)
 		return
 	case "notification_channel_mapping_create":

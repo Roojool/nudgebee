@@ -7076,6 +7076,8 @@ var table_metadata = map[string]TableDefinition{
 					nr.event_types,
 					nr.scope_mode,
 					COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
+					nr.position,
+					nr.continue_matching,
 					nr.tenant_id::text as tenant_id,
 					u.display_name as created_by_display_name,
 					COALESCE(nrm.mappings, '[]'::json) as notification_rule_mappings
@@ -7175,6 +7177,14 @@ var table_metadata = map[string]TableDefinition{
 			"account_ids": {
 				Type: ColumnDefinitionTypeJson,
 				Def:  "account_ids",
+			},
+			"position": {
+				Type: ColumnDefinitionTypeInt,
+				Def:  "position",
+			},
+			"continue_matching": {
+				Type: ColumnDefinitionTypeBoolean,
+				Def:  "continue_matching",
 			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,

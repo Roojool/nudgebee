@@ -120,6 +120,30 @@ func notifyMessagingCacheInvalidate(tenantId string) {
 	defer func() { _ = resp.Body.Close() }()
 }
 
+// notifyRulesCacheInvalidate drops notifications-server's cached notification
+// rules for a tenant, so a deleted rule stops applying without waiting out the
+// cache TTL. Best-effort; a miss only delays the change.
+func notifyRulesCacheInvalidate(tenantId string) {
+	if tenantId == "" || config.Config.NotificationServiceUrl == "" {
+		return
+	}
+	headers := map[string]string{"Content-Type": "application/json"}
+	if config.Config.NotificationServiceToken != "" {
+		headers["X-ACTION-TOKEN"] = config.Config.NotificationServiceToken
+	}
+	resp, err := common.HttpPost(
+		fmt.Sprintf("%s/api/rules/invalidate-cache", config.Config.NotificationServiceUrl),
+		common.HttpWithTimeout(10*time.Second),
+		common.HttpWithHeaders(headers),
+		common.HttpWithJsonBody(map[string]any{"tenant_id": tenantId}),
+	)
+	if err != nil {
+		slog.Warn("notification rules: cache invalidate failed (best-effort)", "error", err, "tenant_id", tenantId)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+}
+
 func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	ctx, err := buildContextFromPayload(c, actionPayload, tracer, meter, logger)
 	if err != nil {
