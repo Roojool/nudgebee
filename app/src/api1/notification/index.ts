@@ -43,6 +43,18 @@ export const LIST_NOTIFICATION_RULES = `query ListNotificationRules($limit: Int,
 }
 `;
 
+// Only automation rules carry event types, and those rules exist only where the
+// server knows the column, so this is fetched per rule rather than in the list.
+export const GET_NOTIFICATION_RULE_EVENT_TYPES = `query GetNotificationRuleEventTypes {
+  notifications_list_rules(limit: 1, offset: 0, where:__WHERE__) {
+    rows {
+      id
+      event_types
+    }
+  }
+}
+`;
+
 // Insertion Queries
 
 export const INSERT_NOTIFICATION_RULE = `
@@ -197,6 +209,17 @@ const apiNotifications = {
       return error;
     }
   },
+  async getNotificationRuleEventTypes(ruleId: string): Promise<string[]> {
+    try {
+      const constructedQuery = GET_NOTIFICATION_RULE_EVENT_TYPES.replaceAll('__WHERE__', gqlStringify({ id: { _eq: ruleId } }));
+      const response = await queryGraphQL(constructedQuery, 'GetNotificationRuleEventTypes', {});
+      const eventTypes = response?.data?.data?.notifications_list_rules?.rows?.[0]?.event_types;
+      return Array.isArray(eventTypes) ? eventTypes : [];
+    } catch (error) {
+      console.log(error);
+      return [];
+    }
+  },
   async insertNotificationRule(query: any) {
     try {
       if (query.accountId === 'demo') {
@@ -259,6 +282,9 @@ const apiNotifications = {
       }
       if (query.frequency) {
         mappingObject.frequency = query.frequency;
+      }
+      if (Array.isArray(query.event_types)) {
+        mappingObject.event_types = query.event_types;
       }
 
       const response = await queryGraphQL(INSERT_NOTIFICATION_RULE, 'InsertNotificationRule', { object: mappingObject });

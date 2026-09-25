@@ -293,6 +293,28 @@ describe('Notifications (integration)', () => {
     expect(screen.getByTestId('label-grey')).toHaveTextContent('Suppressed');
   });
 
+  it('shows All accounts for an automation rule with no account', async () => {
+    apiNotifications.getNotificationRules.mockResolvedValue(
+      mockRulesResponse([
+        {
+          id: 'rule-3',
+          name: 'Silence task updates',
+          source: 'automation',
+          account_id: null,
+          is_suppressed: true,
+          event_types: ['automation.task.completed'],
+          created_by_display_name: 'Carol',
+          created_at: '2026-05-13T10:00:00Z',
+          notification_rule_mappings: '[]',
+        },
+      ])
+    );
+    render(<Notifications />);
+
+    await waitFor(() => expect(screen.getByText('Silence task updates')).toBeInTheDocument());
+    expect(screen.getByText('All accounts')).toBeInTheDocument();
+  });
+
   it('renders platform-specific channel badges', async () => {
     render(<Notifications />);
 

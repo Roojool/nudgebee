@@ -26,7 +26,9 @@ import {
   EmailIcon,
   CloudAccountIcon,
   CloudIconBlackOutline,
+  AutomateBlue,
 } from '@assets';
+import { Checkbox } from '@ui/Checkbox';
 import apiKubernetes from '@api1/kubernetes';
 import apiAutoPlaybook from '@api1/autoPlaybook';
 import apiDashboard from '@api1/home';
@@ -93,8 +95,25 @@ interface Option {
 // repeated inline: the same membership test drives account-requirement
 // validation, the divider and the cluster selector, and adding a source by
 // editing two of those three sites is a silent bug.
-const TENANT_WIDE_SOURCES = ['daily_recap', 'optimize', 'weekly_digest'];
+const TENANT_WIDE_SOURCES = ['daily_recap', 'optimize', 'weekly_digest', 'automation'];
 const isTenantWideSource = (source: string) => TENANT_WIDE_SOURCES.includes(source);
+
+// The automation events a rule can select. Mirrors the allow-list in
+// notifications-server; approval requests are absent because they can never be
+// silenced. `chatter` marks the routine updates preselected on a new rule.
+const AUTOMATION_EVENT_TYPES: { value: string; label: string; description: string; chatter: boolean }[] = [
+  {
+    value: 'automation.task.completed',
+    label: 'Task completed',
+    description: 'Run summary: applied in place, tickets created, skipped',
+    chatter: true,
+  },
+  { value: 'automation.task.progress', label: 'Task progress', description: 'Messages a workflow posts while it runs', chatter: true },
+  { value: 'automation.pr.created', label: 'Pull requests created', description: 'Follow-up once pull requests for a run are open', chatter: true },
+  { value: 'automation.task.failed', label: 'Task failed', description: 'A run had a failed step', chatter: false },
+  { value: 'automation.pr.failed', label: 'Pull request failed', description: 'A pull request could not be created', chatter: false },
+];
+const DEFAULT_AUTOMATION_EVENT_TYPES = AUTOMATION_EVENT_TYPES.filter((e) => e.chatter).map((e) => e.value);
 
 const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   open = false,
@@ -163,6 +182,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     aggregationKey: false,
   });
   const [selectedSeverity, setSelectedSeverity] = useState<string[]>([]);
+  const [selectedEventTypes, setSelectedEventTypes] = useState<string[]>(DEFAULT_AUTOMATION_EVENT_TYPES);
   const [selectedDelivery, setSelectedDelivery] = useState<string>('real_time');
   const [selectedFrequency, setSelectedFrequency] = useState<string>('');
   const [userEmailOptions, setUserEmailOptions] = useState<Option[]>([]);
@@ -742,8 +762,13 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       if (notificationRuleObject.frequency) {
         setSelectedFrequency(notificationRuleObject.frequency);
       }
+      setSelectedEventTypes([]);
+      if (notificationRuleObject.source === 'automation' && notificationRuleObject.id) {
+        apiNotifications.getNotificationRuleEventTypes(notificationRuleObject.id).then(setSelectedEventTypes);
+      }
     } else if (open) {
       setBasedOnValue(createSource || 'troubleshoot');
+      setSelectedEventTypes(DEFAULT_AUTOMATION_EVENT_TYPES);
     }
   };
   useEffect(() => {
@@ -874,6 +899,10 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       error.cluster = 'Account selection is required';
     }
 
+    if (basedOnValue === 'automation' && selectedEventTypes.length === 0) {
+      error.eventTypes = 'Select at least one event';
+    }
+
     if (!notificationName) {
       error.notificationName = 'Notification rule name is required';
     }
@@ -997,6 +1026,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       if (selectedDelivery === 'batch' && selectedFrequency) {
         queryParams.frequency = selectedFrequency;
       }
+    }
+    if (basedOnValue === 'automation') {
+      queryParams.event_types = selectedEventTypes;
     }
     if (!suppressed) {
       queryParams.mappings = [];
@@ -1413,6 +1445,23 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
           <SafeIcon src={basedOnValue === 'cloud' ? CloudAccountIcon : CloudIconBlackOutline} alt='' width={20} height={20} />
           Cloud
         </Button>
+        <Button
+          className={basedOnValue === 'automation' ? 'active' : undefined}
+          sx={styles?.tabButton}
+          onClick={() => {
+            if (!isEditing) {
+              if (basedOnValue === 'daily_recap') {
+                restoreOldStates();
+              }
+              setBasedOnValue('automation');
+            }
+          }}
+          disabled={isEditing && basedOnValue !== 'automation'}
+          id={'tab-automation'}
+        >
+          <SafeIcon src={AutomateBlue} alt='' width={20} height={20} />
+          Automation
+        </Button>
         {/* The two scheduled tenant-wide summaries sit last and together, on the
             same icon: everything before them is an account-scoped alert source,
             and these two are one cadence choice rather than two categories. */}
@@ -1664,6 +1713,37 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
                 </Box>
               </Box>
             )}
+          </Box>
+        )}
+
+        {basedOnValue === 'automation' && (
+          <Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[2] }}>
+              <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                Events
+              </Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>
+                — Applies to every account. Approval requests always deliver and cannot be selected.
+              </Typography>
+            </Box>
+            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 'var(--ds-space-2)' }}>
+              {AUTOMATION_EVENT_TYPES.map((eventType) => (
+                <Checkbox
+                  key={eventType.value}
+                  id={`event-type-${eventType.value.replace(/\./g, '-')}`}
+                  checked={selectedEventTypes.includes(eventType.value)}
+                  onChange={(next) => {
+                    setSelectedEventTypes((prev) => {
+                      const rest = prev.filter((v) => v !== eventType.value);
+                      return next ? [...rest, eventType.value] : rest;
+                    });
+                  }}
+                  label={eventType.label}
+                  description={eventType.description}
+                />
+              ))}
+            </Box>
+            {errors.eventTypes && <FormHelperText error>{errors.eventTypes}</FormHelperText>}
           </Box>
         )}
 

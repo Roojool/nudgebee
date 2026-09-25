@@ -197,7 +197,7 @@ const Notifications = () => {
         });
         data.push({ component: <Text value={snakeToTitleCase(item.source)} /> });
         data.push({
-          component: <Text value={clusterMap.get(item?.account_id) || '-'} />,
+          component: <Text value={clusterMap.get(item?.account_id) || (item.source === 'automation' ? 'All accounts' : '-')} />,
         });
         data.push({
           component: (

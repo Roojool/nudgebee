@@ -3712,6 +3712,7 @@ input notification_rule_upsert_input {
   delivery_mode: String
   frequency: String
   severity: String
+  event_types: [String]
   mappings: [notification_rule_mapping_input]
 }
 
