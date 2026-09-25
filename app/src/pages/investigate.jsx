@@ -321,6 +321,9 @@ const remediationRunLabel = (run, options = []) => {
   return REMEDIATION_TYPE_LABELS[run?.type] || run?.type || 'Run';
 };
 
+// Stable identity for a task card; matches the React key the list renders with.
+const getCardKey = (option) => option?.id || option?.text;
+
 const hasInProgressResolution = (resolutions) => Array.isArray(resolutions) && resolutions.some((r) => r?.status === 'InProgress');
 
 const Investigate = () => {
@@ -468,8 +471,10 @@ const Investigate = () => {
   const [currentInvestigation, setCurrentInvestigation] = useState(null);
   const [isTroubleshootFormOpen, setIsTroubleshootFormOpen] = useState(false);
   const [isRenderInvestigationCard, setIsRenderInvestigationCard] = useState(false);
-  const [openCardIndex, setOpenCardIndex] = useState(-1);
-  const [collapsedObj, setCollapsedObj] = useState(Array.from({ length: matchedOptions?.length }, (_, index) => [index, false]));
+  // Keyed by card id, not list position: cards are appended and removed while the
+  // page is open, and a positional key hands one card's open state to its neighbour.
+  const [openCardKey, setOpenCardKey] = useState(null);
+  const [collapsedObj, setCollapsedObj] = useState({});
   const [generateRcaVisible, setGenerateRcaVisible] = useState(false);
   const [ticketData, setTicketData] = useState({ id: '', url: '' });
   const [hasRcaFeatureAccess, setHasRcaFeatureAccess] = useState(false);
@@ -800,14 +805,14 @@ const Investigate = () => {
   };
 
   const handleTabChange = (_event, newValue) => {
-    setOpenCardIndex((prevOpenCardIndex) => {
-      if (prevOpenCardIndex !== -1) {
+    setOpenCardKey((prevOpenCardKey) => {
+      if (prevOpenCardKey !== null) {
         setCollapsedObj((prevCollapsedObj) => ({
           ...prevCollapsedObj,
-          [prevOpenCardIndex]: false,
+          [prevOpenCardKey]: false,
         }));
       }
-      return -1;
+      return null;
     });
     setTabValue(Number(newValue));
   };
@@ -1605,18 +1610,18 @@ const Investigate = () => {
     }
   }, [queryParam?.id, queryParam?.aggregationKey, queryParam?.serviceKey, queryParam?.start_at, source]);
 
-  const handleCardClick = useCallback((index) => {
-    setOpenCardIndex((prevOpenCardIndex) => {
-      const isCurrentlyOpen = prevOpenCardIndex === index;
+  const handleCardClick = useCallback((cardKey) => {
+    setOpenCardKey((prevOpenCardKey) => {
+      const isCurrentlyOpen = prevOpenCardKey === cardKey;
       setCollapsedObj((prevCollapsedObj) => {
         const newCollapsedObj = { ...prevCollapsedObj };
-        if (prevOpenCardIndex !== -1 && prevOpenCardIndex !== index) {
-          newCollapsedObj[prevOpenCardIndex] = false;
+        if (prevOpenCardKey !== null && prevOpenCardKey !== cardKey) {
+          newCollapsedObj[prevOpenCardKey] = false;
         }
-        newCollapsedObj[index] = !isCurrentlyOpen;
+        newCollapsedObj[cardKey] = !isCurrentlyOpen;
         return newCollapsedObj;
       });
-      return isCurrentlyOpen ? -1 : index;
+      return isCurrentlyOpen ? null : cardKey;
     });
   }, []);
 
@@ -1637,7 +1642,7 @@ const Investigate = () => {
 
     if (filteredIndex !== -1) {
       setTabValue(1);
-      handleCardClick(filteredIndex);
+      handleCardClick(getCardKey(tasksCards[filteredIndex]));
       trackTimeout(() => {
         const cardElement = document.querySelector(`[data-card-index="${filteredIndex}"]`);
         if (cardElement) {
@@ -1713,8 +1718,8 @@ const Investigate = () => {
     setLoading(false);
     setMatchedOptions([]);
     setCurrentInvestigation(null);
-    setOpenCardIndex(-1);
-    setCollapsedObj([]);
+    setOpenCardKey(null);
+    setCollapsedObj({});
     setGenerateRcaVisible(false);
     setEventResolutions([]);
   };
@@ -3129,17 +3134,16 @@ const Investigate = () => {
                             {matchedOptions
                               .filter((option) => option?.id !== 'AskAiCard' && option?.id !== 'RCACard')
                               .map((option, index) => (
-                                <div key={`${option?.id || option?.text}-${option?.refreshRenderId || 0}`} data-card-index={index}>
+                                <div key={`${getCardKey(option)}-${option?.refreshRenderId || 0}`} data-card-index={index}>
                                   <CollapsableCard
-                                    idx={index}
+                                    idx={getCardKey(option)}
                                     icon={option?.icon}
                                     text={option?.text}
                                     highlightsData={option?.getHighLightsData?.() ?? []}
                                     contentComponents={option?.getContentComponents?.() ?? []}
                                     onCardClick={handleCardClick}
                                     collapsedObj={collapsedObj}
-                                    isCollapsed={collapsedObj[index]}
-                                    expandedCardIndex={openCardIndex}
+                                    expandedCardIndex={openCardKey}
                                     isBeta={option?.isBeta}
                                     newUI
                                     maxWidth='100%'
