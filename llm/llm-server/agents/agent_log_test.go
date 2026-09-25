@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"nudgebee/llm/agents/core"
-	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools"
@@ -158,7 +157,7 @@ func TestLogAgent_SystemPrompt_ReusesResolvedPodsAndExplainsArtifactFormat(t *te
 }
 
 // TestLogAgent_FastPathAppAnchor_RoutineOnly pins that the app-anchor
-// fast-path override appears for ROUTINE mode only, never for
+// canonical-query guidance appears for ROUTINE mode only, never for
 // investigation/enumeration, so resource_search still runs first for those
 // modes exactly as sharedHeaderAndWorkflow's step 1 requires.
 func TestLogAgent_FastPathAppAnchor_RoutineOnly(t *testing.T) {
@@ -281,14 +280,13 @@ func TestFetchLogsDirectTool_InputSchema(t *testing.T) {
 	schema := tool.InputSchema()
 	assert.Equal(t, toolcore.ToolSchemaTypeObject, schema.Type)
 	assert.Contains(t, schema.Properties, "command")
+	assert.Contains(t, schema.Properties, "knowledge_context")
 	assert.Equal(t, []string{"command"}, schema.Required)
 }
 
-// TestPreBuiltCanonicalQuery pins the detection rule fetchLogsDirectTool.Call uses
-// to decide whether the model already supplied a ready-to-execute canonical
-// query (skip the internal translation call) versus a natural-language
-// question (unchanged path) — a natural-language command is never valid JSON
-// with a top-level "where" key, so that shape is the unambiguous signal.
+// TestPreBuiltCanonicalQuery pins the canonical shape check used to validate
+// planner output. A natural-language command is never valid JSON with a
+// top-level "where" key.
 func TestPreBuiltCanonicalQuery(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -340,12 +338,11 @@ func TestPreBuiltCanonicalQuery(t *testing.T) {
 	}
 }
 
-// TestCanonicalQueryAuthoringForRoutine checks the ROUTINE-mode fast-path
+// TestCanonicalQueryAuthoringForRoutine checks the ROUTINE-mode canonical-query
 // instructions carry the same correctness-critical rules
 // buildCanonicalLogQueryPrompt enforces for the internal translator (field
 // names come only from the advertised list, namespace vs workload isn't
-// conflated) — this prompt is the only guardrail once the model is trusted to
-// produce canonical JSON directly.
+// conflated); the unified planner also validates the generated query.
 func TestCanonicalQueryAuthoringForRoutine(t *testing.T) {
 	provider := services_server.ObservabilityProvider{
 		Provider: "loki",
@@ -358,7 +355,8 @@ func TestCanonicalQueryAuthoringForRoutine(t *testing.T) {
 	}
 	out := canonicalQueryAuthoringForRoutine("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", provider)
 
-	assert.Contains(t, out, "not an optional shortcut", "must state canonical JSON is the ROUTINE-mode default, not a hedged suggestion — hedged phrasing lost to the tool description's NL framing in live testing")
+	assert.Contains(t, out, "this is the default for ROUTINE mode", "must state canonical JSON is the ROUTINE-mode default, not a hedged suggestion — hedged phrasing lost to the tool description's NL framing in live testing")
+	assert.Contains(t, out, "unified query-planning call")
 	assert.Contains(t, out, "app → deployment.keyword", "must advertise this account's real canonical mapping, not a generic placeholder")
 	assert.Contains(t, out, "namespace → k8s.namespace.keyword")
 	assert.Contains(t, out, "never invent a field name")
@@ -368,61 +366,30 @@ func TestCanonicalQueryAuthoringForRoutine(t *testing.T) {
 func TestCanonicalQueryAuthoringForRoutine_NoLabelMappings_StillProducesGuidance(t *testing.T) {
 	provider := services_server.ObservabilityProvider{Provider: "loki"}
 	out := canonicalQueryAuthoringForRoutine("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", provider)
-	assert.Contains(t, out, "not an optional shortcut")
+	assert.Contains(t, out, "this is the default for ROUTINE mode")
 	assert.NotContains(t, out, "Canonical fields for this backend", "must not claim a canonical mapping when the provider has none")
 }
 
-// TestLogsV3CanonicalFastPathFlag_GatesRoutinePromptContent covers
-// LogsV3CanonicalFastPathEnabled (config/config.go): when false, ROUTINE
-// mode's prompt must reproduce the original NL-only wording exactly — no
-// mention of canonical JSON anywhere, since a stray mention with the code
-// path disabled would tell the model to do something the tool can't
-// fast-path. When true (the default), the fast-path wording must be present.
-func TestLogsV3CanonicalFastPathFlag_GatesRoutinePromptContent(t *testing.T) {
-	orig := config.Config.LogsV3CanonicalFastPathEnabled
-	t.Cleanup(func() { config.Config.LogsV3CanonicalFastPathEnabled = orig })
-
+// TestRoutinePromptAdvertisesCanonicalAndNativeQueries keeps the agent's
+// instructions aligned with the unified planner's accepted inputs.
+func TestRoutinePromptAdvertisesCanonicalAndNativeQueries(t *testing.T) {
 	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
 	ctx := security.NewRequestContextForSuperAdmin()
-
-	t.Run("disabled: no canonical-JSON mention anywhere in ROUTINE prompt", func(t *testing.T) {
-		config.Config.LogsV3CanonicalFastPathEnabled = false
-		prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "recent logs for relay-server"})
-		full := strings.Join(prompt.Instructions, "\n")
-		assert.NotContains(t, full, "canonical JSON")
-		assert.NotContains(t, full, "fast path")
-		assert.Contains(t, full, "Phrase the NL question using the right label", "must fall back to the original NL-only step-3 wording")
-	})
-
-	t.Run("enabled: canonical-JSON fast path present in ROUTINE prompt", func(t *testing.T) {
-		config.Config.LogsV3CanonicalFastPathEnabled = true
-		prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "recent logs for relay-server"})
-		full := strings.Join(prompt.Instructions, "\n")
-		assert.Contains(t, full, "canonical JSON")
-		assert.Contains(t, full, "not an optional shortcut")
-	})
+	prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "recent logs for relay-server"})
+	full := strings.Join(prompt.Instructions, "\n")
+	assert.Contains(t, full, "canonical JSON")
+	assert.Contains(t, full, "this is the default for ROUTINE mode")
+	assert.Contains(t, full, "complete query matching the account's default log provider")
 }
 
-// TestLogsV3CanonicalFastPathFlag_GatesToolBehavior covers the code-path side
-// of the same flag: disabled must make fetchLogsDirectTool.Call ignore a
-// canonical-JSON tool_input entirely (never call ExecuteDirect) and
-// Description/InputSchema must drop back to NL-only wording — defense in
-// depth so a stray canonical JSON in conversation history/memory can't
-// resurrect the fast path once it's supposed to be off.
-func TestLogsV3CanonicalFastPathFlag_GatesToolBehavior(t *testing.T) {
-	orig := config.Config.LogsV3CanonicalFastPathEnabled
-	t.Cleanup(func() { config.Config.LogsV3CanonicalFastPathEnabled = orig })
-
+// TestFetchLogsDirectToolDescriptionsAdvertiseAllQueryForms verifies that the
+// tool schema matches the unified planner's accepted inputs.
+func TestFetchLogsDirectToolDescriptionsAdvertiseAllQueryForms(t *testing.T) {
 	tool := &fetchLogsDirectTool{accountId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
-
-	config.Config.LogsV3CanonicalFastPathEnabled = false
-	assert.NotContains(t, tool.Description(), "canonical JSON")
-	schema := tool.InputSchema()
-	assert.NotContains(t, schema.Properties["command"].Description, "canonical JSON")
-
-	config.Config.LogsV3CanonicalFastPathEnabled = true
+	assert.Contains(t, tool.Description(), "provider-native query")
 	assert.Contains(t, tool.Description(), "canonical JSON")
-	schema = tool.InputSchema()
+	schema := tool.InputSchema()
+	assert.Contains(t, schema.Properties["command"].Description, "provider-native query")
 	assert.Contains(t, schema.Properties["command"].Description, "canonical JSON")
 }
 

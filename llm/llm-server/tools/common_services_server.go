@@ -202,6 +202,14 @@ func executeFetchLogs(ctx core.NbToolContext, logProvider services_server.Observ
 	return logs, nil
 }
 
+// ExecuteNativeLogQuery sends an already-authored provider query to
+// services-server without translating it through the canonical where-clause
+// path. The caller resolves the account's provider; services-server validates
+// the provider-native syntax during execution.
+func ExecuteNativeLogQuery(ctx core.NbToolContext, logProvider services_server.ObservabilityProvider, query string, configs map[string]any) (core.ObservabilityLogResponse, error) {
+	return executeFetchLogs(ctx, logProvider, query, configs)
+}
+
 // executeFetchLogsCanonical sends a provider-independent canonical `where` clause
 // to services-server with an EMPTY Query, so FetchLogs resolves canonical→provider
 // labels and builds the native query server-side (the same path the UI query

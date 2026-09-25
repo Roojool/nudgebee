@@ -538,11 +538,11 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 			require.NoError(t, err)
 			t.Logf("query=%q -> %s", tc.query, out)
 
-			// Byte-stable cases pin the EXACT canonical query; JSONEq compares
-			// semantically (ignores key order/whitespace), so only a wrong
-			// operator/field/value/structure fails.
+			// Byte-stable cases pin the exact canonical structure. _ilike values
+			// are normalized because the operator is case-insensitive, so
+			// %ERROR% and %error% are semantically equivalent.
 			if tc.expectedCanonical != "" {
-				assert.JSONEq(t, tc.expectedCanonical, out, "exact canonical mismatch for %q", tc.query)
+				assertCanonicalJSONEq(t, tc.expectedCanonical, out, tc.query)
 				return
 			}
 
@@ -556,6 +556,40 @@ func TestCanonicalLogQueryGeneration_Live(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertCanonicalJSONEq(t *testing.T, expected, actual, query string) {
+	t.Helper()
+	var expectedValue, actualValue any
+	require.NoError(t, json.Unmarshal([]byte(expected), &expectedValue))
+	require.NoError(t, json.Unmarshal([]byte(actual), &actualValue))
+	assert.Equal(t, normalizeCanonicalILikeValues(expectedValue), normalizeCanonicalILikeValues(actualValue), "exact canonical mismatch for %q", query)
+}
+
+func normalizeCanonicalILikeValues(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "_ilike" {
+				if pattern, ok := child.(string); ok {
+					typed[key] = strings.ToLower(pattern)
+					continue
+				}
+			}
+			typed[key] = normalizeCanonicalILikeValues(child)
+		}
+	case []any:
+		for i, child := range typed {
+			typed[i] = normalizeCanonicalILikeValues(child)
+		}
+	}
+	return value
+}
+
+func TestAssertCanonicalJSONEq_ILikeValuesAreCaseInsensitive(t *testing.T) {
+	expected := `{"where":{"_or":[{"content":{"_ilike":"%ERROR%"}},{"content":{"_ilike":"%FATAL%"}}]}}`
+	actual := `{"where":{"_or":[{"content":{"_ilike":"%error%"}},{"content":{"_ilike":"%fatal%"}}]}}`
+	assertCanonicalJSONEq(t, expected, actual, "ERROR or FATAL")
 }
 
 // TestShouldFallbackToKubectl_DistinguishesCantAskFromNoData pins the structural point:

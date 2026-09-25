@@ -1,7 +1,6 @@
 package agents
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"nudgebee/llm/agents/core"
@@ -126,7 +125,7 @@ func (l *LogAgent) GetSupportedTools(ctx *security.RequestContext) []toolcore.NB
 
 // GetSystemPrompt builds the agent's prompt from the mode classifier and
 // shared/mode-specific instruction blocks in agent_log_prompts.go, plus
-// fastPathAppAnchor (ROUTINE mode only, see its doc comment).
+// routineAppAnchor (ROUTINE mode only, see its doc comment).
 func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAgentRequest) core.NBAgentPrompt {
 	mode := classifyLogModeV3(query.Query, query.OriginalQuery)
 
@@ -142,10 +141,8 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	case logModeEnumerationV3:
 		instructions = append(instructions, enumerationInstructions()...)
 	default:
-		instructions = append(instructions, fastPathAppAnchor()...)
-		if canonicalFastPathEnabled() {
-			instructions = append(instructions, canonicalQueryAuthoringForRoutine(l.accountId, l.provider))
-		}
+		instructions = append(instructions, routineAppAnchor()...)
+		instructions = append(instructions, canonicalQueryAuthoringForRoutine(l.accountId, l.provider))
 		instructions = append(instructions, routineInstructions()...)
 		instructions = append(instructions, routineParallelFollowupReads())
 	}
@@ -172,7 +169,7 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	}
 }
 
-// fastPathAppAnchor overrides sharedHeaderAndWorkflow's step-1 resource_search
+// routineAppAnchor overrides sharedHeaderAndWorkflow's step-1 resource_search
 // mandate for ROUTINE mode only, case 1c (bare service/app/deployment name, no
 // pod given): resource_search_execute already does a DB-first lookup, so a
 // kubectl pre-check ahead of it is redundant. Cases 1a/1b are unchanged.
@@ -181,11 +178,8 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 // namespaces (e.g. per environment), so an unscoped app-anchor fetch can
 // silently return a different namespace's logs. Always confirm the exact
 // namespace before fetching.
-func fastPathAppAnchor() []string {
-	resolvedBullet := "  - `exact` / `unique` / `unique_owner` (or every result shares one namespace): resolved — call `fetch_logs_direct` phrased as `\"all logs for app <name> in <namespace>\"` (namespace-scoped app-anchor, per the Label-anchor rules above)."
-	if canonicalFastPathEnabled() {
-		resolvedBullet = "  - `exact` / `unique` / `unique_owner` (or every result shares one namespace): resolved — you now have namespace + app, exactly what the canonical-JSON fast path below needs. Build the canonical query yourself and call `fetch_logs_direct` with it directly (skips its internal translation call). Only fall back to a phrased NL command like `\"all logs for app <name> in <namespace>\"` if you are not confident constructing the canonical JSON."
-	}
+func routineAppAnchor() []string {
+	resolvedBullet := "  - `exact` / `unique` / `unique_owner` (or every result shares one namespace): resolved — you now have namespace + app. Build a canonical query for `fetch_logs_direct`, or use a natural-language command like `\"all logs for app <name> in <namespace>\"` if you cannot map the fields confidently."
 	return []string{
 		"**This refines workflow step 1c (bare service/app/deployment name, no pod).** Call `resource_search_execute` exactly as step 1 already says (`suggestions`, omit `namespace`, normalize spaces/underscores to hyphens e.g. relay_server → relay-server) — do NOT precede it with a `shell_execute` kubectl round-trip, it already does a DB-first lookup and falls back to kubectl itself on a miss, so a manual pre-check would just re-derive what one call already resolves. Then use its `match_quality` field to resolve the namespace instead of guessing:",
 		resolvedBullet,
@@ -203,18 +197,15 @@ func routineParallelFollowupReads() string {
 	return "**If you do need more than one shell_execute look at the file_ref, chain them into ONE call** (`cmd1; echo '---'; cmd2`) instead of separate actions — one round trip instead of two."
 }
 
-// canonicalQueryAuthoringForRoutine lets ROUTINE-mode fetches skip
-// fetch_logs_direct's internal translation call: once resource_search has
-// resolved namespace+app, the model already has what that call would derive.
-// Additive, not a hard switch — preBuiltCanonicalQuery (below) only takes
-// this path when the tool_input is already valid canonical JSON; anything
-// else still goes through translation unchanged.
+// canonicalQueryAuthoringForRoutine gives ROUTINE-mode callers the field
+// guidance needed to supply a canonical query once resource_search resolves
+// namespace and app. The unified planner still checks the supplied query.
 func canonicalQueryAuthoringForRoutine(accountId string, provider services_server.ObservabilityProvider) string {
 	fields, indices := fetchLabelsAndIndices(accountId, provider)
 	labelMappings := provider.Capabilities.LabelMappings
 
 	var b strings.Builder
-	b.WriteString("**Call fetch_logs_direct with canonical JSON, not a sentence — this is the default for ROUTINE mode once you know namespace + app, not an optional shortcut.** Pass the canonical JSON query directly as `command`. fetch_logs_direct detects the JSON shape and executes it immediately, skipping its internal translation call. Schema: `{\"where\": {\"<field>\": {\"<operator>\": \"<value>\"}}, \"time_range\": \"<string>\", \"limit\": <number>}` (use `_and`/`_or` arrays of filter objects for multiple conditions). Operators: _eq, _neq, _gt, _gte, _lt, _lte, _in, _like, _ilike, _contains, _is_null.\n")
+	b.WriteString("**Call fetch_logs_direct with canonical JSON, not a sentence — this is the default for ROUTINE mode once you know namespace + app.** Pass the canonical JSON query as `command`; fetch_logs_direct checks it in its unified query-planning call before execution. Schema: `{\"where\": {\"<field>\": {\"<operator>\": \"<value>\"}}, \"time_range\": \"<string>\", \"limit\": <number>}` (use `_and`/`_or` arrays of filter objects for multiple conditions). Operators: _eq, _neq, _gt, _gte, _lt, _lte, _in, _like, _ilike, _contains, _is_null.\n")
 
 	if len(labelMappings) > 0 {
 		canonical := make([]string, 0, len(labelMappings))
@@ -246,18 +237,13 @@ func canonicalQueryAuthoringForRoutine(accountId string, provider services_serve
 	} else if provider.DefaultIndex != "" {
 		fmt.Fprintf(&b, "Account default log index (used when `index` is omitted): %s.\n", provider.DefaultIndex)
 	}
-	b.WriteString("Copy every workload/pod/namespace/container name verbatim from the user's question — never substitute or drop one. Honour an explicit time window exactly (\"last 30m\" → `\"time_range\": \"30m\"`); default to `\"1h\"` / `\"limit\": 1000` when none was given. If you are not fully confident the canonical JSON is correct, phrase a natural-language `command` instead — fetch_logs_direct falls back to the translator automatically.\n")
+	b.WriteString("Copy every workload/pod/namespace/container name verbatim from the user's question — never substitute or drop one. Honour an explicit time window exactly (\"last 30m\" → `\"time_range\": \"30m\"`); default to `\"1h\"` / `\"limit\": 1000` when none was given. If you are not fully confident the canonical JSON is correct, phrase a natural-language `command` instead — the unified planner handles it before execution.\n")
 
 	return b.String()
 }
 
-// preBuiltCanonicalQuery detects when the caller already supplied a
-// ready-to-execute canonical `{"where": ...}` query (per
-// canonicalQueryAuthoringForRoutine) instead of a natural-language question,
-// so fetchLogsDirectTool.Call can skip fetch_logs_direct's internal translation LLM
-// call. A natural-language command is never valid JSON with a top-level
-// "where" key, so that combination is an unambiguous signal — no separate
-// schema field needed.
+// preBuiltCanonicalQuery recognizes canonical `{"where": ...}` JSON in a
+// planner response. A natural-language command cannot have this shape.
 func preBuiltCanonicalQuery(s string) (string, bool) {
 	trimmed := strings.TrimSpace(s)
 	if !strings.HasPrefix(trimmed, "{") {
@@ -279,32 +265,6 @@ func preBuiltCanonicalQuery(s string) (string, bool) {
 // accounts with sparse label-mapping enrichment, the short form is more
 // often the one with actual populated data.
 const duplicateLabelHeuristicHint = "**When multiple backend labels could represent the same concept** (e.g. both `app` and `k8s_deployment_name` for workload identity, or `namespace` and `k8s_namespace_name`), prefer the SHORT Kubernetes-native form (`app`, `namespace`, `pod`) over an OTel-semantic-convention duplicate (`k8s_deployment_name`, `k8s_namespace_name`, `k8s_pod_name`, `service_name`, `service_namespace`) — on accounts without full label-mapping enrichment the short form is more often the one with actual populated values; the OTel-style duplicate can exist in the label schema with no matching data and silently returns zero rows.\n"
-
-// generateCanonicalLogQueryV3 is this agent's own copy of
-// FetchLogsAgent.generateCanonicalLogQuery, rendering the prompt via
-// buildCanonicalLogQueryPromptV3 instead of the shared builder. Used by
-// ExecuteDirect whenever the caller didn't already supply canonical JSON.
-func generateCanonicalLogQueryV3(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider, fields []string, indices map[string]string) (string, error) {
-	prompt := buildCanonicalLogQueryPromptV3(provider, fields, indices)
-	messages := buildLogIntentMessages(prompt, request)
-
-	summaryCtx := security.NewRequestContext(
-		context.WithValue(ctx.GetContext(), core.ContextKeyModelTier, core.ModelTierSummary),
-		ctx.GetSecurityContext(),
-		ctx.GetLogger(),
-		ctx.GetTracer(),
-		ctx.GetMeter(),
-	)
-	res, err := core.GenerateAndTrackLLMContent(summaryCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, request.AgentId, false, messages, true)
-	if err != nil {
-		return "", err
-	}
-	if res == nil || len(res.Choices) == 0 {
-		return "", fmt.Errorf("empty LLM response")
-	}
-	raw := strings.TrimSpace(res.Choices[0].Content)
-	return enforceCanonicalLogConstraints(raw, request.Query), nil
-}
 
 // buildCanonicalLogQueryPromptV3 is this agent's own copy of
 // FetchLogsAgent.buildCanonicalLogQueryPrompt, with duplicateLabelHeuristicHint
@@ -442,23 +402,22 @@ func (t *fetchLogsDirectTool) Name() string { return FetchLogsDirectToolName }
 func (t *fetchLogsDirectTool) GetType() toolcore.NBToolType { return toolcore.NBToolTypeTool }
 
 func (t *fetchLogsDirectTool) Description() string {
-	if !canonicalFastPathEnabled() {
-		return `Fetches logs for a resource and returns raw log content. Translates a natural-language log question into the right backend query (Loki/Signoz/ES JSON, Datadog facet syntax, or kubectl flags) and runs it. Saves output to a workspace file so it can be downloaded or grepped via shell_execute. The caller is responsible for the strategy — fetch_logs_direct runs whatever query the question implies; it does not add implicit error filters or widen windows on its own. For investigations, ask for a broad chronological window so the trigger (config reload, deploy, antecedent context) surfaces before the symptom storm.`
-	}
-	return `Fetches logs for a resource and returns raw log content. Accepts EITHER a ready-to-execute canonical JSON query (` + "`{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}`" + ` — the default in ROUTINE mode once you know the resource; see your mode's fast-path rules for the field names) OR a natural-language log question, which it translates into the right backend query (Loki/Signoz/ES JSON, Datadog facet syntax, or kubectl flags) before running it. Saves output to a workspace file so it can be downloaded or grepped via shell_execute. The caller is responsible for the strategy — fetch_logs_direct runs whatever query/question implies; it does not add implicit error filters or widen windows on its own. For investigations, ask for a broad chronological window so the trigger (config reload, deploy, antecedent context) surfaces before the symptom storm.`
+	return `Fetches logs for a resource and returns raw log content. Accepts a complete provider-native query, an applicable provider-native template, a canonical JSON query (` + "`{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}`" + `), or a natural-language log question. One planner checks the request against the account's resolved default provider and selects native or canonical execution. Saves output to a workspace file so it can be downloaded or grepped via shell_execute.`
 }
 
 func (t *fetchLogsDirectTool) InputSchema() toolcore.ToolSchema {
-	desc := "Provide a natural-language log question (e.g. 'errors in <service> last 1h', 'why is <service> slow', 'logs for pod <workload>-<6-10 hex>-<5 alnum> in namespace <ns>')."
-	if canonicalFastPathEnabled() {
-		desc = "A natural-language log question (e.g. 'errors in <service> last 1h', 'why is <service> slow', 'logs for pod <workload>-<6-10 hex>-<5 alnum> in namespace <ns>'), OR — for ROUTINE-mode fetches once namespace+app are resolved, see the fast-path rules in your instructions — a ready-to-execute canonical JSON query `{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}`. A canonical JSON query is detected automatically and executed directly, skipping the internal translation call."
-	}
+	desc := "A natural-language log question (e.g. 'errors in <service> last 1h', 'why is <service> slow', 'logs for pod <workload>-<6-10 hex>-<5 alnum> in namespace <ns>'), a provider-native query or applicable template, or — for ROUTINE-mode fetches once namespace+app are resolved — canonical JSON `{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}`. The unified planner checks the supplied command before execution."
 	return toolcore.ToolSchema{
 		Type: toolcore.ToolSchemaTypeObject,
 		Properties: map[string]toolcore.ToolSchemaProperty{
 			"command": {
 				Type:        toolcore.ToolSchemaTypeString,
 				Description: desc,
+			},
+			"knowledge_context": {
+				Type: toolcore.ToolSchemaTypeString,
+				Description: "Optional verbatim excerpt from loaded user knowledge relevant to this request. " +
+					"Forward query examples, templates, field/index conventions, and mandatory scope constraints without classifying them; fetch_logs_direct decides whether they are native or canonical.",
 			},
 		},
 		Required: []string{"command"},
@@ -467,25 +426,33 @@ func (t *fetchLogsDirectTool) InputSchema() toolcore.ToolSchema {
 
 // buildFetchLogsDirectRequest constructs the core.NBAgentRequest for Call.
 // AgentId is set to nbCtx.ParentAgentId (the calling agent's own id) so the
-// internal canonical-query LLM call attributes to that turn, not a new agent.
-// OriginalQuery and AccountPrompt are forwarded because buildLogIntentMessages
-// uses both in that translator call — dropping them silently degrades intent
-// framing and account field guidance rather than erroring.
+// internal query-planning LLM call attributes to that turn, not a new agent.
+// OriginalQuery is forwarded to preserve the user's scope and constraints.
 func buildFetchLogsDirectRequest(nbCtx toolcore.NbToolContext, input toolcore.NBToolCallRequest) core.NBAgentRequest {
+	knowledge := strings.TrimSpace(nbCtx.KBPrestepContent)
+	if forwarded, ok := input.Arguments["knowledge_context"].(string); ok && strings.TrimSpace(forwarded) != "" {
+		forwarded = strings.TrimSpace(forwarded)
+		if knowledge == "" {
+			knowledge = forwarded
+		} else if !strings.Contains(knowledge, forwarded) {
+			knowledge += "\n\n<forwarded_knowledge>\n" + forwarded + "\n</forwarded_knowledge>"
+		}
+	}
 	request := core.NBAgentRequest{
-		Query:          input.Command,
-		AccountId:      nbCtx.AccountId,
-		ConversationId: nbCtx.ConversationId,
-		AgentId:        nbCtx.ParentAgentId,
-		ParentAgentId:  nbCtx.ParentAgentId,
-		MessageId:      nbCtx.MessageId,
-		UserId:         nbCtx.UserId,
-		QueryContext:   nbCtx.QueryContext,
-		QueryConfig:    nbCtx.QueryConfig,
-		SessionId:      nbCtx.SessionId,
-		OriginalQuery:  nbCtx.OriginalQuery,
-		AccountContext: nbCtx.AccountContext,
-		AccountPrompt:  nbCtx.AccountPrompt,
+		Query:            input.Command,
+		AccountId:        nbCtx.AccountId,
+		ConversationId:   nbCtx.ConversationId,
+		AgentId:          nbCtx.ParentAgentId,
+		ParentAgentId:    nbCtx.ParentAgentId,
+		MessageId:        nbCtx.MessageId,
+		UserId:           nbCtx.UserId,
+		QueryContext:     nbCtx.QueryContext,
+		QueryConfig:      nbCtx.QueryConfig,
+		SessionId:        nbCtx.SessionId,
+		OriginalQuery:    nbCtx.OriginalQuery,
+		AccountContext:   nbCtx.AccountContext,
+		AccountPrompt:    nbCtx.AccountPrompt,
+		KBPrestepContent: knowledge,
 	}
 	// Translators (including kubectl fallback) consume ConversationContext;
 	// retain QueryContext as well for downstream tool execution.
@@ -507,11 +474,7 @@ func (t *fetchLogsDirectTool) Call(nbCtx toolcore.NbToolContext, input toolcore.
 	fetchAgent := newFetchLogsAgent(t.accountId)
 	var resp core.NBAgentResponse
 	var err error
-	if canonicalFastPathEnabled() {
-		resp, err = fetchAgent.ExecuteDirect(nbCtx.Ctx, request)
-	} else {
-		resp, err = fetchAgent.Execute(nbCtx.Ctx, request)
-	}
+	resp, err = fetchAgent.ExecuteDirect(nbCtx.Ctx, request)
 	wallClockSeconds := time.Since(start).Seconds()
 	if err != nil {
 		nbCtx.Ctx.GetLogger().Error("fetch_logs_direct: execute failed", "error", err, "wall_clock_seconds", wallClockSeconds)
@@ -522,38 +485,45 @@ func (t *fetchLogsDirectTool) Call(nbCtx toolcore.NbToolContext, input toolcore.
 }
 
 // ExecuteDirect is this agent's own entry point for every fetch_logs_direct
-// call, using its own fixed translator (generateCanonicalLogQueryV3) instead
-// of the shared one. jsonQuery is either already-canonical JSON from the
-// caller, or translated here. Falls back to the shared executeInner for
-// empty/datadog providers, which this path doesn't cover.
+// call. It builds one unified native-or-canonical query plan and executes the
+// selected representation. Falls back to the shared executeInner only when
+// no provider is configured.
 func (a *FetchLogsAgent) ExecuteDirect(ctx *security.RequestContext, request core.NBAgentRequest) (core.NBAgentResponse, error) {
 	entryStart := time.Now()
 	return runFetchLogsWithTimeout(ctx, resolveFetchLogsWallClockTimeout(), func(tctx *security.RequestContext) (core.NBAgentResponse, error) {
 		provider := a.effectiveProvider(request)
 		providerName := strings.ToLower(strings.TrimSpace(provider.Provider))
-		if providerName == "" || providerName == "datadog" {
+		if providerName == "" {
 			// Neither shape ExecuteDirect covers — fall back to the shared
 			// NL-driven path exactly like executeInner does.
 			tctx.GetLogger().Info("fetch_logs_direct: provider not covered by ExecuteDirect, falling back to executeInner", "provider", providerName, "elapsed", time.Since(entryStart).String())
 			return a.executeInner(tctx, request)
 		}
 
-		jsonQuery, ok := preBuiltCanonicalQuery(request.Query)
-		if ok {
-			tctx.GetLogger().Info("fetch_logs_direct: ExecuteDirect using pre-built canonical query", "conversation_id", request.ConversationId, "json_query", jsonQuery)
-		} else {
-			translateStart := time.Now()
-			fields, indices := fetchLabelsAndIndices(a.accountId, provider)
-			var genErr error
-			jsonQuery, genErr = generateCanonicalLogQueryV3(tctx, request, provider, fields, indices)
-			tctx.GetLogger().Info("fetch_logs_direct: step generateCanonicalLogQueryV3 done", "duration", time.Since(translateStart).String(), "has_error", genErr != nil)
-			if genErr != nil {
-				return errorResponse(a.GetName(), fmt.Errorf("canonical query extraction: %w", genErr)), nil
-			}
+		fields, indices := fetchLabelsAndIndices(a.accountId, provider)
+		planStart := time.Now()
+		plan, planErr := generateLogQueryPlan(tctx, request, provider, fields, indices)
+		tctx.GetLogger().Info("fetch_logs_direct: unified query planning complete",
+			"provider", providerName,
+			"query_type", plan.QueryType,
+			"duration", time.Since(planStart).String(),
+			"has_error", planErr != nil)
+		if planErr != nil {
+			// Do not fall back to executeInner: it runs another LLM translator,
+			// so it cannot recover from a model outage and may reinterpret a
+			// user-supplied native query as a different canonical query.
+			return errorResponse(a.GetName(), fmt.Errorf("log query planning: %w", planErr)), nil
+		}
+		if plan.QueryType == "native" {
+			return a.executeNativeQueryDirect(tctx, request, provider, plan.Native)
+		}
+		jsonQuery, marshalErr := json.Marshal(plan.CanonicalQuery)
+		if marshalErr != nil {
+			return errorResponse(a.GetName(), fmt.Errorf("encode canonical query plan: %w", marshalErr)), nil
 		}
 
 		execStart := time.Now()
-		resp, canonicalQuery, err := a.executeCanonicalQueryDirect(tctx, request, provider, jsonQuery)
+		resp, canonicalQuery, err := a.executeCanonicalQueryDirect(tctx, request, provider, string(jsonQuery))
 		tctx.GetLogger().Info("fetch_logs_direct: executeCanonicalQueryDirect returned", "duration", time.Since(execStart).String(), "status", resp.Status, "has_error", err != nil)
 		if err != nil {
 			return resp, err

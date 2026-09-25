@@ -61,10 +61,7 @@ func classifyLogModeV3(query, originalQuery string) logModeV3 {
 // resource_search_execute and fetch_logs_direct directly (this agent's real tool names),
 // so there is no separate patch-note block to keep in sync.
 func sharedHeaderAndWorkflow() []string {
-	step2 := "  2. **Fetch the logs** by calling `fetch_logs_direct` with a natural-language question that includes the resolved resource and time window. `fetch_logs_direct` translates the question into the right backend query (Loki, Datadog, Elasticsearch, or kubectl) and runs it. The response is a JSON envelope with the rendered query and the raw logs."
-	if canonicalFastPathEnabled() {
-		step2 = "  2. **Fetch the logs** by calling `fetch_logs_direct` with the resolved resource and time window. Exactly how to phrase the call — natural-language question, or (ROUTINE mode) canonical JSON — is your mode's own step 3 below; follow that, not a generic default. `fetch_logs_direct` runs the query against the right backend (Loki, Datadog, Elasticsearch, or kubectl). The response is a JSON envelope with the rendered query and the raw logs."
-	}
+	step2 := "  2. **Fetch the logs** by calling `fetch_logs_direct`. A complete query matching the account's default log provider is passed verbatim and takes precedence over canonical JSON. A provider-native template is passed with the concrete values needed to resolve its placeholders. If you loaded relevant user knowledge, copy its relevant query examples, templates, field/index conventions, and mandatory scope constraints verbatim into the optional `knowledge_context`; do not classify them yourself. Otherwise follow your mode's step 3: use natural language, or canonical JSON in ROUTINE mode. The response is a JSON envelope with the rendered query and raw logs."
 	return []string{
 		"**Role:** You are an SRE expert that retrieves and investigates logs from configured backends. Your goal is to answer the user's question accurately, citing concrete log evidence.",
 
@@ -86,33 +83,15 @@ func sharedHeaderAndWorkflow() []string {
 	}
 }
 
-// canonicalFastPathEnabled gates the `logs` agent's ROUTINE-mode canonical-JSON
-// fast path — see LogsV3CanonicalFastPathEnabled's doc comment (config/config.go)
-// for the full rationale. Checked at every call site that varies its prompt
-// text or behavior based on the fast path (fastPathAppAnchor,
-// routineInstructions, labelAnchorRules, fetchLogsDirectTool.Description,
-// fetchLogsDirectTool.Call, GetSystemPrompt) so flipping it off reproduces the
-// pre-fast-path NL-only behavior exactly, not just a subset of it.
-func canonicalFastPathEnabled() bool {
-	return config.Config.LogsV3CanonicalFastPathEnabled
-}
-
 // routineInstructions returns the body for MODE = ROUTINE: a single small
-// fetch, no shell_execute pass, no widening. When the canonical fast path is
-// enabled, step 3 leads with it (canonicalQueryAuthoringForRoutine, appended
-// earlier in GetSystemPrompt) instead of presenting NL phrasing as the
-// default. When disabled, step 3 reverts to the original NL-only phrasing
-// verbatim.
+// fetch, no shell_execute pass, no widening. Canonical query authoring is the
+// default; natural language remains a fallback when field mapping is uncertain.
 func routineInstructions() []string {
-	fastPath := canonicalFastPathEnabled()
-	step3 := "  3. **Single fetch is enough.** Phrase the NL question using the right label depending on whether the user gave a hashed pod name or an app/deployment name (see Label-anchor rules below). Keep limits small (200-1000 lines)."
-	if fastPath {
-		step3 = "  3. **Single fetch is enough — call `fetch_logs_direct` with canonical JSON, not a sentence.** This applies whether you resolved namespace + app/pod via resource_search (step 1/1c) OR the user already gave you an exact pod name (step 1's skip-resource_search case) — either way, build `{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}` per the fast-path rules above and call `fetch_logs_direct` with it directly; that skips its internal NL-translation call. This is the ROUTINE-mode default, not an optional shortcut — fall back to a natural-language `command` ONLY if you cannot map the resolved resource to a canonical field name (see the Label-anchor rules below for the equivalent NL phrasing). Keep limits small (200-1000 lines)."
-	}
+	step3 := "  3. **Single fetch is enough — call `fetch_logs_direct` with canonical JSON, not a sentence.** This applies whether you resolved namespace + app/pod via resource_search (step 1/1c) OR the user already gave you an exact pod name (step 1's skip-resource_search case) — either way, build `{\"where\": {...}, \"time_range\": \"...\", \"limit\": <n>}` per the field rules above and call `fetch_logs_direct` with it. The unified planner checks the query before execution. This is the ROUTINE-mode default — use a natural-language `command` ONLY if you cannot map the resolved resource to a canonical field name (see the Label-anchor rules below for the equivalent NL phrasing). Keep limits small (200-1000 lines)."
 	return []string{
 		"**Workflow (Routine):**",
 		step3,
-		labelAnchorRules(fastPath),
+		labelAnchorRules(true),
 		"  4. **Read the fetch response — including the pre-computed bundle_signal.** The fetch_logs_direct envelope carries a `bundle_signal` field. When it's non-empty (the user asked for error content), it holds a category-tagged sweep (error / fatal / panic / OOM / timeout / connection-refused / TLS / HTTP-5xx) computed server-side against the saved file — use its output as the body of your answer without issuing your own grep. When it's empty, answer from the inline logs directly.",
 		"  5. **Use the envelope for simple listings.** For requested calculations or grouping absent from the envelope, process the saved file once with Python or shell. Otherwise rely on the fetch response (inline logs + `bundle_signal` when present) for your reply. The envelope already contains the categorised signal, so a follow-up shell_execute grep would only re-derive what you already have.",
 		"  6. **No widening on empty result — this is a hard stop, not a suggestion.** If `fetch_logs_direct` returns no matching log lines for the user's window, you MUST NOT call `resource_search_execute`, `shell_execute`, or `fetch_logs_direct` again to broaden, re-check, or verify — not a different label, not a wider filter, not raw kubectl, not pod events, not sibling resources. State \"no logs found in <window>\" in your final answer and STOP: make NO further tool calls this turn. This mode is for routine viewing, not investigation — an empty result here is a valid, complete answer, not a signal to dig further.",
@@ -222,19 +201,17 @@ func outputFormatInstructions(mode logModeV3) []string {
 }
 
 // labelAnchorRules tells the LLM how to anchor a fetch on the right
-// resource. canonicalFirst is true only for ROUTINE mode when the fast path
-// is enabled (routineInstructions passes canonicalFastPathEnabled();
+// resource. canonicalFirst is true only for ROUTINE mode;
 // investigationInstructions/enumerationInstructions always pass false —
-// those modes never had a canonical-JSON fast path, their fetch strategy is
-// broader/multi-step and needs the NL framing to carry intent like
-// time-window/limit). When true, leads with "prefer the canonical-JSON fast
-// path" and demotes the NL phrasing guidance to the explicit fallback form,
+// those modes use broader, multi-step fetch strategies and need NL framing
+// to carry intent like time-window/limit. When true, leads with
+// canonical JSON and demotes the NL phrasing guidance to the fallback form,
 // matching routineInstructions's step 3.
 func labelAnchorRules(canonicalFirst bool) string {
 	if !canonicalFirst {
 		return "     - **Label anchor (CRITICAL — picks the right target):** If you ALREADY have the exact pod name (Deployment-style hash suffix `<workload>-<6-10 hex>-<5 alphanumeric>`, e.g. from `kubectl get pods` or `resource_search_execute`), anchor on `\"all logs for pod <name> in <namespace>\"` — the exact pod resolves on EVERY backend, including kubectl. If you do NOT have the exact pod, DEFAULT to the workload label by phrasing as `\"all logs for app <name> in <namespace>\"` (emits `app=<name>`, matches all pods) — BUT this app-anchor only resolves on label-indexed backends (Loki / Datadog / Elasticsearch). On the **kubectl backend** (no Loki configured — you had to use `kubectl get` / `shell_execute` to find the resource), a bare `app <name>` is NOT a valid target and errors; there, phrase as `\"all logs for deployment <name> in <namespace>\"` (or statefulset/daemonset), which runs `kubectl logs deployment/<name>`. Never anchor on `pod <bare-workload-name>` without the hash suffix — it yields zero results because entries carry the full pod-with-hash, not the workload name."
 	}
-	return "     - **Label anchor (CRITICAL — picks the right target):** In ROUTINE mode, prefer the canonical-JSON fast path above — use the canonical field that matches what you have (a pod-field canonical_name when you have the exact pod name with its hash suffix, else the app/workload-field canonical_name). For INVESTIGATION/ENUMERATION, or as a ROUTINE-mode fallback when you're not confident in the canonical JSON: if you ALREADY have the exact pod name (Deployment-style hash suffix `<workload>-<6-10 hex>-<5 alphanumeric>`, e.g. from `kubectl get pods` or `resource_search_execute`), anchor on `\"all logs for pod <name> in <namespace>\"` — the exact pod resolves on EVERY backend, including kubectl. If you do NOT have the exact pod, DEFAULT to the workload label by phrasing as `\"all logs for app <name> in <namespace>\"` (emits `app=<name>`, matches all pods) — BUT this app-anchor only resolves on label-indexed backends (Loki / Datadog / Elasticsearch). On the **kubectl backend** (no Loki configured — you had to use `kubectl get` / `shell_execute` to find the resource), a bare `app <name>` is NOT a valid target and errors; there, phrase as `\"all logs for deployment <name> in <namespace>\"` (or statefulset/daemonset), which runs `kubectl logs deployment/<name>`. Never anchor on `pod <bare-workload-name>` without the hash suffix — it yields zero results because entries carry the full pod-with-hash, not the workload name."
+	return "     - **Label anchor (CRITICAL — picks the right target):** In ROUTINE mode, prefer canonical JSON above — use the canonical field that matches what you have (a pod-field canonical_name when you have the exact pod name with its hash suffix, else the app/workload-field canonical_name). For INVESTIGATION/ENUMERATION, or as a ROUTINE-mode fallback when you're not confident in the canonical JSON: if you ALREADY have the exact pod name (Deployment-style hash suffix `<workload>-<6-10 hex>-<5 alphanumeric>`, e.g. from `kubectl get pods` or `resource_search_execute`), anchor on `\"all logs for pod <name> in <namespace>\"` — the exact pod resolves on EVERY backend, including kubectl. If you do NOT have the exact pod, DEFAULT to the workload label by phrasing as `\"all logs for app <name> in <namespace>\"` (emits `app=<name>`, matches all pods) — BUT this app-anchor only resolves on label-indexed backends (Loki / Datadog / Elasticsearch). On the **kubectl backend** (no Loki configured — you had to use `kubectl get` / `shell_execute` to find the resource), a bare `app <name>` is NOT a valid target and errors; there, phrase as `\"all logs for deployment <name> in <namespace>\"` (or statefulset/daemonset), which runs `kubectl logs deployment/<name>`. Never anchor on `pod <bare-workload-name>` without the hash suffix — it yields zero results because entries carry the full pod-with-hash, not the workload name."
 }
 
 // sharedConstraints — the cite-evidence / preserve-identifiers rules apply to

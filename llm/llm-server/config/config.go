@@ -631,20 +631,6 @@ type appConfig struct {
 	// evidence-recall layer it feeds into (LlmServerFsEvidenceRecallEnabled),
 	// this save path had no independent on/off switch. Default 2000.
 	LlmServerEventEvidenceOverflowThreshold int `mapstructure:"llm_server_event_evidence_overflow_threshold"`
-	// LogsV3CanonicalFastPathEnabled gates the `logs` agent's ROUTINE-mode
-	// canonical-JSON fast path (canonicalQueryAuthoringForRoutine /
-	// preBuiltCanonicalQuery / FetchLogsAgent.ExecuteDirect, all in
-	// agent_log.go): when the ReAct loop already knows namespace + app/pod,
-	// it builds the canonical `{"where": ...}` query itself and calls
-	// fetch_logs_direct with it directly, skipping the tool's internal
-	// NL-translation LLM call. Global per-deploy toggle, default true — kept
-	// as its own flag for a clean on/off A/B and instant rollback of just this
-	// sub-feature without reverting the whole agent. When false: the prompt
-	// never advertises the canonical-JSON option (fastPathAppAnchor and the
-	// tool description fall back to their NL-only phrasing) and fetchLogsDirectTool.Call never inspects
-	// tool_input shape — every fetch goes through the original NL →
-	// generateCanonicalLogQuery path unchanged.
-	LogsV3CanonicalFastPathEnabled bool `mapstructure:"llm_server_logs_v3_canonical_fast_path_enabled"`
 	// K8sOrchestratorMode selects which K8s orchestrator implementation the
 	// router-selected k8s_orchestrator runs. Boot-time, per-deploy (rollback =
 	// change + redeploy). Post-#32503 Phase 1 only two modes remain:
@@ -1479,7 +1465,6 @@ func init() {
 	viper.SetDefault("llm_server_knowledge_workspace_enabled", true)
 	viper.SetDefault("llm_server_fs_evidence_recall_enabled", true)
 	viper.SetDefault("llm_server_event_evidence_overflow_threshold", 2000)
-	viper.SetDefault("llm_server_logs_v3_canonical_fast_path_enabled", true)
 	viper.SetDefault("llm_server_log_validate_request_enabled", true)
 	viper.SetDefault("llm_server_trace_validate_request_enabled", true)
 	viper.SetDefault("llm_server_drop_extra_agent_mentions", false)
