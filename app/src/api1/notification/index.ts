@@ -16,6 +16,8 @@ export const LIST_NOTIFICATION_RULES = `query ListNotificationRules($limit: Int,
   notifications_list_rules(limit: $limit, offset: $offset,where:__WHERE__, order_by: [{column: "created_at", order: desc}]) {
     rows {
       account_id
+      scope_mode
+      account_ids
       id
       source
       created_at
@@ -187,7 +189,8 @@ const apiNotifications = {
       }
       const queryParams: any = {};
       if (query.accountId) {
-        queryParams['account_id'] = { _eq: query.accountId };
+        // A rule matches when the account is any one of its accounts.
+        queryParams['account_ids'] = { _contains: JSON.stringify([query.accountId]) };
       } else if (query.isAccountNull) {
         queryParams['account_id'] = { _is_null: true };
       }
@@ -204,10 +207,14 @@ const apiNotifications = {
       }
       const constructedQuery = LIST_NOTIFICATION_RULES.replaceAll('__WHERE__', gqlStringify(queryParams));
       const response = await queryGraphQL(constructedQuery, 'ListNotificationRules', { limit: limit, offset: offset });
+      const errors = response?.data?.errors;
+      if (errors?.length) {
+        return { error: errors[0]?.message || 'Failed to load notification rules' };
+      }
       return { data: response?.data.data };
     } catch (error) {
       console.log(error);
-      return error;
+      return { error: 'Failed to load notification rules' };
     }
   },
   async getNotificationRuleEventTypes(ruleId: string): Promise<string[]> {
@@ -234,9 +241,6 @@ const apiNotifications = {
         };
       }
       const mappingObject: any = {};
-      if (query.cluster) {
-        mappingObject.cluster = query.cluster;
-      }
       if (query.ruleName) {
         mappingObject.name = query.ruleName;
       }
@@ -271,8 +275,8 @@ const apiNotifications = {
       if (query.id) {
         mappingObject.id = query.id;
       }
-      if (query.accountId) {
-        mappingObject.account_id = query.accountId;
+      if (Array.isArray(query.accountIds)) {
+        mappingObject.account_ids = query.accountIds;
       }
       if (query.description) {
         mappingObject.description = query.description;

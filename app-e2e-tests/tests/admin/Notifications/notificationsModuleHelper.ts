@@ -41,7 +41,7 @@ export async function openCreateRuleModal(locators: NotificationsModuleLocators)
 }
 
 // Switches the rule form to Daily Recap, one of TENANT_WIDE_SOURCES in
-// NotificationRuleModal.tsx — so handleSubmit's `Account selection is required` branch
+// NotificationRuleModal.tsx — so handleSubmit's `Select at least one account` branch
 // never applies and the form needs no cloud account to save.
 export async function selectDailyRecapSource(locators: NotificationsModuleLocators): Promise<void> {
   await expect(locators.dailyHighTab).toBeEnabled({ timeout: 15000 });

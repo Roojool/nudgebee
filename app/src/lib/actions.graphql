@@ -3703,6 +3703,8 @@ input notification_rule_upsert_input {
   source: String!
   cluster: String
   account_id: uuid
+  account_ids: [uuid]
+  scope_mode: String
   namespace: String
   workload: String
   aggregation_key: String
@@ -5686,6 +5688,8 @@ input NotificationRulesWhereRequest {
   _not: NotificationRulesWhereRequest
   id: QueryWhereStringRequest
   account_id: QueryWhereStringRequest
+  account_ids: QueryWhereStringRequest
+  scope_mode: QueryWhereStringRequest
   source: QueryWhereStringRequest
   cluster: QueryWhereStringRequest
   aggregation_key: QueryWhereStringRequest
@@ -10116,6 +10120,8 @@ type NotificationRulesResponse {
 type NotificationRule {
   id: String
   account_id: String
+  scope_mode: String
+  account_ids: jsonb
   source: String
   created_at: Datetime
   cluster: String

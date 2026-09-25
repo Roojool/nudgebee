@@ -147,11 +147,21 @@ jest.mock('@shared/buttons/DownloadButton', () => ({
   ),
 }));
 
+jest.mock('@ui/Tooltip', () => ({
+  __esModule: true,
+  default: ({ title, children }: any) => (
+    <span data-testid='tooltip' data-title={title}>
+      {children}
+    </span>
+  ),
+}));
+
 jest.mock('@shared/tables/CustomTable', () => ({
   __esModule: true,
-  default: ({ id, tableData, totalRows, loading, pageNumber, onPageChange }: any) => (
+  default: ({ id, tableData, totalRows, loading, pageNumber, onPageChange, emptyStateText }: any) => (
     <div data-testid='custom-table' id={id}>
       {loading && <div data-testid='loading'>loading</div>}
+      {!loading && !(tableData || []).length && <div data-testid='empty'>{emptyStateText ?? 'No Data Available'}</div>}
       <div data-testid='total'>{totalRows}</div>
       <div data-testid='page'>{pageNumber}</div>
       {(tableData || []).map((row: any, i: number) => (
@@ -221,6 +231,8 @@ const sampleRules = [
     name: 'Slack on Critical',
     source: 'alertmanager',
     account_id: 'acc-1',
+    scope_mode: 'accounts',
+    account_ids: '["acc-1"]',
     namespace: 'default',
     workload: 'web',
     is_suppressed: false,
@@ -233,6 +245,8 @@ const sampleRules = [
     name: 'Email Suppressed',
     source: 'pagerduty',
     account_id: 'acc-2',
+    scope_mode: 'accounts',
+    account_ids: '["acc-2"]',
     is_suppressed: true,
     created_by_display_name: 'Bob',
     created_at: '2026-05-14T10:00:00Z',
@@ -286,8 +300,8 @@ describe('Notifications (integration)', () => {
 
     await waitFor(() => expect(screen.getByText('Slack on Critical')).toBeInTheDocument());
     expect(screen.getByText('Email Suppressed')).toBeInTheDocument();
-    expect(screen.getAllByText('AWS Prod').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('GCP Dev').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('cell-0-2')).toHaveTextContent('AWS Prod');
+    expect(screen.getByTestId('cell-1-2')).toHaveTextContent('GCP Dev');
     // Active = tone='success' → label-green; Suppressed = tone='neutral' → label-grey
     expect(screen.getByTestId('label-green')).toHaveTextContent('Active');
     expect(screen.getByTestId('label-grey')).toHaveTextContent('Suppressed');
@@ -301,6 +315,8 @@ describe('Notifications (integration)', () => {
           name: 'Silence task updates',
           source: 'automation',
           account_id: null,
+          scope_mode: 'all',
+          account_ids: '[]',
           is_suppressed: true,
           event_types: ['automation.task.completed'],
           created_by_display_name: 'Carol',
@@ -313,6 +329,27 @@ describe('Notifications (integration)', () => {
 
     await waitFor(() => expect(screen.getByText('Silence task updates')).toBeInTheDocument());
     expect(screen.getByText('All accounts')).toBeInTheDocument();
+  });
+
+  it('shows a rule over several accounts as a count with the names on hover', async () => {
+    apiNotifications.getNotificationRules.mockResolvedValue(
+      mockRulesResponse([
+        { ...sampleRules[0], account_ids: '["acc-1","acc-2"]' },
+        { ...sampleRules[1], account_id: null, account_ids: '[]' },
+      ])
+    );
+    render(<Notifications />);
+
+    await waitFor(() => expect(screen.getByTestId('cell-0-2')).toHaveTextContent('2 accounts'));
+    expect(screen.getByTestId('tooltip')).toHaveAttribute('data-title', 'AWS Prod, GCP Dev');
+    expect(screen.getByTestId('cell-1-2')).toHaveTextContent('No accounts');
+  });
+
+  it('says the rules could not be loaded instead of showing an empty list', async () => {
+    apiNotifications.getNotificationRules.mockResolvedValue({ error: 'Unknown column account_ids' });
+    render(<Notifications />);
+
+    await waitFor(() => expect(screen.getByTestId('empty')).toHaveTextContent("Couldn't load notification rules. Try again in a minute."));
   });
 
   it('renders platform-specific channel badges', async () => {

@@ -106,7 +106,7 @@ describe('NotificationRuleModal — Automation tab', () => {
     expect(payload.source).toBe('automation');
     expect(payload.isSuppressed).toBe(true);
     expect(payload.event_types).toEqual(['automation.task.completed', 'automation.task.progress']);
-    expect(payload.accountId).toBeUndefined();
+    expect(payload.accountIds).toBeUndefined();
     expect(payload.delivery).toBeUndefined();
   });
 

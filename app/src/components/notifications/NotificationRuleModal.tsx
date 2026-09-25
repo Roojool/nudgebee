@@ -6,7 +6,7 @@ import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import CloseIcon from '@mui/icons-material/Close';
 import { Modal } from '@ui/Modal';
 import { Link } from '@ui/Link';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import SafeIcon from '@shared/icons/SafeIcon';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import apiUser from '@api1/user';
@@ -37,6 +37,7 @@ import CustomSwitch from '@shared/CustomSwitch';
 import apiIntegrations from '@api1/integrations';
 import { styles } from './NotificationPopupStyles';
 import apiAccount from '@api1/account';
+import { ruleAccountIds } from './ruleAccounts';
 import { Button as DsButton } from '@ui/Button';
 import { ds } from 'src/utils/colors';
 import { toast as snackbar } from '@ui/Toast';
@@ -137,7 +138,11 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const [discordChannelHint, setDiscordChannelHint] = useState<{ hint: string; inviteUrl?: string } | null>(null);
   const [email, setEmail] = useState('');
   const [selectedExclusionEmails, setSelectedExclusionEmails] = useState<Option[]>([]);
-  const [selectedCluster, setSelectedCluster] = useState('');
+  const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
+  const selectedClustersKey = selectedClusters.join(',');
+  // The latest option request per picker; a response for an earlier account selection is dropped.
+  const namespaceRequestRef = useRef(0);
+  const eventRulesRequestRef = useRef(0);
   const [msChannelId, setMSChannelId] = useState<string>('');
   const [msTeamId, setMSTeamId] = useState<string>('');
   const [nsWorkloadOptions, setNSWorkloadOptions] = useState<any>([]);
@@ -361,8 +366,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     }
   };
 
-  const fetchNamespacesForCluster = async (clusterId: string) => {
-    if (!clusterId) {
+  const fetchNamespacesForClusters = async (clusterIds: string[]) => {
+    const request = ++namespaceRequestRef.current;
+    if (clusterIds.length === 0) {
       setNamespaceOption([]);
       return;
     }
@@ -372,22 +378,23 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         ...prev,
         namespaces: true,
       }));
-      const response: any = await apiKubernetes.getK8sNamespaces(1000, 0, { accountId: clusterId });
-      const namespaces =
-        response?.data?.k8s_namespaces?.map((item: any) => ({
-          value: item.name,
-          label: item.name,
-        })) || [];
+      // A rule over several accounts matches a namespace by name in any of them.
+      const responses: any[] = await Promise.all(clusterIds.map((id) => apiKubernetes.getK8sNamespaces(1000, 0, { accountId: id })));
+      const names = new Set<string>(responses.flatMap((response) => response?.data?.k8s_namespaces?.map((item: any) => item.name) || []));
+      const namespaces = Array.from(names)
+        .sort((a, b) => a.localeCompare(b))
+        .map((name) => ({ value: name, label: name }));
 
+      if (request !== namespaceRequestRef.current) return;
       setNamespaceOption(namespaces);
     } catch (error) {
+      if (request !== namespaceRequestRef.current) return;
       console.error('Error fetching namespaces:', error);
       setNamespaceOption([]);
     } finally {
-      setLoadingDropdown((prev) => ({
-        ...prev,
-        namespaces: false,
-      }));
+      if (request === namespaceRequestRef.current) {
+        setLoadingDropdown((prev) => ({ ...prev, namespaces: false }));
+      }
     }
   };
 
@@ -396,7 +403,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       if (selectedNamespace) {
         const query: any = {};
         query['namespace'] = selectedNamespace;
-        query['cloud_account_id'] = selectedCluster;
+        query['cloud_account_id'] = selectedClusters;
         query['workload_type'] = ['Deployment', 'Rollout'];
         query.isActive = true;
         setLoadingDropdown((prev) => ({
@@ -406,10 +413,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         apiKubernetes
           .getAllK8sWorkload(query)
           .then((response: any) => {
-            const workloadNameArray: string[] = response?.data.map((item: any) => {
-              return { label: item.name, value: item.name };
-            });
-            setNSWorkloadOptions(workloadNameArray);
+            const workloadNames = Array.from(new Set<string>(response?.data?.map((item: any) => item.name) || []));
+            setNSWorkloadOptions(workloadNames.map((name) => ({ label: name, value: name })));
           })
           .finally(() => {
             setLoadingDropdown((prev) => ({
@@ -445,49 +450,45 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     }
   };
 
-  const fetchEventRules = async (clusterId: string) => {
+  const fetchEventRules = async (clusterIds: string[]) => {
+    const request = ++eventRulesRequestRef.current;
+    if (clusterIds.length === 0) {
+      setEventRulesOptions([]);
+      return;
+    }
     try {
       setLoadingDropdown((prev) => ({
         ...prev,
         aggregationKey: true,
       }));
-      const response = await k8sApi.getEventRules({ accountId: clusterId }, 500, 0);
-      const eventRules =
-        response.data.event_rules
-          ?.filter((rule: any) => rule.alert && rule.alert.trim() !== '')
-          ?.sort((a: any, b: any) => a.alert.localeCompare(b.alert))
-          ?.map((rule: any) => ({
-            value: rule.alert,
-            label: rule.alert,
-          })) || [];
-      if (eventRules.length > 0) {
-        setEventRulesOptions(eventRules);
-      } else {
-        setEventRulesOptions([]);
-      }
+      // Loaded per account so each keeps its own page of rules; accounts often share alert names.
+      const responses = await Promise.all(clusterIds.map((id) => k8sApi.getEventRules({ accountId: id }, 500, 0)));
+      const alerts = new Set<string>(
+        responses.flatMap((response: any) =>
+          (response?.data?.event_rules || []).map((rule: any) => rule.alert).filter((alert: any) => alert && alert.trim() !== '')
+        )
+      );
+      if (request !== eventRulesRequestRef.current) return;
+      setEventRulesOptions(
+        Array.from(alerts)
+          .sort((a, b) => a.localeCompare(b))
+          .map((alert) => ({ value: alert, label: alert }))
+      );
     } finally {
-      setLoadingDropdown((prev) => ({
-        ...prev,
-        aggregationKey: false,
-      }));
+      if (request === eventRulesRequestRef.current) {
+        setLoadingDropdown((prev) => ({ ...prev, aggregationKey: false }));
+      }
     }
   };
 
   useEffect(() => {
-    if (selectedCluster) {
-      fetchEventRules(selectedCluster);
-    }
-  }, [selectedCluster]);
+    fetchEventRules(selectedClusters);
+  }, [selectedClustersKey]);
 
   const handleChildComponentChange = (value: string, type: string) => {
     switch (type) {
       case 'namespace':
         setSelectedNamespace(value);
-        setSelectedWorkload('');
-        break;
-      case 'cluster':
-        setSelectedCluster(value);
-        setSelectedNamespace('');
         setSelectedWorkload('');
         break;
       case 'action-ms-channel-value':
@@ -525,13 +526,15 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     }
   };
 
+  const handleAccountsChange = (values: string[]) => {
+    setSelectedClusters(values);
+    setSelectedNamespace('');
+    setSelectedWorkload('');
+  };
+
   useEffect(() => {
-    if (selectedCluster) {
-      fetchNamespacesForCluster(selectedCluster);
-    } else {
-      setNamespaceOption([]);
-    }
-  }, [selectedCluster]);
+    fetchNamespacesForClusters(selectedClusters);
+  }, [selectedClustersKey]);
 
   useEffect(() => {
     let isAborted = false;
@@ -725,7 +728,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const fetchCluster = (notificationRuleObject: any) => {
     getClustersData();
     if (!notificationRuleObject || Object.keys(notificationRuleObject).length === 0) {
-      setSelectedCluster('');
+      setSelectedClusters([]);
     }
   };
 
@@ -738,9 +741,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       if (notificationRuleObject.namespace) {
         setSelectedNamespace(notificationRuleObject.namespace);
       }
-      if (notificationRuleObject.cluster) {
-        setSelectedCluster(notificationRuleObject.account_id);
-      }
+      setSelectedClusters(ruleAccountIds(notificationRuleObject));
       if (notificationRuleObject.workload) {
         setSelectedWorkload(notificationRuleObject.workload);
       }
@@ -798,7 +799,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setEmail('');
     setSelectedExclusionEmails([]);
     setUserEmailOptions([]);
-    setSelectedCluster('');
+    setSelectedClusters([]);
     setMSChannelId('');
     setNSWorkloadOptions([]);
     setMSTeamId('');
@@ -895,8 +896,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const handleSubmit = () => {
     const error: any = {};
 
-    if (!isTenantWideSource(basedOnValue) && !selectedCluster) {
-      error.cluster = 'Account selection is required';
+    if (!isTenantWideSource(basedOnValue) && selectedClusters.length === 0) {
+      error.cluster = 'Select at least one account';
     }
 
     if (basedOnValue === 'automation' && selectedEventTypes.length === 0) {
@@ -982,17 +983,10 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     }
 
     const queryParams: any = {};
-    // "optimize" is tenant-wide (no account scope) — never send account_id/cluster,
-    // even if a stale selection lingers from another tab, or its rule can never
-    // match the tenant-wide optimize digest (#28130).
-    if (selectedCluster && basedOnValue !== 'optimize') {
-      const clusterName: any = clusterOption.filter((item: any) => {
-        if (item.value == selectedCluster) {
-          return item.label;
-        }
-      });
-      queryParams.cluster = clusterName[0]?.label;
-      queryParams.accountId = selectedCluster;
+    // Tenant-wide sources carry no account scope, even if a stale selection
+    // lingers from another tab: a rule scoped to accounts never matches them.
+    if (!isTenantWideSource(basedOnValue)) {
+      queryParams.accountIds = selectedClusters;
     }
     queryParams.ruleName = notificationName;
     queryParams.source = basedOnValue;
@@ -1240,14 +1234,14 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   }, [editingSource]);
 
   useEffect(() => {
-    if (errors.cluster && (basedOnValue === 'daily_recap' || selectedCluster)) {
+    if (errors.cluster && (basedOnValue === 'daily_recap' || selectedClusters.length > 0)) {
       setErrors((prev: any) => {
         const newErrors = { ...prev };
         delete newErrors.cluster;
         return newErrors;
       });
     }
-  }, [selectedCluster, basedOnValue, errors.cluster]);
+  }, [selectedClustersKey, basedOnValue, errors.cluster]);
 
   useEffect(() => {
     if (errors.notificationName && notificationName && isValidString(notificationName)) {
@@ -1537,20 +1531,19 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
               <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
                 Scope
               </Typography>
-              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>— Select cloud account</Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>— Select cloud accounts</Typography>
             </Box>
             <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--ds-space-3)' }}>
               <Box>
-                <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Account *</InputLabel>
+                <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Accounts *</InputLabel>
                 <Box sx={{ width: '60%' }}>
                   <Select
+                    multiple
                     required
                     id='account-1'
-                    placeholder='Account'
-                    onChange={(value) => {
-                      handleChildComponentChange(value, 'cluster');
-                    }}
-                    value={selectedCluster || null}
+                    placeholder='Accounts'
+                    onChange={handleAccountsChange}
+                    value={selectedClusters}
                     options={clusterOption}
                     grouped
                     groupIcon={renderAccountGroupIcon}
@@ -1569,21 +1562,20 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
               <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
                 Scope
               </Typography>
-              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>— Select account</Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>— Select accounts</Typography>
             </Box>
             <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 'var(--ds-space-3)' }}>
               <Box>
-                <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Account *</InputLabel>
+                <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Accounts *</InputLabel>
                 <Box sx={{ width: '60%' }}>
                   <Select
+                    multiple
                     required
                     disabled={basedOnValue == 'daily_recap'}
                     id='account-2'
-                    placeholder='Account'
-                    onChange={(value) => {
-                      handleChildComponentChange(value, 'cluster');
-                    }}
-                    value={selectedCluster || null}
+                    placeholder='Accounts'
+                    onChange={handleAccountsChange}
+                    value={selectedClusters}
                     options={clusterOption}
                     grouped
                     groupIcon={renderAccountGroupIcon}

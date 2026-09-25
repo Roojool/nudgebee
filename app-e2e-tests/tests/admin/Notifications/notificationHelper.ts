@@ -89,6 +89,11 @@ export async function selectCluster(
     return;
   }
   await selectFromFilterDropdown(page, locators.clusterSelector, clusterName);
+  // A multi-select picker stays open after a pick; a single one closes itself.
+  const stillOpen = await locators.clusterSelector.getAttribute("aria-expanded").catch(() => null);
+  if (stillOpen === "true") {
+    await page.keyboard.press("Escape");
+  }
 }
 
 export async function configureChannels(

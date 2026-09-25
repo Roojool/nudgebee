@@ -22,6 +22,8 @@ import { ds } from 'src/utils/colors';
 import { safeJSONParse, snakeToTitleCase } from 'src/utils/common';
 import { PlatformChannelBadge } from '@shared/icons/IconTextBadge';
 import { Label } from '@ui/Label';
+import Tooltip from '@ui/Tooltip';
+import { ruleAccountIds } from './ruleAccounts';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -54,6 +56,7 @@ const Notifications = () => {
   const [clusterMap, setClusterMap] = useState<Map<string, string>>(new Map());
 
   const [isFetchCluster, setIsFetchCluster] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const rawRulesRef = useRef<any[]>([]);
 
   const getClustersData = async () => {
@@ -131,6 +134,21 @@ const Notifications = () => {
     '',
   ];
 
+  const renderRuleAccounts = (item: any) => {
+    if (item.scope_mode !== 'accounts') {
+      return <Text value='All accounts' />;
+    }
+    const names = ruleAccountIds(item).map((id) => clusterMap.get(id) || 'Unknown account');
+    if (names.length <= 1) {
+      return <Text value={names[0] || 'No accounts'} />;
+    }
+    return (
+      <Tooltip title={names.join(', ')}>
+        <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700], width: 'fit-content' }}>{`${names.length} accounts`}</Typography>
+      </Tooltip>
+    );
+  };
+
   const handleEditRuleModal = (e: any, item: any) => {
     // Look up fresh data from ref to avoid stale closure data
     const freshItem = rawRulesRef.current.find((r: any) => r.id === item.id) || item;
@@ -187,6 +205,7 @@ const Notifications = () => {
     }
 
     apiNotifications.getNotificationRules(query, limit, offset).then((res: any) => {
+      setLoadFailed(Boolean(res?.error));
       const notificationRulesList: any = [];
       const rawRows = res?.data?.notifications_list_rules?.rows || [];
       rawRows.forEach((item: any) => {
@@ -196,9 +215,7 @@ const Notifications = () => {
           component: <Text value={item.name} />,
         });
         data.push({ component: <Text value={snakeToTitleCase(item.source)} /> });
-        data.push({
-          component: <Text value={clusterMap.get(item?.account_id) || (item.source === 'automation' ? 'All accounts' : '-')} />,
-        });
+        data.push({ component: renderRuleAccounts(item) });
         data.push({
           component: (
             <Box>
@@ -392,6 +409,7 @@ const Notifications = () => {
             }}
             id={notificationId}
             loading={loading}
+            emptyStateText={loadFailed ? "Couldn't load notification rules. Try again in a minute." : undefined}
             showExpandable={false}
             upperHeaders={[]}
             onSortChange={() => undefined}
