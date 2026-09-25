@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"nudgebee/services/integrations/core"
+	"nudgebee/services/relay"
 	"nudgebee/services/security"
 )
 
@@ -66,4 +67,11 @@ func (m ElasticsearchAgent) ConfigSchema() core.IntegrationSchema {
 
 func (m ElasticsearchAgent) ValidateConfig(sc *security.SecurityContext, config []core.IntegrationConfigValue, accountId string) []error {
 	return []error{}
+}
+
+// TestConnection implements core.TestableIntegration. The agent's Elasticsearch is
+// configured in the agent's Helm values, not in this form, so the probe asks the
+// agent itself to query it, and reports why it could not.
+func (m ElasticsearchAgent) TestConnection(sc *security.RequestContext, config []core.IntegrationConfigValue, accountId string) error {
+	return relay.TestAgentElasticsearch(accountId)
 }

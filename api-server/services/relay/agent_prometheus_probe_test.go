@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // probeReply builds a successful-envelope prometheus_queries_enricher reply
@@ -76,7 +77,7 @@ func TestAgentPrometheusProbeError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := agentPrometheusProbeError(tc.resp)
+			err := agentProbeReplyError(tc.resp, agentPrometheusProbe(time.Now()))
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want success, got %v", err)
