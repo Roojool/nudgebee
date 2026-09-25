@@ -64,6 +64,10 @@ const (
 	webhookProcessingStatusSkipped   = "skipped"
 )
 
+// maxWebhookProcessingErrorLen caps the processing_error stored per delivery so a
+// parser error that echoes a large payload does not bloat the row.
+const maxWebhookProcessingErrorLen = 2000
+
 // webhookProcessingStatusForError maps a ProcessEventWebook error onto the
 // processing_status recorded for that delivery.
 //
@@ -430,22 +434,25 @@ func ProcessStoredWebhook(sc *security.RequestContext, webhookRowID string) erro
 	var row StoredWebhookEventData
 	err = dbms.Db.Get(&row, `SELECT id, tenant_id, COALESCE(account_id::text, '') as account_id, integration_id, integration_type, raw, COALESCE(request_url, '') as request_url FROM event_incoming_webhooks WHERE id = $1`, webhookRowID)
 	if err != nil {
-		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed)
-		return fmt.Errorf("integrations: webhook row not found: %w", err)
+		err = fmt.Errorf("integrations: failed to load webhook row: %w", err)
+		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed, err)
+		return err
 	}
 
 	sc = security.NewRequestContextForTenantAdmin(row.TenantID, sc.GetLogger().With("integration_id", row.IntegrationID, "webhook_row_id", webhookRowID), sc.GetTracer(), sc.GetMeter())
 
 	integration, found := GetIntegration(row.IntegrationType)
 	if !found {
-		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed)
-		return fmt.Errorf("integrations: integration type %s not found", row.IntegrationType)
+		err = fmt.Errorf("integrations: integration type %s not found", row.IntegrationType)
+		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed, err)
+		return err
 	}
 
 	webhookIntegration, ok := integration.(EventIncomingTroubleshootWebhookIntegration)
 	if !ok {
-		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed)
-		return fmt.Errorf("integrations: integration type %s does not support webhook events", row.IntegrationType)
+		err = fmt.Errorf("integrations: integration type %s does not support webhook events", row.IntegrationType)
+		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusFailed, err)
+		return err
 	}
 
 	webhookSettings, err := getIntegrationSettings(dbms, row.IntegrationID)
@@ -456,7 +463,7 @@ func ProcessStoredWebhook(sc *security.RequestContext, webhookRowID string) erro
 	webhookEvents, err := webhookIntegration.ProcessEventWebook(sc, webhookSettings, row.AccountID, row.Raw)
 	if err != nil {
 		status := webhookProcessingStatusForError(err)
-		updateWebhookStatus(dbms, webhookRowID, status)
+		updateWebhookStatus(dbms, webhookRowID, status, err)
 		if status != webhookProcessingStatusSkipped {
 			sc.GetLogger().Error("integrations: unable to process webhook payload", "error", err)
 		}
@@ -487,7 +494,7 @@ func ProcessStoredWebhook(sc *security.RequestContext, webhookRowID string) erro
 			_, updateErr := dbms.Exec(`UPDATE event_incoming_webhooks SET
 				webhook_id = $2, event_type = $3, event_id = $4, event_url = $5,
 				event_status = $6, event_priority = $7, event_created_at = $8,
-				event_title = $9, event_description = $10, account_id = $11, processing_status = 'processed'
+				event_title = $9, event_description = $10, account_id = $11, processing_status = 'processed', processing_error = NULL
 				WHERE id = $1`,
 				webhookRowID, e.WebhookId, e.EventType, e.EventId, e.EventUrl,
 				e.EventStatus, e.EventPriority, e.EventCreatedAt, e.EventTitle, e.EventDescription, nullableAccountID(eventAccountId))
@@ -510,7 +517,7 @@ func ProcessStoredWebhook(sc *security.RequestContext, webhookRowID string) erro
 	}
 
 	if len(webhookEvents) == 0 {
-		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusProcessed)
+		updateWebhookStatus(dbms, webhookRowID, webhookProcessingStatusProcessed, nil)
 	}
 
 	return nil
@@ -532,9 +539,23 @@ func routeWebhookEvent(sc *security.RequestContext, tenantId, accountId, source 
 	}
 }
 
-// updateWebhookStatus updates the processing_status of a webhook row.
-func updateWebhookStatus(dbms *database.DatabaseManager, webhookRowID, status string) {
-	_, err := dbms.Exec(`UPDATE event_incoming_webhooks SET processing_status = $2 WHERE id = $1`, webhookRowID, status)
+// updateWebhookStatus updates the processing_status of a webhook row and records
+// processErr as its processing_error. A nil processErr clears any earlier error.
+func updateWebhookStatus(dbms *database.DatabaseManager, webhookRowID, status string, processErr error) {
+	var processingError *string
+	if processErr != nil {
+		msg := processErr.Error()
+		if len(msg) > maxWebhookProcessingErrorLen {
+			msg = msg[:maxWebhookProcessingErrorLen]
+		}
+		// Postgres rejects invalid UTF-8 and NUL bytes in text. Both can reach
+		// here from a parser error that echoes the payload, or from the cut
+		// above splitting a rune; either would fail this UPDATE and leave the
+		// row stuck in 'processing'.
+		msg = strings.ReplaceAll(strings.ToValidUTF8(msg, ""), "\x00", "")
+		processingError = &msg
+	}
+	_, err := dbms.Exec(`UPDATE event_incoming_webhooks SET processing_status = $2, processing_error = $3 WHERE id = $1`, webhookRowID, status, processingError)
 	if err != nil {
 		slog.Error("integrations: failed to update webhook processing status", "webhook_row_id", webhookRowID, "status", status, "error", err)
 	}

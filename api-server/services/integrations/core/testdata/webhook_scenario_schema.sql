@@ -21,7 +21,8 @@ create table event_incoming_webhooks (
   event_url text, event_status text, event_priority text,
   event_created_at timestamp not null, event_title text not null,
   event_description text, raw text,
-  processing_status text not null default 'processed', request_url text
+  processing_status text not null default 'processed', request_url text,
+  processing_error text
 );
 insert into integration_types(name, category) values ('workflow_webhook','incident_webhook');
 insert into tenant(id) values ('890cad87-c452-4aa7-b84a-742cee0454a1');
