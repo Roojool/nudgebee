@@ -197,6 +197,16 @@ func TestNativeQueryExecutionArgs(t *testing.T) {
 		assert.Equal(t, time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC), end)
 	})
 
+	t.Run("absolute bounds preserve fractional seconds", func(t *testing.T) {
+		start, end, _, _, err := nativeQueryExecutionArgs(nativeLogQueryPlan{
+			StartTime: "2026-09-20T09:00:00.123456789Z",
+			EndTime:   "2026-09-20T10:00:00.987654321Z",
+		}, provider, now)
+		require.NoError(t, err)
+		assert.Equal(t, "2026-09-20T09:00:00.123456789Z", start.Format(time.RFC3339Nano))
+		assert.Equal(t, "2026-09-20T10:00:00.987654321Z", end.Format(time.RFC3339Nano))
+	})
+
 	for _, tc := range []struct {
 		name string
 		plan nativeLogQueryPlan

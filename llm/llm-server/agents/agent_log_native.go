@@ -47,6 +47,7 @@ When original_user_request is present, it is authoritative. Do not widen or repl
 
 Return JSON only in exactly one of these forms:
 {"query_type":"native","native":{"query":"provider-native query","time_range":"1h","limit":1000,"index":"optional index"}}
+{"query_type":"native","native":{"query":"provider-native query","start_time":"2026-09-24T09:00:00Z","end_time":"2026-09-24T10:00:00Z","limit":1000,"index":"optional index"}}
 {"query_type":"canonical","canonical_query":{"where":{},"time_range":"1h","limit":1000}}
 
 Native requirements:
@@ -54,7 +55,7 @@ Native requirements:
 - Preserve fixed selectors, clauses, operators, fields, indices, and literals from an applicable query or template.
 - Never put provider-independent canonical JSON in native.query.
 - If any native placeholder cannot be resolved, return canonical instead.
-- For an absolute start_time, omit time_range. For an unanchored relative window such as "last 30m", omit end_time so it ends now. Only use time_range with end_time when the user explicitly asks for a window ending at an absolute time.
+- Use RFC3339 timestamps (optional fractional seconds) for absolute start_time and end_time. Never combine start_time with time_range. For an unanchored relative window such as "last 30m", omit end_time so it ends now. Only use time_range with end_time when the user explicitly asks for a window ending at an absolute time.
 
 Canonical requirements:
 %s
