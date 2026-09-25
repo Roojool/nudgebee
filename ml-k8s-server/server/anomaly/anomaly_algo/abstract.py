@@ -187,9 +187,12 @@ METRIC_SPECS: Dict[AnomalyType, MetricSpec] = {
         time_range="1m",
     ),
     AnomalyType.LATENCY: MetricSpec(
-        query_fmt="(histogram_quantile(0.99, sum(rate(container_http_requests_duration_seconds_bucket{{"
-        '  __CLUSTER__  actual_destination_workload_name="{deployment}", actual_destination_workload_namespace="{'
-        'namespace}"}}[2m])) by (le)) or vector(0))',
+        # Never fired (#39260). The PromQL named a metric that does not exist and matched
+        # a pod-name label as if it held workload names; `or vector(0)` turned both into
+        # a flat zero series, so the detector trained on zeros and reported nothing. The
+        # key gets both right. Absent now cancels: no HTTP traffic means no latency to
+        # find an anomaly in, and zero-filling is what hid this.
+        utilisation_keys=(MetricKey("workload_http_latency_p99"),),
         default_threshold=0.5,  # seconds
         dbscan_eps=0.6,  # Medium-tight for latency
         dbscan_min_samples=5,

@@ -142,3 +142,34 @@ def test_spec_without_keys_takes_the_promql_path():
     assert isinstance(seen["column"], str), "a PromQL spec must still send a query string"
     assert 'namespace="nudgebee"' in seen["column"]
     assert data is not None
+
+
+# --- LATENCY (#39260) ---------------------------------------------------------------
+
+
+def test_latency_is_answered_by_key_not_promql():
+    """The spec that had never fired now names a key instead of carrying PromQL."""
+    from server.anomaly.anomaly_algo.abstract import get_metric_spec
+
+    spec = get_metric_spec("latency")
+    assert spec.utilisation_keys == (MetricKey("workload_http_latency_p99"),)
+    assert not spec.query_fmt, "latency must no longer carry PromQL"
+
+
+def test_latency_cancels_when_absent_rather_than_zero_filling():
+    """No HTTP traffic means no latency to detect on -- zero-filling is what hid it."""
+    from server.anomaly.anomaly_algo.abstract import get_metric_spec
+
+    for key in get_metric_spec("latency").utilisation_keys:
+        assert key.zero_when_absent is False
+
+
+def test_latency_tuning_constants_are_unchanged():
+    """The migration changes where the number comes from, not how it is judged."""
+    from server.anomaly.anomaly_algo.abstract import get_metric_spec
+
+    spec = get_metric_spec("latency")
+    assert spec.default_threshold == 0.5
+    assert spec.dbscan_eps == 0.6
+    assert spec.dbscan_min_samples == 5
+    assert spec.step == "2m"
