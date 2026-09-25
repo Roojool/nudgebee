@@ -638,6 +638,12 @@ func TestMetricsDiscoveryProviderFor(t *testing.T) {
 			want:     "openobserve",
 		},
 		{
+			name:     "user-configured Splunk Enterprise enumerates Splunk Enterprise",
+			provider: services_server.ObservabilityProvider{Provider: "splunk_enterprise", IntegrationSource: "user"},
+			want:     "splunk_enterprise",
+			why:      "series-match resolves through this, so a wrong provider routes to the agent relay",
+		},
+		{
 			name:     "in-cluster Prometheus stays prometheus",
 			provider: services_server.ObservabilityProvider{Provider: "prometheus", IntegrationSource: "agent"},
 			want:     "prometheus",

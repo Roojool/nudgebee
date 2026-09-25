@@ -43,6 +43,12 @@ func newMetricsAgent(ctx *security.RequestContext, accountId string, provider se
 		} else {
 			slog.Warn("metrics: elasticsearch metrics agent not found, falling back to prometheus", "accountId", accountId)
 		}
+	case "splunk_enterprise":
+		if splunkMetricsAgent, ok := core.GetNBAgent(ctx, SplunkEnterpriseMetricsAgentName, accountId, ""); ok {
+			primaryAgent = splunkMetricsAgent
+		} else {
+			slog.Warn("metrics: splunk enterprise metrics agent not found, falling back to prometheus", "accountId", accountId)
+		}
 	case "aws":
 		// Cloud-only AWS account with no first-class metrics provider — read CloudWatch
 		// metrics via the aws CLI.
