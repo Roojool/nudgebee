@@ -2,8 +2,8 @@ name: Migrations-Validate
 
 # Fast, cluster-free guard that runs on every PR touching the migration tree.
 # Checks:
-#   1. validate_migrations.py — duplicate-timestamp / V-label-reuse hard fail;
-#      out-of-order is a warning under atlas (the engine handles it natively).
+#   1. validate_migrations.py — duplicate-timestamp / V-label-reuse and
+#      unqualified CREATE TABLE hard fail for new files; out-of-order warns.
 #   2. atlas migrate hash diff — atlas.sum staleness fails the PR at review
 #      time rather than at deploy time (the migration Job would otherwise
 #      refuse with `checksum mismatch` after merge).
@@ -43,10 +43,12 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     services:
-      # Empty Postgres for the fresh-DB apply smoke test below.
+      # The production-like role name resolves the nudgebee revisions schema
+      # before public under PostgreSQL's default "$user", public search_path.
       postgres:
         image: ghcr.io/nudgebee/postgres:16.10-alpine-nb2
         env:
+          POSTGRES_USER: nudgebee
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: appdb
         ports:
@@ -113,7 +115,7 @@ jobs:
       # real from-scratch deploy. RabbitMQ + playbook steps are skipped.
       - name: Fresh-DB apply smoke test (run-migrations.sh on an empty database)
         env:
-          APP_DATABASE_URL: postgres://postgres:postgres@localhost:5432/appdb?sslmode=disable
+          APP_DATABASE_URL: postgres://nudgebee:postgres@localhost:5432/appdb?sslmode=disable
           MIGRATE_SKIP_PLAYBOOK: "1"
           MIGRATE_SKIP_RABBITMQ: "1"
         run: |
@@ -122,6 +124,30 @@ jobs:
           # Invoke via bash to match the image CMD (["/bin/bash","./run-migrations.sh"]);
           # the script is committed 100644, so `./run-migrations.sh` would EACCES.
           bash ./run-migrations.sh
+
+      # Replay the reported upgrade shape: historical migrations created 15
+      # application tables in the role schema, with revisions already recorded.
+      - name: Existing-DB role-schema reconciliation smoke test
+        env:
+          APP_DATABASE_URL: postgres://nudgebee:postgres@localhost:5432/appdb?sslmode=disable
+          MIGRATE_SKIP_PLAYBOOK: "1"
+          MIGRATE_SKIP_RABBITMQ: "1"
+        run: |
+          before_oid=$(psql "$APP_DATABASE_URL" -tAq -c "SELECT 'public.llm_gateway_usage'::regclass::oid")
+          for table in \
+            llm_conversation_attachment_refs llm_conversation_attachments \
+            llm_gateway_rate_limits llm_gateway_request_log llm_gateway_routing_rules \
+            llm_gateway_tenant_settings llm_gateway_usage llm_memory_user_consent \
+            llm_session_working_memory messaging_channel_message messaging_channel_watch \
+            triage_correction_log triage_signal_class webhook_subject_mappings workflow_versions
+          do
+            psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
+              "ALTER TABLE public.$table SET SCHEMA nudgebee"
+          done
+          (cd api-server/migrations && bash ./run-migrations.sh)
+          after_oid=$(psql "$APP_DATABASE_URL" -tAq -c "SELECT 'public.llm_gateway_usage'::regclass::oid")
+          test "$before_oid" = "$after_oid"
+          test "$(psql "$APP_DATABASE_URL" -tAq -c "SELECT count(*) FROM pg_tables WHERE schemaname='nudgebee' AND tablename NOT IN ('atlas_schema_revisions','schema_migrations','migration_gap_backfill')")" = 0
 
       # Account deletion clears an account's rows from a hand-kept, ordered table
       # list (api-server/services/account). A migration that adds a table with a
@@ -139,7 +165,7 @@ jobs:
       - name: Check the account delete plan against the migrated schema
         working-directory: ./api-server/services
         env:
-          APP_DATABASE_URL: postgres://postgres:postgres@localhost:5432/appdb?sslmode=disable
+          APP_DATABASE_URL: postgres://nudgebee:postgres@localhost:5432/appdb?sslmode=disable
           REQUIRE_DB_TESTS: "true"
         run: go test ./account/ -run 'TestAccountDeletePlanCoversForeignKeys_DB' -count=1 -v
 
