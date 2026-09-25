@@ -13,10 +13,11 @@ import (
 // investigation prompt has to ask the question before the recommendation is
 // written; the code stage's no_op check runs too late.
 func TestBuildCodeCapabilityBlock(t *testing.T) {
-	t.Run("no capability mapped keeps the existing stop-there rule", func(t *testing.T) {
+	t.Run("no capability mapped adds no code guidance", func(t *testing.T) {
+		// A "no repo mapped" note read as "code can't be checked": event 07f70dc8
+		// stopped at a repo-mapping blocker instead of verifying the code path.
 		b := buildCodeCapabilityBlock(&services_server.EventCodeCapabilities{}, "nudgebee", "llm-gateway")
-		assert.Contains(t, b, "No source repository or deployment values file is mapped")
-		assert.NotContains(t, b, "already there")
+		assert.Empty(t, b)
 	})
 
 	t.Run("source with a deployed commit asks whether the change already shipped", func(t *testing.T) {

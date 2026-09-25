@@ -2128,8 +2128,7 @@ func capInvestigationPrompt(ctx *security.RequestContext, prompt, eventId string
 // Returns "" when nothing is reachable.
 func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, namespace, workload string) string {
 	if !caps.HasAny() {
-		return "\n\n## Code Analysis\nNo source repository or deployment values file is mapped for `" + workload +
-			"`. If your investigation concludes a code defect, state it in your findings and stop there — do not name a file you cannot verify, and do not emit a <change_plan> block."
+		return ""
 	}
 
 	var b strings.Builder
