@@ -209,13 +209,28 @@ func (s *ChronosphereMetricSource) FetchMetricsQuery(
 		instant = v
 	}
 
+	// One key whose text will not parse must not cost the others their answer. The
+	// build failure is recorded against that key and the rest of the batch goes on --
+	// the same shape the per-key providers use, and what the relay response loop below
+	// already does for a key the backend rejects.
 	filteredQueries := make(map[string]string, len(req.Queries))
+	buildFailures := make([]QueryResult, 0)
 	for k, v := range req.Queries {
 		injected, err := injectPromQLMatchers(v, nil, req.Labels)
 		if err != nil {
-			return OutputMetricQuery{}, err
+			ctx.GetLogger().Warn("FetchMetricsQuery: query build failed", "key", k, "error", err)
+			msg := err.Error()
+			buildFailures = append(buildFailures, QueryResult{QueryKey: k, Error: &msg})
+			continue
 		}
 		filteredQueries[k] = injected
+	}
+	// Nothing left to ask for. Returning here is not just saving a call: the fetch below
+	// reports a transport failure by returning an error and an EMPTY result, which would
+	// throw away the per-key reasons collected above and leave every key silent -- the
+	// exact failure this build loop exists to prevent.
+	if len(filteredQueries) == 0 {
+		return OutputMetricQuery{Results: buildFailures}, nil
 	}
 
 	externalAppMap, err := relay.ExecutePrometheus(
@@ -229,7 +244,10 @@ func (s *ChronosphereMetricSource) FetchMetricsQuery(
 		return OutputMetricQuery{}, err
 	}
 
-	output := OutputMetricQuery{Results: make([]QueryResult, 0, len(externalAppMap))}
+	output := OutputMetricQuery{Results: make([]QueryResult, 0, len(externalAppMap)+len(buildFailures))}
+	// Keys whose text would not parse are reported alongside the ones that ran, so the
+	// caller sees every key it asked for rather than a short list it has to diff.
+	output.Results = append(output.Results, buildFailures...)
 	for queryKey, query := range externalAppMap {
 		switch q := query.(type) {
 		case map[string]any: // Range query

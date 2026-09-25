@@ -76,12 +76,15 @@ class RecommendationService:
         # one. For the default strategy that is 7 Datadog GETs per workload against
         # the 2 this service makes, which fetches the raw series once and takes the
         # percentiles locally. Three properties of observability/datadog.go make that
-        # multiplier expensive rather than merely larger: the key loop runs
-        # sequentially, any one key's failure returns and discards the other keys'
-        # results, and the metrics path issues a plain HttpGet with no 429 retry —
-        # the Retry-After handling next to it belongs to the traces API.
+        # multiplier expensive rather than merely larger. Three properties were named
+        # here; two are now fixed in api-server:
         #
-        # Unblock this by fixing those three, not by changing anything here.
+        #   - a key's failure no longer discards the other keys' results (FIXED)
+        #   - the metrics path now retries 429s within a caller-supplied budget (FIXED)
+        #   - the key loop still runs SEQUENTIALLY (open)
+        #
+        # The last one is what still makes 7 GETs worse than 2, because they happen one
+        # after another. Fix that in api-server, not here.
         via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation and metrics_provider != "datadog"
 
         if via_utilisation:

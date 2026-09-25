@@ -176,6 +176,15 @@ type FetchMetricsRequest struct {
 	// RecordHistory opts this call into a user_history row; see the identically
 	// named field on FetchLogRequest for why this is opt-in and top-level.
 	RecordHistory bool `json:"record_history"`
+
+	// RetryBudgetSeconds is how long this caller will spend, in total, retrying a
+	// rate-limited or failing provider. Zero means the short default.
+	//
+	// It belongs to the caller because the same keys serve opposite needs: a UI chart
+	// would rather show an error than hang, while an hourly anomaly or rightsizing run
+	// can afford to wait a rate limit out. The layer clamps it so a caller cannot pin a
+	// connection indefinitely.
+	RetryBudgetSeconds int `json:"retry_budget_seconds"`
 }
 
 type FetchMetricLabelsRequest struct {

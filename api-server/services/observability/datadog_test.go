@@ -1157,7 +1157,7 @@ func TestFetchDatadogTraceAPI_RetriesOn429ThenSucceeds(t *testing.T) {
 	defer server.Close()
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
-	body, err := fetchDatadogTraceAPI(ctx, server.URL, map[string]string{})
+	body, err := fetchDatadogAPI(ctx, server.URL, map[string]string{}, time.Now().Add(datadogRetryBudgetMax))
 	assert.NoError(t, err)
 	assert.JSONEq(t, `{"data":[]}`, string(body))
 	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
@@ -1174,7 +1174,7 @@ func TestFetchDatadogTraceAPI_ExhaustsOn429(t *testing.T) {
 	defer server.Close()
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
-	_, err := fetchDatadogTraceAPI(ctx, server.URL, map[string]string{})
+	_, err := fetchDatadogAPI(ctx, server.URL, map[string]string{}, time.Now().Add(datadogRetryBudgetMax))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "rate-limited")
 	assert.Equal(t, int32(datadogTraceMaxRetries+1), atomic.LoadInt32(&calls))
@@ -1195,7 +1195,7 @@ func TestFetchDatadogTraceAPI_RetriesOn5xx(t *testing.T) {
 	defer server.Close()
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
-	body, err := fetchDatadogTraceAPI(ctx, server.URL, map[string]string{})
+	body, err := fetchDatadogAPI(ctx, server.URL, map[string]string{}, time.Now().Add(datadogRetryBudgetMax))
 	assert.NoError(t, err)
 	assert.Equal(t, `{"data":[]}`, string(body))
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
@@ -1211,7 +1211,7 @@ func TestFetchDatadogTraceAPI_NoRetryOn4xx(t *testing.T) {
 	defer server.Close()
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
-	_, err := fetchDatadogTraceAPI(ctx, server.URL, map[string]string{})
+	_, err := fetchDatadogAPI(ctx, server.URL, map[string]string{}, time.Now().Add(datadogRetryBudgetMax))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), strconv.Itoa(http.StatusForbidden))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "4xx (non-429) must not retry")
