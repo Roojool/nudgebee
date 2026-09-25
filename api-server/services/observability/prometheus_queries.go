@@ -715,6 +715,24 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ container_id=~"%s", level=~"critical|error|exception"}[5m])) by (container_id)`, safeMeta.Name)
 		case "container_error_log_count_with_workload":
 			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ container_id=~"%s", level=~"critical|error"}[5m])) by (container_id)`, safeMeta.Name)
+		// Error and request counts as separate series, so a consumer can apply its own
+		// smoothing to the ratio instead of inheriting whatever this layer chose. The
+		// anomaly detector needs exactly that: it divides by (requests + K) to stop a
+		// 1-error-in-1-request moment reading as a 100% error rate.
+		//
+		// Both are an increase over the REQUESTED STEP, not a fixed window, so the value
+		// scales with the caller's resolution — a consumer deriving a constant from these
+		// (such as that K) must pin its step. Scoped on destination_workload_name, which
+		// carries the workload name and is matched exactly; the actual_destination_*
+		// labels carry pod names and would need a prefix, which over-matches siblings.
+		case "workload_http_request_count":
+			queries[metricKey] = fmt.Sprintf(
+				`sum(increase(container_http_requests_total{ __CLUSTER__ destination_workload_name="%s", destination_workload_namespace="%s"}[%s]))`,
+				safeMeta.Name, safeMeta.Namespace, stepW)
+		case "workload_http_error_count":
+			queries[metricKey] = fmt.Sprintf(
+				`sum(increase(container_http_requests_total{ __CLUSTER__ destination_workload_name="%s", destination_workload_namespace="%s", status=~"^[45][0-9][0-9]$"}[%s]))`,
+				safeMeta.Name, safeMeta.Namespace, stepW)
 		case "workload_http_error_rate":
 			queries[metricKey] = fmt.Sprintf(`sum by(destination_workload_name, destination_workload_namespace)(rate(container_http_requests_total{ __CLUSTER__ status=~"5..|4..", destination_workload_name=~"%s", destination_workload_namespace=~"%s"}[1h])) / sum by(destination_workload_name, destination_workload_namespace)(rate(container_http_requests_total{ __CLUSTER__ destination_workload_name=~"%s", destination_workload_namespace=~"%s"}[1h]))`, safeMeta.Name, safeMeta.Namespace, safeMeta.Name, safeMeta.Namespace)
 		case "container_http_latency_p90":

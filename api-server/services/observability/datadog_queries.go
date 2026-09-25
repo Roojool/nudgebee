@@ -237,6 +237,23 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 			if meta.Name != "" {
 				queries[metricKey] = fmt.Sprintf("avg:trace.http.server.request{service:%s}", meta.Name)
 			}
+		// Error and request counts, the two halves of a smoothed error rate. Bucketed by
+		// the REQUESTED STEP rather than the window, because a consumer that derives a
+		// constant from these (the anomaly detector's Laplace K) calibrates it per bucket.
+		//
+		// Datadog counts a span as an error when the tracer marks it failed -- in
+		// practice 5xx -- so the numerator reads lower than the Prometheus one, which
+		// counts 4xx too. Same caveat the http_error_rate key already carries.
+		case "workload_http_request_count":
+			if meta.Name != "" {
+				queries[metricKey] = fmt.Sprintf("sum:trace.http.server.request.hits{service:%s}.as_count().rollup(sum, %d)",
+					meta.Name, datadogRollupSeconds(meta.Step))
+			}
+		case "workload_http_error_count":
+			if meta.Name != "" {
+				queries[metricKey] = fmt.Sprintf("sum:trace.http.server.request.errors{service:%s}.as_count().rollup(sum, %d)",
+					meta.Name, datadogRollupSeconds(meta.Step))
+			}
 		case "cpu_request":
 			queries[metricKey] = fmt.Sprintf("avg:kubernetes.cpu.requests{%s}%s", filterStr, groupBy)
 		case "cpu_limit":

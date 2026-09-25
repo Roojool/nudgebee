@@ -374,7 +374,7 @@ def _detect_inner() -> Response:
 
             all_data_result = algo_obj.load_data_from_prometheus(
                 account_id=str(data.get("account")),
-                query=data["query"],
+                column=data["query"],
                 start_time=historical_start_time,
                 end_time=analysis_end_time,
                 step=step,

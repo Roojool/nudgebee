@@ -362,12 +362,54 @@ def test_memory_single_spike_still_flagged():
     assert resp.has_anomaly is True
 
 
-def test_errorrate_query_is_laplace_smoothed():
-    """Guard Rule 1 (can't be functionally tested offline): the query must be the smoothed form."""
-    q = get_metric_spec("errorrate").query_fmt
-    assert "increase(" in q and "+ 10)" in q
-    assert get_metric_spec("errorrate").default_threshold == 0.05
-    assert get_metric_spec("errorrate").min_sustained_points == 3
+def test_errorrate_is_laplace_smoothed():
+    """Guard Rule 1: the error rate must be the smoothed form, errors / (requests + K).
+
+    This used to assert on the substring "+ 10)" in a PromQL template because the
+    smoothing lived inside the query and "can't be functionally tested offline". It now
+    lives in _errorrate_laplace, so assert the property that actually matters: a single
+    error in a single request must NOT read as a 100% error rate.
+    """
+    spec = get_metric_spec("errorrate")
+    assert spec.combine is not None, "errorrate must combine its two count keys"
+
+    idx = pd.date_range("2026-01-01", periods=3, freq="2min")
+    errors = pd.Series([1.0, 0.0, 50.0], index=idx)
+    requests = pd.Series([1.0, 1000.0, 100.0], index=idx)
+    rate = spec.combine(errors, requests)
+
+    # 1 error in 1 request: smoothed to 1/(1+K), nowhere near 1.0
+    assert rate.iloc[0] == pytest.approx(1 / 11)
+    assert rate.iloc[0] < 0.1
+    # no errors is still zero, whatever the volume
+    assert rate.iloc[1] == 0.0
+    # high volume is essentially unaffected by K
+    assert rate.iloc[2] == pytest.approx(50 / 110)
+
+    assert spec.default_threshold == 0.05
+    assert spec.min_sustained_points == 3
+
+
+def test_errorrate_absence_contract_is_asymmetric():
+    """An absent error count means "no errors"; an absent request count means no data.
+
+    Conflating the two would cancel error-rate detection for every healthy workload —
+    measured on dev, 231 of 299 workloads with HTTP traffic have never returned a 4xx/5xx
+    and so have no series at all for the numerator.
+    """
+    keys = {k.name: k for k in get_metric_spec("errorrate").utilisation_keys}
+    assert keys["workload_http_error_count"].zero_when_absent is True
+    assert keys["workload_http_request_count"].zero_when_absent is False
+
+
+def test_usage_specs_cancel_when_absent():
+    """For cpu/memory/replicas the series exists whenever the workload does, so an empty
+    answer really does mean there is nothing to detect on — none of them zero-fill."""
+    for anomaly_type in ("cpu", "memory", "replicas"):
+        spec = get_metric_spec(anomaly_type)
+        assert spec.utilisation_keys, f"{anomaly_type} should be answered by key"
+        for key in spec.utilisation_keys:
+            assert key.zero_when_absent is False, f"{anomaly_type}/{key.name} must not zero-fill"
 
 
 # --- Memory baseline gate: recurrence-suppress + sustained-detect --------------------------
