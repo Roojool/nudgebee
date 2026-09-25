@@ -459,9 +459,9 @@ func init() {
 	viper.SetDefault("app_database_url", "")
 	viper.SetDefault("nudgebee_license", "")
 	viper.SetDefault("app_database_max_connection", "20")
-	viper.SetDefault("app_database_min_connection", "2")
+	viper.SetDefault("app_database_min_connection", "5")
 	viper.SetDefault("app_database_idle_minutes", "5")
-	viper.SetDefault("app_database_conn_max_lifetime_minutes", "5")
+	viper.SetDefault("app_database_conn_max_lifetime_minutes", "15")
 	viper.SetDefault("app_database_query_timeout_seconds", "120")
 	viper.SetDefault("nudgebee_encryption_key", "")
 
