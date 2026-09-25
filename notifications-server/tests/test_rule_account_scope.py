@@ -178,10 +178,12 @@ def test_explicit_all_widens_an_account_optional_rule():
     assert result == (SCOPE_ALL, [])
 
 
-def test_new_account_scoped_rule_needs_accounts():
-    for data in ({}, {"scope_mode": SCOPE_ALL}, {"scope_mode": SCOPE_ACCOUNTS, "account_ids": []}):
+def test_new_account_scoped_rule_needs_accounts_unless_it_asks_for_all():
+    # Older clients never send scope_mode, so they still have to name an account.
+    for data in ({}, {"scope_mode": SCOPE_ACCOUNTS, "account_ids": []}):
         with pytest.raises(InvalidRuleError):
             _resolve_scope(data, "troubleshoot", None, [])
+    assert _resolve_scope({"scope_mode": SCOPE_ALL}, "troubleshoot", None, []) == (SCOPE_ALL, [])
 
 
 def test_existing_all_accounts_rule_stays_editable():

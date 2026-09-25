@@ -624,10 +624,16 @@ async def save_or_update_rule(data: Dict[Any, Any]):
     return JSONResponse(response, status_code=201)
 
 
-@router.post("/rules/order", status_code=201, dependencies=[Depends(verify_action_token)])
-async def update_rule_order(data: Dict[Any, Any]):
-    service = NotificationRulesService(engine)
-    response = await service.update_rule_order(**data)
+@router.post("/rules/defaults", status_code=201, dependencies=[Depends(verify_action_token)])
+async def list_default_policies(data: Dict[Any, Any]):
+    response = await NotificationRulesService(engine).list_default_policies(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/defaults/save", status_code=201, dependencies=[Depends(verify_action_token)])
+async def upsert_default_policy(data: Dict[Any, Any]):
+    response = await NotificationRulesService(engine).upsert_default_policy(**data)
     response.pop("status_code", None)
     return JSONResponse(response, status_code=201)
 

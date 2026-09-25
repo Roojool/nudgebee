@@ -51,7 +51,8 @@ class NotificationProcessor:
             async with BaseDB.async_session(self.engine)() as session:
                 matched_rules, _ = await self._rule_matcher.match_notification_rules(session, tenant_id, source, kwargs)
 
-            outcome = resolve_outcome(matched_rules, source=source, honour_batch=False)
+            default_policy = await self._rules_service.get_default_policy(tenant_id, source)
+            outcome = resolve_outcome(matched_rules, source=source, honour_batch=False, default_policy=default_policy)
             if outcome.response is not None:
                 return None
 

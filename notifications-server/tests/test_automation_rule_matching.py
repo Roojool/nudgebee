@@ -17,6 +17,7 @@ from notifications_server.services.message import (
     NotificationRuleMatcher,
     _event_type_matches,
     _finding_rule_source,
+    resolve_outcome,
 )
 from notifications_server.services.rules import AUTOMATION_EVENT_TYPES, _resolve_scope, validate_fields
 
@@ -177,38 +178,92 @@ def _matched(**overrides):
     return [row]
 
 
+def _effect(rows, source=None, event_type=None):
+    return resolve_outcome(rows, source=source, event_type=event_type).response
+
+
 def test_suppressed_rule_drops_task_update():
-    result = MessageService._maybe_return_rule_effect(
-        _matched(), "tenant-1", source=AUTOMATION_SOURCE, event_type="automation.task.completed"
-    )
+    result = _effect(_matched(), source=AUTOMATION_SOURCE, event_type="automation.task.completed")
     assert result and result[0]["status"] == "suppressed"
 
 
 def test_approval_request_is_never_suppressed_or_snoozed():
     for row in (_matched(), _matched(suppressed=False, expires_at=__import__("datetime").datetime.max)):
-        result = MessageService._maybe_return_rule_effect(
-            row, "tenant-1", source=AUTOMATION_SOURCE, event_type="automation.approval.requested"
-        )
-        assert result is None
+        assert _effect(row, source=AUTOMATION_SOURCE, event_type="automation.approval.requested") is None
 
 
 def test_batch_effect_is_skipped_for_automation_messages():
     row = _matched(suppressed=False, delivery_mode="batch")
-    assert (
-        MessageService._maybe_return_rule_effect(
-            row, "tenant-1", source=AUTOMATION_SOURCE, event_type="automation.task.completed"
-        )
-        is None
-    )
+    assert _effect(row, source=AUTOMATION_SOURCE, event_type="automation.task.completed") is None
     # Findings keep the batch behaviour.
-    queued = MessageService._maybe_return_rule_effect(row, "tenant-1", source="troubleshoot", event_type=None)
+    queued = _effect(row, source="troubleshoot")
     assert queued and queued[0]["status"] == "queued"
 
 
-def test_effect_signature_is_backward_compatible():
-    assert MessageService._maybe_return_rule_effect([], "tenant-1") is None
-    result = MessageService._maybe_return_rule_effect(_matched(), "tenant-1")
-    assert result and result[0]["status"] == "suppressed"
+class _ThreadMatcher:
+    def __init__(self, matched, policy):
+        self._matched = matched
+        self.rules_service = SimpleNamespace(get_default_policy=self._policy)
+        self._policy_value = policy
+        self.policy_sources = []
+
+    async def _policy(self, _tenant_id, source):
+        self.policy_sources.append(source)
+        return self._policy_value
+
+    async def match_notification_rules(self, *_args):
+        return self._matched, AUTOMATION_SOURCE
+
+
+class _ThreadSession:
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _threaded_send(monkeypatch, matched, policy, event_type):
+    from notifications_server.schemas.message import SendMessageRequest
+    from notifications_server.services import message as message_module
+
+    monkeypatch.setattr(message_module.BaseDB, "async_session", staticmethod(lambda engine: _ThreadSession()))
+    service = MessageService.__new__(MessageService)
+    service.engine = None
+    service.rule_matcher = _ThreadMatcher(matched, policy)
+    sent = []
+
+    async def send_threaded_reply(tenant_id, thread, parameters):
+        sent.append(thread)
+        return [{"platform": "slack", "status": "success"}]
+
+    service.send_threaded_reply = send_threaded_reply
+    request = SendMessageRequest(
+        tenant_id="tenant-1",
+        source=AUTOMATION_SOURCE,
+        event_type=event_type,
+        parameters={"message": "run finished", "account_id": "acc-1"},
+        thread={"message_ts": "1.2", "channel_id": "C1", "platform": "slack"},
+    )
+    return asyncio.run(service.send_message(request)), sent, service.rule_matcher.policy_sources
+
+
+def test_a_threaded_task_update_follows_the_automation_default(monkeypatch):
+    drop = {"action": "drop", "mappings": []}
+    result, sent, sources = _threaded_send(monkeypatch, [], drop, "automation.task.progress")
+    assert result[0]["status"] == "suppressed"
+    assert sent == []
+    assert sources == [AUTOMATION_SOURCE]
+
+
+def test_a_threaded_approval_request_ignores_a_drop_default(monkeypatch):
+    drop = {"action": "drop", "mappings": []}
+    result, sent, _ = _threaded_send(monkeypatch, [], drop, "automation.approval.requested")
+    assert result == [{"platform": "slack", "status": "success"}]
+    assert len(sent) == 1
 
 
 # ----------------------------- validation -----------------------------

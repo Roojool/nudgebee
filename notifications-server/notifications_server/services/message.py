@@ -6,7 +6,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from itertools import groupby
 from typing import Dict, Any, List, Optional
 
 from notifications_server.utils.datetime_utils import utc_now
@@ -25,7 +24,12 @@ from notifications_server.models.enums import PlatformTypes
 from notifications_server.schemas.message import SendMessageRequest
 from notifications_server.services.cache import Cache
 from notifications_server.services.response_helpers import success_response, failed_response, system_response
-from notifications_server.services.rules import NotificationRulesService, rule_order_key as _rule_order_key
+from notifications_server.services.rules import (
+    DEFAULT_CHANNELS,
+    DEFAULT_DELIVER,
+    NotificationRulesService,
+    rule_sort_key,
+)
 from notifications_server.services import weekly_digest_report
 from notifications_server.message_templates.slack.weekly_digest_events import digest_link, digest_verdict
 from notifications_server.services.slack.slack import retriable_slack_api_error, slack_channel_not_found_error
@@ -131,60 +135,73 @@ def normalize_channel(channel):
 @dataclass
 class RuleOutcome:
     """What the matched rules decide for one message. `response` is set when
-    nothing is delivered; otherwise `targets` are the matched-rule entries whose
-    mappings receive the message, and `use_defaults` says whether platforms no
-    target names still get the installation's default channel."""
+    nothing is delivered (`stopped_by` names the rule that stopped it, if one
+    did); otherwise `targets` are the mapping entries that receive the message,
+    and `use_defaults` says whether platforms no target names still get the
+    installation's default channel."""
 
     response: Optional[List[Dict[str, Any]]]
     targets: List[Dict[str, Any]]
     use_defaults: bool
-    deciding_rule_id: Any = None
+    stopped_by: Any = None
 
 
-def resolve_outcome(matched_rules, source=None, event_type=None, honour_batch=True) -> RuleOutcome:
-    """Walk the matched rules in evaluation order. A suppress rule or an active
-    snooze stops the walk; a deliver rule adds its mappings and stops unless it
-    continues matching. Copies collected before a stop are still delivered.
-    Batch rules sit outside the order: any matching batch rule queues the
-    message. With honour_batch off (email tasks, which have no digest) batch
-    rules are ordinary rules. Approval requests are never stopped."""
-    if not matched_rules:
-        return RuleOutcome(None, [], True)
+def resolve_outcome(matched_rules, source=None, event_type=None, honour_batch=True, default_policy=None) -> RuleOutcome:
+    """Every matching rule applies. Any matching suppress rule or active snooze
+    stops the message on every channel; otherwise any matching batch rule queues
+    it (email tasks, which have no digest, pass honour_batch=False); otherwise it
+    goes to the channels of every matching rule. Approval requests are never
+    stopped.
+
+    When no deliver rule matched, the source's default policy decides: each
+    platform's default channel (also when there is no policy), the policy's own
+    channels, or nothing. When deliver rules matched, platforms they do not name
+    get their default channel only under the first of those."""
     non_suppressible = event_type in NON_SUPPRESSIBLE_EVENT_TYPES
     now = utc_now()
-    targets = []
-    stop = None
-    deciding_rule_id = None
-    for _, group in groupby(matched_rules, key=lambda entry: str(entry["rule_id"])):
-        entries = list(group)
-        rule = entries[0]
-        if rule["suppressed"] or (rule["expires_at"] and rule["expires_at"] > now):
-            if non_suppressible:
-                continue
-            stop = rule
-            break
-        if honour_batch and rule.get("delivery_mode") == "batch":
-            continue
-        targets.extend(entry for entry in entries if entry.get("platform"))
-        if not rule.get("continue_matching", True):
-            deciding_rule_id = rule["rule_id"]
-            break
 
-    if stop is not None:
-        if targets:
-            return RuleOutcome(None, targets, False, stop["rule_id"])
-        if stop["suppressed"]:
+    def snoozed(entry):
+        return bool(entry["expires_at"]) and entry["expires_at"] > now
+
+    if not non_suppressible:
+        suppressing = next((entry for entry in matched_rules if entry["suppressed"]), None)
+        if suppressing is not None:
             response = system_response("suppressed", "Notification suppressed by notification rule configuration")
-        else:
-            response = system_response("snoozed", f"Notification snoozed until {stop['expires_at']}")
-        return RuleOutcome([response], [], False, stop["rule_id"])
+            return RuleOutcome([response], [], False, suppressing["rule_id"])
+        snoozing = next((entry for entry in matched_rules if snoozed(entry)), None)
+        if snoozing is not None:
+            response = system_response("snoozed", f"Notification snoozed until {snoozing['expires_at']}")
+            return RuleOutcome([response], [], False, snoozing["rule_id"])
 
     # The batch digest is built from the events table, so a queued automation
     # message would never be delivered.
     if honour_batch and not non_suppressible and source != AUTOMATION_SOURCE and is_batch_delivery(matched_rules):
         return RuleOutcome([system_response("queued", "Notification queued for batch delivery")], [], False)
 
-    return RuleOutcome(None, targets, True, deciding_rule_id)
+    delivering = [
+        entry
+        for entry in matched_rules
+        if not entry["suppressed"]
+        and not snoozed(entry)
+        and not (honour_batch and entry.get("delivery_mode") == "batch")
+    ]
+    targets = [entry for entry in delivering if entry.get("platform")]
+    policy_action = (default_policy or {}).get("action", DEFAULT_DELIVER)
+    if delivering:
+        return RuleOutcome(None, targets, policy_action == DEFAULT_DELIVER)
+    if policy_action == DEFAULT_DELIVER or (non_suppressible and policy_action != DEFAULT_CHANNELS):
+        return RuleOutcome(None, [], True)
+    if policy_action == DEFAULT_CHANNELS:
+        default_targets = [
+            {"rule_id": None, "platform": mapping["platform"], "channels": mapping["channels"]}
+            for mapping in default_policy.get("mappings") or []
+        ]
+        return RuleOutcome(None, default_targets, False)
+    return RuleOutcome(
+        [system_response("suppressed", "No notification rule matched and the default for this source is to drop")],
+        [],
+        False,
+    )
 
 
 def _distinct_rule_channels(matched_rules, platform):
@@ -267,10 +284,38 @@ def _scope_matches(rule, account_id):
     return False
 
 
-def _continues(rule):
-    # An unordered deliver rule keeps the old meaning: every matching rule applies.
-    value = getattr(rule, "continue_matching", None)
-    return True if value is None else bool(value)
+_EXCEPTION_FIELDS = {
+    "account_ids": "account_id",
+    "namespaces": "namespace",
+    "workloads": "workload",
+    "aggregation_keys": "aggregation_key",
+}
+
+
+def _excluded(rule, account_id, namespace, workload, aggregation_key):
+    """Whether the rule's exceptions leave this finding out: some group lists the
+    finding's value under every key the group has. Saves store exceptions as
+    lists of strings; anything else is ignored so one bad row cannot break
+    matching for the whole tenant."""
+    exceptions = getattr(rule, "exceptions", None)
+    if not isinstance(exceptions, list):
+        return False
+    values = {
+        "account_id": account_id,
+        "namespace": namespace,
+        "workload": workload,
+        "aggregation_key": aggregation_key,
+    }
+    for group in exceptions:
+        if not isinstance(group, dict) or not group:
+            continue
+        for key, listed in group.items():
+            value = values.get(_EXCEPTION_FIELDS.get(key))
+            if value is None or not isinstance(listed, list) or str(value) not in listed:
+                break
+        else:
+            return True
+    return False
 
 
 def _finding_rule_source(source):
@@ -355,9 +400,10 @@ class NotificationRuleMatcher:
                     and (type_ != "finding" or _severity_matches(rule.severity, finding_priority))
                     and _event_type_matches(rule, source, event_type)
                     and rule.is_active
+                    and not _excluded(rule, account_id, namespace, workload, aggregation_key)
                 )
             ),
-            key=_rule_order_key,
+            key=rule_sort_key,
         )
 
         if not truly_matched_rules:
@@ -396,7 +442,6 @@ class NotificationRuleMatcher:
                         "expires_at": rule.expires_at,
                         "delivery_mode": rule.delivery_mode,
                         "severity": rule.severity,
-                        "continue_matching": _continues(rule),
                     }
                     for mapping in mappings
                 )
@@ -414,7 +459,6 @@ class NotificationRuleMatcher:
                         "expires_at": rule.expires_at,
                         "delivery_mode": rule.delivery_mode,
                         "severity": rule.severity,
-                        "continue_matching": _continues(rule),
                     }
                 )
 
@@ -751,7 +795,10 @@ class GroupedMessageHandler:
                         session, tenant_id, orig_type, first_msg
                     )
 
-                    outcome = resolve_outcome(matched_rules, source=source)
+                    default_policy = await self.message_service.rule_matcher.rules_service.get_default_policy(
+                        tenant_id, source
+                    )
+                    outcome = resolve_outcome(matched_rules, source=source, default_policy=default_policy)
                     if outcome.response is not None:
                         LOG.debug("Skipping flush for %s due to suppression or batch rule", key)
                         return {"status": "ok"}
@@ -840,11 +887,15 @@ class MessageService:
                         matched_rules, _ = await self.rule_matcher.match_notification_rules(
                             session, tenant_id, type_, payload
                         )
-                    rule_result = self._maybe_return_rule_effect(
-                        matched_rules, tenant_id, source=source, event_type=payload.get("event_type")
+                    default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+                    outcome = resolve_outcome(
+                        matched_rules,
+                        source=source,
+                        event_type=payload.get("event_type"),
+                        default_policy=default_policy,
                     )
-                    if rule_result is not None:
-                        return rule_result
+                    if outcome.response is not None:
+                        return outcome.response
                 return await self.send_threaded_reply(tenant_id, thread, parameters)
 
             if type_ == "finding_resolved":
@@ -875,7 +926,10 @@ class MessageService:
                             )
                         ]
 
-                outcome = resolve_outcome(matched_rules, source=source, event_type=payload.get("event_type"))
+                default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+                outcome = resolve_outcome(
+                    matched_rules, source=source, event_type=payload.get("event_type"), default_policy=default_policy
+                )
                 if outcome.response is not None:
                     return outcome.response
 
@@ -920,10 +974,6 @@ class MessageService:
             return await self.group_handler.enqueue(anomaly)
 
         return None
-
-    @staticmethod
-    def _maybe_return_rule_effect(matched_rules, tenant_id, source=None, event_type=None):
-        return resolve_outcome(matched_rules, source=source, event_type=event_type).response
 
     async def trigger_notification(
         self,

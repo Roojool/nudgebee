@@ -237,11 +237,10 @@ class NotificationRules(Base):
     # notification_rule_accounts rows (loaded onto the instance as account_ids);
     # account_id is only a compatibility mirror for older clients.
     scope_mode = Column(String, nullable=True)
-    # Rules of one source are evaluated by ascending position: the first match
-    # decides unless it has continue_matching. NULL means a row written without
-    # an order (see _rule_order_key).
-    position = Column(Integer, nullable=True)
-    continue_matching = Column(Boolean, nullable=True)
+    # Findings the rule leaves out: a list of groups, each mapping account_ids,
+    # namespaces, workloads or aggregation_keys to values. A finding is left out
+    # when every key of some group lists its value.
+    exceptions = Column(JSON, nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -263,8 +262,7 @@ class NotificationRules(Base):
             "event_types": self.event_types,
             "scope_mode": self.scope_mode,
             "account_ids": getattr(self, "account_ids", None),
-            "position": self.position,
-            "continue_matching": self.continue_matching,
+            "exceptions": self.exceptions,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -305,11 +303,24 @@ class NotificationRules(Base):
             severity=data.get("severity"),
             event_types=data.get("event_types"),
             scope_mode=data.get("scope_mode"),
-            position=data.get("position"),
-            continue_matching=data.get("continue_matching"),
+            exceptions=data.get("exceptions"),
         )
         rule.account_ids = data.get("account_ids")
         return rule
+
+
+class NotificationDefaultPolicy(Base):
+    """What happens to a notification no rule decides, per tenant and source; no
+    row means every platform's default channel."""
+
+    __tablename__ = "notification_default_policies"
+
+    tenant_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    source = Column(String, primary_key=True)
+    action = Column(String, nullable=False)
+    mappings = Column(JSON, nullable=False, default=list)
+    updated_by = Column(PG_UUID(as_uuid=True), nullable=True)
+    updated_at = Column(DateTime, nullable=False)
 
 
 class NotificationRuleAccounts(Base):

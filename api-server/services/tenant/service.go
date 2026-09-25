@@ -2427,6 +2427,7 @@ func DeleteTenant(ctx *security.RequestContext, request TenantDeleteRequest) (Te
 		{name: "notification_channel_account_mappings"},
 		{name: "notification_rule_mappings"},
 		{name: "notification_rules"},
+		{name: "notification_default_policies"},
 		{name: "notifications", tenantColumn: "tenant"},
 		// knowledge graph
 		{name: "knowledge_graph_edge"},

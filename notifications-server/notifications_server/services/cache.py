@@ -106,7 +106,7 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return
-        key = f"notification_rules:v3:{tenant_id}"
+        key = f"notification_rules:v4:{tenant_id}"
         with self.redis_client.pipeline() as pipe:
             try:
                 rules_dict = [rule.to_dict() if hasattr(rule, "to_dict") else rule for rule in rules]
@@ -122,7 +122,7 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return None
-        key = f"notification_rules:v3:{tenant_id}"
+        key = f"notification_rules:v4:{tenant_id}"
         rules_json = self.redis_client.get(key)
         if rules_json:
             rules_data = json.loads(rules_json)
@@ -135,17 +135,36 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return
-        key = f"notification_rules:v3:{tenant_id}"
+        key = f"notification_rules:v4:{tenant_id}"
         with self.redis_client.pipeline() as pipe:
             try:
                 pipe.delete(key)
+                pipe.delete(f"notification_defaults:v1:{tenant_id}")
                 # Earlier keys too, for older pods still running during a rollout.
+                pipe.delete(f"notification_rules:v3:{tenant_id}")
                 pipe.delete(f"notification_rules:v2:{tenant_id}")
                 pipe.delete(f"notification_rules:{tenant_id}")
                 pipe.execute()
                 LOG.info(f"Cache entry for key '{key}' deleted successfully.")
             except redis.RedisError as e:
                 LOG.exception(f"Error deleting cache entry for key '{key}': {e}")
+
+    def cache_default_policies(self, tenant_id, policies):
+        self._ensure_connection()
+        if not self.redis_client:
+            return
+        key = f"notification_defaults:v1:{tenant_id}"
+        try:
+            self.redis_client.set(key, json.dumps(policies), ex=settings.redis.cache_expiration_minutes * 60)
+        except redis.RedisError as e:
+            LOG.exception(f"Error caching notification default policies for tenant {tenant_id}: {e}")
+
+    def get_default_policies(self, tenant_id):
+        self._ensure_connection()
+        if not self.redis_client:
+            return None
+        cached = self.redis_client.get(f"notification_defaults:v1:{tenant_id}")
+        return json.loads(cached) if cached else None
 
     def cache_event_entry(self, thread_ts, event_entry):
         self._ensure_connection()

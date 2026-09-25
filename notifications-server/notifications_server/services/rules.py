@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import inspect, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm.attributes import flag_modified, set_committed_value
@@ -16,6 +17,7 @@ from notifications_server.models.db_base import BaseDB
 from notifications_server.models.enums import EventCategory, EventType, EventAction, EventStatus, EventActor
 from notifications_server.models.models import (
     CloudAccount,
+    NotificationDefaultPolicy,
     NotificationRuleAccounts,
     NotificationRuleMappings,
     NotificationRules,
@@ -111,48 +113,47 @@ AUTOMATION_EVENT_TYPES = (
 SCOPE_ALL = "all"
 SCOPE_ACCOUNTS = "accounts"
 
-# Positions are rewritten as multiples of this step whenever a source's order changes.
-ORDER_STEP = 1000
-_NARROWING_FIELDS = ("namespace", "workload", "aggregation_key", "severity")
+# What happens to a notification no rule decides; no row means DEFAULT_DELIVER.
+DEFAULT_DELIVER = "deliver_defaults"
+DEFAULT_CHANNELS = "deliver_channels"
+DEFAULT_DROP = "drop"
+DEFAULT_ACTIONS = (DEFAULT_DELIVER, DEFAULT_CHANNELS, DEFAULT_DROP)
+DEFAULT_POLICY_SOURCES = ("troubleshoot", "optimize", "slo", "cloud", "automation", "daily_recap", "weekly_digest")
+
+EXCEPTION_KEYS = ("account_ids", "namespaces", "workloads", "aggregation_keys")
+MAX_EXCEPTION_GROUPS = 20
+MAX_EXCEPTION_VALUES = 100
 
 
-def _is_stop_rule(rule):
-    # Same test as resolve_outcome: a snooze stops only while its window is open.
-    return bool(rule.is_suppressed) or (rule.expires_at is not None and rule.expires_at > utc_now())
+def rule_sort_key(rule):
+    # Matching is order-free; this only keeps channel lists deterministic.
+    return (getattr(rule, "created_at", None) or datetime.min, str(rule.id))
 
 
-def rule_order_key(rule):
-    """Evaluation order within a source. A rule with no position was written by
-    code that predates ordering (or the column is missing); it keeps its old
-    meaning, where any matching suppress or snooze wins, by placing unordered stop
-    rules before every ordered rule and unordered deliver rules after them."""
-    position = getattr(rule, "position", None)
-    if position is None:
-        band = -1 if _is_stop_rule(rule) else 1
-        position = 0
-    else:
-        band = 0
-    created_at = getattr(rule, "created_at", None) or datetime.min
-    return (band, position, created_at, str(rule.id))
-
-
-def _is_broader(rule, rule_account_ids, fields, scope_mode, account_ids):
-    """Whether `rule` matches every event a rule with `fields`, `scope_mode` and
-    `account_ids` matches, so a new rule placed above it can act as an exception."""
-    if rule.scope_mode != SCOPE_ALL:
-        if scope_mode == SCOPE_ALL or not set(account_ids) <= set(rule_account_ids):
-            return False
-    for key in _NARROWING_FIELDS:
-        value = getattr(rule, key)
-        if value is not None and value != fields.get(key):
-            return False
-    new_event_types = fields.get("event_types")
-    if rule.event_types and not new_event_types:
-        return False
-    if new_event_types is not None:
-        if not rule.event_types or not set(new_event_types) <= set(rule.event_types):
-            return False
-    return True
+def normalize_exceptions(raw):
+    """Validate a rule's exceptions: a list of groups, each mapping keys from
+    EXCEPTION_KEYS to non-empty lists of strings. Returns the cleaned list (an
+    empty list clears them) or raises InvalidRuleError."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > MAX_EXCEPTION_GROUPS:
+        raise InvalidRuleError(Err.OS0011.value[0] % "exceptions")
+    groups = []
+    for group in raw:
+        if not isinstance(group, dict) or not group or set(group) - set(EXCEPTION_KEYS):
+            raise InvalidRuleError(Err.OS0011.value[0] % "exceptions")
+        cleaned = {}
+        for key, values in group.items():
+            if (
+                not isinstance(values, list)
+                or not values
+                or len(values) > MAX_EXCEPTION_VALUES
+                or not all(isinstance(v, str) and v.strip() for v in values)
+            ):
+                raise InvalidRuleError(Err.OS0011.value[0] % f"exceptions.{key}")
+            cleaned[key] = list(dict.fromkeys(v.strip() for v in values))
+        groups.append(cleaned)
+    return groups
 
 
 def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
@@ -183,7 +184,14 @@ def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
             scope_mode = SCOPE_ALL
 
     keeps_existing_all = existing_rule is not None and existing_rule.scope_mode == SCOPE_ALL and scope_mode == SCOPE_ALL
-    if source not in ACCOUNT_OPTIONAL_SOURCES and scope_mode != SCOPE_ACCOUNTS and not keeps_existing_all:
+    # Only a client that knows about scopes sends scope_mode; older clients keep
+    # needing an account on these sources.
+    explicit_all = rule_data.get("scope_mode") == SCOPE_ALL
+    if (
+        source not in ACCOUNT_OPTIONAL_SOURCES
+        and scope_mode != SCOPE_ACCOUNTS
+        and not (keeps_existing_all or explicit_all)
+    ):
         raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
     if scope_mode == SCOPE_ACCOUNTS and not account_ids:
         raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
@@ -306,10 +314,8 @@ class NotificationRulesService:
                 source = rule_data.get("source")
 
                 fields = {k: v for k, v in rule_data.items() if hasattr(NotificationRules, k)}
-                # Order changes only through notifications_update_rule_order.
-                fields.pop("position", None)
-                if "continue_matching" in fields and not isinstance(fields["continue_matching"], bool):
-                    raise InvalidRuleError(Err.OS0011.value[0] % "continue_matching")
+                if "exceptions" in rule_data:
+                    fields["exceptions"] = normalize_exceptions(rule_data["exceptions"])
                 if "expires_at" in fields and isinstance(fields["expires_at"], str):
                     parsed = datetime.fromisoformat(fields["expires_at"])
                     fields["expires_at"] = (
@@ -325,6 +331,10 @@ class NotificationRulesService:
                 scope_mode, account_ids = _resolve_scope(rule_data, source, existing_rule, existing_account_ids)
                 account_names = await self._get_tenant_account_names(session, tenant_id, account_ids)
                 fields["scope_mode"] = scope_mode
+                exceptions = (
+                    fields["exceptions"] if "exceptions" in fields else getattr(existing_rule, "exceptions", None)
+                )
+                await self._validate_exceptions(session, tenant_id, exceptions, scope_mode, fields)
                 fields["account_id"] = account_ids[0] if account_ids else None
                 fields["cluster"] = account_names[account_ids[0]] if account_ids else None
 
@@ -332,13 +342,9 @@ class NotificationRulesService:
                     self._update_existing_rule(existing_rule, fields, user_id)
                     rule_id = existing_rule.id
                 else:
-                    # A client that predates ordering expects every matching rule to apply.
-                    fields.setdefault("continue_matching", True)
                     rule_id = self._create_new_rule(session, fields, tenant_id, user_id, rule_data)
                 await session.flush()
                 await self._replace_rule_accounts(session, rule_id, tenant_id, account_ids)
-                if not existing_rule:
-                    await self._place_new_rule(session, tenant_id, source, rule_id, fields, scope_mode, account_ids)
 
                 if rule_data.get("mappings") is not None:
                     await self._save_mappings_data(
@@ -455,84 +461,102 @@ class NotificationRulesService:
         result = await session.execute(select(NotificationRuleAccounts.account_id).filter_by(rule_id=rule_id))
         return [str(account_id) for account_id in result.scalars().all()]
 
-    @staticmethod
-    async def _lock_source_order(session, tenant_id, source):
-        # Serialises every rewrite of one source's order, so concurrent saves never
-        # compute positions from different snapshots.
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-            {"key": f"notification_rule_order:{tenant_id}:{source}"},
-        )
+    async def _validate_exceptions(self, session, tenant_id, exceptions, scope_mode, fields):
+        if not exceptions:
+            return
+        # A save sets delivery_mode to what it sends (an update clears one it omits).
+        if fields.get("delivery_mode") == "batch":
+            raise InvalidRuleError(Err.OS0011.value[0] % "exceptions: not available for batch rules")
+        account_ids = [a for group in exceptions for a in group.get("account_ids", [])]
+        if account_ids:
+            if scope_mode != SCOPE_ALL:
+                raise InvalidRuleError(
+                    Err.OS0011.value[0] % "exceptions.account_ids: only a rule for all accounts can leave accounts out"
+                )
+            await self._get_tenant_account_names(session, tenant_id, list(dict.fromkeys(account_ids)))
 
-    @staticmethod
-    async def _load_source_rules(session, tenant_id, source):
-        result = await session.execute(select(NotificationRules).filter_by(tenant_id=tenant_id, source=source))
-        return sorted(result.scalars().all(), key=rule_order_key)
+    def invalidate_cached_rules(self, tenant_id):
+        self._invalidate_cache(tenant_id)
 
-    @staticmethod
-    def _write_positions(ordered_rules):
-        for index, rule in enumerate(ordered_rules):
-            rule.position = (index + 1) * ORDER_STEP
+    async def get_default_policies(self, tenant_id):
+        """{source: {"action", "mappings"}} for the tenant's saved defaults. Read in
+        its own session so a missing table (a release running ahead of its
+        migration) cannot abort the caller's transaction; that case reads as no
+        saved defaults and is not cached."""
+        if self.cache and self.cache.redis_client:
+            cached = self.cache.get_default_policies(tenant_id)
+            if cached is not None:
+                return cached
+        async with BaseDB.async_session(self.engine)() as session:
+            try:
+                result = await session.execute(select(NotificationDefaultPolicy).filter_by(tenant_id=tenant_id))
+                policies = {
+                    row.source: {"action": row.action, "mappings": row.mappings or []} for row in result.scalars()
+                }
+            except ProgrammingError as e:
+                if not _is_missing_schema(e):
+                    LOG.exception("Error loading notification default policies for tenant %s: %s", tenant_id, e)
+                return {}
+            except Exception as e:
+                LOG.exception("Error loading notification default policies for tenant %s: %s", tenant_id, e)
+                return {}
+        if self.cache and self.cache.redis_client:
+            self.cache.cache_default_policies(tenant_id, policies)
+        return policies
 
-    async def _place_new_rule(self, session, tenant_id, source, rule_id, fields, scope_mode, account_ids):
-        """Insert a new rule directly above the first rule of its source that is
-        broader on every dimension, or at the end, and rewrite the order."""
-        await self._lock_source_order(session, tenant_id, source)
-        rules = await self._load_source_rules(session, tenant_id, source)
-        new_rule = next(rule for rule in rules if str(rule.id) == str(rule_id))
-        others = [rule for rule in rules if rule is not new_rule]
-        accounts_by_rule = await self._get_accounts_by_rule(session, [rule.id for rule in others])
-        insert_at = next(
-            (
-                index
-                for index, rule in enumerate(others)
-                if _is_broader(rule, accounts_by_rule.get(str(rule.id), []), fields, scope_mode, account_ids)
-            ),
-            len(others),
-        )
-        self._write_positions(others[:insert_at] + [new_rule] + others[insert_at:])
+    async def get_default_policy(self, tenant_id, source):
+        return (await self.get_default_policies(tenant_id)).get(source)
 
-    @staticmethod
-    async def _get_accounts_by_rule(session, rule_ids):
-        if not rule_ids:
-            return {}
-        result = await session.execute(
-            select(NotificationRuleAccounts.rule_id, NotificationRuleAccounts.account_id).filter(
-                NotificationRuleAccounts.rule_id.in_(rule_ids)
-            )
-        )
-        accounts = {}
-        for rule_id, account_id in result.all():
-            accounts.setdefault(str(rule_id), []).append(str(account_id))
-        return accounts
+    async def list_default_policies(self, **kwargs):
+        tenant_id = (kwargs.get("session_variables") or {}).get("tenant_id")
+        if not tenant_id:
+            return {"error": "tenant is required", "status_code": 400}
+        policies = await self.get_default_policies(tenant_id)
+        return {
+            "policies": [
+                {"source": source, "action": policy["action"], "mappings": policy["mappings"]}
+                for source, policy in sorted(policies.items())
+            ]
+        }
 
-    async def update_rule_order(self, **kwargs):
-        """Set the evaluation order of one source's rules. The request must list
-        every rule of that source exactly once, so a stale editor cannot drop or
-        duplicate a rule's position."""
+    async def upsert_default_policy(self, **kwargs):
         action = kwargs.get("action") or {}
-        if action.get("name") != "notifications_update_rule_order":
+        if action.get("name") != "notifications_upsert_default_policy":
             return {"error": "Unsupported action", "status_code": 400}
         request = (kwargs.get("input") or {}).get("request") or {}
         sess_vars = kwargs.get("session_variables") or {}
         tenant_id = sess_vars.get("tenant_id")
-        user_id = sess_vars.get("user_id")
+        user_id = sess_vars.get("user_id") or None
         source = request.get("source")
-        rule_ids = [str(rule_id) for rule_id in request.get("rule_ids") or []]
-        if not tenant_id or not source:
-            return {"error": "source is required", "status_code": 400}
+        policy_action = request.get("action")
+        mappings = request.get("mappings") or []
+        if not tenant_id:
+            return {"error": "tenant is required", "status_code": 400}
+        if source not in DEFAULT_POLICY_SOURCES:
+            return {"error": Err.OS0011.value[0] % "source", "status_code": 400}
+        if policy_action not in DEFAULT_ACTIONS:
+            return {"error": Err.OS0011.value[0] % "action", "status_code": 400}
+        if policy_action == DEFAULT_CHANNELS:
+            if not isinstance(mappings, list) or not mappings:
+                return {"error": Err.OS0010.value[0] % "mappings", "status_code": 400}
+            if any(
+                not isinstance(m, dict) or not isinstance(m.get("platform"), str) or not m.get("channels")
+                for m in mappings
+            ):
+                return {"error": Err.OS0011.value[0] % "mappings", "status_code": 400}
+            mappings = [{"platform": m["platform"], "channels": m["channels"]} for m in mappings]
+        else:
+            mappings = []
 
         async with BaseDB.async_session(self.engine)() as session:
             try:
-                await self._lock_source_order(session, tenant_id, source)
-                rules = await self._load_source_rules(session, tenant_id, source)
-                by_id = {str(rule.id): rule for rule in rules}
-                if len(set(rule_ids)) != len(rule_ids) or set(rule_ids) != set(by_id):
-                    return {
-                        "error": "The rule list has changed since it was loaded; reload and try again",
-                        "status_code": 409,
-                    }
-                self._write_positions([by_id[rule_id] for rule_id in rule_ids])
+                values = {"action": policy_action, "mappings": mappings, "updated_by": user_id, "updated_at": utc_now()}
+                # One statement, so two first saves of the same default cannot collide.
+                await session.execute(
+                    pg_insert(NotificationDefaultPolicy)
+                    .values(tenant_id=tenant_id, source=source, **values)
+                    .on_conflict_do_update(index_elements=["tenant_id", "source"], set_=values)
+                )
                 self._invalidate_cache(tenant_id)
                 await session.commit()
                 self._invalidate_cache(tenant_id)
@@ -542,16 +566,13 @@ class NotificationRulesService:
                         "error": "Notification rules are being upgraded. Try again in a minute.",
                         "status_code": 503,
                     }
-                LOG.exception("Unexpected error ordering notification rules: %s", e)
-                return {"error": "Unable to reorder notification rules", "status_code": 500}
+                LOG.exception("Unexpected error saving notification default policy: %s", e)
+                return {"error": "Unable to save the notification default", "status_code": 500}
 
         await self._create_audit_entry(
-            source, tenant_id, user_id, {"source": source, "rule_ids": rule_ids}, is_update=True
+            source, tenant_id, user_id, {"source": source, "action": policy_action}, is_update=True
         )
-        return {"source": source, "rule_ids": rule_ids}
-
-    def invalidate_cached_rules(self, tenant_id):
-        self._invalidate_cache(tenant_id)
+        return {"source": source, "action": policy_action, "mappings": mappings}
 
     @staticmethod
     async def _get_tenant_account_names(session, tenant_id, account_ids):

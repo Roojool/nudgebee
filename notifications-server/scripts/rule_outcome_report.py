@@ -1,14 +1,14 @@
-"""Read-only report of the notification rules whose outcome changes when rules are
-evaluated in order instead of "any matching rule wins".
+"""Read-only report of the notification rules whose outcome changes under the
+order-free engine (every matching rule applies, silence wins) compared with the
+combination it replaced.
 
-After the migration orders existing rules, delivery is unchanged except where two
-rules that can match the same event:
+Delivery is unchanged except where two rules that can match the same event:
   extra_copies:  both deliver to one chat platform, on different channels. Both
                  channels now receive the message; before, only one did.
   email_stopped: one suppresses (or is snoozed) and the other has email recipients.
                  The email is now stopped; before, it was still sent.
 
-Usage: DATABASE_URL=postgresql://... python scripts/rule_order_report.py
+Usage: DATABASE_URL=postgresql://... python scripts/rule_outcome_report.py
 """
 
 import itertools

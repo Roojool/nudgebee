@@ -1,10 +1,10 @@
 """
-The migration orders existing rules so the ordered engine reproduces the old
-"any rule wins" combination. This compares the two over random rule sets that
-all match one event. The only allowed differences are the two decided ones:
-several matched rules mapping one platform to different channels now all receive
-the message, and a suppress rule or active snooze now also stops email.
-`old_outcome` is a frozen copy of the combination the ordered engine replaced.
+Rules are order-free: every matching rule applies and silence wins. This compares
+that with the combination it replaced, over random rule sets that all match one
+event, with no saved default. The only allowed differences are the two decided
+ones: several matched rules mapping one platform to different channels now all
+receive the message, and a suppress rule or active snooze now also stops email.
+`old_outcome` is a frozen copy of the replaced combination.
 """
 
 import random
@@ -42,7 +42,7 @@ def random_rules(rng):
     return rules
 
 
-def entries(rules, continue_of):
+def entries(rules):
     out = []
     for r in rules:
         base = dict(
@@ -51,7 +51,6 @@ def entries(rules, continue_of):
             expires_at=r["expires_at"],
             delivery_mode="batch" if r["batch"] else "real_time",
             severity=None,
-            continue_matching=continue_of(r),
         )
         if r["mappings"]:
             for platform, channel in r["mappings"]:
@@ -79,23 +78,8 @@ def old_outcome(rules):
     return "deliver", chat, email
 
 
-def migrated_order(rules):
-    def group(r):
-        if r["suppressed"]:
-            return 1
-        if r["expires_at"] is not None:
-            return 2
-        return 3
-
-    def latest_expiry_first(r):
-        return -(r["expires_at"].timestamp()) if r["expires_at"] is not None else 0
-
-    return sorted(rules, key=lambda r: (group(r), latest_expiry_first(r), r["created"]))
-
-
 def new_outcome(rules):
-    ordered = migrated_order(rules)
-    matched = entries(ordered, continue_of=lambda r: not r["suppressed"])
+    matched = entries(sorted(rules, key=lambda r: r["created"]))
     outcome = resolve_outcome(matched, source="troubleshoot")
     email_outcome = resolve_outcome(matched, source="troubleshoot", honour_batch=False)
     if email_outcome.response is not None:
@@ -132,7 +116,7 @@ def _classify(rules, old, new):
     return "other"
 
 
-def test_migrated_order_reproduces_any_rule_wins_except_the_decided_differences():
+def test_order_free_rules_reproduce_any_rule_wins_except_the_decided_differences():
     rng = random.Random(7)
     unexplained = []
     seen = set()
