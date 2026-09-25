@@ -154,7 +154,7 @@ interface WorkflowActionsCellProps {
   accountId: string | undefined;
   onStop: (workflow: any) => void;
   onEdit: (workflowId: string, workflowAccountId: string) => void;
-  getMenuItems: (workflow: any) => { label: string; id: string; icon: any; disabled?: boolean }[];
+  getMenuItems: (workflow: any) => { label: string; id: string; action: string; icon: any; disabled?: boolean }[];
   onMenuClick: (menuItem: any, workflow: any) => void;
 }
 
@@ -470,22 +470,24 @@ const WorkflowListing: React.FC = () => {
     }
   };
 
-  const getMenuItems = (workflow: any): { label: string; id: string; icon: any; disabled?: boolean }[] => {
-    const MENU_ITEMS: { label: string; id: string; icon: any; disabled?: boolean }[] = [];
+  const getMenuItems = (workflow: any): { label: string; id: string; action: string; icon: any; disabled?: boolean }[] => {
+    const MENU_ITEMS: { label: string; id: string; action: string; icon: any; disabled?: boolean }[] = [];
     const isRunning = ['RUNNING', 'IN_PROGRESS'].includes(workflow?.last_execution_status?.toUpperCase());
 
     if (workflow?.account_id && hasWriteAccess(workflow.account_id)) {
       // Add trigger option for all workflows
       MENU_ITEMS.push({
         label: 'Manual run',
-        id: 'manual-run',
+        id: `workflow-row-action-manual-run-${workflow.id}`,
+        action: 'manual-run',
         icon: manualTriggerIcon,
         disabled: isRunning,
       });
 
       MENU_ITEMS.push({
         label: 'Duplicate',
-        id: 'duplicate',
+        id: `workflow-row-action-duplicate-${workflow.id}`,
+        action: 'duplicate',
         icon: CopyIconBlue,
       });
     }
@@ -495,13 +497,15 @@ const WorkflowListing: React.FC = () => {
     if (workflow?.account_id) {
       MENU_ITEMS.push({
         label: 'Copy Link',
-        id: 'copy-link',
+        id: `workflow-row-action-copy-link-${workflow.id}`,
+        action: 'copy-link',
         icon: ShareIconBlue,
       });
 
       MENU_ITEMS.push({
         label: 'Copy JSON',
-        id: 'copy-json',
+        id: `workflow-row-action-copy-json-${workflow.id}`,
+        action: 'copy-json',
         icon: CopyIcon,
       });
     }
@@ -515,20 +519,23 @@ const WorkflowListing: React.FC = () => {
       if (toggleAction === 'pause') {
         MENU_ITEMS.push({
           label: 'Pause',
-          id: 'pause',
+          id: `workflow-row-action-pause-${workflow.id}`,
+          action: 'pause',
           icon: pauseIcon,
         });
       } else if (toggleAction === 'activate') {
         MENU_ITEMS.push({
           label: 'Activate',
-          id: 'resume',
+          id: `workflow-row-action-resume-${workflow.id}`,
+          action: 'resume',
           icon: playIcon,
         });
       }
 
       MENU_ITEMS.push({
         label: 'Delete',
-        id: 'delete',
+        id: `workflow-row-action-delete-${workflow.id}`,
+        action: 'delete',
         icon: DeleteIconRed,
       });
     }
@@ -537,7 +544,7 @@ const WorkflowListing: React.FC = () => {
   };
 
   const onMenuClick = (menuItem: any, workflow: any) => {
-    if (menuItem.id === 'delete') {
+    if (menuItem.action === 'delete') {
       setSelectedWorkflow(workflow);
       setDeleteCallers(null);
       setDeleteCallersLoading(true);
@@ -562,20 +569,20 @@ const WorkflowListing: React.FC = () => {
           }
         }
       })();
-    } else if (menuItem.id === 'pause') {
+    } else if (menuItem.action === 'pause') {
       setSelectedWorkflow(workflow);
       setPauseModalOpen(true);
-    } else if (menuItem.id === 'resume') {
+    } else if (menuItem.action === 'resume') {
       setSelectedWorkflow(workflow);
       setResumeModalOpen(true);
-    } else if (menuItem.id === 'manual-run') {
+    } else if (menuItem.action === 'manual-run') {
       setSelectedWorkflow(workflow);
       setTriggerModalOpen(true);
-    } else if (menuItem.id === 'duplicate') {
+    } else if (menuItem.action === 'duplicate') {
       handleDuplicateWorkflow(workflow);
-    } else if (menuItem.id === 'copy-link') {
+    } else if (menuItem.action === 'copy-link') {
       handleCopyWorkflowLink(workflow);
-    } else if (menuItem.id === 'copy-json') {
+    } else if (menuItem.action === 'copy-json') {
       handleCopyWorkflowJson(workflow);
     }
   };
