@@ -15,6 +15,67 @@ type Query {
 }
 
 type Query {
+  integrations_list_webhook_events(
+    limit: Int
+    offset: Int
+    order_by: [QuerySortByRequest!]
+    where: WebhookEventWhereRequest
+  ): WebhookEventResponse!
+}
+
+type Query {
+  integrations_aggregate_webhook_events(
+    where: WebhookEventWhereRequest
+  ): WebhookEventAggregationResponse!
+}
+
+input WebhookEventWhereRequest {
+  _and: [WebhookEventWhereRequest]
+  _or: [WebhookEventWhereRequest]
+  _not: WebhookEventWhereRequest
+  id: QueryWhereStringRequest
+  integration_id: QueryWhereStringRequest
+  account_id: QueryWhereStringRequest
+  event_title: QueryWhereStringRequest
+  event_type: QueryWhereStringRequest
+  event_status: QueryWhereStringRequest
+  event_priority: QueryWhereStringRequest
+  event_url: QueryWhereStringRequest
+  event_description: QueryWhereStringRequest
+  event_created_at: QueryWhereDatetimeRequest
+  processing_status: QueryWhereStringRequest
+  tenant_id: QueryWhereStringRequest
+}
+
+type WebhookEventResponse {
+  rows: [WebhookEvent!]!
+}
+
+type WebhookEvent {
+  id: String
+  integration_id: String
+  account_id: String
+  event_title: String
+  event_type: String
+  event_status: String
+  event_priority: String
+  event_url: String
+  event_description: String
+  event_created_at: Datetime
+  processing_status: String
+  raw: String
+  tenant_id: String
+}
+
+type WebhookEventAggregationResponse {
+  rows: [WebhookEventAggregation!]!
+}
+
+type WebhookEventAggregation {
+  count: Int
+}
+
+type Query {
   notifications_aggregate_rules(
     where: NotificationRulesWhereRequest
   ): NotificationRulesAggregationResponse!

@@ -37,6 +37,30 @@ actions:
     permissions:
       - role: tenant_admin
       - role: tenant_admin_readonly
+  - name: integrations_list_webhook_events
+    comment: List incoming webhook events for one integration's Activity Log
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+  - name: integrations_aggregate_webhook_events
+    comment: Count incoming webhook events for one integration's Activity Log widgets
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: notifications_aggregate_rules
     comment: Aggregate notification rules grouped by severity, source and account
     definition:

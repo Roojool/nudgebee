@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_event_incoming_webhooks_integration_created;
+DROP INDEX IF EXISTS idx_event_incoming_webhooks_integration_processing;

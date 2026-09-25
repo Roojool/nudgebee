@@ -7524,6 +7524,64 @@ var table_metadata = map[string]TableDefinition{
 			},
 		},
 	},
+	// Incoming webhook events for the per-integration Activity Log (Admin ->
+	// Integrations -> <webhook> -> Activity Log). This is the raw ingestion log,
+	// not the processed `events` surface. Tenant-scoped and gated on integrations
+	// like the integrations catalog itself (admin_get_integrations_v2); the caller
+	// always filters by integration_id, which is the real per-integration scope.
+	// Deliberately no AccountIdColumnName: a webhook routes to many accounts and
+	// unrouted events carry account_id IS NULL (V697), so an account filter would
+	// hide part of the integration's activity — and setting it would flip the
+	// integrations module into the account-scopable set (see AccountScopableModules).
+	"event_incoming_webhooks_v2": {
+		Type:               Normal,
+		Source:             database.Metastore,
+		TenantIdColumnName: "tenant_id",
+		PermissionModule:   "integrations",
+		Name:               "event_incoming_webhooks_v2",
+		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			return "event_incoming_webhooks", request, nil
+		},
+		Columns: map[string]ColumnDefinition{
+			"id":                {Type: ColumnDefinitionTypeString},
+			"integration_id":    {Type: ColumnDefinitionTypeString},
+			"account_id":        {Type: ColumnDefinitionTypeString},
+			"event_title":       {Type: ColumnDefinitionTypeString},
+			"event_type":        {Type: ColumnDefinitionTypeString},
+			"event_status":      {Type: ColumnDefinitionTypeString},
+			"event_priority":    {Type: ColumnDefinitionTypeString},
+			"event_url":         {Type: ColumnDefinitionTypeString},
+			"event_description": {Type: ColumnDefinitionTypeString},
+			"event_created_at":  {Type: ColumnDefinitionTypeDatetime},
+			"processing_status": {Type: ColumnDefinitionTypeString},
+			"raw":               {Type: ColumnDefinitionTypeString},
+			"tenant_id":         {Type: ColumnDefinitionTypeString},
+		},
+	},
+	// Count companion for the two Activity Log widgets: total events (filter on
+	// integration_id) and processed events (integration_id + processing_status).
+	"event_incoming_webhooks_grouping_v2": {
+		Type:               Aggregate,
+		Source:             database.Metastore,
+		TenantIdColumnName: "tenant_id",
+		PermissionModule:   "integrations",
+		Name:               "event_incoming_webhooks_grouping_v2",
+		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			return "event_incoming_webhooks", request, nil
+		},
+		Columns: map[string]ColumnDefinition{
+			"integration_id":    {Type: ColumnDefinitionTypeString},
+			"processing_status": {Type: ColumnDefinitionTypeString},
+			"account_id":        {Type: ColumnDefinitionTypeString},
+			"event_created_at":  {Type: ColumnDefinitionTypeDatetime},
+			"tenant_id":         {Type: ColumnDefinitionTypeString},
+			"count": {
+				Type:         ColumnDefinitionTypeInt,
+				Def:          "count(*)",
+				IsAggregated: true,
+			},
+		},
+	},
 	"get_cloud_accounts_v2": {
 		Type:                Normal,
 		Source:              database.Metastore,
@@ -10814,12 +10872,14 @@ var tableAliases = map[string]string{
 	"events_list":           "events_v2",
 	"agents_list_playbooks": "agent_playbook_v2",
 	// Tier 2: admin_get_*_v2 → <entity>_<verb>_*
-	"integrations_list":             "admin_get_integrations_v2",
-	"integrations_aggregate":        "admin_get_integrations_grouping_v2",
-	"notifications_list_rules":      "admin_get_notification_rules_v2",
-	"notifications_aggregate_rules": "admin_get_notification_rules_grouping_v2",
-	"usergroups_aggregate":          "admin_get_user_groups_grouping_v2",
-	"users_aggregate_by_tenant":     "admin_get_users_grouping_by_tenant_v2",
+	"integrations_list":                     "admin_get_integrations_v2",
+	"integrations_aggregate":                "admin_get_integrations_grouping_v2",
+	"integrations_list_webhook_events":      "event_incoming_webhooks_v2",
+	"integrations_aggregate_webhook_events": "event_incoming_webhooks_grouping_v2",
+	"notifications_list_rules":              "admin_get_notification_rules_v2",
+	"notifications_aggregate_rules":         "admin_get_notification_rules_grouping_v2",
+	"usergroups_aggregate":                  "admin_get_user_groups_grouping_v2",
+	"users_aggregate_by_tenant":             "admin_get_users_grouping_by_tenant_v2",
 	// Tier 3: user_*_v2 / usergroup_*_v2 → users_* / usergroups_*
 	"users_get_details":                "user_details_v2",
 	"users_get_by_provider_account":    "user_by_provider_account_v2",

@@ -13,6 +13,7 @@ import { Button as DsButton } from '@ui/Button';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import IntegrationDynamicFormModal from '@components/integrations/modal/IntegrationDynamicFormModal';
+import WebhookActivityLogModal from '@components/integrations/modal/WebhookActivityLogModal';
 import AddLLMConfigModal from '@components/llm/AddLLMConfigModal';
 import VmAgentCredentialsDialog from '@components/integrations/modal/VmAgentCredentialsDialog';
 import { Label } from '@ui/Label';
@@ -21,6 +22,8 @@ import { toast as snackbar } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
 import { canManage } from '@lib/auth';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
+import { buildWebhookUrl, getWebhookToken } from '@lib/webhookUrl';
+import CopyButton from '@shared/buttons/CopyButton';
 import { action } from 'src/utils/actionStyles';
 import { ds } from 'src/utils/colors';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
@@ -174,7 +177,12 @@ const ListIntegrations = ({ integrationName }) => {
   // LLM Gateway is tenant-scoped (no account concept) — it drops the Account column.
   const isLLMGateway = integrationName === 'llm_gateway';
   const accountCols = isLLMGateway ? [] : ['Account'];
-  const headers = hideConnectionInfo
+  // Webhook integrations surface their inbound receiver URL where the connection
+  // info would otherwise sit — that URL is the whole point of the integration.
+  const showWebhookUrl = !!integrationName?.endsWith('_webhook');
+  const headers = showWebhookUrl
+    ? ['Name', 'URL', ...accountCols, 'Created By', 'Updated By', 'Status', '']
+    : hideConnectionInfo
     ? ['Name', ...accountCols, 'Created By', 'Updated By', 'Status', '']
     : ['Name', 'Connection Info', ...accountCols, 'Created By', 'Updated By', 'Status', ''];
 
@@ -234,6 +242,7 @@ const ListIntegrations = ({ integrationName }) => {
   const [testingConnectionId, setTestingConnectionId] = useState(null);
   const [testableConfig, setTestableConfig] = useState({ testable: false, testable_when: null });
   const [agentHealthMap, setAgentHealthMap] = useState({});
+  const [activityLogIntegration, setActivityLogIntegration] = useState(null);
   const [nameInput, setNameInput] = useState('');
   const [selectedNameFilter, setSelectedNameFilter] = useState('');
   const [selectedStatusFilter, setSelectedStatusFilter] = useState(DEFAULT_STATUS_FILTER);
@@ -279,6 +288,11 @@ const ListIntegrations = ({ integrationName }) => {
     if (!canManage('integrations', 'Write')) return [];
     const status = item.status || 'enabled';
     const items = [];
+    // Webhook integrations get an Activity Log entry point — the incoming events
+    // received on this webhook, plus total/processed counts.
+    if (integrationName?.endsWith('_webhook')) {
+      items.push({ label: 'Activity Log', id: 'activity_log' });
+    }
     if (item?.source === 'agent' && agentManagedIntegrations.includes(integrationName)) {
       if (status === 'disabled') {
         items.push({ label: 'Enable', id: 'enable' });
@@ -434,6 +448,8 @@ const ListIntegrations = ({ integrationName }) => {
       setModalAction('regenerate');
     } else if (menuItem.id === 'test_connection') {
       handleTestConnection(item);
+    } else if (menuItem.id === 'activity_log') {
+      setActivityLogIntegration(item);
     }
   };
 
@@ -534,6 +550,36 @@ const ListIntegrations = ({ integrationName }) => {
     );
   };
 
+  // Webhook receiver URL cell: truncated to one line with the full URL on hover,
+  // plus a copy button — the same URL the Add/Edit modal hands out on creation.
+  const webhookUrlCell = (item) => {
+    const url = buildWebhookUrl(integrationName, getWebhookToken(item.integration_config_values));
+    if (!url) {
+      return { text: '-' };
+    }
+    return {
+      component: (
+        <Stack direction='row' spacing={0.5} alignItems='center'>
+          <Tooltip title={url}>
+            <Typography
+              sx={{
+                fontSize: ds.text.small,
+                color: ds.gray[600],
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                maxWidth: ds.space.mul(1, 70),
+              }}
+            >
+              {url}
+            </Typography>
+          </Tooltip>
+          <CopyButton text={url} size='sm' toastMessage='Webhook URL copied' />
+        </Stack>
+      ),
+    };
+  };
+
   const buildIntegrationRow = (item) => {
     const connectionInfoCell = {
       text: getConnectionInfo(integrationName === 'postgres' ? 'postgresql' : integrationName, item.integration_config_values),
@@ -548,6 +594,9 @@ const ListIntegrations = ({ integrationName }) => {
         component: <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} />,
       },
     ];
+    if (showWebhookUrl) {
+      return [baseRow[0], webhookUrlCell(item), ...baseRow.slice(1)];
+    }
     if (hideConnectionInfo) {
       return baseRow;
     }
@@ -786,6 +835,7 @@ const ListIntegrations = ({ integrationName }) => {
         accessKey={regeneratedCredentials?.accessKey}
         accessSecret={regeneratedCredentials?.accessSecret}
       />
+      <WebhookActivityLogModal open={!!activityLogIntegration} onClose={() => setActivityLogIntegration(null)} integration={activityLogIntegration} />
       {integrationName === 'solarwinds' && (
         <Modal
           handleClose={() => setOpenSetupGuide(false)}
