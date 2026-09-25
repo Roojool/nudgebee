@@ -468,8 +468,14 @@ func newJiraClient(config map[string]string) (*jira.Client, error) {
 	return jira.NewClient(tp.Client(), config["url"])
 }
 
+// sanitizeURL turns the stored Jira "url" config value into a base URL: a scheme
+// is added only when none is present (so http:// instances keep working) and
+// trailing slashes are dropped so "%s/browse/%s" links stay well formed. Keep in
+// step with api-server's normalizeJiraURL and ticket-server's NormalizeJiraURL.
 func sanitizeURL(rawURL string) string {
-	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+	rawURL = strings.TrimSpace(rawURL)
+	lower := strings.ToLower(rawURL)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		rawURL = "https://" + rawURL
 	}
 
@@ -478,9 +484,9 @@ func sanitizeURL(rawURL string) string {
 		// Neither the URL nor the parse error (which quotes it) is logged: a
 		// ticketing URL can embed user:token credentials.
 		slog.Error("failed to parse ticketing URL")
-		return rawURL
+		return strings.TrimRight(rawURL, "/")
 	}
-	return u.String()
+	return strings.TrimRight(u.String(), "/")
 }
 
 func nullableField(field any) string {

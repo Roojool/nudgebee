@@ -115,7 +115,7 @@ func (s *JiraService) Get(ctx *gin.Context, config models.TicketConfigurations, 
 		Labels:      issue.Fields.Labels,
 		Platform:    "jira",
 		ProjectKey:  issue.Fields.Project.Key,
-		URL:         "https://" + jiraClient.GetBaseURL().Host + "/browse/" + issue.Key,
+		URL:         clients.JiraBrowseURL(jiraClient, issue.Key),
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Raw:         marshalToMap(issue),
@@ -174,7 +174,7 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 	if detailedIssue.Fields.Priority != nil {
 		ticket.Severity = detailedIssue.Fields.Priority.Name
 	}
-	ticket.URL = "https://" + jiraClient.GetBaseURL().Host + "/browse/" + detailedIssue.Key
+	ticket.URL = clients.JiraBrowseURL(jiraClient, detailedIssue.Key)
 	ticket.Platform = "jira"
 	now := time.Now()
 	ticket.CreatedAt = &now
@@ -759,7 +759,7 @@ func QueryIssueFieldDetails(ctx *gin.Context, configuration models.TicketConfigu
 	if err != nil {
 		return nil, fmt.Errorf("invalid auto-complete URL: %v", err)
 	}
-	parsedConfigURL, err := url.Parse("https://" + strings.TrimPrefix(configuration.URL, "https://"))
+	parsedConfigURL, err := url.Parse(clients.NormalizeJiraURL(configuration.URL))
 	if err != nil {
 		return nil, fmt.Errorf("invalid Jira configuration URL: %v", err)
 	}
@@ -1065,7 +1065,6 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 	}
 
 	tickets := make([]models.Ticket, 0, len(issues))
-	baseURL := "https://" + jiraClient.GetBaseURL().Host + "/browse/"
 	for _, issue := range issues {
 		var assignee string
 		if issue.Fields.Assignee != nil {
@@ -1095,7 +1094,7 @@ func (s *JiraService) List(ctx *gin.Context, config models.TicketConfigurations,
 			Severity:  priority,
 			Assignee:  assignee,
 			Platform:  "jira",
-			URL:       baseURL + issue.Key,
+			URL:       clients.JiraBrowseURL(jiraClient, issue.Key),
 			CreatedAt: createdAt,
 		})
 	}

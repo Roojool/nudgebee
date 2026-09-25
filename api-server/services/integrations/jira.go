@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -126,6 +127,9 @@ func (j Jira) ValidateConfig(ctx *security.SecurityContext, values []core.Integr
 	if password == "" {
 		return []error{fmt.Errorf("jira password/token is required")}
 	}
+	if u, err := neturl.Parse(normalizeJiraURL(url)); err != nil || u.Host == "" {
+		return []error{fmt.Errorf("jira url %q is not a valid address; use a host such as company.atlassian.net or jira.company.com/jira", url)}
+	}
 
 	// Test connection by creating client and fetching projects
 	jiraClient, err := newJiraClient(url, authType, username, password, 15*time.Second)
@@ -154,6 +158,25 @@ const (
 	jiraMaxPages     = 200 // safety cap → up to 10k users
 )
 
+// normalizeJiraURL turns the stored Jira "url" config value into a base URL. The
+// value is whatever the tenant typed: a bare host, a host with a context path
+// ("jira.company.com/jira"), or a full address with https:// or http://. A scheme
+// is added only when none is present, so http:// instances keep working, and
+// trailing slashes are dropped. Keep in step with ticket-server's NormalizeJiraURL
+// and llm-server's sanitizeURL.
+func normalizeJiraURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	lower := strings.ToLower(raw)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		raw = "https://" + raw
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return strings.TrimRight(raw, "/")
+	}
+	return strings.TrimRight(u.String(), "/")
+}
+
 // newJiraClient builds a Jira client for the given instance with the supplied
 // request timeout: bearer auth for Data Center personal access tokens, Basic
 // otherwise. Shared by ValidateConfig and ListUsers so the client construction
@@ -168,7 +191,7 @@ func newJiraClient(url, authType, username, password string, timeout time.Durati
 		httpClient = tp.Client()
 	}
 	httpClient.Timeout = timeout
-	client, err := jira.NewClient(httpClient, "https://"+url)
+	client, err := jira.NewClient(httpClient, normalizeJiraURL(url))
 	if err != nil {
 		return nil, fmt.Errorf("jira: failed to create client: %w", err)
 	}

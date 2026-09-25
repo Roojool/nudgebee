@@ -482,3 +482,24 @@ func TestJiraList_CloudReportsApproximateTotalWhileMorePagesRemain(t *testing.T)
 	mustEqual(t, "exact total on last page", got.Total, 4)
 	mustEqual(t, "no count request on last page", f.hits["/rest/api/2/search/approximate-count"], 0)
 }
+
+// A self-hosted Jira served over plain http under a context path: API calls must
+// go to <base>/rest/api/2/..., and issue links must keep the scheme and the path.
+func TestJira_ContextPathOverHTTP(t *testing.T) {
+	f := &fakeJira{cloud: false, hits: map[string]int{}}
+	// StripPrefix makes every request outside /jira/ a 404, so a client that drops
+	// the context path fails the test instead of silently working.
+	ts := httptest.NewServer(http.StripPrefix("/jira", http.HandlerFunc(f.handler)))
+	defer ts.Close()
+	config := models.TicketConfigurations{URL: ts.URL + "/jira/", Username: "u", Password: "p"}
+
+	got, err := (&JiraService{}).List(nil, config, models.ListParams{ProjectKey: "PROJ", Offset: 2, Limit: 2})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	mustEqual(t, "issues served", len(got.Tickets), 2)
+	for _, tk := range got.Tickets {
+		mustEqual(t, "issue link", tk.URL, ts.URL+"/jira/browse/"+tk.TicketID)
+	}
+	mustEqual(t, "server info fetched under the context path", f.hits["/rest/api/2/serverInfo"], 1)
+}

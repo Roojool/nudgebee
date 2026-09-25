@@ -109,3 +109,40 @@ func TestIsJiraCloud_CachesDeploymentType(t *testing.T) {
 		t.Fatalf("serverInfo hits = %d, want 1", hits)
 	}
 }
+
+// The same stored value must resolve identically in api-server, ticket-server
+// and llm-server; keep this table in sync with their copies.
+func TestNormalizeJiraURL(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"company.atlassian.net", "https://company.atlassian.net"},
+		{"https://company.atlassian.net", "https://company.atlassian.net"},
+		{"http://jira.internal:8080", "http://jira.internal:8080"},
+		{"jira.company.com/jira", "https://jira.company.com/jira"},
+		{"https://jira.company.com/jira/", "https://jira.company.com/jira"},
+		{"HTTPS://Jira.Company.com", "https://Jira.Company.com"},
+		{"  company.atlassian.net/  ", "https://company.atlassian.net"},
+	} {
+		if got := NormalizeJiraURL(tt.in); got != tt.want {
+			t.Errorf("NormalizeJiraURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// Browse links keep the scheme and the context path of the configured instance.
+func TestJiraBrowseURL(t *testing.T) {
+	for _, tt := range []struct{ stored, want string }{
+		{"company.atlassian.net", "https://company.atlassian.net/browse/PROJ-1"},
+		{"https://company.atlassian.net", "https://company.atlassian.net/browse/PROJ-1"},
+		{"http://jira.internal:8080", "http://jira.internal:8080/browse/PROJ-1"},
+		{"jira.company.com/jira", "https://jira.company.com/jira/browse/PROJ-1"},
+		{"https://jira.company.com/jira/", "https://jira.company.com/jira/browse/PROJ-1"},
+	} {
+		client, err := CreateJiraClient("", "u", "p", tt.stored)
+		if err != nil {
+			t.Fatalf("CreateJiraClient(%q): %v", tt.stored, err)
+		}
+		if got := JiraBrowseURL(client, "PROJ-1"); got != tt.want {
+			t.Errorf("JiraBrowseURL for stored %q = %q, want %q", tt.stored, got, tt.want)
+		}
+	}
+}
