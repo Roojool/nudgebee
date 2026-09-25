@@ -169,6 +169,12 @@ func computeWorkloadNetworkRate(out observability.OutputMetricQuery) (avgRate fl
 	haveTs := false
 
 	for _, qr := range out.Results {
+		// A failed key is not a quiet workload. Its Payload is empty either way, so
+		// summing it as zero would let a metrics failure read as "no network traffic"
+		// and mark a live workload abandoned. Refuse to answer instead.
+		if qr.Error != nil && *qr.Error != "" {
+			return 0, 0, false
+		}
 		for _, res := range qr.Payload {
 			for i, v := range res.Values {
 				sum += math.Abs(v)

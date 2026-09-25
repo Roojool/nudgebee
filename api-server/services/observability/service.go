@@ -3083,7 +3083,30 @@ func FetchMetricsQuery(ctx *security.RequestContext, fetchMetricsRequest FetchMe
 	if err != nil {
 		return OutputMetricQuery{}, err
 	}
-	return source.FetchMetricsQuery(ctx, fetchMetricsRequest)
+	out, err := source.FetchMetricsQuery(ctx, fetchMetricsRequest)
+	noteFailedKeys(&out)
+	return out, err
+}
+
+// noteFailedKeys gives a key that failed a Note as well as an Error.
+//
+// An empty Payload has to say why, whatever the cause. The layer already guarantees
+// that for a key a provider cannot answer; this extends it to a key whose query ran and
+// failed, which until now set only Error.
+//
+// The distinction matters because Error is easy to miss and Payload is not: across
+// api-server, 91 call sites read Payload and 62 check Error. A caller reading only
+// Payload sees an empty list and concludes the workload used nothing -- which is how a
+// failed memory query becomes a recommendation to shrink a limit, and a failed network
+// query becomes "this workload is idle".
+func noteFailedKeys(out *OutputMetricQuery) {
+	for i := range out.Results {
+		r := &out.Results[i]
+		if r.Error == nil || *r.Error == "" || r.Note != "" {
+			continue
+		}
+		r.Note = "Query failed, so this key returned no data: " + *r.Error
+	}
 }
 
 // GetMetricsQuery renders BUILDER chips into provider-native query strings. Input
