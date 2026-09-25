@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"nudgebee/services/integrations/core"
+	"nudgebee/services/relay"
 	"nudgebee/services/security"
 )
 
@@ -36,4 +37,11 @@ func (m PrometheusAgent) ConfigSchema() core.IntegrationSchema {
 
 func (m PrometheusAgent) ValidateConfig(sc *security.SecurityContext, config []core.IntegrationConfigValue, accountId string) []error {
 	return []error{}
+}
+
+// TestConnection implements core.TestableIntegration. The agent's Prometheus has
+// no URL in this form — it is configured in the agent's Helm values — so the
+// probe asks the agent itself to run a query, and reports why it could not.
+func (m PrometheusAgent) TestConnection(sc *security.RequestContext, config []core.IntegrationConfigValue, accountId string) error {
+	return relay.TestAgentPrometheus(accountId)
 }
