@@ -18,6 +18,7 @@ import { useConversationManager } from '@hooks/useConversationManager';
 import { useConversationSuggestions } from '@hooks/useConversationSuggestions';
 import { useLLMInvestigationControl } from '@hooks/useLLMInvestigationControl';
 import { useTokenUsage } from '@hooks/useTokenUsage';
+import { useFollowLatest } from '@hooks/useFollowLatest';
 import { getUserSession, hasReadAccess, hasPermission } from '@lib/auth';
 import { applyFiltersOnRouter } from '@lib/router';
 import { Avatar, Box, CircularProgress, Typography } from '@mui/material';
@@ -170,6 +171,7 @@ const KubernetesLLMResponseGenerator = ({
   const textareaRef = useRef(null);
   const bottomRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const followingLatestRef = useFollowLatest(scrollContainerRef);
   const processedSessionIds = useRef(new Set());
   const prevSessionConvIdRef = useRef({ sessionId, conversationId });
   const isAlertOpen = useRef(false);
@@ -979,7 +981,7 @@ const KubernetesLLMResponseGenerator = ({
   useEffect(() => {
     if (messages.length > 0) {
       const timeoutId = setTimeout(() => {
-        if (messages[messages.length - 1]?.type === 'response') {
+        if (messages[messages.length - 1]?.type === 'response' && followingLatestRef.current) {
           bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
       }, 1000);
