@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
@@ -312,7 +313,37 @@ func (m ServerExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestConte
 	input: kill -9 12345
 	answer: delete
 	`
+	if _, ok := confirmationArgs(input)["args"]; ok {
+		return "The input is a JSON object for server_command_executor. Classify the shell command in its args field; command is the execution mode and instance, host_name, and user_name identify the target. If args is missing or cannot be classified, answer unknown.\n\n" + prompt, nil
+	}
 	return prompt, nil
+}
+
+// A confirmation of one SSH operation must not approve another command or
+// target later in the same conversation.
+func (m ServerExecuteTool) ConfirmationKey(toolInput string) string {
+	return perActionConfirmationKey(m.Name(), toolInput)
+}
+
+func (m ServerExecuteTool) ConfirmationQuestion(toolInput string) string {
+	args := confirmationArgs(toolInput)
+	command, _ := args["args"].(string)
+	instance, _ := args["instance"].(string)
+	if strings.TrimSpace(command) == "" || strings.TrimSpace(instance) == "" {
+		return ""
+	}
+	host, _ := args["host_name"].(string)
+	user, _ := args["user_name"].(string)
+	if user != "" && host != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s as %s at host %s?", command, instance, user, host)
+	}
+	if user != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s as %s?", command, instance, user)
+	}
+	if host != "" {
+		return fmt.Sprintf("Run command %q on SSH instance %s at host %s?", command, instance, host)
+	}
+	return fmt.Sprintf("Run command %q on SSH instance %s?", command, instance)
 }
 
 func (m ServerExecuteTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfigSchema {

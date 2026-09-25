@@ -31,6 +31,7 @@ const (
 	PromptAzureLean                          = "azure_lean"
 	PromptFinops                             = "finops"
 	PromptGcpLean                            = "gcp_lean"
+	PromptVMLean                             = "vm_lean"
 	PromptK8sLean                            = "k8s_lean"
 	PromptK8sNative                          = "k8s_native"
 	PromptWebhookSubjectExtractor            = "webhook_subject_extractor"
@@ -94,6 +95,7 @@ var promptCategories = map[string]PromptCategory{
 	PromptAzureLean:                          CategoryAgents,
 	PromptFinops:                             CategoryAgents,
 	PromptGcpLean:                            CategoryAgents,
+	PromptVMLean:                             CategoryAgents,
 	PromptK8sLean:                            CategoryAgents,
 	PromptK8sNative:                          CategoryAgents,
 	PromptWebhookSubjectExtractor:            CategoryAgents,
