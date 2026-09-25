@@ -1467,16 +1467,21 @@ func (a *observabilityTracesAction) autoExecuteByWorkload(ctx playbooks.Playbook
 
 	traceRows := convertOTelTracesToMapRows(finalSpans)
 	insights := traceHandleTracesInsight(traceRows)
+	insights = append(insights, spanAttributeTrendInsights(finalSpans)...)
 
-	// Say so when this is the phase-3 sample rather than the traces the finding
-	// is about. Unlabelled, a card of 23 arbitrary healthy spans reads as the
-	// evidence for an error-rate alert: on dev, 429 of 951 trace evidences were
-	// this fallback, every one of them with error_span_count 0 — including all
-	// 266 attached to OtelDemoGRPCClientErrorRate, an alert that fires on errors.
+	// Say so when this is the phase-3 sample rather than error spans.
+	// Unlabelled, a card of 23 arbitrary healthy spans reads as the evidence for
+	// an error-rate alert: on dev, 429 of 951 trace evidences were this
+	// fallback, every one of them with error_span_count 0 — including all 266
+	// attached to OtelDemoGRPCClientErrorRate, an alert that fires on errors.
+	// Do not call them unrelated, though: a failure that produces no error spans
+	// (an OOM) is carried by exactly these spans, and "not traces of the
+	// failure" made the investigation of event 07f70dc8 skip the spans that held
+	// its cause.
 	if queryMode == "fallback_recent_sample" {
 		insights = append([]playbooks.PlaybookActionResponseInsight{{
 			Message: "No error spans were found for " + workloadName + " in this window. " +
-				"The spans below are a recent traffic sample for context, not traces of the failure.",
+				"The spans below are its most recent requests from the same window.",
 			Severity: "Info",
 		}}, insights...)
 	}
@@ -1782,6 +1787,7 @@ func (a *observabilityTracesAction) Execute(ctx playbooks.PlaybookActionContext,
 
 	// Generate insights from event attributes, errors, and service flow
 	insights := traceHandleTracesInsight(traceRows)
+	insights = append(insights, spanAttributeTrendInsights(traceoutput)...)
 
 	metadata := map[string]any{
 		"query-result-version": "1.0",
