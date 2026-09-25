@@ -114,6 +114,12 @@ type TableDefinition struct {
 	// clause still bounds the result. Leave false for tables whose NULL-account
 	// rows are sensitive or global-only.
 	TenantWideReadable bool
+	// AccountScope, when set, replaces the account-id restriction applied to
+	// account-scoped readers with a table-specific SQL predicate. It must build
+	// SQL only from the quoted ids it is given. The result goes to the SQL
+	// builder as a separate argument and never through QueryRequest, which
+	// callers control.
+	AccountScope func(accountIds []string, quote func(any) string) string
 }
 
 var AzureTraceTableDefinition = map[string]ColumnDefinition{
@@ -7068,11 +7074,18 @@ var table_metadata = map[string]TableDefinition{
 					nr.delivery_mode,
 					nr.frequency,
 					nr.event_types,
+					nr.scope_mode,
+					COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
 					nr.tenant_id::text as tenant_id,
 					u.display_name as created_by_display_name,
 					COALESCE(nrm.mappings, '[]'::json) as notification_rule_mappings
 			FROM notification_rules nr
 			LEFT JOIN users u ON u.id = nr.created_by
+			LEFT JOIN (
+					SELECT rule_id, jsonb_agg(account_id::text ORDER BY account_id) as account_ids
+					FROM notification_rule_accounts
+					GROUP BY rule_id
+			) nra ON nra.rule_id = nr.id
 			LEFT JOIN (
 					SELECT
 							rule_id,
@@ -7085,6 +7098,7 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY rule_id
 			) nrm ON nrm.rule_id = nr.id
 	) as notification_rules_v2`,
+		AccountScope: notificationRuleAccountScope("notification_rules_v2"),
 		Columns: map[string]ColumnDefinition{
 			"id": {
 				Type: ColumnDefinitionTypeString,
@@ -7154,6 +7168,14 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeJson,
 				Def:  "event_types",
 			},
+			"scope_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "scope_mode",
+			},
+			"account_ids": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "account_ids",
+			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "tenant_id",
@@ -7187,10 +7209,26 @@ var table_metadata = map[string]TableDefinition{
 				nr.is_suppressed,
 				nr.severity,
 				nr.delivery_mode,
+				nr.scope_mode,
+				COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
 				nr.tenant_id::text as tenant_id
 			FROM notification_rules nr
+			LEFT JOIN (
+				SELECT rule_id, jsonb_agg(account_id::text ORDER BY account_id) as account_ids
+				FROM notification_rule_accounts
+				GROUP BY rule_id
+			) nra ON nra.rule_id = nr.id
 		) as notification_rules_grouping`,
+		AccountScope: notificationRuleAccountScope("notification_rules_grouping"),
 		Columns: map[string]ColumnDefinition{
+			"scope_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "scope_mode",
+			},
+			"account_ids": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "account_ids",
+			},
 			"id": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "id",

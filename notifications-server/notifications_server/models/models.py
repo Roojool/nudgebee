@@ -233,6 +233,10 @@ class NotificationRules(Base):
     frequency = Column(String, nullable=True)
     severity = Column(String, nullable=True)
     event_types = Column(JSON, nullable=True)
+    # "all" or "accounts". With "accounts", the rule's accounts are its
+    # notification_rule_accounts rows (loaded onto the instance as account_ids);
+    # account_id is only a compatibility mirror for older clients.
+    scope_mode = Column(String, nullable=True)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -252,6 +256,8 @@ class NotificationRules(Base):
             "frequency": self.frequency,
             "severity": self.severity,
             "event_types": self.event_types,
+            "scope_mode": self.scope_mode,
+            "account_ids": getattr(self, "account_ids", None),
         }
 
     @classmethod
@@ -268,7 +274,7 @@ class NotificationRules(Base):
                 return datetime.fromtimestamp(value, tz=timezone.utc).replace(tzinfo=None)
             return default
 
-        return cls(
+        rule = cls(
             id=data.get("id"),
             created_at=parse_datetime(data.get("created_at")),
             updated_at=parse_datetime(data.get("updated_at")),
@@ -290,7 +296,18 @@ class NotificationRules(Base):
             frequency=data.get("frequency"),
             severity=data.get("severity"),
             event_types=data.get("event_types"),
+            scope_mode=data.get("scope_mode"),
         )
+        rule.account_ids = data.get("account_ids")
+        return rule
+
+
+class NotificationRuleAccounts(Base):
+    __tablename__ = "notification_rule_accounts"
+
+    rule_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    account_id = Column(PG_UUID(as_uuid=True), primary_key=True)
+    tenant_id = Column(PG_UUID(as_uuid=True), nullable=False)
 
 
 class NotificationRuleMappings(Base):

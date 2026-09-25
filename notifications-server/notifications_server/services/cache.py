@@ -106,7 +106,7 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return
-        key = f"notification_rules:{tenant_id}"
+        key = f"notification_rules:v2:{tenant_id}"
         with self.redis_client.pipeline() as pipe:
             try:
                 rules_dict = [rule.to_dict() if hasattr(rule, "to_dict") else rule for rule in rules]
@@ -122,7 +122,7 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return None
-        key = f"notification_rules:{tenant_id}"
+        key = f"notification_rules:v2:{tenant_id}"
         rules_json = self.redis_client.get(key)
         if rules_json:
             rules_data = json.loads(rules_json)
@@ -135,10 +135,12 @@ class Cache:
         self._ensure_connection()
         if not self.redis_client:
             return
-        key = f"notification_rules:{tenant_id}"
+        key = f"notification_rules:v2:{tenant_id}"
         with self.redis_client.pipeline() as pipe:
             try:
                 pipe.delete(key)
+                # The pre-scope key too, for older pods still running during a rollout.
+                pipe.delete(f"notification_rules:{tenant_id}")
                 pipe.execute()
                 LOG.info(f"Cache entry for key '{key}' deleted successfully.")
             except redis.RedisError as e:

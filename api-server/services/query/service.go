@@ -20,6 +20,8 @@ func ExecuteQuery(context *security.RequestContext, query QueryRequest) (QueryRe
 	var tableDef TableDefinition
 	queryArgs := []any{}
 	var requestedAccountId string
+	// Server-built account restriction for tables that define AccountScope.
+	var accountScope string
 
 	if tableDef1, ok := GetTableMetadata(query.Table); ok {
 		sourceType = tableDef1.Source
@@ -89,10 +91,18 @@ func ExecuteQuery(context *security.RequestContext, query QueryRequest) (QueryRe
 
 				if slices.Contains(context.GetSecurityContext().GetRoles(), security.AUTH_ACCOUNT_ADMIN_ROLE) || slices.Contains(context.GetSecurityContext().GetRoles(), security.AUTH_ACCOUNT_READ_ADMIN_ROLE) {
 					accountIds := context.GetSecurityContext().ListAccountIds()
-					query.Where.And = append(query.Where.And, accountScopeClause(accountIdColumnName, accountIds, tableDef.TenantWideReadable))
+					if tableDef.AccountScope != nil {
+						accountScope = tableAccountScope(tableDef, accountIds)
+					} else {
+						query.Where.And = append(query.Where.And, accountScopeClause(accountIdColumnName, accountIds, tableDef.TenantWideReadable))
+					}
 				} else if slices.Contains(context.GetSecurityContext().GetRoles(), security.AUTH_K8S_NAMESPACE_ADMIN_ROLE) || slices.Contains(context.GetSecurityContext().GetRoles(), security.AUTH_K8S_NAMESPACE_READ_ADMIN_ROLE) {
 					accountIds := context.GetSecurityContext().ListAccountIds()
-					query.Where.And = append(query.Where.And, accountScopeClause(accountIdColumnName, accountIds, tableDef.TenantWideReadable))
+					if tableDef.AccountScope != nil {
+						accountScope = tableAccountScope(tableDef, accountIds)
+					} else {
+						query.Where.And = append(query.Where.And, accountScopeClause(accountIdColumnName, accountIds, tableDef.TenantWideReadable))
+					}
 
 					queryWithNamespace, queryResponse, err := updateQueryWithNamespace(context, tableDef, query, context, startTime, accountIdColumnName, accountIds)
 					if err != nil {
@@ -108,13 +118,17 @@ func ExecuteQuery(context *security.RequestContext, query QueryRequest) (QueryRe
 					// PermissionModule (empty module -> no scoped ids -> falls
 					// through to Access Denied), confining scoped grants to the
 					// per-account-gateable query-engine surface.
-					query.Where.And = append(query.Where.And, QueryWhereClause{
-						Binary: map[string]map[BinaryWhereClauseType]any{
-							accountIdColumnName: {
-								In: scopedAccountIds,
+					if tableDef.AccountScope != nil {
+						accountScope = tableAccountScope(tableDef, scopedAccountIds)
+					} else {
+						query.Where.And = append(query.Where.And, QueryWhereClause{
+							Binary: map[string]map[BinaryWhereClauseType]any{
+								accountIdColumnName: {
+									In: scopedAccountIds,
+								},
 							},
-						},
-					})
+						})
+					}
 				} else {
 					return QueryResponse{
 						Errors: []common.Error{
@@ -191,7 +205,7 @@ func ExecuteQuery(context *security.RequestContext, query QueryRequest) (QueryRe
 		return executeChronosphereQuery(context, requestedAccountId, query, tableDef, startTime)
 	}
 
-	queryText, err := GenerateSqlQuery(context, requestedAccountId, query, tableDef)
+	queryText, err := generateSqlQuery(context, requestedAccountId, query, tableDef, accountScope)
 	if err != nil {
 		return QueryResponse{
 			Errors: []common.Error{
@@ -357,6 +371,19 @@ func neverMatchClause(column string) QueryWhereClause {
 // `true` for an empty list (match-all, intentional for user filters) — an empty
 // ids set here yields a never-match, so a scoped user who resolves to zero
 // accounts/namespaces sees nothing rather than everything in the tenant (#34582).
+// tableAccountScope renders a table's AccountScope predicate for the caller's
+// accounts. No accounts means no rows.
+func tableAccountScope(tableDef TableDefinition, accountIds []string) string {
+	if len(accountIds) == 0 {
+		return "FALSE"
+	}
+	dialect := getDialect(tableDef.Source)
+	if dialect == nil {
+		return "FALSE"
+	}
+	return tableDef.AccountScope(accountIds, dialect.QuoteLiteral)
+}
+
 func scopedInClause(column string, ids []string) QueryWhereClause {
 	if len(ids) == 0 {
 		return neverMatchClause(column)

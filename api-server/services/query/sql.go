@@ -990,6 +990,12 @@ func generateLimitOffsetClause(request QueryRequest, tableDef TableDefinition) (
 }
 
 func GenerateSqlQuery(ctx *security.RequestContext, accountId string, request QueryRequest, tableDef TableDefinition) (string, error) {
+	return generateSqlQuery(ctx, accountId, request, tableDef, "")
+}
+
+// generateSqlQuery builds the SQL for request. accountScope is a server-built
+// predicate (see TableDefinition.AccountScope) ANDed with the request's WHERE.
+func generateSqlQuery(ctx *security.RequestContext, accountId string, request QueryRequest, tableDef TableDefinition, accountScope string) (string, error) {
 	// column transformation fix for datetime grouping
 	// if transforamtions are misisng then use day as default unit
 	for _, groupColumn := range request.GroupBy {
@@ -1052,6 +1058,13 @@ func GenerateSqlQuery(ctx *security.RequestContext, accountId string, request Qu
 		whereStr, err := generateWhereClause(request.Where, tableDef)
 		if err != nil {
 			return "", err
+		}
+		if accountScope != "" {
+			if whereStr != "" {
+				whereStr = "(" + whereStr + ") AND (" + accountScope + ")"
+			} else {
+				whereStr = "(" + accountScope + ")"
+			}
 		}
 		if whereStr != "" {
 			queryBuilder.WriteString(" WHERE ")

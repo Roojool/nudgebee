@@ -1062,9 +1062,11 @@ func ProcessHourlyEventsBatchNotification(ctx *security.RequestContext) error {
 	}
 
 	const rulesQuery = `
-		SELECT id, name, account_id, cluster, frequency, severity, tenant_id
-		FROM notification_rules 
-		WHERE delivery_mode = 'batch' AND is_active = true AND is_suppressed = false
+		SELECT nr.id, nr.name, nra.account_id, ca.account_name, nr.frequency, nr.severity, nr.tenant_id
+		FROM notification_rules nr
+		JOIN notification_rule_accounts nra ON nra.rule_id = nr.id
+		JOIN cloud_accounts ca ON ca.id = nra.account_id
+		WHERE nr.delivery_mode = 'batch' AND nr.is_active = true AND nr.is_suppressed = false
 	`
 	rulesRows, err := dbManager.Query(rulesQuery)
 	defer func() {

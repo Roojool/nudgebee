@@ -369,8 +369,14 @@ var accountDataDeletePlan = []deleteGroup{
 		{name: "runbook_task_output"},
 		{name: "auto_pilot_reviewee"}, {name: "auto_pilot_reviewers"}, {name: "auto_pilot_approvals"}, {name: "auto_pilot_approval_policy"}, {name: "auto_playbook_task"}, {name: "auto_playbook_executions"}, {name: "auto_optimize_resource_map"}, {name: "auto_pilot"}, {name: "auto_playbook"},
 	}},
-	// notifications
-	{defaultAccountIdColumn: "account_id", tables: []tableDetails{{name: "notification_channel_account_mappings", accountColumnName: "account_id"}, {name: "notification_rules"}}},
+	// notifications; repointNotificationRuleMirrors has already moved the mirror
+	// off this account for rules that cover others, so notification_rules loses
+	// only the rules scoped to this account alone
+	{defaultAccountIdColumn: "account_id", tables: []tableDetails{
+		{name: "notification_channel_account_mappings", accountColumnName: "account_id"},
+		{name: "notification_rules"},
+		{name: "notification_rule_accounts"},
+	}},
 	// tickets
 	{defaultAccountIdColumn: "account_id", tables: []tableDetails{{name: "tickets"}}},
 	// event related tables; they go before the resource tables because
@@ -524,6 +530,29 @@ func deleteTables(context *security.RequestContext, tx *sql.Tx, tables []tableDe
 	return nil
 }
 
+// repointNotificationRuleMirrors moves notification_rules.account_id, the
+// first-account mirror older clients read, off accountId for every rule that
+// covers another account too. The mirror of a rule scoped to accounts must
+// never be NULL: older code reads NULL as every account.
+func repointNotificationRuleMirrors(context *security.RequestContext, tx *sql.Tx, accountId string) error {
+	_, err := tx.Exec(`
+		UPDATE notification_rules r
+		SET account_id = other.account_id, cluster = other.account_name
+		FROM (
+			SELECT DISTINCT ON (nra.rule_id) nra.rule_id, nra.account_id, ca.account_name
+			FROM notification_rule_accounts nra
+			JOIN cloud_accounts ca ON ca.id = nra.account_id
+			WHERE nra.account_id <> $1
+			  AND nra.rule_id IN (SELECT id FROM notification_rules WHERE account_id = $1)
+			ORDER BY nra.rule_id, nra.account_id
+		) other
+		WHERE r.id = other.rule_id`, accountId)
+	if err != nil {
+		return rollbackTableDelete(context, tx, "notification_rules", err)
+	}
+	return nil
+}
+
 func rollbackTableDelete(context *security.RequestContext, tx *sql.Tx, table string, err error) error {
 	context.GetLogger().Error("Error deleting", "table", table, "error", err)
 	if err1 := tx.Rollback(); err1 != nil {
@@ -585,6 +614,9 @@ func DeleteAccount(context *security.RequestContext, query AccountDeleteRequest)
 	// remove all in single transaction
 	tx, err := databaseManager.Db.Begin()
 	if err != nil {
+		return AccountDeleteResponse{}, err
+	}
+	if err := repointNotificationRuleMirrors(context, tx, query.Id); err != nil {
 		return AccountDeleteResponse{}, err
 	}
 	plan := accountDataDeletePlan

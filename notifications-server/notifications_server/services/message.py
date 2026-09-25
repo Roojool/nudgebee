@@ -171,6 +171,21 @@ AUTOMATION_SOURCE = "automation"
 NON_SUPPRESSIBLE_EVENT_TYPES = {"automation.approval.requested"}
 
 
+def _scope_matches(rule, account_id):
+    """Whether a message from account_id is in the rule's scope. A rule loaded
+    from a database that predates scope_mode still uses account_id, which is the
+    truth there; otherwise account_id is never read. Unknown scope matches nothing."""
+    if "scope_mode" in getattr(rule, "missing_columns", frozenset()):
+        return _ids_match(rule.account_id, account_id)
+    scope_mode = getattr(rule, "scope_mode", None)
+    if scope_mode == "all":
+        return True
+    if scope_mode == "accounts":
+        account_ids = getattr(rule, "account_ids", None)
+        return bool(account_ids) and account_id is not None and str(account_id) in account_ids
+    return False
+
+
 def _finding_rule_source(source):
     return source if source in RULE_SOURCE_CATEGORIES else "troubleshoot"
 
@@ -245,7 +260,7 @@ class NotificationRuleMatcher:
             for rule in all_rules
             if (
                 rule.source == source
-                and _ids_match(rule.account_id, account_id)
+                and _scope_matches(rule, account_id)
                 and (rule.namespace == namespace or rule.namespace is None)
                 and (rule.workload == workload or rule.workload is None)
                 and (rule.aggregation_key == aggregation_key or rule.aggregation_key is None)

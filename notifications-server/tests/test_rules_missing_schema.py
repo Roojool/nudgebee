@@ -61,6 +61,8 @@ class _Session:
         self.executed.append(statement)
         if isinstance(statement, TextClause):
             return _Rows([(name,) for name in self._db_columns])
+        if "notification_rule_accounts" in str(statement):
+            return _Rows([])
         if self._first_error is not None:
             error, self._first_error = self._first_error, None
             self.aborted = True

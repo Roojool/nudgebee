@@ -14,7 +14,12 @@ from notifications_server.exceptions.exceptions import Err
 from notifications_server.exceptions.notification_errors import InvalidRuleError
 from notifications_server.models.db_base import BaseDB
 from notifications_server.models.enums import EventCategory, EventType, EventAction, EventStatus, EventActor
-from notifications_server.models.models import NotificationRules, NotificationRuleMappings
+from notifications_server.models.models import (
+    CloudAccount,
+    NotificationRuleAccounts,
+    NotificationRuleMappings,
+    NotificationRules,
+)
 from notifications_server.services.audit import create_audit_request
 from notifications_server.services.cache import Cache
 from notifications_server.utils.datetime_utils import utc_now
@@ -68,6 +73,7 @@ async def _load_rules_with_existing_columns(session, tenant_id):
     for rule in rules:
         for key in missing:
             set_committed_value(rule, key, None)
+        rule.missing_columns = frozenset(missing)
     return rules, missing
 
 
@@ -85,8 +91,7 @@ def is_valid_string(s):
 #   ai_cost            — the AI Cost Daily Report digest, one per tenant-day
 TENANT_WIDE_SOURCES = ("daily_recap", "optimize", "weekly_digest", "ai_cost")
 
-# Automation messages carry an account, but a rule may leave account_id empty
-# to cover every account (the matcher treats a null account as a wildcard).
+# Automation messages carry an account, but a rule may cover every account.
 AUTOMATION_SOURCE = "automation"
 ACCOUNT_OPTIONAL_SOURCES = TENANT_WIDE_SOURCES + (AUTOMATION_SOURCE,)
 
@@ -103,6 +108,53 @@ AUTOMATION_EVENT_TYPES = (
 )
 
 
+SCOPE_ALL = "all"
+SCOPE_ACCOUNTS = "accounts"
+
+
+def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
+    """Return (scope_mode, account_ids) for a save. Older clients send only
+    account_id. A rule scoped to accounts is only widened by an explicit
+    scope_mode of "all", which older clients cannot send."""
+    account_ids = rule_data.get("account_ids")
+    sent_account_ids = account_ids is not None
+    if account_ids is None:
+        account_ids = [rule_data["account_id"]] if rule_data.get("account_id") else []
+    account_ids = list(dict.fromkeys(str(a) for a in account_ids if a))
+    scope_mode = rule_data.get("scope_mode")
+
+    if source in TENANT_WIDE_SOURCES:
+        # Tenant-wide notifications carry no account, so these rules only make sense for every account.
+        return SCOPE_ALL, []
+
+    if scope_mode not in (None, SCOPE_ALL, SCOPE_ACCOUNTS):
+        raise InvalidRuleError(Err.OS0011.value[0] % "scope_mode")
+    if not sent_account_ids and len(existing_account_ids) > 1 and account_ids:
+        raise InvalidRuleError("This rule covers several accounts; update it with account_ids, not account_id")
+    if scope_mode is None:
+        if account_ids:
+            scope_mode = SCOPE_ACCOUNTS
+        elif existing_rule is not None and existing_rule.scope_mode == SCOPE_ACCOUNTS:
+            raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
+        else:
+            scope_mode = SCOPE_ALL
+
+    keeps_existing_all = existing_rule is not None and existing_rule.scope_mode == SCOPE_ALL and scope_mode == SCOPE_ALL
+    if source not in ACCOUNT_OPTIONAL_SOURCES and scope_mode != SCOPE_ACCOUNTS and not keeps_existing_all:
+        raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
+    if scope_mode == SCOPE_ACCOUNTS and not account_ids:
+        raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
+    return scope_mode, (account_ids if scope_mode == SCOPE_ACCOUNTS else [])
+
+
+def _is_uuid(value):
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
+
+
 def _validate_automation_fields(fields):
     event_types = fields.get("event_types")
     if not isinstance(event_types, list) or not event_types:
@@ -114,15 +166,13 @@ def _validate_automation_fields(fields):
         raise InvalidRuleError(Err.OS0011.value[0] % "delivery_mode: batch is not available for automation rules")
 
 
-def validate_fields(fields, is_update=False):
+def validate_fields(fields):
     source = fields.get("source", None)
     name = fields.get("name", None)
     if not name or not is_valid_string(name):
         raise InvalidRuleError(Err.OS0011.value[0] % "name")
     if source is None:
         raise InvalidRuleError(Err.OS0010.value[0] % "source")
-    if not is_update and source not in ACCOUNT_OPTIONAL_SOURCES and fields.get("account_id") is None:
-        raise InvalidRuleError(Err.OS0010.value[0] % "account_id")
     if source == AUTOMATION_SOURCE:
         _validate_automation_fields(fields)
     return None
@@ -220,14 +270,24 @@ class NotificationRulesService:
                     )
                 existing_rule = await self._get_existing_rule(session, rule_id, source, tenant_id)
 
-                validate_fields(fields, is_update=existing_rule is not None)
+                validate_fields(fields)
+
+                existing_account_ids = (
+                    await self._get_rule_account_ids(session, existing_rule.id) if existing_rule else []
+                )
+                scope_mode, account_ids = _resolve_scope(rule_data, source, existing_rule, existing_account_ids)
+                account_names = await self._get_tenant_account_names(session, tenant_id, account_ids)
+                fields["scope_mode"] = scope_mode
+                fields["account_id"] = account_ids[0] if account_ids else None
+                fields["cluster"] = account_names[account_ids[0]] if account_ids else None
 
                 if existing_rule:
                     self._update_existing_rule(existing_rule, fields, user_id)
                     rule_id = existing_rule.id
                 else:
                     rule_id = self._create_new_rule(session, fields, tenant_id, user_id, rule_data)
-                    await session.flush()
+                await session.flush()
+                await self._replace_rule_accounts(session, rule_id, tenant_id, account_ids)
 
                 if rule_data.get("mappings") is not None:
                     await self._save_mappings_data(
@@ -340,6 +400,38 @@ class NotificationRulesService:
         return rule_id
 
     @staticmethod
+    async def _get_rule_account_ids(session, rule_id):
+        result = await session.execute(select(NotificationRuleAccounts.account_id).filter_by(rule_id=rule_id))
+        return [str(account_id) for account_id in result.scalars().all()]
+
+    @staticmethod
+    async def _get_tenant_account_names(session, tenant_id, account_ids):
+        if not account_ids:
+            return {}
+        malformed = [a for a in account_ids if not _is_uuid(a)]
+        if malformed:
+            raise InvalidRuleError(Err.OS0011.value[0] % f"account_ids: {', '.join(malformed)}")
+        result = await session.execute(
+            select(CloudAccount.id, CloudAccount.account_name).filter(
+                CloudAccount.id.in_(account_ids), CloudAccount.tenant == tenant_id
+            )
+        )
+        names = {str(account_id): name for account_id, name in result.all()}
+        unknown = [a for a in account_ids if a not in names]
+        if unknown:
+            raise InvalidRuleError(Err.OS0011.value[0] % f"account_ids: {', '.join(unknown)}")
+        return names
+
+    @staticmethod
+    async def _replace_rule_accounts(session, rule_id, tenant_id, account_ids):
+        existing = await session.execute(select(NotificationRuleAccounts).filter_by(rule_id=rule_id))
+        for row in existing.scalars().all():
+            await session.delete(row)
+        await session.flush()
+        for account_id in account_ids:
+            session.add(NotificationRuleAccounts(rule_id=rule_id, account_id=account_id, tenant_id=tenant_id))
+
+    @staticmethod
     async def _save_mappings_data(session, rule_id, is_update, user_id, tenant_id, new_mappings):
         existing_mappings = {}
         if is_update:
@@ -435,9 +527,42 @@ class NotificationRulesService:
             except Exception as e:
                 LOG.exception("Error getting notification rules for tenant %s: %s", tenant_id, e)
                 return []
-            if rules and self.cache and self.cache.redis_client:
+            for rule in rules:
+                rule.missing_columns = frozenset()
+            scope_loaded = await self._attach_account_ids(session, tenant_id, rules)
+            if rules and scope_loaded and self.cache and self.cache.redis_client:
                 self.cache.cache_notification_rules(tenant_id, rules)
             return rules
+
+    @staticmethod
+    async def _attach_account_ids(session, tenant_id, rules):
+        """Load each rule's accounts onto rule.account_ids. On failure every rule
+        gets None, which the matcher treats as no accounts, and the load must not
+        be cached."""
+        try:
+            result = await session.execute(
+                select(NotificationRuleAccounts.rule_id, NotificationRuleAccounts.account_id).filter_by(
+                    tenant_id=tenant_id
+                )
+            )
+        except Exception as e:
+            LOG.exception("Error loading notification rule accounts for tenant %s: %s", tenant_id, e)
+            for rule in rules:
+                rule.account_ids = None
+            return False
+        by_rule = {}
+        for rule_id, account_id in result.all():
+            by_rule.setdefault(str(rule_id), []).append(str(account_id))
+        for rule in rules:
+            rule.account_ids = by_rule.get(str(rule.id), [])
+            if rule.scope_mode == SCOPE_ACCOUNTS and rule.account_id and str(rule.account_id) not in rule.account_ids:
+                LOG.warning(
+                    "Notification rule %s has account_id %s outside its accounts %s; an older client edited it",
+                    rule.id,
+                    rule.account_id,
+                    rule.account_ids,
+                )
+        return True
 
     @staticmethod
     async def _get_rules_before_migration(session, tenant_id):
@@ -455,4 +580,6 @@ class NotificationRulesService:
                 missing,
             )
             _warned_missing_schema = True
+        if rules and "scope_mode" not in missing:
+            await NotificationRulesService._attach_account_ids(session, tenant_id, rules)
         return rules

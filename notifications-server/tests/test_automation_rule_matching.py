@@ -18,7 +18,7 @@ from notifications_server.services.message import (
     _event_type_matches,
     _finding_rule_source,
 )
-from notifications_server.services.rules import AUTOMATION_EVENT_TYPES, validate_fields
+from notifications_server.services.rules import AUTOMATION_EVENT_TYPES, _resolve_scope, validate_fields
 
 
 def _filters(type_, **kwargs):
@@ -30,6 +30,9 @@ def _rule(**overrides):
         id="rule-1",
         source=AUTOMATION_SOURCE,
         account_id=None,
+        scope_mode="all",
+        account_ids=[],
+        missing_columns=frozenset(),
         namespace=None,
         workload=None,
         aggregation_key=None,
@@ -146,7 +149,8 @@ def test_all_accounts_rule_matches_any_account():
 
 def test_single_account_rule_matches_only_that_account():
     matched, _ = _match(
-        [_rule(account_id="acc-1")], _automation_payload("automation.task.completed", account_id="acc-2")
+        [_rule(account_id="acc-1", scope_mode="accounts", account_ids=["acc-1"])],
+        _automation_payload("automation.task.completed", account_id="acc-2"),
     )
     assert matched == []
 
@@ -242,4 +246,4 @@ def test_automation_rule_rejects_batch_delivery():
 
 def test_account_scoped_sources_still_require_an_account():
     with pytest.raises(InvalidRuleError):
-        validate_fields({"name": "Prod alerts", "source": "troubleshoot"})
+        _resolve_scope({"name": "Prod alerts", "source": "troubleshoot"}, "troubleshoot", None, [])
