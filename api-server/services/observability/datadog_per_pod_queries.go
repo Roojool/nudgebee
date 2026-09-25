@@ -2,6 +2,7 @@ package observability
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -113,10 +114,17 @@ func buildDatadogPerPodQuery(metric string, meta RequestMetadata, filterStr stri
 // avg-buckets at the same 900s width, and 21x higher at the extreme.
 //
 // `avg` for a percentile, because Datadog has no percentile rollup and the quantile is
-// computed here across the buckets; and for count, where a bucket's value does not
-// matter, only whether it has one.
+// computed here across the buckets.
+//
+// `count` asks Datadog to count instead, which is not the same question as "how many
+// buckets came back". A bucket's VALUE under this rollup is the number of raw
+// submissions inside it, so summing the values measures observation directly and is
+// independent of how wide the buckets are. Counting non-empty buckets instead credits a
+// bucket holding one sample with its entire width: measured on a 2700s bucket, a pod
+// that reported 3 samples was credited 36 step-equivalent points where it had earned
+// 0.8 -- a 45x over-credit, against a floor of 50.
 func datadogRollupFunc(agg ParsedAggregate) string {
-	if agg.IsQuantile() || agg.Name == AggregateCount {
+	if agg.IsQuantile() {
 		return "avg"
 	}
 	return agg.Name
@@ -243,6 +251,13 @@ func datadogCollapseOverTime(results []QueryResult, meta RequestMetadata) {
 	step := aggregateStepSeconds(meta)
 
 	for i := range results {
+		// How often this metric is submitted, derived from the answer rather than
+		// assumed: a bucket that was fully covered holds rollup/interval samples, so
+		// the busiest bucket anywhere in the response gives the interval. Reading it
+		// from the data means no constant to keep in step with an agent's config, and
+		// it is per result because two keys can be submitted at different rates.
+		samplePeriod := datadogSamplePeriod(results[i], rollup)
+
 		// Every key collapses here now. Nothing is pushed down as a bucket the width
 		// of the window, and Datadog's source reads neither `instant` nor `step`, so
 		// everything arrives as a range whatever the caller asked for.
@@ -254,11 +269,12 @@ func datadogCollapseOverTime(results []QueryResult, meta RequestMetadata) {
 			}
 			var value float64
 			if isPerPod && meta.Aggregate.Name == AggregateCount {
-				// Each bucket Datadog answered stands for `rollup` seconds of
-				// observation; a gap stands for none. Converting to Step-wide intervals
-				// is what makes this comparable to Prometheus's count_over_time, and to
-				// the floor the caller checks it against.
-				value = stepEquivalentCount(float64(countFinite(series.Values)), rollup, step)
+				// Each bucket's value is how many raw samples it holds, so their SUM is
+				// the number of readings the pod actually produced. Multiplying by the
+				// interval between readings turns that into seconds observed, and
+				// dividing by Step makes it comparable to Prometheus's
+				// count_over_time -- and to the floor the caller checks it against.
+				value = stepEquivalentCount(sumFinite(series.Values), samplePeriod, step)
 			} else {
 				v, ok := datadogReduceOverTime(series.Values, meta.Aggregate)
 				if !ok {
@@ -333,21 +349,6 @@ func datadogReduceOverTime(values []float64, aggregate ParsedAggregate) (float64
 	return 0, false
 }
 
-// countFinite is how many of a series' points are measurements.
-//
-// A gap arrives as NaN and is not an observation: counting it would credit a pod with
-// coverage over an interval it did not exist in, which is the opposite of what the
-// floor is asked to detect. Zero is a measurement and counts.
-func countFinite(values []float64) int {
-	n := 0
-	for _, v := range values {
-		if !math.IsNaN(v) && !math.IsInf(v, 0) {
-			n++
-		}
-	}
-	return n
-}
-
 // percentileOverTime is linear interpolation over one series' own values, matching
 // the quantile_over_time() the Prometheus path asks the engine for and the
 // np.percentile() the Python Datadog service used before this moved server-side.
@@ -390,4 +391,55 @@ func datadogNoteUnanswerableKeys(results []QueryResult, requested []string) []Qu
 		results = append(results, QueryResult{QueryKey: key, Note: reason})
 	}
 	return results
+}
+
+// sumFinite totals the readable values, ignoring gaps.
+//
+// A gap arrives as NaN and is not an observation: counting it would credit a pod with
+// coverage over an interval it did not exist in, which is the opposite of what the floor
+// is asked to detect. Zero IS a measurement and contributes, which matters here because
+// an idle container reports zero rather than nothing.
+func sumFinite(values []float64) float64 {
+	var total float64
+	for _, v := range values {
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			total += v
+		}
+	}
+	return total
+}
+
+// datadogSamplePeriod is the seconds between raw submissions, derived from the response.
+//
+// Under a `count` rollup a saturated bucket holds rollup/interval samples, so the
+// largest bucket in the whole result gives the interval. Taking the maximum across every
+// series matters: one pod may have lived only a fraction of a bucket, and sizing on that
+// would overstate the interval and so overstate everyone's coverage.
+//
+// Falls back to the rollup width when nothing usable came back, which reproduces the old
+// bucket-counting behaviour rather than inventing a number.
+func datadogSamplePeriod(result QueryResult, rollup float64) float64 {
+	var busiest float64
+	for _, series := range result.Payload {
+		for _, v := range series.Values {
+			if !math.IsNaN(v) && !math.IsInf(v, 0) && v > busiest {
+				busiest = v
+			}
+		}
+	}
+	if busiest < 1 || rollup <= 0 {
+		// Falling back to the bucket width reproduces the old bucket-counting answer,
+		// which is a defensible number -- but reaching here means the values were not
+		// the sample counts they should be. That happened once already: the nanocore
+		// conversion had scaled them by 1e-9, and this branch turned a 7-million-fold
+		// error into a plausible-looking one. Say so rather than absorb it.
+		slog.Warn("datadog: count values are not sample counts, falling back to bucket width",
+			"busiest", busiest, "rollup", rollup)
+		return rollup
+	}
+	period := rollup / busiest
+	if period < 1 {
+		return 1
+	}
+	return period
 }

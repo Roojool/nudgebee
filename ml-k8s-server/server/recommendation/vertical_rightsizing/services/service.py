@@ -76,40 +76,25 @@ class RecommendationService:
         # whichever service the first branch builds, and the other three read as
         # assignment errors.
         self._metrics_service_loaders: MetricsService
-        # Datadog stays on its own service even with the flag on, until api-server's
-        # Datadog metrics executor can carry the traffic this would send it.
+        # Datadog used to be excluded here. It no longer is: every reason has been
+        # fixed and the numbers checked against Prometheus on the same cluster, which
+        # is the only way to tell "Datadog disagrees" from "we asked it a different
+        # question".
         #
-        # `aggregate` applies to a whole request, so four CPU percentiles cannot share
-        # one. For the default strategy that is 7 Datadog GETs per workload against
-        # the 2 this service makes, which fetches the raw series once and takes the
-        # percentiles locally. Three properties of observability/datadog.go make that
-        # multiplier expensive rather than merely larger. The three api-server properties
-        # originally named here are now all fixed -- the key loop is bounded-concurrent,
-        # a key's failure no longer discards the others' results, and the metrics path
-        # retries 429s within a caller-supplied budget.
+        # The three original blockers were api-server's, and are gone (#39288, #39297,
+        # #39301): the key loop is bounded-concurrent, one key's failure no longer
+        # discards the others, and the metrics path retries 429s inside a budget.
         #
-        # The carve-out stays anyway, for a reason nobody had written down -- and it is
-        # neither the percentiles nor the executor. On Datadog the COVERAGE COUNT is
-        # resolution-dependent, so it cannot be compared against points_required at all.
+        # Two more surfaced while verifying, both measured rather than reasoned about:
+        # the rollup ignored the window, and coverage counted buckets instead of
+        # samples. With both fixed, Datadog matches Prometheus at equal resolution --
+        # memory 100-103%, coverage 100-110%, CPU p99 94-110%.
         #
-        # The rollup is chosen from how many pods the request names, to stay inside a
-        # point budget. A bucket holding a single sample is credited with its whole
-        # width, so a coarser rollup reports MORE coverage for the same data. Measured on
-        # a dev account, one pod, same 14 days, same three buckets of data:
-        #
-        #     asked about 291 pods -> 36 units (45 min)
-        #     asked about  1 pod   -> 12 units (15 min)
-        #     the old service      -> 96 units (2 hours, Datadog's default 2h buckets)
-        #
-        # Coverage is a property of the pod, not of the batch it was fetched in. Against
-        # a fixed 50-unit floor that decides inclusion, 88 of 288 pods fell below it and
-        # none rose above -- but tuning the floor cannot fix a number that moves with
-        # batch size.
-        #
-        # Unblocking this means making coverage resolution-independent -- a fixed
-        # resolution for the count, or measuring the first-to-last span instead of
-        # counting buckets -- not another pass at the executor.
-        via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation and metrics_provider != "datadog"
+        # What remains is a property of Datadog, not a defect: it cannot be sampled
+        # finer than 300s at scale, so its percentiles are a coarser-window peak than
+        # the 75s one a Prometheus account gets. Recommendations there are smoother for
+        # spiky workloads. That is a deliberate trade, not a regression.
+        via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation
 
         if via_utilisation:
             # One service for every provider: it asks api-server for metric keys and

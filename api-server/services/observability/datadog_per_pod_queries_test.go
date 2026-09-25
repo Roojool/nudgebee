@@ -57,12 +57,16 @@ func TestBuildDatadogPerPodQuery_PlainAggregateAsksForABoundedRollup(t *testing.
 // ever sees it. Measured on 69 pod incarnations at the same 900s width, `max` over
 // max-buckets read 6.7x higher than `max` over avg-buckets, and 21x at the extreme.
 //
-// A percentile and a count are the exceptions: Datadog has no percentile rollup, and a
-// count cares only whether a bucket exists, not what is in it.
+// A percentile is the one exception, because Datadog has no percentile rollup.
+//
+// `count` used to be a second exception, bucketed with avg on the reasoning that a count
+// cares only whether a bucket exists. It does not: a bucket holding one sample was then
+// credited its whole width. Measured on a 2700s bucket, a pod that reported 3 samples
+// scored 36 step-equivalent points where it had earned 0.8, against a floor of 50.
 func TestDatadogRollupFunc_UsesTheAggregatesOwnFunction(t *testing.T) {
 	for _, tc := range []struct{ aggregate, want string }{
 		{"max", "max"}, {"min", "min"}, {"sum", "sum"}, {"avg", "avg"},
-		{"count", "avg"}, {"p50", "avg"}, {"p99", "avg"}, {"p99.9", "avg"},
+		{"count", "count"}, {"p50", "avg"}, {"p99", "avg"}, {"p99.9", "avg"},
 	} {
 		agg, err := parseAggregate(tc.aggregate)
 		require.NoErrorf(t, err, "aggregate %q", tc.aggregate)
@@ -347,11 +351,21 @@ func TestDatadogPerPodFilter_ToleratesHowTheFilterWasAssembled(t *testing.T) {
 		datadogPerPodFilter("kube_namespace:nudgebee, ", meta), "a trailing comma is dropped")
 }
 
-// `.rollup(count, W)` counts the points Datadog stored in W, which is a different
-// question from "how many of the caller's steps had data". Asking for buckets and
-// converting them is what keeps the data floor meaning the same thing here as on
-// Prometheus.
-func TestBuildDatadogPerPodQuery_CountAsksForBucketsNotADatadogCount(t *testing.T) {
+// `.rollup(count, W)` counts the points Datadog stored in W, which really is a different
+// question from "how many of the caller's steps had data" -- this test used to assert
+// the opposite for exactly that reason.
+//
+// The objection was right about the unit and wrong about the remedy. Avoiding Datadog's
+// count meant counting BUCKETS instead, which credits a bucket holding one sample with
+// its entire width: a pod that reported 3 samples in a 2700s bucket scored 36
+// step-equivalent points against a floor of 50, a 45x over-credit.
+//
+// The unit is now converted rather than avoided. A bucket's value is its raw sample
+// count, and the interval between samples is read from the busiest bucket in the
+// response (a saturated 2700s bucket holding 135 samples means one every 20s), so
+// samples x interval / step lands back in the caller's unit -- and, unlike counting
+// buckets, does not change when the bucket width does.
+func TestBuildDatadogPerPodQuery_CountAsksDatadogToCount(t *testing.T) {
 	count, err := parseAggregate("count")
 	require.NoError(t, err)
 
@@ -362,8 +376,8 @@ func TestBuildDatadogPerPodQuery_CountAsksForBucketsNotADatadogCount(t *testing.
 	}
 	q := buildDatadogPerPodQuery("kubernetes.cpu.usage.total", meta, "kube_namespace:shop", 14*24*3600)
 
-	assert.Contains(t, q, ".rollup(avg, 300)", "the finest rollup two pods over 14 days affords")
-	assert.NotContains(t, q, "rollup(count", "a Datadog count is in Datadog's own unit")
+	assert.Contains(t, q, ".rollup(count, 300)",
+		"the finest rollup two pods over 14 days affords, counting samples not averaging them")
 }
 
 // The collapse has to multiply by the SAME rollup the query asked for. Recomputing it
@@ -454,4 +468,91 @@ func onesThenGaps(measured, gaps int) []float64 {
 		out = append(out, math.NaN())
 	}
 	return out
+}
+
+// Coverage measures OBSERVATION, not how many buckets came back.
+//
+// Under a count rollup a bucket's value is how many raw samples it holds, so a pod that
+// reported three samples in one 2700s bucket has earned 0.8 step-equivalent points --
+// not the 36 that crediting the bucket its whole width would give. Against a floor of
+// 50 that is the difference between including a pod on three readings and excluding it.
+func TestDatadogCollapseOverTime_CountMeasuresSamplesNotBuckets(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+	meta := RequestMetadata{Aggregate: count, RangeWindow: "1209600s", Step: "75s"}
+	require.Equal(t, 2700, datadogPerPodRollupSeconds(meta, 14*24*3600))
+
+	results := []QueryResult{{
+		QueryKey: "container_cpu_usage_by_pod",
+		Payload: []Result{
+			// A saturated bucket: 2700s at one sample every 20s. This is what tells the
+			// collapse the submission interval, so it must come from the same response.
+			{Timestamps: seq(2), Values: []float64{135, 135}},
+			// The thin pod: three readings, in one bucket.
+			{Timestamps: seq(1), Values: []float64{3}},
+		},
+	}}
+	datadogCollapseOverTime(results, meta)
+
+	dense := results[0].Payload[0].Values[0]
+	thin := results[0].Payload[1].Values[0]
+
+	assert.InDelta(t, 270*20/75.0, dense, 0.01, "270 samples at 20s is 5400s of observation")
+	assert.InDelta(t, 3*20/75.0, thin, 0.01, "three readings are three readings")
+	assert.Less(t, thin, 50.0, "a pod seen three times must not clear a 50-point floor")
+	assert.Greater(t, dense, 50.0, "a pod seen throughout must clear it")
+}
+
+// The interval is read from the busiest bucket in the WHOLE result, not per series.
+// A pod that lived for a fraction of one bucket would otherwise imply a long interval
+// and inflate every pod's coverage.
+func TestDatadogSamplePeriod_ComesFromTheBusiestBucketAnywhere(t *testing.T) {
+	result := QueryResult{Payload: []Result{
+		{Values: []float64{2}},
+		{Values: []float64{135, 100}},
+		{Values: []float64{1}},
+	}}
+	assert.InDelta(t, 20.0, datadogSamplePeriod(result, 2700), 0.01)
+
+	// Nothing usable: fall back to the bucket width, which is the old behaviour rather
+	// than an invented number.
+	empty := QueryResult{Payload: []Result{{Values: []float64{math.NaN()}}}}
+	assert.Equal(t, 2700.0, datadogSamplePeriod(empty, 2700))
+}
+
+// A count must survive the unit conversion untouched.
+//
+// Datadog labels a CPU series `nanocore` whatever the rollup, because that is the unit
+// of the metric being counted -- not of the count. Scaling it anyway divided a pod's 37
+// samples by a billion, and its coverage read 3.7e-8 against a floor of 50, so every
+// pod on every Datadog account was excluded from CPU sizing. Memory was unaffected only
+// because its unit is `byte`, which is why the failure looked provider-specific rather
+// than aggregate-specific.
+func TestDatadogNanocoresToCores_LeavesACountAlone(t *testing.T) {
+	count, err := parseAggregate("count")
+	require.NoError(t, err)
+	maxAgg, err := parseAggregate("max")
+	require.NoError(t, err)
+
+	newResults := func() []QueryResult {
+		return []QueryResult{{
+			QueryKey: "container_cpu_usage_by_pod",
+			Payload: []Result{{
+				Metric: map[string]string{"unit": "nanocore", "pod": "web-1"},
+				Values: []float64{37, 136},
+			}},
+		}}
+	}
+
+	counted := newResults()
+	datadogNanocoresToCores(counted, RequestMetadata{Aggregate: count})
+	assert.Equal(t, []float64{37, 136}, counted[0].Payload[0].Values,
+		"sample counts are not nanocores")
+
+	// The conversion still has to happen for an actual quantity, or CPU reads a
+	// billion times high beside requests and limits Datadog already gives in cores.
+	measured := newResults()
+	datadogNanocoresToCores(measured, RequestMetadata{Aggregate: maxAgg})
+	assert.InDelta(t, 37e-9, measured[0].Payload[0].Values[0], 1e-18)
+	assert.Equal(t, "core", measured[0].Payload[0].Metric["unit"])
 }

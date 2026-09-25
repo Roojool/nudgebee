@@ -259,7 +259,7 @@ func TestDatadogNanocoresToCores(t *testing.T) {
 		{QueryKey: "no_unit", Payload: []Result{{Metric: map[string]string{}, Values: []float64{7}}}},
 	}
 
-	datadogNanocoresToCores(results)
+	datadogNanocoresToCores(results, RequestMetadata{})
 
 	assert.Equal(t, []float64{1.5, 0.25}, results[0].Payload[0].Values)
 	assert.Equal(t, "core", results[0].Payload[0].Metric["unit"])

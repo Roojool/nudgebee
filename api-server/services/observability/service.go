@@ -3397,11 +3397,11 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 
 	// Post-process Datadog percentile queries: collapse per-host series into a single percentile series
 	if metricsProvider == "datadog" {
-		datadogNanocoresToCores(output.Results)
+		datadogNanocoresToCores(output.Results, meta)
 		datadogHTTPLabels(output.Results)
 		// The collapse Aggregate promises is done here for the aggregates Datadog
-		// cannot be asked for: it has no percentile over time, and its own `count`
-		// is in buckets rather than in the caller's steps.
+		// cannot be asked for: it has no percentile over time, and its `count` is in
+		// raw submissions rather than in the caller's steps.
 		datadogCollapseOverTime(output.Results, meta)
 		output.Results = datadogNoteUnanswerableKeys(output.Results, meta.RequestedMetrics)
 		percentileKeys := make(map[string]float64)
@@ -3460,7 +3460,16 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 // Keyed on the unit Datadog attaches to each series, not on the metric key, so it
 // covers every CPU key and nothing else. Done here rather than in the Datadog source
 // because that source also runs users' own queries, which must come back unscaled.
-func datadogNanocoresToCores(results []QueryResult) {
+//
+// A COUNT is exempt, because it is not a quantity in the metric's unit -- it is how
+// many readings there were. Datadog still labels those series `nanocore`, since that is
+// the unit of the metric being counted, so without this a pod's 37 samples were divided
+// by a billion and its coverage read 3.7e-8. Elasticsearch carries the same carve-out
+// (see esPerPodScale) for the same reason.
+func datadogNanocoresToCores(results []QueryResult, meta RequestMetadata) {
+	if meta.Aggregate.Name == AggregateCount {
+		return
+	}
 	const nanocoresPerCore = 1e9
 	for i := range results {
 		for j := range results[i].Payload {

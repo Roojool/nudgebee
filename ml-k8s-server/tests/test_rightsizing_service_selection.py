@@ -68,30 +68,28 @@ def test_the_flag_on_is_one_service_for_every_provider_but_datadog(metrics_provi
     assert isinstance(loaders, UtilisationMetricsService)
 
 
-def test_datadog_stays_on_its_own_service_because_coverage_is_resolution_dependent():
-    """The executor reasons for this carve-out are fixed. It stays for a different one.
+def test_datadog_uses_the_shared_service_like_every_other_provider():
+    """Datadog was excluded here until its numbers could be shown to agree.
 
-    On Datadog the coverage count moves with the ROLLUP, and the rollup is chosen from
-    how many pods the request names. A bucket holding one sample is credited with its
-    whole width, so a coarser rollup reports more coverage for identical data.
+    They now do, measured against Prometheus on the same cluster at equal resolution:
+    memory 100-103%, coverage 100-110%, CPU p99 94-110%. The exclusion existed for
+    api-server defects that are fixed (#39288, #39297, #39301) plus two found while
+    verifying — a rollup that ignored the window, and coverage counted in buckets
+    rather than samples.
 
-    Measured on a dev account -- one pod, same 14 days, same three buckets of data:
-    asked about 291 pods it reported 36 units (45 min); asked about that pod alone, 12
-    units (15 min); the old service, 96 units (2 hours). Coverage is a property of the
-    pod, not of the batch it was fetched in, so comparing it to a fixed points_required
-    is unsound at any value -- 88 of 288 pods fell below the floor and none rose above.
-
-    Unblock by making coverage resolution-independent, not by editing this test.
+    "Every provider but one" was the shape this epic exists to remove, so there is no
+    provider name left in this decision at all.
     """
     loaders = _service(True, metrics_provider="datadog")
-    assert isinstance(loaders, DatadogMetricsService)
-    assert not isinstance(loaders, UtilisationMetricsService)
+    assert isinstance(loaders, UtilisationMetricsService)
+    assert not isinstance(loaders, DatadogMetricsService)
 
 
-def test_a_prometheus_account_uses_the_shared_service():
-    """Unchanged by the Datadog carve-out being lifted."""
-    assert isinstance(_service(True, metrics_provider="prometheus"), UtilisationMetricsService)
-    assert isinstance(_service(True, metrics_provider=None), UtilisationMetricsService)
+def test_the_flag_alone_decides_for_every_provider():
+    """No provider is named on this path any more."""
+    for provider in ("prometheus", "datadog", "ES", "newrelic", "dynatrace", None):
+        loaders = _service(True, metrics_provider=provider, elasticsearch={"url": "https://es:9200"})
+        assert isinstance(loaders, UtilisationMetricsService), f"{provider} should use the shared service"
 
 
 def test_a_prometheus_family_account_keeps_its_pod_inventory_walk():
