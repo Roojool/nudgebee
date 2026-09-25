@@ -1,6 +1,23 @@
 package core
 
-import "nudgebee/llm/security"
+import (
+	"errors"
+
+	"nudgebee/llm/security"
+)
+
+// MetadataToolConfigName is the tool-call metadata key naming the configured
+// target a call ran against; MetadataToolConfigStrategy names how it was chosen.
+const (
+	MetadataToolConfigName     = "tool_config_name"
+	MetadataToolConfigStrategy = "tool_config_strategy"
+)
+
+// ErrNoMatchingConfig means configs exist for this tool but none of them is the
+// system the question is about. Distinct from having no configuration at all:
+// the caller should be told which targets exist and that none matches, rather
+// than being handed one of them.
+var ErrNoMatchingConfig = errors.New("no configured target matches the subject")
 
 type NBToolType string
 

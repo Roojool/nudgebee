@@ -249,6 +249,13 @@ type NbToolContext struct {
 	ToolCallId     string
 	AccountContext string
 	AccountPrompt  string
+	// Source is the conversation source this tool call belongs to, as a plain
+	// string so tools/core stays free of the agents/core import. Empty means
+	// unknown. Tools use it to tell a live user's request, where asking or
+	// inferring from the user's own words is reasonable, from an unattended
+	// run where nobody is there to answer and a guess is silently wrong.
+	Source string
+
 	// SessionId is the top-level conversation session ID. Propagated from parent
 	// agents so sub-agents (e.g. agent_code_2) can pass it to external services
 	// like the workspace pod for conversation linking.
@@ -295,7 +302,28 @@ func (tc NbToolContext) GoContext() context.Context {
 	return tc.Ctx.GetContext()
 }
 
-func NewNbToolContext(ctx *security.RequestContext, tool NBTool, accountId string, userId string, conversationId string, messageId string, agenId string, query string, history []llms.MessageContent, queryContext string, queryConfig NBQueryConfig, toolCallId string) NbToolContext {
+// userConversationSources are the sources with a person waiting on the answer.
+// Mirrors agents/core's isUserConversationSource, duplicated as strings because
+// tools/core cannot import agents/core.
+var userConversationSources = map[string]struct{}{
+	"UserInvestigation":    {},
+	"UserInvestigationCli": {},
+}
+
+// HasLiveUser reports whether someone is waiting on this tool call. False for
+// event analysis, automations and other unattended runs.
+func (c NbToolContext) HasLiveUser() bool {
+	_, ok := userConversationSources[c.Source]
+	return ok
+}
+
+func NewNbToolContext(ctx *security.RequestContext, tool NBTool, accountId string, userId string, conversationId string, messageId string, agenId string, query string, history []llms.MessageContent, queryContext string, queryConfig NBQueryConfig, toolCallId string, source ...string) NbToolContext {
+	// Variadic so the ~37 existing callers stay untouched; only the paths that
+	// know the conversation source pass it.
+	conversationSource := ""
+	if len(source) > 0 {
+		conversationSource = source[0]
+	}
 
 	toolConfigs := map[string]string{}
 	if queryConfig.ToolConfigs != nil {
@@ -336,6 +364,7 @@ func NewNbToolContext(ctx *security.RequestContext, tool NBTool, accountId strin
 		Ctx:            ctx,
 		ToolConfig:     toolConfig,
 		ToolCallId:     toolCallId,
+		Source:         conversationSource,
 	}
 	return toolContext
 }

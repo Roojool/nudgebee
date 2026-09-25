@@ -118,6 +118,27 @@ func mergeToolResponseMetadata(metadata *toolcore.NBToolResponseMetadata, additi
 	}
 }
 
+// withResolvedToolTarget copies additionalDetails and adds the config this tool
+// call resolved to, plus the strategy that chose it. Returns the input unchanged
+// when no config was involved (tools that need none).
+func withResolvedToolTarget(additionalDetails map[string]any, queryConfig toolcore.NBQueryConfig, toolName string) map[string]any {
+	// The executing tool context is authoritative for WHICH target ran and has
+	// already set tool_config_name; this only adds HOW it was chosen. Falling
+	// back to the request map would attribute a stale name to a call that ran
+	// against something else. Checked before cloning: this runs on every tool
+	// call and most tools need no config at all.
+	if _, ran := additionalDetails[toolcore.MetadataToolConfigName]; !ran {
+		return additionalDetails
+	}
+	out := maps.Clone(additionalDetails)
+	if meta, ok := queryConfig.ToolConfigMetadata[toolName].(map[string]any); ok {
+		if strategy, ok := meta["strategy"].(string); ok && strategy != "" {
+			out[toolcore.MetadataToolConfigStrategy] = strategy
+		}
+	}
+	return out
+}
+
 func actionExecutionMetadata(action NBAgentPlannerToolAction) map[string]any {
 	if action.ExecutionBatchID == "" && action.PlannerIteration <= 0 {
 		return nil
@@ -307,7 +328,12 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 	// with the non-internal subset of AdditionalDetails (per-tool extras like
 	// delegate_agent's iterations_used / tools_used). Failure is non-fatal —
 	// log and persist NULL so the row still lands.
-	metadataJSON, mErr := mergeToolResponseMetadataWithAction(response.Metadata, response.AdditionalDetails, tcr)
+	// Which target this call actually hit, and how it was chosen. Without this a
+	// wrong-target answer is invisible in the transcript: an event investigation
+	// queried another server entirely and the only way to notice was matching its
+	// figures against a different run's output.
+	additionalDetails := withResolvedToolTarget(response.AdditionalDetails, h.request.QueryConfig, tcr.Tool)
+	metadataJSON, mErr := mergeToolResponseMetadataWithAction(response.Metadata, additionalDetails, tcr)
 	if mErr != nil {
 		h.ctx.GetLogger().Warn("toolcallbackhandler: failed to marshal tool metadata", "error", mErr)
 	}

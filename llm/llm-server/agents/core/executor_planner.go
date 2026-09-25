@@ -30,6 +30,7 @@ import (
 	"github.com/tmc/langchaingo/memory"
 	"github.com/tmc/langchaingo/schema"
 	"go.opentelemetry.io/otel/trace"
+	"regexp"
 )
 
 var ExecutePlannerWorkerPool *common.WorkerPool
@@ -2066,6 +2067,104 @@ func writeConfirmationRequired(tool toolcore.NBTool, requestType *toolcore.ToolR
 	}
 }
 
+// withExecutedToolTarget records the configured target a tool call actually ran
+// against. Empty for tools that need no configuration.
+func withExecutedToolTarget(additionalDetails map[string]any, configName string) map[string]any {
+	if configName == "" {
+		return additionalDetails
+	}
+	if additionalDetails == nil {
+		additionalDetails = map[string]any{}
+	}
+	additionalDetails[toolcore.MetadataToolConfigName] = configName
+	return additionalDetails
+}
+
+// matchConfigBySubject matches the resource an alert is about against a tool's
+// configured targets, by config name or by the comma-separated regex patterns
+// in its host value — the same shape the tools match an explicit instance
+// argument against. Generic on purpose: every tool with configured targets has
+// this question and only the argument parsing is tool-specific.
+func matchConfigBySubject(ctx *security.RequestContext, subject string, configs []toolcore.ToolConfig) (toolcore.ToolConfig, bool) {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return toolcore.ToolConfig{}, false
+	}
+	for _, config := range configs {
+		if strings.EqualFold(config.Name, subject) {
+			return config, true
+		}
+		for _, v := range config.Values {
+			if v.Name != "host" {
+				continue
+			}
+			for _, pattern := range strings.Split(v.Value, ",") {
+				trimmed := strings.TrimSpace(pattern)
+				if trimmed == "" {
+					continue
+				}
+				if !strings.HasPrefix(trimmed, "(?i)") {
+					trimmed = "(?i)" + trimmed
+				}
+				re, err := regexp.Compile(trimmed)
+				if err != nil {
+					ctx.GetLogger().Warn("plannerexecutor: invalid host pattern in tool config", "config", config.Name, "pattern", trimmed, "error", err)
+					continue
+				}
+				if re.MatchString(subject) {
+					return config, true
+				}
+			}
+		}
+	}
+	return toolcore.ToolConfig{}, false
+}
+
+// unresolvedTargetMessage explains why a configured tool could not run. "None
+// configured" and "several configured, none is the subject" lead somewhere
+// different: the second should send the agent to reach the system where it
+// runs, so it names the subject and the targets that do exist.
+func unresolvedTargetMessage(ctx *security.RequestContext, tool toolcore.NBTool, accountId string, toolContext toolcore.NbToolContext) string {
+	generic := fmt.Sprintf("Tool %s requires configuration but none was found", tool.Name())
+	subject := subjectOfRequest(toolContext)
+	if subject == "" {
+		return generic
+	}
+	configs, err := toolcore.ListToolConfigs(ctx, accountId, tool)
+	if err != nil || len(configs) == 0 {
+		return generic
+	}
+	names := make([]string, 0, len(configs))
+	for _, c := range configs {
+		names = append(names, c.Name)
+	}
+	return fmt.Sprintf("%s: none of the configured targets for %s (%s) is %s — name one explicitly, or reach it where it runs",
+		toolcore.ErrNoMatchingConfig, tool.Name(), strings.Join(names, ", "), subject)
+}
+
+// subjectOfRequest is the resource the question is about, as the event pipeline
+// recorded it. Empty when the caller supplied none, e.g. a free-form chat.
+func subjectOfRequest(toolContext toolcore.NbToolContext) string {
+	workload := strings.TrimSpace(toolContext.QueryConfig.Workload)
+	if workload == "" {
+		return ""
+	}
+	if ns := strings.TrimSpace(toolContext.QueryConfig.Namespace); ns != "" {
+		return "`" + ns + "/" + workload + "`"
+	}
+	return "`" + workload + "`"
+}
+
+// ensureToolConfigs returns a non-nil map so a resolved config can always be
+// recorded, including on the paths that previously returned without noting
+// which target they had settled on.
+func ensureToolConfigs(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
+}
+
 func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, queryContext string) (NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
 	// Normalize tool name: trim whitespace that XML parsing may leave
 	action.Tool = strings.TrimSpace(action.Tool)
@@ -3045,8 +3144,14 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		}
 	}
 
-	// If there's exactly one config, no need to ask the user — it will be auto-selected
+	// If there's exactly one config, no need to ask the user — it will be auto-selected.
+	// Recorded so the transcript distinguishes "only one candidate existed" from a
+	// choice that was actually made: a single configured database is still the wrong
+	// one when the alert is about a database that has no integration at all.
 	if len(configs) == 1 {
+		e.agentRequest.QueryConfig.ToolConfigs = ensureToolConfigs(e.agentRequest.QueryConfig.ToolConfigs)
+		e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] = configs[0].Name
+		recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "sole_config")
 		return nil, nil, nil
 	}
 
@@ -3106,7 +3211,7 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 	// returns every ticket integration, but a query like "list jira tickets" should
 	// only see Jira configs — including in the fallback follow-up prompt).
 	if filterer, ok := tool.(toolcore.NBToolConfigsFilter); ok {
-		toolContext := toolcore.NewNbToolContext(e.ctx, tool, e.agentRequest.AccountId, e.agentRequest.UserId, e.agentRequest.ConversationId, e.agentRequest.MessageId, e.agentRequest.AgentId, originalUserQuery, nil, e.agentRequest.QueryContext, e.agentRequest.QueryConfig, action.ToolID)
+		toolContext := toolcore.NewNbToolContext(e.ctx, tool, e.agentRequest.AccountId, e.agentRequest.UserId, e.agentRequest.ConversationId, e.agentRequest.MessageId, e.agentRequest.AgentId, originalUserQuery, nil, e.agentRequest.QueryContext, e.agentRequest.QueryConfig, action.ToolID, string(e.agentRequest.ConversationSource))
 		filtered := filterer.FilterConfigs(toolContext, configs)
 		if len(filtered) > 0 && len(filtered) < len(configs) {
 			e.ctx.GetLogger().Info("plannerexecutor: narrowed tool configs via FilterConfigs",
@@ -3152,12 +3257,50 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		// hints (e.g. "dev-pg") that IdentifyConfig's keyword matching can pick up.
 		// Fall back to action.ToolInput for cases where the LLM-generated tool arguments
 		// carry more specific info (e.g. explicit "instance" field in JSON args).
-		toolContext := toolcore.NewNbToolContext(e.ctx, tool, e.agentRequest.AccountId, e.agentRequest.UserId, e.agentRequest.ConversationId, e.agentRequest.MessageId, e.agentRequest.AgentId, originalUserQuery, nil, e.agentRequest.QueryContext, e.agentRequest.QueryConfig, action.ToolID)
+		toolContext := toolcore.NewNbToolContext(e.ctx, tool, e.agentRequest.AccountId, e.agentRequest.UserId, e.agentRequest.ConversationId, e.agentRequest.MessageId, e.agentRequest.AgentId, originalUserQuery, nil, e.agentRequest.QueryContext, e.agentRequest.QueryConfig, action.ToolID, string(e.agentRequest.ConversationSource))
 		toolContext.SessionId = e.agentRequest.SessionId
 
 		request := toolcore.NBToolCallRequest{Command: action.ToolInput}
 
+		// The resource the alert is about is the one signal that says which system
+		// the question concerns. Try it before the tool's own logic, which for an
+		// unattended run would otherwise fall through to matching env keywords
+		// against a ~28k-character generated prompt.
+		if matched, ok := matchConfigBySubject(e.ctx, strings.Trim(subjectOfRequest(toolContext), "`"), configs); ok {
+			e.agentRequest.QueryConfig.ToolConfigs = ensureToolConfigs(e.agentRequest.QueryConfig.ToolConfigs)
+			e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] = matched.Name
+			recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "subject_match")
+			e.ctx.GetLogger().Info("plannerexecutor: resolved tool config from the alert subject", "tool", tool.Name(), "config", matched.Name)
+			persistResolvedConfigAsync()
+			return nil, nil, nil
+		}
+		// Nothing configured is the subject. For an unattended run stop here: the
+		// remaining strategies infer a target from prose, and a wrong target
+		// answers with real numbers from the wrong system.
+		if !toolContext.HasLiveUser() && subjectOfRequest(toolContext) != "" {
+			return []NBAgentPlannerToolActionStep{
+				{
+					Action:      action,
+					Observation: unresolvedTargetMessage(e.ctx, tool, e.agentRequest.AccountId, toolContext),
+					Status:      ToolStatusFailure,
+				},
+			}, nil, nil
+		}
+
 		identifiedConfig, err := configIdentifier.IdentifyConfig(toolContext, request, configs)
+		if errors.Is(err, toolcore.ErrNoMatchingConfig) {
+			// Configs exist but none is the system this question is about. Falling
+			// through would hand the agent one of them; it would then answer with
+			// real numbers from the wrong system and nothing downstream could tell.
+			e.ctx.GetLogger().Info("plannerexecutor: no configured target matches the subject", "tool", tool.Name(), "error", err)
+			return []NBAgentPlannerToolActionStep{
+				{
+					Action:      action,
+					Observation: err.Error(),
+					Status:      ToolStatusFailure,
+				},
+			}, nil, nil
+		}
 		if err != nil {
 			e.ctx.GetLogger().Error("plannerexecutor: IdentifyConfig failed", "tool", tool.Name(), "error", err)
 		}
@@ -3177,7 +3320,11 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 			}
 			e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] = identifiedConfig.Name
 
-			recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "keyword_matching")
+			// The tool's own IdentifyConfig resolved it. Which rung inside the tool
+			// did so (the instance argument, a host pattern, or a keyword scan of
+			// the query text) is not visible here — labelling it "keyword_matching"
+			// hid exactly the distinction we need to measure.
+			recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "tool_identify")
 
 			e.ctx.GetLogger().Info("plannerexecutor: resolved tool config using IdentifyConfig", "tool", tool.Name(), "config", identifiedConfig.Name)
 			persistResolvedConfigAsync()
@@ -3971,7 +4118,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 		queryContext = agentRequest.QueryContext
 	}
 
-	toolContext := toolcore.NewNbToolContext(nbRequestContext, tool, agentRequest.AccountId, agentRequest.UserId, agentRequest.ConversationId, agentRequest.MessageId, agentRequest.AgentId, input, previousHistory, queryContext, agentRequest.QueryConfig, toolId)
+	toolContext := toolcore.NewNbToolContext(nbRequestContext, tool, agentRequest.AccountId, agentRequest.UserId, agentRequest.ConversationId, agentRequest.MessageId, agentRequest.AgentId, input, previousHistory, queryContext, agentRequest.QueryConfig, toolId, string(agentRequest.ConversationSource))
 	toolContext.AccountContext = agentRequest.AccountContext
 	toolContext.AccountPrompt = agentRequest.AccountPrompt
 	toolContext.SessionId = agentRequest.SessionId
@@ -3996,9 +4143,15 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 		// Check if we have a valid tool config
 		config := toolContext.ToolConfig
 		if !reflect.ValueOf(config).IsValid() || config.Name == "" {
+			// "None configured" and "several configured, none is the subject"
+			// are different answers and lead somewhere different: the second
+			// should send the agent to reach the system where it runs. Ask the
+			// tool which it is — the pre-resolve path that also asks discards
+			// its steps, so this is the only place the answer reliably reaches
+			// the agent.
 			return toolcore.NBToolResponse{
 				Status: toolcore.NBToolResponseStatusError,
-				Data:   fmt.Sprintf("Tool %s requires configuration but none was found", tool.Name()),
+				Data:   unresolvedTargetMessage(nbRequestContext, tool, agentRequest.AccountId, toolContext),
 			}, nil
 		}
 	}
@@ -4091,6 +4244,11 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	_, span := nbRequestContext.GetTracer().Start(nbRequestContext.GetContext(), fmt.Sprintf("Agent:ToolExecution:%s", tool.Name()))
 	data, err := tool.Call(toolContext, request)
 	span.End()
+	// Record the target from the context the tool actually ran with. The agent
+	// request's ToolConfigs map is resolved per agent and a parent orchestrator's
+	// copy can be stale, so reading it there misses exactly the calls most at
+	// risk — the ones resolved inside the tool rather than by the planner.
+	data.AdditionalDetails = withExecutedToolTarget(data.AdditionalDetails, toolContext.ToolConfig.Name)
 	latency := time.Since(t0).Seconds()
 	nbRequestContext.GetLogger().Info("tool execution time", "tool", tool.Name(), "time", latency, "input", input)
 	// Record tool latency metric
