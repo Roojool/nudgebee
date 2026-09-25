@@ -314,3 +314,72 @@ class TestUnreadableReadingsAreSkippedNotFatal:
             ]
         )
         assert parsed["web"]["web-1"] == [(1_700_000_060.0, 1_500_000.0)]
+
+
+class TestTheDataFloorMeansTheSameThingOnEveryProvider:
+    """points_required is 50 steps of 75s — about an hour of observed data.
+
+    Datadog scales its rollup with the window: measured against the dev account, every
+    delta in a 14-day query is exactly 7200s, while a 24-hour query comes back in
+    5-minute buckets. Counting readings directly therefore turned that one-hour floor
+    into a four-day one, and every pod on a cluster that redeploys often fell under it:
+    400 pod incarnations over 14 days, the busiest with 9 readings, none reaching 50.
+    """
+
+    def test_hourly_buckets_count_as_the_time_they_cover(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            bucket_seconds,
+            equivalent_points,
+        )
+        import numpy as np
+
+        # What dev returned: 2-hour buckets, one pod alive for 8 of them.
+        bucket = 7200.0
+        arrays = {
+            "web-1": np.array([[1_700_000_000 + i * bucket, 1.0] for i in range(8)]),
+            "web-2": np.array([[1_700_000_000 + i * bucket, 1.0] for i in range(3)]),
+        }
+        measured = bucket_seconds(arrays)
+        assert measured == pytest.approx(bucket)
+
+        # 8 readings cover 16 hours, which is past the one-hour floor.
+        assert equivalent_points(arrays["web-1"], measured) == pytest.approx(8 * bucket / 75.0)
+        assert equivalent_points(arrays["web-1"], measured) > 50
+        # 3 readings still cover 6 hours, and also count.
+        assert equivalent_points(arrays["web-2"], measured) > 50
+
+    def test_a_pod_seen_for_minutes_stays_below_the_floor(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            equivalent_points,
+        )
+        import numpy as np
+
+        # A short window, sampled every 30s: two readings are a minute of data.
+        arr = np.array([[1_700_000_000, 1.0], [1_700_000_030, 1.0]])
+        assert equivalent_points(arr, 30.0) < 50
+
+    def test_gaps_do_not_stretch_the_bucket(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            bucket_seconds,
+        )
+        import numpy as np
+
+        # An interval a pod did not exist in is absent, not null, so the series has a
+        # jump in it. The median ignores it; a mean would follow it and overstate
+        # every pod's coverage.
+        arr = np.array(
+            [[0, 1.0], [300, 1.0], [600, 1.0], [86_400, 1.0], [86_700, 1.0]],
+            dtype=float,
+        )
+        assert bucket_seconds({"web-1": arr}) == pytest.approx(300.0)
+
+    def test_one_reading_with_nothing_to_measure_counts_for_itself(self):
+        from server.recommendation.vertical_rightsizing.services.metrics_datadog_service import (
+            bucket_seconds,
+            equivalent_points,
+        )
+        import numpy as np
+
+        arr = np.array([[1_700_000_000, 1.0]])
+        assert bucket_seconds({"web-1": arr}) == 0.0
+        assert equivalent_points(arr, 0.0) == 1.0

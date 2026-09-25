@@ -71,6 +71,46 @@ def pods_from_series(entries: List[dict], live_cutoff: float) -> list[PodData]:
     return [PodData(name=name, deleted=seen < live_cutoff) for name, seen in last_seen.items()]
 
 
+# The strategy's points_required floor is expressed in Prometheus steps: 50 points at
+# the 75s step the loaders use is "about an hour of observed data". Datadog scales its
+# rollup with the window — measured against the dev account, 5-minute buckets over 24
+# hours and 2-hour buckets over the 14 days rightsizing asks for — so the same 50 would
+# demand that a pod have lived for more than four days. Rather than give each provider
+# its own threshold — three numbers that have to be kept in step with one setting — the
+# counts Datadog reports are converted into the same unit: how many 75s steps the
+# observed data covers. The floor then means the same thing on every provider.
+PROMETHEUS_EQUIVALENT_STEP_SECONDS = 75.0
+
+
+def bucket_seconds(arrays: Dict[str, np.ndarray]) -> float:
+    """The width of one Datadog bucket, from the timestamps it actually returned.
+
+    Taken across every pod in the response, and as a median, because a single pod's
+    gaps (an interval it did not exist in is simply absent) leave jumps that a mean
+    would follow. Returns 0 when there is nothing to measure from.
+    """
+    deltas: List[float] = []
+    for arr in arrays.values():
+        timestamps = arr[:, 0]
+        deltas.extend(float(d) for d in np.diff(timestamps) if d > 0)
+    if not deltas:
+        return 0.0
+    return float(np.median(deltas))
+
+
+def equivalent_points(arr: np.ndarray, bucket: float) -> float:
+    """How many 75s steps this pod's readings cover.
+
+    A Datadog reading stands for its whole bucket, so N readings cover N * bucket
+    seconds of observation. With no bucket to measure (one reading, one pod) the
+    reading counts for itself, which keeps the old behaviour rather than inventing
+    coverage that was not measured.
+    """
+    if bucket <= 0:
+        return float(len(arr))
+    return len(arr) * bucket / PROMETHEUS_EQUIVALENT_STEP_SECONDS
+
+
 # Datadog metric names
 DD_CPU_METRIC = "kubernetes.cpu.usage.total"
 DD_MEMORY_METRIC = "kubernetes.memory.working_set"
@@ -329,15 +369,17 @@ class DatadogMetricsService(MetricsService):
 
             elif metric_name == "CPUAmountLoader":
                 pods_data = {}
+                cpu_bucket = bucket_seconds(cpu_arrays)
                 for pod_name, arr in cpu_arrays.items():
-                    count = float(len(arr))
+                    count = equivalent_points(arr, cpu_bucket)
                     pods_data[pod_name] = np.array([[arr[-1, 0], count]], dtype=np.float64)
                 result[metric_name] = pods_data
 
             elif metric_name == "MemoryAmountLoader":
                 pods_data = {}
+                mem_bucket = bucket_seconds(mem_arrays)
                 for pod_name, arr in mem_arrays.items():
-                    count = float(len(arr))
+                    count = equivalent_points(arr, mem_bucket)
                     pods_data[pod_name] = np.array([[arr[-1, 0], count]], dtype=np.float64)
                 result[metric_name] = pods_data
 
