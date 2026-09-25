@@ -90,7 +90,7 @@ func TestParseConfirmingCheckBlock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			check, reason := parseConfirmingCheckBlock(tt.text, ns, wl)
+			check, reason := parseConfirmingCheckBlock(tt.text, ns, wl, "")
 			assert.Equal(t, tt.wantReason, reason)
 			if !tt.wantCheck {
 				assert.Nil(t, check)
@@ -114,7 +114,7 @@ func TestIsSpecificExpect(t *testing.T) {
 		"CrashLoopBackOff", "image-pull-back-off",
 	}
 	for _, e := range generic {
-		assert.False(t, isSpecificExpect(e, ns, wl), e)
+		assert.False(t, isSpecificExpect(e, ns, wl, ""), e)
 	}
 	specific := []string{
 		"k8s-collector-worker restarted", "no k8s agent with access_key 4323ed4a", "redis-cache used_mem 1046/1048",
@@ -122,13 +122,42 @@ func TestIsSpecificExpect(t *testing.T) {
 		"nudgebee namespace quota", "cannot write /data/report.csv: permission denied",
 	}
 	for _, e := range specific {
-		assert.True(t, isSpecificExpect(e, ns, wl), e)
+		assert.True(t, isSpecificExpect(e, ns, wl, ""), e)
+	}
+}
+
+// Plain-word expects that real investigations wrote and the validator rejected
+// as generic, because only tokens with a digit or separator were considered.
+func TestIsSpecificExpect_PlainWords(t *testing.T) {
+	const ns, wl = "otel", "otel-collector"
+	specific := []struct{ expect, title string }{
+		{"sending queue is full", "Pod otel/otel-collector memory high"},
+		{"ClientSecretCredential authentication failed", "inventory-sync errors"},
+		{"NonExistentQueue", "inventory-sync CrashLoopBackOff"},
+		{"sql schema version compatibility check failed", "scheduler-frontend crash loop"},
+		{"Memory cgroup out of memory: Killed process", "Pod checkout-api restarted"},
+		{"agent not connected", "High 5xx rate for gateway"},
+	}
+	for _, tt := range specific {
+		assert.True(t, isSpecificExpect(tt.expect, ns, wl, tt.title), tt.expect)
+	}
+	generic := []struct{ expect, title string }{
+		{"events", ""},
+		{"true", ""},
+		{"ImagePullBackOff", "Pod checkout-worker ImagePullBackOff"},
+		// Words from the alert title restate the symptom, not the mechanism.
+		{"disk pressure on node", "Node disk pressure"},
+		// Two characters, six bytes: too short to count as a word.
+		{"错误", ""},
+	}
+	for _, tt := range generic {
+		assert.False(t, isSpecificExpect(tt.expect, ns, wl, tt.title), tt.expect)
 	}
 }
 
 func TestParseConfirmingCheckBlock_MultiLineQuery(t *testing.T) {
 	text := "<confirming_check>\ntool: prometheus_execute\nquery: sum by (pod) (\n  rate(x_total[5m])\n)\nexpect: k8s-collector-worker above 0.2\n</confirming_check>"
-	check, _ := parseConfirmingCheckBlock(text, "nudgebee", "k8s-collector-worker")
+	check, _ := parseConfirmingCheckBlock(text, "nudgebee", "k8s-collector-worker", "")
 	require.NotNil(t, check)
 	assert.Equal(t, "sum by (pod) (\n  rate(x_total[5m])\n)", check.Query)
 }
@@ -147,8 +176,12 @@ func TestBuildConfirmingCheckBlock(t *testing.T) {
 		assert.Contains(t, block, want)
 	}
 	assert.Contains(t, buildConfirmingCheckBlock("", ""), "the resource")
+	// A cause confirmed from the pre-collected evidence still gets a check,
+	// pointing at the live query rather than the saved file.
+	assert.Contains(t, block, "collected before it")
+	assert.Contains(t, block, "not the file it was saved to")
 	// The instruction's own placeholder lines must be rejected if echoed back.
-	_, reason := parseConfirmingCheckBlock(block, "nudgebee", "k8s-collector-worker")
+	_, reason := parseConfirmingCheckBlock(block, "nudgebee", "k8s-collector-worker", "")
 	assert.Equal(t, confirmingCheckPlaceholder, reason)
 }
 
@@ -288,7 +321,7 @@ func TestParseConfirmingCheck_VolatileValue(t *testing.T) {
 		"couldn't start executing the request in 10.000 seconds",
 	}
 	for _, e := range volatile {
-		check, reason := parseConfirmingCheckBlock(block(e), "otel", "otel-collector")
+		check, reason := parseConfirmingCheckBlock(block(e), "otel", "otel-collector", "")
 		require.NotNil(t, check, "must be recorded, not rejected: %s", e)
 		assert.Empty(t, reason)
 		assert.True(t, check.VolatileValue, "expected a measured reading: %s", e)
@@ -300,7 +333,7 @@ func TestParseConfirmingCheck_VolatileValue(t *testing.T) {
 	// millisecond figure with real precision was a measured one.
 	volatile = append(volatile, "duration: 16165.692 ms statement: SELECT count(*)")
 	for _, e := range volatile[len(volatile)-1:] {
-		check, _ := parseConfirmingCheckBlock(block(e), "otel", "otel-collector")
+		check, _ := parseConfirmingCheckBlock(block(e), "otel", "otel-collector", "")
 		require.NotNil(t, check)
 		assert.True(t, check.VolatileValue, "a measured duration: %s", e)
 	}
@@ -318,7 +351,7 @@ func TestParseConfirmingCheck_VolatileValue(t *testing.T) {
 		"upstream connect timeout 250ms to quote:8080",
 	}
 	for _, e := range stable {
-		check, reason := parseConfirmingCheckBlock(block(e), "otel", "otel-collector")
+		check, reason := parseConfirmingCheckBlock(block(e), "otel", "otel-collector", "")
 		require.NotNil(t, check, "rejected a usable expect: %s (%s)", e, reason)
 		assert.False(t, check.VolatileValue, "flagged a stable value: %s", e)
 	}
@@ -397,21 +430,21 @@ func TestParseConfirmingCheck_FlagsReadTheExpect(t *testing.T) {
 	// A re-runnable query whose expected output pins the check to this firing.
 	check, reason := parseConfirmingCheckBlock(
 		checkBlock("shell_execute", "kubectl get events -n nudgebee --field-selector involvedObject.name=llm-server",
-			"pod llm-server-7566fcdb4-6gvj6 exceeded its memory limit"), ns, wl)
+			"pod llm-server-7566fcdb4-6gvj6 exceeded its memory limit"), ns, wl, "")
 	require.NotNil(t, check)
 	assert.Empty(t, reason)
 	assert.True(t, check.PodSpecific, "the expect names a pod")
 
 	check, _ = parseConfirmingCheckBlock(
 		checkBlock("logs", "Show error logs for llm-server in namespace nudgebee between {window_start} and {window_end}",
-			"2026-09-22T01:33:49Z scheduler: run-migrations failed for llm-server"), ns, wl)
+			"2026-09-22T01:33:49Z scheduler: run-migrations failed for llm-server"), ns, wl, "")
 	require.NotNil(t, check)
 	assert.True(t, check.FixedTime, "the expect carries a wall-clock timestamp")
 
 	// A unix time in seconds, which only the millisecond form used to catch.
 	check, _ = parseConfirmingCheckBlock(
 		checkBlock("shell_execute", "kubectl logs -n nudgebee job/k6-services-server-api-1789882060",
-			"thresholds on http_req_duration have been crossed"), ns, wl)
+			"thresholds on http_req_duration have been crossed"), ns, wl, "")
 	require.NotNil(t, check)
 	assert.True(t, check.FixedTime, "the job name is pinned to one firing")
 }

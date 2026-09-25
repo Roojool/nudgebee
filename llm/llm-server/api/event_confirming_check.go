@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
@@ -130,6 +132,10 @@ var genericExpectWords = map[string]bool{
 	"image": true, "pull": true, "pod": true, "pods": true, "container": true,
 	"containers": true, "memory": true, "cpu": true, "usage": true, "service": true,
 	"killed": true, "evicted": true, "pending": true, "ready": true, "unhealthy": true,
+	// Words that fill any tool output; they only became reachable once plain
+	// words started counting as specific.
+	"event": true, "events": true, "true": true, "false": true, "info": true,
+	"debug": true, "shows": true, "showing": true, "listing": true, "running": true,
 }
 
 // specificValueChars mark a token as a value, version, path, host or address.
@@ -148,7 +154,10 @@ func buildConfirmingCheckBlock(namespace, workload string) string {
 	}
 	var b strings.Builder
 	b.WriteString("\n\n## Confirming Check\n")
-	b.WriteString("If a tool result you obtained in THIS investigation confirmed the root cause, also end your response with the block below. Omit it when the cause was not confirmed by a tool result you ran.\n")
+	// Confirmation read from the pre-collected event evidence counts too: about
+	// half of the confirmed-cause runs that omitted the block made no live call
+	// of their own. tool_ran_in_query records which case it was.
+	b.WriteString("If evidence confirmed the root cause, also end your response with the block below — whether the confirming result came from a tool you called in THIS investigation or from the event evidence collected before it. When it came from the collected evidence, name the tool and the query that return that same evidence live, not the file it was saved to. Omit the block only when the cause was not confirmed by evidence.\n")
 	b.WriteString("The check must prove the mechanism — the step in your causality chain that explains why — not merely that the alert fired. It must be re-runnable for a later firing: name " + target + " rather than a pod, and write {window_start} / {window_end} instead of fixed times. Never point it at a file in your workspace.\n")
 	b.WriteString("<confirming_check>\n")
 	b.WriteString("tool: <the exact name of the tool you called>\n")
@@ -161,7 +170,7 @@ func buildConfirmingCheckBlock(namespace, workload string) string {
 // parseConfirmingCheckBlock extracts and validates the block. It returns
 // (nil, "") when the block is absent, and (nil, reason) when it is present but
 // rejected.
-func parseConfirmingCheckBlock(text, namespace, workload string) (*confirmingCheck, string) {
+func parseConfirmingCheckBlock(text, namespace, workload, alertTitle string) (*confirmingCheck, string) {
 	m := confirmingCheckBlockPattern.FindStringSubmatch(text)
 	if m == nil {
 		return nil, ""
@@ -192,7 +201,7 @@ func parseConfirmingCheckBlock(text, namespace, workload string) (*confirmingChe
 	if workspaceFilePattern.MatchString(check.Query) {
 		return nil, confirmingCheckWorkspaceFile
 	}
-	if !isSpecificExpect(check.Expect, namespace, workload) {
+	if !isSpecificExpect(check.Expect, namespace, workload, alertTitle) {
 		return nil, confirmingCheckGenericExpect
 	}
 	// Either field can pin the check to this firing: a query naming a pod, or an
@@ -204,8 +213,9 @@ func parseConfirmingCheckBlock(text, namespace, workload string) (*confirmingChe
 }
 
 // isSpecificExpect reports whether expect names the specific thing involved: the
-// workload or namespace, or a token shaped like a name, key, path or value.
-func isSpecificExpect(expect, namespace, workload string) bool {
+// workload or namespace, a token shaped like a name, key, path or value, or a
+// word that is neither generic nor already in the alert's title.
+func isSpecificExpect(expect, namespace, workload, alertTitle string) bool {
 	lower := strings.ToLower(expect)
 	for _, name := range []string{workload, namespace} {
 		if len(name) >= 4 && strings.Contains(lower, strings.ToLower(name)) {
@@ -228,7 +238,32 @@ func isSpecificExpect(expect, namespace, workload string) bool {
 			}
 		}
 	}
+	// Plain words never match specificTokenPattern, which needs a digit or a
+	// separator, so "sending queue is full" and "NonExistentQueue" were all
+	// rejected, about a quarter of all blocks written. A word the alert title
+	// already carries restates the symptom, so it does not count.
+	titleWords := map[string]bool{}
+	for _, w := range expectWords(alertTitle) {
+		titleWords[w] = true
+	}
+	for _, w := range expectWords(expect) {
+		if utf8.RuneCountInString(w) >= 4 && !genericExpectWords[w] && !titleWords[w] {
+			return true
+		}
+	}
 	return false
+}
+
+// expectWords splits text into lower-case words of letters only; tokens with
+// digits or separators are judged by specificTokenPattern instead.
+func expectWords(text string) []string {
+	var words []string
+	for _, f := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if strings.IndexFunc(f, unicode.IsDigit) < 0 {
+			words = append(words, f)
+		}
+	}
+	return words
 }
 
 func isPodSpecific(text, workload string) bool {
@@ -395,8 +430,8 @@ const toolResponseMatchSQL = `regexp_replace(lower(replace(replace(replace(repla
 // recordConfirmingCheck parses the block from the investigation text, fills the
 // measurement flags, and emits the Phase 1 metric and log line. Returns the
 // check to store, or nil.
-func recordConfirmingCheck(ctx *security.RequestContext, dbManager *common.DatabaseManager, text, messageId, eventId, accountId, namespace, workload string) *confirmingCheck {
-	check, reason := parseConfirmingCheckBlock(text, namespace, workload)
+func recordConfirmingCheck(ctx *security.RequestContext, dbManager *common.DatabaseManager, text, messageId, eventId, accountId, namespace, workload, alertTitle string) *confirmingCheck {
+	check, reason := parseConfirmingCheckBlock(text, namespace, workload, alertTitle)
 	switch {
 	case check == nil && reason == "":
 		common.MetricsEventAnalysisOperationsTotal("confirming_check", "missing", accountId)

@@ -2843,7 +2843,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			// the investigation names as proof of its cause. Nothing reads it back
 			// yet; it is stored so its specificity and re-runnability can be
 			// measured on real investigations.
-			check := recordConfirmingCheck(ctx, dbManager, investigationResponse, investigationMessageId, request.EventId, request.AccountId, workloadNamespace, workloadName)
+			check := recordConfirmingCheck(ctx, dbManager, investigationResponse, investigationMessageId, request.EventId, request.AccountId, workloadNamespace, workloadName, eventData.Title)
 			cleaned := stripConfirmingCheckBlock(stripChangePlanBlock(investigationResponse))
 			response.Summary = cleaned
 			investigationText = cleaned
