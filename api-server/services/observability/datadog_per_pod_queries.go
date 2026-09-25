@@ -45,16 +45,27 @@ var datadogPerPodKeys = map[string]string{
 	"container_memory_limit_by_pod":       datadogPerPodMetricMemoryLimit,
 }
 
-// datadogPerPodUnanswerable are per-pod keys Datadog reports no metric for, and why.
-// Kept as a list rather than an absence so the reason reaches the caller: a key that
-// is merely missing from the map above would be dropped from the response, which is
-// indistinguishable from a workload that used nothing.
-var datadogPerPodUnanswerable = map[string]string{
+// datadogUnanswerableKeys are keys Datadog cannot answer, and why. Kept as a list
+// rather than an absence so the reason reaches the caller: a key merely missing from
+// the builder is dropped from the response, which is indistinguishable from a
+// workload that used nothing.
+var datadogUnanswerableKeys = map[string]string{
 	"container_memory_max_usage_by_pod": "Datadog reports no cgroup high-water mark. " +
 		"kubernetes.memory.working_set is a different number — answering with it would size a limit too low.",
 	"container_oomkilled_limit_by_pod": "Datadog reports no per-container terminated reason, so there is nothing " +
 		"to join a memory limit against. kubernetes_state.container.restarts counts restarts of every cause — " +
 		"answering with it would report a limit for containers that were never OOM-killed.",
+
+	// kubernetes.network.{rx,tx}_bytes exists, but whether it reports a per-second
+	// rate or a per-interval total decides whether bytes-per-bucket is
+	// `value * bucket` or `sum(values)`, and the two differ by the scrape interval.
+	// Measured on a live account, the ratio between the raw series and a summed
+	// hourly rollup was ~133 — consistent with neither reading cleanly. Rather than
+	// ship a conversion that is plausible and possibly wrong by a factor of the
+	// scrape interval, the key says it is unanswerable until the semantics are
+	// confirmed against Datadog's own metric metadata.
+	"network_receive_bytes_increase":  "Not implemented for Datadog: kubernetes.network.rx_bytes' rate-versus-total semantics are unconfirmed, and guessing decides the unit.",
+	"network_transmit_bytes_increase": "Not implemented for Datadog: kubernetes.network.tx_bytes' rate-versus-total semantics are unconfirmed, and guessing decides the unit.",
 }
 
 // datadogRollupSecondsForPods picks the finest rollup whose response stays inside the
@@ -335,15 +346,15 @@ func percentileOverTime(values []float64, quantile float64) (float64, bool) {
 	return finite[lo] + (finite[hi]-finite[lo])*(pos-float64(lo)), true
 }
 
-// datadogNoteUnanswerablePerPodKeys gives each requested key Datadog cannot answer an
+// datadogNoteUnanswerableKeys gives each requested key Datadog cannot answer an
 // empty result carrying the reason, rather than leaving it out of the response.
 //
 // Silence and "used nothing" look identical to a caller, and rightsizing acts on the
 // difference: a missing high-water mark must not read as a workload that never
 // allocated.
-func datadogNoteUnanswerablePerPodKeys(results []QueryResult, requested []string) []QueryResult {
+func datadogNoteUnanswerableKeys(results []QueryResult, requested []string) []QueryResult {
 	for _, key := range requested {
-		reason, unanswerable := datadogPerPodUnanswerable[key]
+		reason, unanswerable := datadogUnanswerableKeys[key]
 		if !unanswerable {
 			continue
 		}

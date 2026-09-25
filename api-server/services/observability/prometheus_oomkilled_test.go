@@ -83,11 +83,11 @@ func TestBuildPrometheusWorkloadQueries_OOMKilledLimitHonoursThePodList(t *testi
 // note is what lets rightsizing tell a workload that was never OOM-killed from a
 // provider that cannot answer the question at all.
 func TestDatadogOOMKilledLimit_ComesBackWithAReasonNotSilence(t *testing.T) {
-	reason, unanswerable := datadogPerPodUnanswerable["container_oomkilled_limit_by_pod"]
+	reason, unanswerable := datadogUnanswerableKeys["container_oomkilled_limit_by_pod"]
 	require.True(t, unanswerable, "Datadog must say why, not return an empty payload")
 	assert.Contains(t, reason, "terminated reason")
 
-	results := datadogNoteUnanswerablePerPodKeys(nil, []string{"container_oomkilled_limit_by_pod"})
+	results := datadogNoteUnanswerableKeys(nil, []string{"container_oomkilled_limit_by_pod"})
 	require.Len(t, results, 1)
 	assert.Equal(t, "container_oomkilled_limit_by_pod", results[0].QueryKey)
 	assert.Empty(t, results[0].Payload, "empty, so nothing reads it as a measured limit")

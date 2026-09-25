@@ -5648,6 +5648,13 @@ input MetricsQueryUtilisationRequest {
   start_time: Float
   end_time: Float
   request: jsonb!
+  # The Go request has carried these since the typed-request work; undeclared fields
+  # are dropped by the gateway, so a caller could set them and silently get defaults.
+  # step_interval is the query resolution; step is the bucket a key aggregates over.
+  step_interval: Int
+  step: Int
+  aggregate: String
+  pod_names: [String!]
 }
 
 input AwsOnboardStatusInput {

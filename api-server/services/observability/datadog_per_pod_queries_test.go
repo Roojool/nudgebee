@@ -124,7 +124,7 @@ func TestDatadogHighWaterMark_ComesBackWithAReasonNotSilence(t *testing.T) {
 	assert.Contains(t, queries, "container_cpu_usage_by_pod")
 
 	// What the caller actually receives.
-	results := datadogNoteUnanswerablePerPodKeys(
+	results := datadogNoteUnanswerableKeys(
 		[]QueryResult{{QueryKey: "container_cpu_usage_by_pod", Payload: []Result{{}}}}, requested)
 
 	require.Len(t, results, 2)

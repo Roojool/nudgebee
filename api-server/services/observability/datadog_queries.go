@@ -98,6 +98,31 @@ func buildDatadogPVCPerClaimQueries(queries map[string]string, meta RequestMetad
 	}
 }
 
+// datadogClusterWideKeys are scoped {*}: they describe the whole cluster and mean the
+// same thing with or without a workload filter.
+//
+// They used to sit below buildDatadogWorkloadQueries' `if filterStr == ""` guard, so
+// the one scope they exist for — the cluster utilisation tiles, which name no
+// namespace and no workload — returned before reaching them. Measured live against a
+// Datadog account: every cluster tile came back empty, and empty with NO note, which
+// reads as "this cluster used nothing" rather than "nobody built a query".
+var datadogClusterWideKeys = map[string]string{
+	"cpu_real":        "sum:kubernetes.cpu.usage.total{*}",
+	"cpu_total":       "sum:kubernetes_state.node.cpu_capacity{*}",
+	"cpu_usage_trend": "sum:kubernetes.cpu.usage.total{*}",
+	"mem_real":        "sum:kubernetes.memory.usage{*}",
+	"mem_total":       "sum:kubernetes_state.node.memory_capacity{*}",
+	"mem_usage_trend": "sum:kubernetes.memory.usage{*}",
+}
+
+func buildDatadogClusterWideQueries(queries map[string]string, metrics []string) {
+	for _, metricKey := range metrics {
+		if query, ok := datadogClusterWideKeys[metricKey]; ok {
+			queries[metricKey] = query
+		}
+	}
+}
+
 func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[string]string {
 	// Per-pod keys roll up over the window, so they need its width in seconds.
 	// datadogRollupSeconds parses the "<N>s" form promAggWindow (or an explicit
@@ -132,11 +157,12 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 		filterStr = fmt.Sprintf("%s, kube_container_name:%s", filterStr, meta.ContainerName)
 	}
 
-	// Claim-scoped keys are answered first, because they are the only ones here that
-	// mean something without a workload: volume rightsizing walks every claim in the
-	// cluster, so an empty scope is "all of them". Everything below needs a workload
-	// filter and the guard after this returns without one.
+	// Both families are answered before the guard below, because both mean something
+	// without a workload: volume rightsizing walks every claim in the cluster, and the
+	// cluster tiles name no namespace at all. Everything after the guard needs a
+	// workload filter.
 	buildDatadogPVCPerClaimQueries(queries, meta, metrics)
+	buildDatadogClusterWideQueries(queries, metrics)
 
 	if filterStr == "" {
 		return queries
@@ -159,7 +185,7 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 	for _, metricKey := range metrics {
 		// Per-pod keys group by pod and container instead of the workload tag, and
 		// carry their own rollup. One Datadog has no metric for builds no query;
-		// datadogNoteUnanswerablePerPodKeys puts it back in the response with the
+		// datadogNoteUnanswerableKeys puts it back in the response with the
 		// reason, so it is not mistaken for a workload that used nothing.
 		if metric, perPod := datadogPerPodKeys[metricKey]; perPod {
 			queries[metricKey] = buildDatadogPerPodQuery(metric, meta, filterStr, windowSeconds)
@@ -229,15 +255,6 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 				queries[metricKey] = fmt.Sprintf("sum:kubernetes_state.persistentvolumeclaim.request_storage{%s}", pvcFilterStr)
 			}
 
-		// --- Node/Cluster Aggregations ---
-		case "cpu_real":
-			queries[metricKey] = "sum:kubernetes.cpu.usage.total{*}"
-		case "cpu_total":
-			queries[metricKey] = "sum:kubernetes_state.node.cpu_capacity{*}"
-		case "mem_real":
-			queries[metricKey] = "sum:kubernetes.memory.usage{*}"
-		case "mem_total":
-			queries[metricKey] = "sum:kubernetes_state.node.memory_capacity{*}"
 		case "p90_mem":
 			queries[metricKey] = "avg:system.mem.used{*} by {host}"
 		case "p90_cpu":

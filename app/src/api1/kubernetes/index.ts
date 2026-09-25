@@ -2990,6 +2990,15 @@ query k8s_event_groupings($limit:Int,$offset:Int){
         data: [],
       };
     }
+    // The same defaults the PromQL implementation applied: a caller that omits the
+    // range gets the last seven days rather than an empty chart.
+    if (!startDate) {
+      startDate = new Date();
+      startDate.setDate(startDate.getDate() - 7);
+    }
+    if (!endDate) {
+      endDate = new Date();
+    }
 
     let steps = '1d';
     if (dateUnit == 'week') {
@@ -2998,95 +3007,103 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       steps = '30d';
     }
     try {
-      const queries = [];
-      if (metric?.includes('networkReceiveBytes')) {
-        queries.push({
-          key: 'networkReceiveBytes',
-          query: `sum(increase(container_network_receive_bytes_total{__CLUSTER__}[${steps}]))`,
-        });
-      }
-      if (metric?.includes('networkTransferBytes')) {
-        queries.push({
-          key: 'networkTransferBytes',
-          query: `sum(increase(container_network_transmit_bytes_total{__CLUSTER__}[${steps}]))`,
-        });
-      }
-      if (metric?.includes('cpu')) {
-        queries.push({
-          key: 'cpu_usage',
-          query: `sum(irate(node_cpu_seconds_total{ __CLUSTER__ mode!="idle" }[${steps}]))`,
-        });
-        queries.push({
-          key: 'cpu_total',
-          query: `sum(irate(node_cpu_seconds_total{ __CLUSTER__}[${steps}]))`,
-        });
-      }
-      if (metric?.includes('memory')) {
-        queries.push({
-          key: 'memory_usage',
-          query: `sum(node_memory_Active_bytes{__CLUSTER__})`,
-        });
-        queries.push({
-          key: 'memory_total',
-          query: `sum(node_memory_MemTotal_bytes{__CLUSTER__})`,
-        });
-      }
+      // One request, by key, naming no provider — api-server resolves the account's
+      // backend and builds the native query.
+      //
+      // `step` sizes the window the network keys count bytes over, which is the
+      // bucket these tiles chart. `step_interval` asks for the point spacing, and is
+      // sent because that is what it means — but measured against the agent-backed
+      // Prometheus path it changes nothing: a 7-day range returns ~1,965 points
+      // whether it is omitted, 1h or 24h. The series therefore arrives at the
+      // provider's own resolution, exactly as it did before this migration, and the
+      // chart buckets it the same way it always has.
+      const keyFor: Record<string, string[]> = {
+        networkReceiveBytes: ['network_receive_bytes_increase'],
+        networkTransferBytes: ['network_transmit_bytes_increase'],
+        cpu: ['cpu_usage_trend', 'cpu_total'],
+        memory: ['mem_usage_trend', 'mem_total'],
+      };
+      const wanted = new Set<string>();
+      if (metric?.includes('networkReceiveBytes')) keyFor.networkReceiveBytes.forEach((k) => wanted.add(k));
+      if (metric?.includes('networkTransferBytes')) keyFor.networkTransferBytes.forEach((k) => wanted.add(k));
+      if (metric?.includes('cpu')) keyFor.cpu.forEach((k) => wanted.add(k));
+      if (metric?.includes('memory')) keyFor.memory.forEach((k) => wanted.add(k));
 
-      if (!startDate) {
-        startDate = new Date();
-        startDate.setDate(startDate.getDate() - 7);
+      const CLUSTER_METRICS_UTILISATION = `
+    query MetricsQueryUtilisation($jsonFilter: jsonb!, $accountId: String!, $startTime: Float!, $endTime: Float!, $step: Int, $stepInterval: Int) {
+      metrics_aggregate_utilisation(request: {account_id: $accountId, request: $jsonFilter, end_time: $endTime, start_time: $startTime, step: $step, step_interval: $stepInterval}) {
+        results
       }
-      if (!endDate) {
-        endDate = new Date();
-      }
+    }
+    `;
+
+      const bucketSeconds = promStepToSeconds(steps);
+      const response = await queryGraphQL(CLUSTER_METRICS_UTILISATION, 'MetricsQueryUtilisation', {
+        accountId,
+        startTime: startDate.getTime(),
+        endTime: endDate.getTime(),
+        step: bucketSeconds,
+        stepInterval: bucketSeconds,
+        jsonFilter: { metrics: Array.from(wanted) },
+      });
+
+      const results = response?.data?.data?.metrics_aggregate_utilisation?.results || [];
+      const seriesFor = (key: string) => results.find((r: any) => r.query_key === key)?.payload?.[0];
+      const valuesFor = (key: string) => seriesFor(key)?.values || [];
 
       let result: any[] = [];
-      const promqlParsed = await this.promqlSeriesListByKey(accountId, queries, startDate.getTime(), endDate.getTime(), promStepToSeconds(steps));
-      if (promqlParsed) {
-        const metrics = ['networkReceiveBytes', 'networkTransferBytes', 'cpu_usage', 'cpu_total', 'memory_usage', 'memory_total'];
-        const hasData = metrics.some((metric) => promqlParsed[metric]?.series_list_result?.length > 0);
-        if (hasData) {
-          const firstAvailableMetric = metrics.find((metric) => promqlParsed[metric]?.series_list_result?.length > 0);
+      const timestamps = Array.from(wanted)
+        .map((k) => seriesFor(k)?.timestamps)
+        .find((t: any) => t?.length);
 
-          if (firstAvailableMetric) {
-            result = promqlParsed[firstAvailableMetric].series_list_result[0].timestamps.flatMap((timestamp: any, index: any) => {
-              const response: any = [];
-              if (metric?.includes('networkTransferBytes')) {
-                response.push({
-                  timestamp: formatDateTime(timestamp),
-                  metric: 'networkTransferBytes',
-                  avg_value: parseFloat(promqlParsed.networkTransferBytes?.series_list_result[0]?.values?.[index]),
-                  account_id: accountId,
-                });
-              }
-              if (metric?.includes('networkReceiveBytes')) {
-                response.push({
-                  timestamp: formatDateTime(timestamp),
-                  metric: 'networkReceiveBytes',
-                  avg_value: parseFloat(promqlParsed.networkReceiveBytes?.series_list_result[0]?.values?.[index]),
-                  account_id: accountId,
-                });
-              }
-              if (metric?.includes('cpu')) {
-                response.push({
-                  timestamp: formatDateTime(timestamp),
-                  avg_cpu_used_node: parseFloat(promqlParsed.cpu_usage?.series_list_result[0]?.values?.[index]),
-                  total_cpu_allocatable: parseFloat(promqlParsed.cpu_total?.series_list_result[0]?.values?.[index]),
-                  account_id: accountId,
-                });
-              }
-              if (metric?.includes('memory')) {
-                response.push({
-                  timestamp: formatDateTime(timestamp),
-                  avg_memory_used_node: parseFloat(promqlParsed.memory_usage?.series_list_result[0]?.values?.[index]),
-                  total_memory_allocatable: parseFloat(promqlParsed.memory_total?.series_list_result[0]?.values?.[index]),
-                  account_id: accountId,
-                });
-              }
-              return response;
+      if (timestamps) {
+        const rx = valuesFor('network_receive_bytes_increase');
+        const tx = valuesFor('network_transmit_bytes_increase');
+        const cpuUsed = valuesFor('cpu_usage_trend');
+        const cpuTotal = valuesFor('cpu_total');
+        const memUsed = valuesFor('mem_usage_trend');
+        const memTotal = valuesFor('mem_total');
+
+        result = timestamps.flatMap((timestamp: any, index: any) => {
+          // One object per metric FAMILY, never a merged row with null members: the
+          // summary tiles decide what a row is by which keys it carries
+          // (`'avg_cpu_used_node' in item`), so a null-valued key would add phantom
+          // points to a chart the caller never asked for.
+          const response: any = [];
+          if (metric?.includes('networkTransferBytes')) {
+            response.push({
+              timestamp: formatDateTime(timestamp),
+              metric: 'networkTransferBytes',
+              avg_value: parseFloat(tx[index]),
+              account_id: accountId,
             });
           }
-        }
+          if (metric?.includes('networkReceiveBytes')) {
+            response.push({
+              timestamp: formatDateTime(timestamp),
+              metric: 'networkReceiveBytes',
+              avg_value: parseFloat(rx[index]),
+              account_id: accountId,
+            });
+          }
+          if (metric?.includes('cpu')) {
+            response.push({
+              timestamp: formatDateTime(timestamp),
+              avg_cpu_used_node: parseFloat(cpuUsed[index]),
+              total_cpu_allocatable: parseFloat(cpuTotal[index]),
+              account_id: accountId,
+            });
+          }
+          if (metric?.includes('memory')) {
+            response.push({
+              timestamp: formatDateTime(timestamp),
+              avg_memory_used_node: parseFloat(memUsed[index]),
+              total_memory_allocatable: parseFloat(memTotal[index]),
+              account_id: accountId,
+            });
+          }
+          return response;
+        });
       }
       return {
         data: {

@@ -645,6 +645,22 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			queries[metricKey] = `sum(node_memory_MemTotal_bytes{__CLUSTER__} - node_memory_MemAvailable_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__} - node_resources_memory_available_bytes{__CLUSTER__})`
 		case "mem_total":
 			queries[metricKey] = `sum(node_memory_MemTotal_bytes{__CLUSTER__}) or sum(node_resources_memory_total_bytes{__CLUSTER__})`
+		// Cluster network, as BYTES PER BUCKET rather than a rate.
+		//
+		// The existing network_receive_packet / network_transmit_packets keys are
+		// per-second rates, and the transmit one is deliberately sign-negated so the
+		// two render as a mirrored chart. The cluster tiles want neither: they ask
+		// "how many bytes crossed the wire in this day / week / month", so the window
+		// is the caller's own bucket and the answer is unsigned.
+		//
+		// meta.Step is that bucket, which a caller sets explicitly; the default
+		// derived from the range would make each point cover a different span than
+		// the one being charted.
+		case "network_receive_bytes_increase":
+			queries[metricKey] = fmt.Sprintf(`sum(increase(container_network_receive_bytes_total{__CLUSTER__}[%s]))`, stepW)
+		case "network_transmit_bytes_increase":
+			queries[metricKey] = fmt.Sprintf(`sum(increase(container_network_transmit_bytes_total{__CLUSTER__}[%s]))`, stepW)
+
 		// cpu_usage_trend / mem_usage_trend feed the utilisation sparkline: fetched as a RANGE
 		// query so the relay evaluates them at each step across the picker window. CPU uses a
 		// short rate window (rateW) so spikes register instead of being averaged away.

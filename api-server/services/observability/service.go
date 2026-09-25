@@ -3380,7 +3380,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		// cannot be asked for: it has no percentile over time, and its own `count`
 		// is in buckets rather than in the caller's steps.
 		datadogCollapseOverTime(output.Results, meta)
-		output.Results = datadogNoteUnanswerablePerPodKeys(output.Results, meta.RequestedMetrics)
+		output.Results = datadogNoteUnanswerableKeys(output.Results, meta.RequestedMetrics)
 		percentileKeys := make(map[string]float64)
 		for _, m := range meta.RequestedMetrics {
 			switch m {
