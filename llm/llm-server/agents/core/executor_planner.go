@@ -30,7 +30,6 @@ import (
 	"github.com/tmc/langchaingo/memory"
 	"github.com/tmc/langchaingo/schema"
 	"go.opentelemetry.io/otel/trace"
-	"regexp"
 )
 
 var ExecutePlannerWorkerPool *common.WorkerPool
@@ -2076,48 +2075,8 @@ func withExecutedToolTarget(additionalDetails map[string]any, configName string)
 	if additionalDetails == nil {
 		additionalDetails = map[string]any{}
 	}
-	additionalDetails[toolcore.MetadataToolConfigName] = configName
+	additionalDetails[toolcore.MetadataResolvedTarget] = configName
 	return additionalDetails
-}
-
-// matchConfigBySubject matches the resource an alert is about against a tool's
-// configured targets, by config name or by the comma-separated regex patterns
-// in its host value — the same shape the tools match an explicit instance
-// argument against. Generic on purpose: every tool with configured targets has
-// this question and only the argument parsing is tool-specific.
-func matchConfigBySubject(ctx *security.RequestContext, subject string, configs []toolcore.ToolConfig) (toolcore.ToolConfig, bool) {
-	subject = strings.TrimSpace(subject)
-	if subject == "" {
-		return toolcore.ToolConfig{}, false
-	}
-	for _, config := range configs {
-		if strings.EqualFold(config.Name, subject) {
-			return config, true
-		}
-		for _, v := range config.Values {
-			if v.Name != "host" {
-				continue
-			}
-			for _, pattern := range strings.Split(v.Value, ",") {
-				trimmed := strings.TrimSpace(pattern)
-				if trimmed == "" {
-					continue
-				}
-				if !strings.HasPrefix(trimmed, "(?i)") {
-					trimmed = "(?i)" + trimmed
-				}
-				re, err := regexp.Compile(trimmed)
-				if err != nil {
-					ctx.GetLogger().Warn("plannerexecutor: invalid host pattern in tool config", "config", config.Name, "pattern", trimmed, "error", err)
-					continue
-				}
-				if re.MatchString(subject) {
-					return config, true
-				}
-			}
-		}
-	}
-	return toolcore.ToolConfig{}, false
 }
 
 // unresolvedTargetMessage explains why a configured tool could not run. "None
@@ -3262,32 +3221,18 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 
 		request := toolcore.NBToolCallRequest{Command: action.ToolInput}
 
-		// The resource the alert is about is the one signal that says which system
-		// the question concerns. Try it before the tool's own logic, which for an
-		// unattended run would otherwise fall through to matching env keywords
-		// against a ~28k-character generated prompt.
-		if matched, ok := matchConfigBySubject(e.ctx, strings.Trim(subjectOfRequest(toolContext), "`"), configs); ok {
-			e.agentRequest.QueryConfig.ToolConfigs = ensureToolConfigs(e.agentRequest.QueryConfig.ToolConfigs)
-			e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] = matched.Name
-			recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "subject_match")
-			e.ctx.GetLogger().Info("plannerexecutor: resolved tool config from the alert subject", "tool", tool.Name(), "config", matched.Name)
-			persistResolvedConfigAsync()
-			return nil, nil, nil
+		// An unattended run does not consult the tool's own identification. Its
+		// first rung tests an explicit instance argument against the config's host,
+		// but hosts hold addresses (10.14.128.5), not names, so it cannot match a
+		// resource name; the rungs below it infer a target by scanning the query for
+		// "dev"/"prod"/"qa", and for an investigation that query is a ~28k-character
+		// generated prompt where 192 of 244 contain both. Named-config matching
+		// earlier in this function still applies.
+		var identifiedConfig toolcore.ToolConfig
+		var err error
+		if toolContext.HasLiveUser() {
+			identifiedConfig, err = configIdentifier.IdentifyConfig(toolContext, request, configs)
 		}
-		// Nothing configured is the subject. For an unattended run stop here: the
-		// remaining strategies infer a target from prose, and a wrong target
-		// answers with real numbers from the wrong system.
-		if !toolContext.HasLiveUser() && subjectOfRequest(toolContext) != "" {
-			return []NBAgentPlannerToolActionStep{
-				{
-					Action:      action,
-					Observation: unresolvedTargetMessage(e.ctx, tool, e.agentRequest.AccountId, toolContext),
-					Status:      ToolStatusFailure,
-				},
-			}, nil, nil
-		}
-
-		identifiedConfig, err := configIdentifier.IdentifyConfig(toolContext, request, configs)
 		if errors.Is(err, toolcore.ErrNoMatchingConfig) {
 			// Configs exist but none is the system this question is about. Falling
 			// through would hand the agent one of them; it would then answer with
@@ -3306,12 +3251,27 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		}
 
 		// Fallback: retry with action.ToolInput if original user query didn't resolve
-		if identifiedConfig.Name == "" && action.ToolInput != "" && action.ToolInput != originalUserQuery {
+		if toolContext.HasLiveUser() && identifiedConfig.Name == "" && action.ToolInput != "" && action.ToolInput != originalUserQuery {
 			toolContext.Query = action.ToolInput
 			identifiedConfig, err = configIdentifier.IdentifyConfig(toolContext, request, configs)
 			if err != nil {
 				e.ctx.GetLogger().Error("plannerexecutor: IdentifyConfig failed with tool input fallback", "tool", tool.Name(), "error", err)
 			}
+		}
+
+		// Nothing named the target: not the subject, and not the tool's own
+		// arguments. For an unattended run stop here rather than inferring one
+		// from prose — a wrong target answers with real numbers from the wrong
+		// system. A live user still gets the remaining strategies, and anyone
+		// can name the target explicitly.
+		if identifiedConfig.Name == "" && !toolContext.HasLiveUser() && subjectOfRequest(toolContext) != "" {
+			return []NBAgentPlannerToolActionStep{
+				{
+					Action:      action,
+					Observation: unresolvedTargetMessage(e.ctx, tool, e.agentRequest.AccountId, toolContext),
+					Status:      ToolStatusFailure,
+				},
+			}, nil, nil
 		}
 
 		if identifiedConfig.Name != "" {

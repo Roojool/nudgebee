@@ -6,11 +6,16 @@ import (
 	"nudgebee/llm/security"
 )
 
-// MetadataToolConfigName is the tool-call metadata key naming the configured
-// target a call ran against; MetadataToolConfigStrategy names how it was chosen.
+// MetadataResolvedTarget is the tool-call metadata key naming the configured
+// target a call ran against; MetadataResolvedBy names how it was chosen.
+//
+// Deliberately not "tool_config_name": that key is already carried in some
+// tools' own call context (watch's poll contract) and can hold the
+// "NoConfigToolsFound" sentinel, so reusing it would mix a tool's own value
+// with what actually ran and make the recorded data unusable for counting.
 const (
-	MetadataToolConfigName     = "tool_config_name"
-	MetadataToolConfigStrategy = "tool_config_strategy"
+	MetadataResolvedTarget = "nb_resolved_target"
+	MetadataResolvedBy     = "nb_resolved_by"
 )
 
 // ErrNoMatchingConfig means configs exist for this tool but none of them is the

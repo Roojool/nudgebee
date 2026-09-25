@@ -123,17 +123,17 @@ func mergeToolResponseMetadata(metadata *toolcore.NBToolResponseMetadata, additi
 // when no config was involved (tools that need none).
 func withResolvedToolTarget(additionalDetails map[string]any, queryConfig toolcore.NBQueryConfig, toolName string) map[string]any {
 	// The executing tool context is authoritative for WHICH target ran and has
-	// already set tool_config_name; this only adds HOW it was chosen. Falling
+	// already recorded it; this only adds HOW it was chosen. Falling
 	// back to the request map would attribute a stale name to a call that ran
 	// against something else. Checked before cloning: this runs on every tool
 	// call and most tools need no config at all.
-	if _, ran := additionalDetails[toolcore.MetadataToolConfigName]; !ran {
+	if _, ran := additionalDetails[toolcore.MetadataResolvedTarget]; !ran {
 		return additionalDetails
 	}
 	out := maps.Clone(additionalDetails)
 	if meta, ok := queryConfig.ToolConfigMetadata[toolName].(map[string]any); ok {
 		if strategy, ok := meta["strategy"].(string); ok && strategy != "" {
-			out[toolcore.MetadataToolConfigStrategy] = strategy
+			out[toolcore.MetadataResolvedBy] = strategy
 		}
 	}
 	return out
