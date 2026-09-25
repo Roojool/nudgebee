@@ -83,8 +83,8 @@ func executionTargets(ctx *security.RequestContext, accountID string, saved map[
 	return current, others, nil
 }
 
-// RenderExecutionTargets tells the planner which clusters and cloud accounts it
-// can run commands against, for the tools it has. Per-user and per-request, so
+// RenderExecutionTargets tells the planner which clusters, cloud accounts and
+// discovered VMs it can run commands against, for the tools it has. Per-user and per-request, so
 // it belongs in the human message. Empty when no tool has another target.
 func RenderExecutionTargets(ctx *security.RequestContext, accountID string, saved map[string]string, toolNames []string) string {
 	if ctx == nil || ctx.GetSecurityContext() == nil || accountID == "" {
@@ -129,6 +129,13 @@ func RenderExecutionTargets(ctx *security.RequestContext, accountID string, save
 		}
 		sections = append(sections, fmt.Sprintf("%s: current %s; others you can use: %s.\n%s",
 			kind.title, currentName, strings.Join(names, ", "), kind.usage))
+	}
+	if available[ToolExecuteServerCommand] {
+		if vms, err := sshVMTargets(ctx, accountID); err != nil {
+			ctx.GetLogger().Warn("execution targets: VM lookup failed", "tool", ToolExecuteServerCommand, "error", err)
+		} else if section := renderSSHVMTargets(vms); section != "" {
+			sections = append(sections, section)
+		}
 	}
 	if len(sections) == 0 {
 		return ""

@@ -65,6 +65,7 @@ require (
 
 require (
 	github.com/Cyprinus12138/otelgin v1.0.3
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/gin-contrib/cors v1.7.8
 	github.com/gin-contrib/pprof v1.5.5
 	github.com/gin-gonic/gin v1.12.0

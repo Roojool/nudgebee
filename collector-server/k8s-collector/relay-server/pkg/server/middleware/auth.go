@@ -17,6 +17,9 @@ import (
 const (
 	CtxAccountID = "accountID"
 	CtxAgentType = "agentType"
+	// CtxAgentID is the authenticated agent's agent.id. It tells apart
+	// several agents of one type on the same account (e.g. two proxy agents).
+	CtxAgentID = "agentID"
 )
 
 // AgentAuthMiddleware protects agent endpoints (e.g. /register) using Basic‑auth.
@@ -67,7 +70,7 @@ func AgentAuthMiddleware(store db.AgentStore) gin.HandlerFunc {
 		}
 		accessKey, secret := parts[0], parts[1]
 
-		ok, accountID, agentType, err := store.ValidateAgent(c.Request.Context(), accessKey, secret)
+		ok, accountID, agentType, agentID, err := store.ValidateAgent(c.Request.Context(), accessKey, secret)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError,
 				utils.BuildError(500, "error validating credentials"),
@@ -81,9 +84,10 @@ func AgentAuthMiddleware(store db.AgentStore) gin.HandlerFunc {
 			return
 		}
 
-		// Store accountID and agentType for downstream handlers
+		// Store accountID, agentType and agentID for downstream handlers
 		c.Set(CtxAccountID, accountID)
 		c.Set(CtxAgentType, agentType)
+		c.Set(CtxAgentID, agentID)
 		c.Next()
 	}
 }

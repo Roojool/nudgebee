@@ -540,8 +540,37 @@ func parseProxyDBResponse(response map[string]any) (string, error) {
 	return string(b), nil
 }
 
+// proxySSHTargetHost picks the host for a proxy-agent ssh_command: the
+// per-call host_name, else the config's `host` value (the integration's own
+// host, or the discovered VM's IP IdentifyConfig / resolveCallHost set on a
+// copy of a dynamic integration). Empty when neither is set.
+func proxySSHTargetHost(toolConfig core.ToolConfig, configs map[string]any) (string, error) {
+	if hn, ok := configs["host_name"].(string); ok && strings.TrimSpace(hn) != "" {
+		hn = strings.TrimSpace(hn)
+		if !sshHostRe.MatchString(hn) {
+			return "", fmt.Errorf("invalid host_name %q: must be a hostname or IPv4 address", hn)
+		}
+		return hn, nil
+	}
+	if host := strings.TrimSpace(getConfigValue(toolConfig.Values, "host")); host != "" {
+		if !sshHostRe.MatchString(host) {
+			return "", fmt.Errorf("invalid host %q in integration config", host)
+		}
+		return host, nil
+	}
+	return "", nil
+}
+
 // executeSSHViaProxyAgent sends an ssh_command request to the forager agent via the relay
-func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, accountId string) (any, error) {
+func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, accountId string, configs map[string]any) (any, error) {
+	host, err := proxySSHTargetHost(toolContext.ToolConfig, configs)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" && isDynamicSSHConfig(toolContext.ToolConfig) {
+		return nil, fmt.Errorf("no target host for dynamic ssh integration %s: pass host_name, or an instance id, IP or name of a VM it can reach", toolContext.ToolConfig.Name)
+	}
+
 	datasourceKey := getConfigValue(toolContext.ToolConfig.Values, "datasource_key")
 	if datasourceKey == "" {
 		if toolContext.ToolConfig.Id != "" {
@@ -565,6 +594,9 @@ func executeSSHViaProxyAgent(toolContext core.NbToolContext, command string, acc
 		"datasource_id": datasourceKey,
 		"command":       command,
 		"timeout_ms":    float64(config.Config.LlmServerRelayPodExecutionTimeoutSeconds * 1000),
+	}
+	if host != "" {
+		params["host"] = host
 	}
 
 	actionParam := relay.ActionExecuteBody{
@@ -703,7 +735,7 @@ func ExecuteContainerJob(toolContext core.NbToolContext, module RelayJob, query 
 
 	// Route SSH commands to proxy agent for vm_agent integrations
 	if isSSHProxyModule(module) && isVMAgentMode(toolContext.ToolConfig.Values) {
-		return executeSSHViaProxyAgent(toolContext, query, accountId)
+		return executeSSHViaProxyAgent(toolContext, query, accountId, configs)
 	}
 
 	explainQuery := false

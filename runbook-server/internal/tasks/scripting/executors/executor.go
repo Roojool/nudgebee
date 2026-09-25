@@ -45,6 +45,11 @@ type ExecutionConfig struct {
 	TargetID      string // Instance ID (SSM) or Host (SSH - via Integration?)
 	Region        string // AWS Region
 	IntegrationID string // For SSH or Cloud Auth
+
+	// SSH target override (ssh executor, vm_agent integrations). Host takes
+	// precedence over the integration's saved host; Port 0 means default.
+	Host string
+	Port int
 }
 
 // BuildShellEnvPrefix builds a shell-safe "export K='V'; " prefix string.

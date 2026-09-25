@@ -936,6 +936,15 @@ func pushProxyConfigAsync(accountID string, datasources []ProxyDatasourceConfig)
 // The proxy agent returns a flat {data: "<json-string>"} response, unlike the k8s
 // agent's nested findings/evidence envelope.
 func ExecuteProxy(accountID string, action string, datasourceID string, params map[string]any, timeoutSeconds int) (map[string]any, error) {
+	return ExecuteProxyWithAgentType(accountID, action, datasourceID, params, timeoutSeconds, "")
+}
+
+// ExecuteProxyWithAgentType is ExecuteProxy routed to a specific relay agent
+// type (the integration's agent_type config value). Empty means "proxy".
+func ExecuteProxyWithAgentType(accountID string, action string, datasourceID string, params map[string]any, timeoutSeconds int, agentType string) (map[string]any, error) {
+	if agentType == "" {
+		agentType = "proxy"
+	}
 	proxyParams := make(map[string]any, len(params)+1)
 	for k, v := range params {
 		proxyParams[k] = v
@@ -951,7 +960,7 @@ func ExecuteProxy(accountID string, action string, datasourceID string, params m
 		},
 		NoSinks:        true,
 		Cache:          false,
-		AgentType:      "proxy",
+		AgentType:      agentType,
 		TimeoutSeconds: timeoutSeconds,
 	}
 

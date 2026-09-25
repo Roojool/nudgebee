@@ -3,7 +3,6 @@ package playbooks
 import (
 	"fmt"
 	"nudgebee/services/common"
-	"nudgebee/services/relay"
 )
 
 type proxySSHCommandAction struct{}
@@ -13,6 +12,10 @@ type proxySSHCommandParams struct {
 	Command      string `json:"command"`
 	TimeoutMs    int    `json:"timeout_ms,omitempty"`
 	AccountID    string `json:"account_id,omitempty"`
+	// Host/Port target a VM through a dynamic-mode ssh-proxy. Host overrides
+	// the integration's saved host; the agent enforces its allowed_hosts.
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
 }
 
 func (a *proxySSHCommandAction) Execute(ctx PlaybookActionContext, rawParams map[string]any) (PlaybookActionResponse, error) {
@@ -39,26 +42,31 @@ func (a *proxySSHCommandAction) Execute(ctx PlaybookActionContext, rawParams map
 		return nil, fmt.Errorf("account_id is required")
 	}
 
-	actionParams := map[string]any{
-		"command": params.Command,
-	}
-	if params.TimeoutMs > 0 {
-		actionParams["timeout_ms"] = params.TimeoutMs
-	}
-
 	datasourceKey, err := resolveDatasourceKey(params.DatasourceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve datasource: %w", err)
 	}
 
-	timeoutSec := 60
-	if params.TimeoutMs > 0 {
-		timeoutSec = (params.TimeoutMs / 1000) + 5
+	integration := lookupProxySSHIntegration(params.DatasourceID, accountID)
+	integrationName := integration.Name
+	if integrationName == "" {
+		integrationName = params.DatasourceID
+	}
+	host, err := ResolveProxySSHTarget(params.Host, integration.Host, params.Port, integrationName, integration.Mode)
+	if err != nil {
+		return nil, err
 	}
 
-	result, err := relay.ExecuteProxy(accountID, "ssh_command", datasourceKey, actionParams, timeoutSec)
+	result, err := ExecuteProxySSHCommand(ProxySSHCommand{
+		AccountID:     accountID,
+		DatasourceKey: datasourceKey,
+		Command:       params.Command,
+		Host:          host,
+		Port:          params.Port,
+		TimeoutMs:     params.TimeoutMs,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("proxy ssh_command failed: %w", err)
+		return nil, err
 	}
 
 	title, _ := rawParams["title"].(string)

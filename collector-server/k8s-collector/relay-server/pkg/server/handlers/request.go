@@ -33,6 +33,7 @@ func NewRequestHandler(
 	store db.AgentStore,
 	rpcClient mq.RPCClient,
 	topo mq.TenantEnsurer,
+	prober mq.ConsumerProber,
 	cfg *config.Config,
 	signer *signing.Signer,
 	roottracer *trace.Tracer,
@@ -169,6 +170,9 @@ func NewRequestHandler(
 		}
 
 		rk := mq.RelayQueueName(accountID, agentType)
+		if agentType == db.AgentTypeProxy {
+			rk = proxyRoutingKey(ctx, store, prober, accountID, rawBody, logger)
+		}
 
 		// Log action execution for tracking
 		logger.Info("executing action",
@@ -216,4 +220,75 @@ func NewRequestHandler(
 			return
 		}
 	}
+}
+
+// requestDatasourceIDPaths are where a proxy request may carry the addressed
+// datasource: the legacy envelope (llm-server / runbook-server / api-server
+// put it in body.action_params) first, then the unified top-level format.
+var requestDatasourceIDPaths = []string{
+	"body.action_params.datasource_id",
+	"datasource_id",
+	"params.datasource_id",
+	"body.datasource_id",
+}
+
+func requestDatasourceID(raw []byte) string {
+	for _, path := range requestDatasourceIDPaths {
+		if v := gjson.GetBytes(raw, path).String(); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// proxyRoutingKey picks the queue for a request to a proxy agent.
+//
+// Several proxy agents may serve one account, each with its own datasources,
+// and all of them consume the shared relay_requests_{acct}_proxy queue. A
+// request published there is taken by whichever agent's session gets it
+// first, which need not be the agent that has the datasource. So when the
+// datasource's owner is known (the agent_id recorded at registration), the
+// request goes to that agent's own queue instead.
+//
+// It falls back to the shared queue — the pre-existing behaviour, still
+// consumed by every proxy session — whenever routing to the owner cannot be
+// shown to work: no datasource in the request, no or ambiguous recorded owner
+// (rows written before agent_id existed), a lookup error, or an owner queue
+// with no consumer. The last case covers a rollout, where the owner is still
+// connected to a relay replica that only consumes the shared queue, and an
+// owner that is offline: its queue would hold the request until the TTL, while
+// the shared queue lets the caller fail fast. The consumer check asks the
+// broker, so it holds whichever relay replica hosts the owner's session.
+func proxyRoutingKey(ctx context.Context, store db.AgentStore, prober mq.ConsumerProber, accountID string, raw []byte, logger *slog.Logger) string {
+	shared := mq.RelayQueueName(accountID, db.AgentTypeProxy)
+
+	dsID := requestDatasourceID(raw)
+	if dsID == "" {
+		return shared
+	}
+	owner, err := store.GetDatasourceAgentID(ctx, accountID, dsID)
+	if err != nil {
+		logger.Warn("failed to resolve datasource owner agent, using shared proxy queue",
+			"account_id", accountID, "datasource_id", dsID, "err", err)
+		return shared
+	}
+	if owner == "" {
+		return shared
+	}
+
+	own := mq.RelayAgentQueueName(accountID, db.AgentTypeProxy, owner)
+	if prober != nil {
+		has, err := prober.HasConsumers(ctx, own)
+		if err != nil {
+			logger.Warn("failed to probe owner agent queue, using shared proxy queue",
+				"account_id", accountID, "datasource_id", dsID, "agent_id", owner, "queue", own, "err", err)
+			return shared
+		}
+		if !has {
+			logger.Info("owner agent queue has no consumer, using shared proxy queue",
+				"account_id", accountID, "datasource_id", dsID, "agent_id", owner, "queue", own)
+			return shared
+		}
+	}
+	return own
 }

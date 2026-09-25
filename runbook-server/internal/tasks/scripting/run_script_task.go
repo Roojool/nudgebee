@@ -7,6 +7,7 @@ import (
 	"nudgebee/runbook/internal/tasks/types"
 	"nudgebee/runbook/services/cloud"
 	integrationsService "nudgebee/runbook/services/integrations"
+	"nudgebee/runbook/services/relay"
 	"strings"
 	"time"
 )
@@ -158,6 +159,17 @@ func (t *RunScriptTask) Execute(taskCtx types.TaskContext, params map[string]any
 			integrationID = resolved
 		}
 		config.IntegrationID = integrationID
+	}
+
+	if config.ExecutorType == "ssh" {
+		if host, ok := params["host"].(string); ok {
+			config.Host = strings.TrimSpace(host)
+		}
+		port, err := relay.ParseSSHPort(params["port"])
+		if err != nil {
+			return nil, err
+		}
+		config.Port = port
 	}
 
 	if cwd, ok := params["cwd"].(string); ok {
@@ -355,19 +367,37 @@ func (t *RunScriptTask) InputSchema() *types.Schema {
 				DependsOn:   []string{"executor_type"},
 				VisibleWhen: &types.VisibleWhen{Field: "executor_type", Value: []string{"ssh"}},
 			},
+			"host": {
+				Type:        types.PropertyTypeString,
+				Description: "Target host (hostname or IPv4) for SSH. Overrides the integration's default host; required for agent SSH integrations without a fixed host.",
+				Required:    false,
+				Title:       "Host",
+				Order:       11,
+				DependsOn:   []string{"executor_type"},
+				VisibleWhen: &types.VisibleWhen{Field: "executor_type", Value: []string{"ssh"}},
+			},
+			"port": {
+				Type:        types.PropertyTypeInteger,
+				Description: "Target SSH port. Defaults to the integration's port (22 for k8s-mode integrations).",
+				Required:    false,
+				Title:       "Port",
+				Order:       12,
+				DependsOn:   []string{"executor_type"},
+				VisibleWhen: &types.VisibleWhen{Field: "executor_type", Value: []string{"ssh"}},
+			},
 			"cwd": {
 				Type:        types.PropertyTypeString,
 				Description: "The working directory to run the script in.",
 				Required:    false,
 				Title:       "Working Directory",
-				Order:       11,
+				Order:       13,
 			},
 			"image": {
 				Type:        types.PropertyTypeString,
 				Description: "Override the container image for execution. Defaults: bash/python use nudgebee-debug, javascript uses node:22-alpine, powershell uses mcr.microsoft.com/powershell:lts-alpine-3.17.",
 				Required:    false,
 				Title:       "Docker Image",
-				Order:       12,
+				Order:       14,
 				DependsOn:   []string{"executor_type"},
 				VisibleWhen: &types.VisibleWhen{Field: "executor_type", Value: []string{"kubernetes", "agent"}},
 			},
@@ -376,7 +406,7 @@ func (t *RunScriptTask) InputSchema() *types.Schema {
 				Description: "Resource requests and limits. Keys: cpu_request, cpu_limit, memory_request, memory_limit.",
 				Required:    false,
 				Title:       "Resource Limits",
-				Order:       13,
+				Order:       15,
 				DependsOn:   []string{"executor_type"},
 				VisibleWhen: &types.VisibleWhen{Field: "executor_type", Value: []string{"kubernetes"}},
 			},
@@ -385,7 +415,7 @@ func (t *RunScriptTask) InputSchema() *types.Schema {
 				Description: "The format to parse the output as. Supported values: 'json'.",
 				Required:    false,
 				Title:       "Output Parser",
-				Order:       14,
+				Order:       16,
 			},
 		},
 	}

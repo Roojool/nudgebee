@@ -46,7 +46,7 @@ func (t *SSHTask) Execute(taskCtx types.TaskContext, params map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	resp, err := relay.ExecuteRelayJob(requestContext, accountId, relay.RelayJobSSH, integrationId, params["command"].(string), nil)
+	resp, err := relay.ExecuteRelayJob(requestContext, accountId, relay.RelayJobSSH, integrationId, params["command"].(string), sshTargetConfigs(params))
 
 	if err != nil {
 		return nil, err
@@ -66,6 +66,20 @@ func (t *SSHTask) Execute(taskCtx types.TaskContext, params map[string]any) (any
 	return nil, errors.New("unable to process request")
 }
 
+// sshTargetConfigs extracts the optional per-task target host/port. They are
+// honoured on the vm_agent (forager ssh-proxy) path, where they override the
+// integration's saved host; a dynamic-mode proxy requires one of the two.
+func sshTargetConfigs(params map[string]any) map[string]any {
+	configs := map[string]any{}
+	if host, ok := params["host"].(string); ok && host != "" {
+		configs["host"] = host
+	}
+	if port, ok := params["port"]; ok && port != nil && port != "" {
+		configs["port"] = port
+	}
+	return configs
+}
+
 func (t *SSHTask) InputSchema() *types.Schema {
 	return &types.Schema{
 		Properties: map[string]types.Property{
@@ -79,6 +93,16 @@ func (t *SSHTask) InputSchema() *types.Schema {
 				Type:        "string",
 				Description: "SSH command.",
 				Required:    true,
+			},
+			"host": {
+				Type:        "string",
+				Description: "Target host (hostname or IPv4). Overrides the integration's default host; required for agent SSH integrations without a fixed host.",
+				Required:    false,
+			},
+			"port": {
+				Type:        "integer",
+				Description: "Target SSH port. Defaults to the integration's port (22 for k8s-mode integrations).",
+				Required:    false,
 			},
 			"account_id": {
 				Type:        types.PropertyTypeAccount,
