@@ -1,12 +1,15 @@
 package core
 
 import (
+	"context"
 	"testing"
 
+	"nudgebee/llm/security"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestWriteConfirmationRequired: write tools (create/update/delete) prompt, except
@@ -124,6 +127,80 @@ func TestConfirmationApprovedForAction(t *testing.T) {
 	// Tools absent from the map fall back to the per-tool key.
 	unknown := NBAgentPlannerToolAction{Tool: "other_tool", ToolInput: "x"}
 	assert.True(t, confirmationApprovedForAction(map[string]string{"other_tool": "yes"}, nameToTool, unknown))
+}
+
+func TestConfirmationRejectedForAction(t *testing.T) {
+	scoped := confirmScopedStubTool{confirmStubTool{name: "scoped_tool"}}
+	nameToTool := map[string]toolcore.NBTool{"SCOPED_TOOL": scoped}
+	action := NBAgentPlannerToolAction{Tool: "scoped_tool", ToolInput: "a"}
+
+	assert.True(t, confirmationRejectedForAction(map[string]string{"scoped_tool:a": "no"}, nameToTool, action, "account"))
+	assert.True(t, confirmationRejectedForAction(map[string]string{"scoped_tool:a": ""}, nameToTool, action, "account"))
+	assert.False(t, confirmationRejectedForAction(map[string]string{"scoped_tool:a": "yes"}, nameToTool, action, "account"))
+	assert.False(t, confirmationRejectedForAction(map[string]string{"scoped_tool:b": "no"}, nameToTool, action, "account"))
+	assert.False(t, confirmationRejectedForAction(nil, nameToTool, action, "account"))
+}
+
+type rejectionContinuationPlanner struct {
+	mockNBAgentPlanner
+	steps []NBAgentPlannerToolActionStep
+}
+
+func (p *rejectionContinuationPlanner) Plan(_ context.Context, steps []NBAgentPlannerToolActionStep, _ string) ([]NBAgentPlannerToolAction, *NBAgentPlannerFinishAction, error) {
+	p.steps = append([]NBAgentPlannerToolActionStep(nil), steps...)
+	return nil, &NBAgentPlannerFinishAction{Data: "planner continued", Status: ConversationStatusCompleted}, nil
+}
+
+type rejectionContinuationDao struct{ IConversationDao }
+
+func (rejectionContinuationDao) GetConversationMessage(_, _, _ string) (ConversationMessage, error) {
+	return ConversationMessage{Status: ConversationStatusInProgress}, nil
+}
+
+func TestRejectedConfirmationContinuesResumedPlannerTurn(t *testing.T) {
+	previousDao := GetConversationDao()
+	SetConversationDao(rejectionContinuationDao{})
+	defer SetConversationDao(previousDao)
+
+	ctx := security.NewRequestContextForTenantAccountAdmin("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", []string{"cccccccc-cccc-cccc-cccc-cccccccccccc"})
+	agent := &MockAgent{}
+	planner := &rejectionContinuationPlanner{}
+	request := NBAgentRequest{AccountId: "cccccccc-cccc-cccc-cccc-cccccccccccc", ConversationId: "conversation", MessageId: "message", Query: "run the command"}
+	executor := newPlannerExecutor(ctx, planner, agent, request, 3)
+	executor.currentAction = []NBAgentPlannerToolAction{{ToolID: "pending-write", Tool: "write_tool", ToolInput: "touch /tmp/probe"}}
+	state, err := executor.Marshal()
+	require.NoError(t, err)
+
+	request.QueryConfig.ToolConfirmations = map[string]string{"write_tool": "no"}
+	response, err := executeAgentPlanner(ctx, planner, agent, request, string(state))
+	require.NoError(t, err)
+	assert.Equal(t, AgentExecutionStatusSuccess, response.Status)
+	assert.Contains(t, response.Response, "planner continued")
+	assert.Empty(t, response.Followup)
+	require.Len(t, planner.steps, 1)
+	assert.Equal(t, ToolStatusFailure, planner.steps[0].Status)
+	assert.Contains(t, planner.steps[0].Observation, "User rejected approval")
+	assert.Contains(t, planner.steps[0].Observation, "not executed")
+}
+
+func TestRejectedWriteRetryRemainsToolFailure(t *testing.T) {
+	tool := &MockClassifiedTool{
+		MockContextCapturingTool: MockContextCapturingTool{NameVal: "write_tool"},
+		RequestType:              toolcore.ToolRequestTypeCreate,
+	}
+	request := NBAgentRequest{
+		AccountId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+		QueryConfig: toolcore.NBQueryConfig{
+			ToolConfirmations: map[string]string{"write_tool": "no"},
+		},
+	}
+	executor := newPlannerExecutor(security.NewRequestContextForSuperAdmin(), &mockNBAgentPlanner{}, &MockAgent{SupportedTools: []toolcore.NBTool{tool}}, request, 3)
+	action := NBAgentPlannerToolAction{ToolID: "denied-write", Tool: "write_tool", ToolInput: "touch /tmp/probe"}
+	step, finish, err := executor.doAction(getNameToTool([]toolcore.NBTool{tool}), action, "")
+	require.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Equal(t, ToolStatusFailure, step.Status)
+	assert.Contains(t, step.Observation, "not executed")
 }
 
 // A bare-string `commands` must still produce the full card, DESTRUCTIVE warning included.

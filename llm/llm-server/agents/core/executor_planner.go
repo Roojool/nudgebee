@@ -2028,6 +2028,12 @@ func confirmationApprovedForAction(confirmations map[string]string, nameToTool m
 	return isToolConfirmationApproved(confirmations, resumeConfirmationKey(nameToTool, action, accountId...))
 }
 
+func confirmationRejectedForAction(confirmations map[string]string, nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId string) bool {
+	key := resumeConfirmationKey(nameToTool, action, accountId)
+	_, found := confirmations[key]
+	return found && !isToolConfirmationApproved(confirmations, key)
+}
+
 // resumeConfirmationKey is the key a resume looks an approval up under: the
 // per-action key when the tool scopes its confirmations, else the tool name.
 func resumeConfirmationKey(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId ...string) string {
@@ -2393,10 +2399,11 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 					isFollowupFound = true
 					previousData = strings.TrimSpace(previousData)
 					if !slices.Contains([]string{"ok", "yes", "true"}, strings.ToLower(previousData)) {
-						return NBAgentPlannerToolActionStep{}, &NBAgentPlannerFinishAction{
-							Data:   fmt.Sprintf("user has rejected approval (response - %s) for this action, stopping", previousData),
-							Status: ConversationStatusCompleted,
-						}, nil
+						return NBAgentPlannerToolActionStep{
+							Action:      action,
+							Observation: "User rejected approval for this action. It was not executed. Continue with other work or summarize.",
+							Status:      ToolStatusFailure,
+						}, nil, nil
 					}
 				}
 			}
@@ -4321,6 +4328,18 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 			resumeNameToTool := getNameToTool(nbAgentPlanner.GetTools())
 			// read all current actions as steps
 			for _, action := range executor.currentAction {
+				// A rejection is a tool observation, not an unresolved configuration
+				// or a reason to end the entire planner turn.
+				if confirmationRejectedForAction(request.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId) {
+					ctx.GetLogger().Info("plannerexecutor: user rejected tool confirmation", "tool", action.Tool, "toolId", action.ToolID)
+					executor.steps = append(executor.steps, NBAgentPlannerToolActionStep{
+						Action:      action,
+						Observation: "User rejected approval for this action. It was not executed. Continue with other work or summarize.",
+						Status:      ToolStatusFailure,
+					})
+					executor.stepKeys[action.ToolID] = true
+					continue
+				}
 				toolId := action.ToolID
 				response, status, err := GetConversationDao().GetConversationToolResponse(toolId, request.MessageId, request.ConversationId, request.AccountId)
 				ctx.GetLogger().Info("plannerexecutor: resumption check", "toolId", toolId, "status", status, "err", err)
