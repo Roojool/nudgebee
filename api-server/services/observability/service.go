@@ -620,6 +620,16 @@ func scopeToAccountTenant(ctx *security.RequestContext, accountId string) *secur
 // pair for an account and also returns the integration DTO that produced the
 // match (when one exists), so callers that need additional config from the
 // same integration can avoid a second lookup.
+// logAgentLookupFailure logs a failed agent lookup at WARN when the account simply
+// has no live agent (expected during capability discovery) and at ERROR otherwise.
+func logAgentLookupFailure(logger *slog.Logger, accountId string, err error) {
+	level := slog.LevelError
+	if errors.Is(err, account.ErrAgentNotConnected) {
+		level = slog.LevelWarn
+	}
+	logger.Log(context.Background(), level, fmt.Sprintf("unable to get agent details, for account %s", accountId), "error", err)
+}
+
 func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, accountId, logProviderFromRequest, providerType string, logSourceFromRequest string) (string, string, *core.IntegrationDto, error) {
 	if ctx == nil || ctx.GetSecurityContext() == nil {
 		return "", "", nil, ErrNoTenantContext
@@ -660,7 +670,7 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 						return "gcp", "user", nil, nil
 					}
 				}
-				ctx.GetLogger().Error(fmt.Sprintf("unable to get agent details, for account %s", accountId), "error", err)
+				logAgentLookupFailure(ctx.GetLogger(), accountId, err)
 				return "", "", nil, err
 			}
 			// Agent-reported features go stale once it disconnects; only trust them while live.
