@@ -135,3 +135,47 @@ func TestTransitionJiraIssue(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveJiraPriority_MatchesNameIgnoringCase(t *testing.T) {
+	var calls, status int32 = 0, http.StatusOK
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(int(atomic.LoadInt32(&status)))
+		_, _ = w.Write([]byte(`[{"id":"2","name":"High"},{"id":"4","name":"Low"}]`))
+	}))
+	defer ts.Close()
+	client, err := jira.NewClient(ts.Client(), ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, in := range []string{"Low", "LoW", "low", "LOW", " lOw "} {
+		if got := resolveJiraPriority(client, &jira.Priority{Name: in}); got.ID != "4" || got.Name != "" {
+			t.Errorf("resolve(%q) = %+v, want ID 4", in, *got)
+		}
+	}
+	if got := resolveJiraPriority(client, &jira.Priority{Name: "Urgent"}); got.Name != "Urgent" || got.ID != "" {
+		t.Errorf("unknown name must pass through, got %+v", *got)
+	}
+
+	if got := resolveJiraPriority(nil, &jira.Priority{Name: "Low"}); got.Name != "Low" || got.ID != "" {
+		t.Errorf("a nil client must pass the name through, got %+v", *got)
+	}
+
+	before := atomic.LoadInt32(&calls)
+	if got := resolveJiraPriority(client, &jira.Priority{ID: "4"}); got.ID != "4" {
+		t.Errorf("an ID must pass through, got %+v", *got)
+	}
+	if got := resolveJiraPriority(client, nil); got != nil {
+		t.Errorf("nil must stay nil, got %+v", got)
+	}
+	if atomic.LoadInt32(&calls) != before {
+		t.Error("an ID or nil priority must not call Jira")
+	}
+
+	atomic.StoreInt32(&status, http.StatusInternalServerError)
+	if got := resolveJiraPriority(client, &jira.Priority{Name: "LoW"}); got.Name != "LoW" || got.ID != "" {
+		t.Errorf("a failed lookup must pass the name through, got %+v", *got)
+	}
+}

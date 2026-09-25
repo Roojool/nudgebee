@@ -142,6 +142,7 @@ func CreateJiraIssue(configuration models.TicketConfigurations, ticket models.Ti
 		return ticket, err
 	}
 
+	fields.Priority = resolveJiraPriority(jiraClient, fields.Priority)
 	issue := jira.Issue{
 		Fields: fields,
 	}
@@ -191,6 +192,25 @@ func jiraPriority(value string) *jira.Priority {
 		return &jira.Priority{ID: value}
 	}
 	return &jira.Priority{Name: value}
+}
+
+// resolveJiraPriority swaps a priority name for the instance's ID for it. Jira
+// matches a priority name case-sensitively ("Low" is accepted, "LoW" is not), so the
+// name is looked up ignoring case in the instance's priority list. Best-effort: with
+// no list or no match the name goes through unchanged and Jira gives its own error.
+func resolveJiraPriority(client *jira.Client, priority *jira.Priority) *jira.Priority {
+	if priority == nil || priority.Name == "" {
+		return priority
+	}
+	if client == nil {
+		return priority
+	}
+	for _, known := range fetchJiraPriorities(client) {
+		if known.ID != "" && strings.EqualFold(strings.TrimSpace(known.Name), strings.TrimSpace(priority.Name)) {
+			return &jira.Priority{ID: known.ID}
+		}
+	}
+	return priority
 }
 
 // buildJiraIssueFields assembles the field set sent to Jira's create API.
@@ -1250,7 +1270,7 @@ func (s *JiraService) Update(ctx *gin.Context, config models.TicketConfiguration
 	update := make(map[string]interface{})
 
 	if updateFields.Severity != "" {
-		update["priority"] = jiraPriority(updateFields.Severity)
+		update["priority"] = resolveJiraPriority(jiraClient, jiraPriority(updateFields.Severity))
 	}
 
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
