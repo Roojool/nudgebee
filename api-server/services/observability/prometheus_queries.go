@@ -692,9 +692,9 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "max_usage_cpu":
 			queries[metricKey] = fmt.Sprintf(`max_over_time(sum(rate(node_cpu_seconds_total{__CLUSTER__ mode!="idle"}[%s]))[%s:%s]) or max_over_time(sum(rate(node_resources_cpu_usage_seconds_total{__CLUSTER__ mode!="idle"}[%s]))[%s:%s])`, rateW, rangeW, stepW, rateW, rangeW, stepW)
 		case "replica_defined":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_replicaset_spec_replicas{ __CLUSTER__ namespace="%s", replicaset=~"%s.*"})`, safeMeta.Namespace, safeMeta.Name)
+			queries[metricKey] = promWorkloadReplicaQuery(safeMeta, false)
 		case "replica_ready":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_replicaset_status_ready_replicas{ __CLUSTER__ namespace="%s", replicaset=~"%s.*"})`, safeMeta.Namespace, safeMeta.Name)
+			queries[metricKey] = promWorkloadReplicaQuery(safeMeta, true)
 
 		// others
 		case "container_application_type_with_pod":
@@ -895,4 +895,52 @@ func promKubeletPreferred(expr, filter string) string {
 	return fmt.Sprintf(`%s or %s`,
 		fmt.Sprintf(expr, kubeletFilter),
 		fmt.Sprintf(expr, filter))
+}
+
+// promWorkloadReplicaQuery renders replica_defined / replica_ready for the workload
+// named in meta.
+//
+// The replica keys used to read the ReplicaSet family through
+// `replicaset=~"<name>.*"`, which is wrong twice over. The regex is a prefix, so
+// "services-server" also matches every ReplicaSet of "services-server-worker"; and a
+// Deployment keeps one ReplicaSet per revision, so even the right workload contributes
+// as many series as it has revisions. Measured on dev: the key answered 3 for a
+// Deployment with 1 replica, summing 22 ReplicaSets across two Deployments.
+//
+// Reading the controller's own object instead gives one series per workload, and the
+// controller is the thing the caller asked about. The kind decides the family; anything
+// else (including an absent kind) is treated as a Deployment, which is what every
+// caller sends today.
+func promWorkloadReplicaQuery(meta RequestMetadata, ready bool) string {
+	var metric, label string
+	switch strings.ToLower(meta.Kind) {
+	case "statefulset":
+		label, metric = "statefulset", "kube_statefulset_replicas"
+		if ready {
+			metric = "kube_statefulset_status_replicas_ready"
+		}
+	case "daemonset":
+		// A DaemonSet has no replica count; the scheduler's desired/ready pod counts
+		// are the same quantity under a different name.
+		label, metric = "daemonset", "kube_daemonset_status_desired_number_scheduled"
+		if ready {
+			metric = "kube_daemonset_status_number_ready"
+		}
+	case "replicaset":
+		label, metric = "replicaset", "kube_replicaset_spec_replicas"
+		if ready {
+			metric = "kube_replicaset_status_ready_replicas"
+		}
+	default:
+		label, metric = "deployment", "kube_deployment_spec_replicas"
+		if ready {
+			metric = "kube_deployment_status_replicas_ready"
+		}
+	}
+	// max, not sum: the selector now identifies exactly one workload, so every series
+	// it matches carries the same number. Summing is only ever equal or wrong — it
+	// reads N× wherever two kube-state-metrics replicas report the same object, which
+	// is the failure this whole key just had in a different form.
+	return fmt.Sprintf(`max(%s{ __CLUSTER__ namespace="%s", %s="%s"})`,
+		metric, meta.Namespace, label, meta.Name)
 }

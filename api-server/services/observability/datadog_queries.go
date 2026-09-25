@@ -1,6 +1,9 @@
 package observability
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Datadog utilisation query builders. These render abstract metric keys into
 // Datadog metric query strings for node- and workload-scoped utilisation, and
@@ -268,10 +271,48 @@ func buildDatadogWorkloadQueries(meta RequestMetadata, metrics []string) map[str
 		case "max_usage_cpu":
 			queries[metricKey] = "max:kubernetes.cpu.usage.total{*}"
 		case "replica_defined":
-			queries[metricKey] = fmt.Sprintf("sum:kubernetes_state.replicaset.replicas_desired{kube_namespace:%s, kube_replica_set:%s-*}", meta.Namespace, meta.Name)
+			queries[metricKey] = datadogWorkloadReplicaQuery(meta, false)
 		case "replica_ready":
-			queries[metricKey] = fmt.Sprintf("sum:kubernetes_state.replicaset.replicas_ready{kube_namespace:%s, kube_replica_set:%s-*}", meta.Namespace, meta.Name)
+			queries[metricKey] = datadogWorkloadReplicaQuery(meta, true)
 		}
 	}
 	return queries
+}
+
+// datadogWorkloadReplicaQuery renders replica_defined / replica_ready for the workload
+// named in meta.
+//
+// The keys used to read the ReplicaSet family through the glob
+// `kube_replica_set:<name>-*`, which matches every ReplicaSet of every workload sharing
+// the prefix ("services-server-*" also catches "services-server-worker-..."), and every
+// revision of the right one. Reading the controller's own object gives one series per
+// workload. Mirrors promWorkloadReplicaQuery; the kind-to-tag mapping is the one
+// buildDatadogWorkloadQueries already uses for the usage keys.
+func datadogWorkloadReplicaQuery(meta RequestMetadata, ready bool) string {
+	var metric, tag string
+	switch strings.ToLower(meta.Kind) {
+	case "statefulset":
+		tag, metric = "kube_stateful_set", "kubernetes_state.statefulset.replicas_desired"
+		if ready {
+			metric = "kubernetes_state.statefulset.replicas_ready"
+		}
+	case "daemonset":
+		tag, metric = "kube_daemon_set", "kubernetes_state.daemonset.desired"
+		if ready {
+			metric = "kubernetes_state.daemonset.ready"
+		}
+	case "replicaset":
+		tag, metric = "kube_replica_set", "kubernetes_state.replicaset.replicas_desired"
+		if ready {
+			metric = "kubernetes_state.replicaset.replicas_ready"
+		}
+	default:
+		tag, metric = "kube_deployment", "kubernetes_state.deployment.replicas_desired"
+		if ready {
+			metric = "kubernetes_state.deployment.replicas_ready"
+		}
+	}
+	// max, not sum: see promWorkloadReplicaQuery. One workload is one number, however
+	// many Cluster Agents report it.
+	return fmt.Sprintf("max:%s{kube_namespace:%s, %s:%s}", metric, meta.Namespace, tag, meta.Name)
 }

@@ -68,10 +68,11 @@ class PrometheusQuery:
 
 
 class ReplicasCount(PrometheusQuery):
-    # kube_replicaset_spec_replicas (desired) rather than _status_replicas (current).
-    # They differ only while a rollout or a scale event is in flight; on an hourly grid
-    # over 14 days that is a handful of buckets, and desired is the better forecasting
-    # signal anyway — it is what the autoscaler decided, not what had finished starting.
+    # The desired replica count (kube_deployment_spec_replicas and its per-kind
+    # equivalents) rather than the ready one. They differ only while a rollout or a
+    # scale event is in flight; on an hourly grid over 14 days that is a handful of
+    # buckets, and desired is the better forecasting signal anyway — it is what the
+    # autoscaler decided, not what had finished starting.
     utilisation_key = "replica_defined"
 
     def get_data(
