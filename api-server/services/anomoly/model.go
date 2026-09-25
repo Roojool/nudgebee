@@ -11,7 +11,6 @@ type AnomalyTemplate struct {
 	ChangeOperator   string      `json:"change_operator" validate:"required" mapstructure:"change_operator"`
 	Title            string      `json:"title" validate:"required" mapstructure:"title"`
 	Description      string      `json:"description" validate:"required" mapstructure:"description"`
-	AnomalyProvider  string      `json:"anomaly_provider" mapstructure:"anomaly_provider"`
 }
 
 type Anomaly struct {
