@@ -228,6 +228,11 @@ type appConfig struct {
 
 	NBRetentionDaysAiCostReportDispatchLog int `mapstructure:"nb_retention_days_ai_cost_report_dispatch_log"`
 
+	// event_incoming_webhooks keeps the raw body of every webhook delivery, one
+	// row per event, for the integration Activity Log and replay. Nothing else
+	// references it, and stuck-delivery recovery only looks back 30 minutes.
+	NBRetentionDaysEventIncomingWebhooks int `mapstructure:"nb_retention_days_event_incoming_webhooks"`
+
 	// llm_retrieval_trace (formerly llm_rag_audit, still readable under that
 	// name through a view) holds one row per knowledge-base or memory search,
 	// with every candidate and the scores behind it. Written on every search by
@@ -539,6 +544,7 @@ func init() {
 	viper.SetDefault("nb_retention_days_k8s_resources", 30)
 	viper.SetDefault("nb_retention_days_recommendations_archive", 30)
 	viper.SetDefault("nb_retention_days_ai_cost_report_dispatch_log", 7)
+	viper.SetDefault("nb_retention_days_event_incoming_webhooks", 14)
 	viper.SetDefault("nb_retention_days_rag_retrieval_trace", 30)
 	viper.SetDefault("nb_retention_days_event_analysis", 90)
 	viper.SetDefault("kg_edge_stale_after_days", 7)

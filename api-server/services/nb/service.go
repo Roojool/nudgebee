@@ -335,6 +335,24 @@ func CleanupData(ctx *security.RequestContext, job ...string) {
 				Metastore: database.Metastore,
 				Query:     fmt.Sprintf(`DELETE FROM ai_cost_report_dispatch_log WHERE report_date < (now() - interval '%d days')::date`, config.Config.NBRetentionDaysAiCostReportDispatchLog),
 			},
+			{
+				// One row per delivered event, carrying the full raw payload, so it
+				// grows with alert volume. event_created_at is UTC wall clock in a
+				// timestamp-without-time-zone column (see webhook_recovery.go), hence
+				// the AT TIME ZONE 'utc' on the cutoff. Rows still pending or
+				// processing are kept: they are deliveries that never completed and
+				// the only record of the alert, re-driven by webhook recovery.
+				Name:      "event_incoming_webhooks",
+				Metastore: database.Metastore,
+				Batched:   true,
+				Query: fmt.Sprintf(`WITH to_del AS (
+					SELECT id FROM event_incoming_webhooks
+					WHERE event_created_at < (now() AT TIME ZONE 'utc') - interval '%d days'
+					  AND processing_status NOT IN ('pending', 'processing')
+					LIMIT %d
+				) DELETE FROM event_incoming_webhooks WHERE id IN (SELECT id FROM to_del)`,
+					config.Config.NBRetentionDaysEventIncomingWebhooks, cleanupBatchSize),
+			},
 		}
 
 	jobsToRemove := []dataCleanupJob{}
