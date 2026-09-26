@@ -315,19 +315,30 @@ func TestFetchServiceNowIncidentCreateMeta_Structure(t *testing.T) {
 	if !ok {
 		t.Fatal("urgency field missing")
 	}
-	if urgency.Group != FieldGroupSeverity {
-		t.Errorf("urgency group = %q, want %q", urgency.Group, FieldGroupSeverity)
+	if urgency.Group != "" {
+		t.Errorf("urgency must not be a severity source, group = %q", urgency.Group)
 	}
 	if len(urgency.AllowedValues) != 3 {
 		t.Fatalf("urgency should expose 3 options, got %d", len(urgency.AllowedValues))
 	}
-	// Values must be the names getServiceNowPriority maps to 1/2/3 at create time.
+	// Values are the High/Medium/Low names; serviceNowLevelCode maps them to 1/2/3.
 	wantValues := map[string]bool{"High": true, "Medium": true, "Low": true}
 	for _, v := range urgency.AllowedValues {
 		val := v.(map[string]interface{})["value"].(string)
 		if !wantValues[val] {
 			t.Errorf("unexpected urgency value %q", val)
 		}
+	}
+
+	impact, ok := fields["impact"]
+	if !ok {
+		t.Fatal("impact field missing")
+	}
+	if impact.Required || urgency.Required {
+		t.Error("impact and urgency must be optional; create supplies the defaults")
+	}
+	if impact.Group != "" || len(impact.AllowedValues) != 3 {
+		t.Errorf("impact should be a plain 3-option select, got group %q with %d options", impact.Group, len(impact.AllowedValues))
 	}
 
 	if _, ok := fields["labels"]; ok {
@@ -467,37 +478,84 @@ func TestServiceNowService_List_RejectsUnknownPriority(t *testing.T) {
 	}
 }
 
-func TestServiceNowSeverityWrites_ImpactAndUrgency(t *testing.T) {
-	want := map[string][2]string{
-		"Highest": {"1", "1"}, "High": {"2", "1"}, "Medium": {"2", "2"}, "Low": {"2", "3"}, "Lowest": {"3", "3"},
+func TestServiceNowSeverityHelpers_AreCaseInsensitive(t *testing.T) {
+	want := map[string]string{
+		"highest": "1", "critical": "1", "high": "2", "medium": "3", "low": "4", "lowest": "5",
 	}
-	for sev, iu := range want {
-		if got := getServiceNowImpact(sev); got != iu[0] {
-			t.Errorf("impact(%s) = %s, want %s", sev, got, iu[0])
-		}
-		if got := getServiceNowPriority(sev); got != iu[1] {
-			t.Errorf("urgency(%s) = %s, want %s", sev, got, iu[1])
+	for name, level := range want {
+		for _, spelling := range []string{name, strings.ToUpper(name), strings.ToUpper(name[:1]) + name[1:]} {
+			if got := getServiceNowPriorityLevel(spelling); got != level {
+				t.Errorf("filter(%q) = %s, want %s", spelling, got, level)
+			}
 		}
 	}
 }
 
-func TestServiceNowSeverityHelpers_AreCaseInsensitive(t *testing.T) {
-	// impact, urgency, priority-filter
-	want := map[string][3]string{
-		"highest": {"1", "1", "1"}, "critical": {"1", "1", "1"}, "high": {"2", "1", "2"},
-		"medium": {"2", "2", "3"}, "low": {"2", "3", "4"}, "lowest": {"3", "3", "5"},
+func TestServiceNowCreateBody_UsesImpactAndUrgencyOnly(t *testing.T) {
+	// Severity must never influence the pair, whatever it says.
+	tk := models.Ticket{Severity: "Highest", AdditionalFields: map[string]interface{}{"impact": "3", "urgency": "1"}}
+	body, _ := serviceNowCreateBody(tk)
+	if body["impact"] != "3" || body["urgency"] != "1" {
+		t.Errorf("impact=%s urgency=%s, want 3 and 1", body["impact"], body["urgency"])
 	}
-	for name, w := range want {
-		for _, spelling := range []string{name, strings.ToUpper(name), strings.ToUpper(name[:1]) + name[1:]} {
-			if got := getServiceNowImpact(spelling); got != w[0] {
-				t.Errorf("impact(%q) = %s, want %s", spelling, got, w[0])
-			}
-			if got := getServiceNowPriority(spelling); got != w[1] {
-				t.Errorf("urgency(%q) = %s, want %s", spelling, got, w[1])
-			}
-			if got := getServiceNowPriorityLevel(spelling); got != w[2] {
-				t.Errorf("filter(%q) = %s, want %s", spelling, got, w[2])
-			}
+
+	// The workflow builder sends option names.
+	body, _ = serviceNowCreateBody(models.Ticket{AdditionalFields: map[string]interface{}{"impact": "Low", "urgency": "High"}})
+	if body["impact"] != "3" || body["urgency"] != "1" {
+		t.Errorf("workflow impact=%s urgency=%s, want 3 and 1", body["impact"], body["urgency"])
+	}
+
+	// The Nubi ticket tool sends selects as {"id": "<code>"}.
+	body, _ = serviceNowCreateBody(models.Ticket{AdditionalFields: map[string]interface{}{
+		"impact": map[string]interface{}{"id": "3"}, "urgency": map[string]interface{}{"id": "1"},
+	}})
+	if body["impact"] != "3" || body["urgency"] != "1" {
+		t.Errorf("nubi impact=%s urgency=%s, want 3 and 1", body["impact"], body["urgency"])
+	}
+
+	// Nothing supplied: Impact Medium, Urgency Low, and severity is not consulted.
+	body, _ = serviceNowCreateBody(models.Ticket{Severity: "Highest"})
+	if body["impact"] != "2" || body["urgency"] != "3" {
+		t.Errorf("default impact=%s urgency=%s, want 2 and 3", body["impact"], body["urgency"])
+	}
+}
+
+func TestServiceNowSeverityFromLevels(t *testing.T) {
+	// impact, urgency -> severity, per the Impact x Urgency table (1 = High, 3 = Low).
+	for _, c := range [][3]string{
+		{"1", "1", "Highest"}, {"2", "1", "High"}, {"3", "1", "Medium"},
+		{"1", "2", "High"}, {"2", "2", "Medium"}, {"3", "2", "Low"},
+		{"1", "3", "Medium"}, {"2", "3", "Low"}, {"3", "3", "Lowest"},
+	} {
+		if got := serviceNowSeverityFromLevels(c[0], c[1]); got != c[2] {
+			t.Errorf("impact=%s urgency=%s -> %s, want %s", c[0], c[1], got, c[2])
 		}
+	}
+}
+
+func TestServiceNowCreateBody_RejectsUnknownImpactOrUrgency(t *testing.T) {
+	for _, key := range []string{"impact", "urgency"} {
+		_, err := serviceNowCreateBody(models.Ticket{AdditionalFields: map[string]interface{}{key: "Critical"}})
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s=Critical must be rejected, got %v", key, err)
+		}
+	}
+}
+
+func TestServiceNowLevelCode_AcceptsJSONNumbersAndRejectsOtherTypes(t *testing.T) {
+	if got, err := serviceNowLevelCode("impact", float64(2)); err != nil || got != "2" {
+		t.Errorf("float64 2 -> %q, %v; want 2", got, err)
+	}
+	if got, err := serviceNowLevelCode("impact", map[string]interface{}{"id": float64(3)}); err != nil || got != "3" {
+		t.Errorf("{id: 3} -> %q, %v; want 3", got, err)
+	}
+	if _, err := serviceNowLevelCode("impact", float64(2.5)); err == nil {
+		t.Error("2.5 must be rejected")
+	}
+	if _, err := serviceNowLevelCode("impact", true); err == nil {
+		t.Error("a bool must be rejected rather than ignored")
+	}
+	if got, err := serviceNowLevelCode("impact", nil); err != nil || got != "" {
+		t.Errorf("nil -> %q, %v; want empty and no error", got, err)
 	}
 }

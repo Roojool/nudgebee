@@ -75,7 +75,7 @@ func TestServiceNowService_Update_AppliesEveryFieldInOnePut(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 
 	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{
-		Severity: "High", Assignee: "sys-user-1", Description: "**hi**", Status: "In Progress",
+		Impact: "3", Urgency: "High", Severity: "Highest", Assignee: "sys-user-1", Description: "**hi**", Status: "In Progress",
 	})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
@@ -84,7 +84,7 @@ func TestServiceNowService_Update_AppliesEveryFieldInOnePut(t *testing.T) {
 	if gets != 1 || puts != 1 {
 		t.Fatalf("want one lookup and one PUT, got %d and %d", gets, puts)
 	}
-	want := map[string]string{"urgency": "1", "impact": "2", "assigned_to": "sys-user-1", "description": "hi", "state": "2"}
+	want := map[string]string{"urgency": "1", "impact": "3", "assigned_to": "sys-user-1", "description": "hi", "state": "2"}
 	for k, v := range want {
 		if st.putBody[k] != v {
 			t.Errorf("PUT %s = %v, want %s (body %v)", k, st.putBody[k], v, st.putBody)
@@ -97,7 +97,7 @@ func TestServiceNowService_Update_FailureIsOnePutAndAnError(t *testing.T) {
 	cfg := newServiceNowStub(t, st)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 
-	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Severity: "Low", Assignee: "sys-user-1"})
+	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Urgency: "Low", Assignee: "sys-user-1"})
 	if err == nil {
 		t.Fatal("expected an error when the PUT is refused")
 	}
@@ -143,7 +143,7 @@ func TestServiceNowService_Update_GivesUpOnAnUnresponsiveInstance(t *testing.T) 
 	defer func() { servicenowRequestTimeout = orig }()
 
 	start := time.Now()
-	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Severity: "High"})
+	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Urgency: "High"})
 	if err == nil {
 		t.Fatal("expected a timeout error")
 	}
@@ -160,5 +160,46 @@ func TestServiceNowStateCode(t *testing.T) {
 		if got := serviceNowStateCode(in); got != want {
 			t.Errorf("serviceNowStateCode(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestServiceNowService_Update_IgnoresSeverityAndWritesOnlyGivenLevels(t *testing.T) {
+	st := &snStub{}
+	cfg := newServiceNowStub(t, st)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Severity: "Highest", Urgency: "2"})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if st.putBody["urgency"] != "2" {
+		t.Errorf("urgency = %v, want 2", st.putBody["urgency"])
+	}
+	if _, ok := st.putBody["impact"]; ok {
+		t.Errorf("impact must be left alone when not supplied, body %v", st.putBody)
+	}
+
+	st2 := &snStub{}
+	cfg2 := newServiceNowStub(t, st2)
+	err = (&ServiceNowService{}).Update(ctx, cfg2, "INC0010001", models.UpdateFields{Severity: "Highest"})
+	if err == nil || !strings.Contains(err.Error(), "Impact and Urgency") {
+		t.Errorf("a severity-only update must fail loudly, got %v", err)
+	}
+	if _, puts := st2.counts(); puts != 0 {
+		t.Errorf("a severity-only update must not write anything, got %d PUTs", puts)
+	}
+}
+
+func TestServiceNowService_Update_RejectsUnknownUrgency(t *testing.T) {
+	st := &snStub{}
+	cfg := newServiceNowStub(t, st)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	err := (&ServiceNowService{}).Update(ctx, cfg, "INC0010001", models.UpdateFields{Urgency: "Critical"})
+	if err == nil || !strings.Contains(err.Error(), "urgency") {
+		t.Errorf("urgency=Critical must be rejected, got %v", err)
+	}
+	if gets, puts := st.counts(); gets != 0 || puts != 0 {
+		t.Errorf("a rejected value must not reach ServiceNow, got %d GETs and %d PUTs", gets, puts)
 	}
 }

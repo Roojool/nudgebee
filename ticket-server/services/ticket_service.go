@@ -818,6 +818,18 @@ func UpdateTicket(ctx *gin.Context, ticket models.Ticket, updateFields models.Up
 	if err := manager.Update(ctx, configuration, ticket.TicketID, updateFields); err != nil {
 		return err
 	}
+	if configuration.Tool == "servicenow" {
+		// ServiceNow never takes a severity: it derives Priority from Impact and Urgency, so
+		// the row must follow ServiceNow's result rather than whatever severity the caller sent.
+		updateFields.Severity = ""
+		if updateFields.Impact != "" || updateFields.Urgency != "" {
+			if current, err := manager.Get(ctx, configuration, ticket.TicketID); err != nil {
+				slog.Warn("ServiceNow: could not read back severity after update", "ticketID", ticket.TicketID, "error", slog.AnyValue(err))
+			} else if current != nil {
+				updateFields.Severity = current.Severity
+			}
+		}
+	}
 	syncTicketToDB(ticket.TicketID, ticket.IntegrationID, updateFields)
 	return nil
 }

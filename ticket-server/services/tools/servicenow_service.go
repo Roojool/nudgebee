@@ -14,6 +14,7 @@ import (
 	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/utils"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func (s *ServiceNowService) GetCreateMeta(ctx *gin.Context, config models.Ticket
 }
 
 // FetchServiceNowIncidentCreateMeta builds the create-meta template for a ServiceNow
-// incident: a static urgency list (tagged as the severity source), a live list of
+// incident: static impact and urgency lists, a live list of
 // assignable users from the sys_user table, and summary/description. ServiceNow has
 // no labels concept. Matches the shared {"data": [Template, ...]} shape.
 func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketConfigurations, _ string) (any, error) {
@@ -64,19 +65,24 @@ func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketCon
 				Required:      false,
 				Type:          "select",
 			},
-			// Urgency is the severity source. Values are the names getServiceNowPriority
-			// maps to ServiceNow's 1/2/3 at create time.
+			// Impact and Urgency are ServiceNow's own inputs; it derives Priority from
+			// them, so Priority itself is never asked for, and neither field is tagged as a
+			// severity source. Both are optional: the create modal pre-selects the defaults
+			// and create falls back to Impact Medium / Urgency Low for callers that omit them.
+			// Ids are the raw 1/2/3 codes.
+			"impact": {
+				AllowedValues: serviceNowLevelOptions(),
+				Key:           "impact",
+				Name:          "Impact",
+				Required:      false,
+				Type:          "select",
+			},
 			"urgency": {
-				AllowedValues: []interface{}{
-					map[string]interface{}{"id": "1", "name": "High", "value": "High"},
-					map[string]interface{}{"id": "2", "name": "Medium", "value": "Medium"},
-					map[string]interface{}{"id": "3", "name": "Low", "value": "Low"},
-				},
-				Key:      "urgency",
-				Name:     "Urgency",
-				Required: false,
-				Type:     "select",
-				Group:    FieldGroupSeverity,
+				AllowedValues: serviceNowLevelOptions(),
+				Key:           "urgency",
+				Name:          "Urgency",
+				Required:      false,
+				Type:          "select",
 			},
 			"summary": {
 				AllowedValues: nil,
@@ -98,6 +104,14 @@ func FetchServiceNowIncidentCreateMeta(ctx *gin.Context, config models.TicketCon
 	}
 
 	return map[string]interface{}{"data": []Template{template}}, nil
+}
+
+func serviceNowLevelOptions() []interface{} {
+	return []interface{}{
+		map[string]interface{}{"id": "1", "name": "High", "value": "High"},
+		map[string]interface{}{"id": "2", "name": "Medium", "value": "Medium"},
+		map[string]interface{}{"id": "3", "name": "Low", "value": "Low"},
+	}
 }
 
 // ServiceNow assignee metadata is paged to avoid silently truncating the
@@ -739,24 +753,93 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 	}, nil
 }
 
-func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) (models.Ticket, error) {
-	if ticket.Severity == "" {
-		ticket.Severity = "Low"
+// serviceNowLevelCode maps an Impact/Urgency choice to ServiceNow's 1/2/3 code. The
+// create modal sends the code, the workflow builder sends the option name, and the
+// Nubi ticket tool sends a select as {"id": "<code>"}; a JSON number is accepted too. An
+// empty value returns "" with no error; anything else is an error rather than a silent default.
+func serviceNowLevelCode(name string, v interface{}) (string, error) {
+	if m, ok := v.(map[string]interface{}); ok {
+		v = m["id"]
 	}
+	var str string
+	switch val := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		str = strings.TrimSpace(val)
+	case float64:
+		str = strconv.FormatFloat(val, 'f', -1, 64)
+	default:
+		return "", fmt.Errorf("invalid %s: expected a string or number, got %T", name, v)
+	}
+	if str == "" {
+		return "", nil
+	}
+	switch strings.ToLower(str) {
+	case "1", "high":
+		return "1", nil
+	case "2", "medium":
+		return "2", nil
+	case "3", "low":
+		return "3", nil
+	default:
+		return "", fmt.Errorf("invalid %s %q: use High, Medium or Low", name, str)
+	}
+}
 
-	host := strings.TrimPrefix(configuration.URL, "https://")
-	apiURL := "https://" + host + "/api/now/v1/table/incident"
+// Impact and Urgency used when the caller supplies none (Medium impact, Low urgency).
+const (
+	serviceNowDefaultImpact  = "2"
+	serviceNowDefaultUrgency = "3"
+)
 
+// serviceNowSeverityFromLevels derives the Nudgebee severity from an Impact/Urgency
+// pair using ServiceNow's default priority matrix (priority = impact + urgency - 1).
+func serviceNowSeverityFromLevels(impact, urgency string) string {
+	i, errI := strconv.Atoi(impact)
+	u, errU := strconv.Atoi(urgency)
+	if errI != nil || errU != nil {
+		return getNudgebeeSeverity("")
+	}
+	return getNudgebeeSeverity(strconv.Itoa(i + u - 1))
+}
+
+// serviceNowCreateBody builds the incident fields for a create call.
+func serviceNowCreateBody(ticket models.Ticket) (map[string]string, error) {
 	body := map[string]string{
 		"short_description": ticket.Title,
 		"description":       markdownToPlainText(ticket.Description),
-		"urgency":           getServiceNowPriority(ticket.Severity),
-		"impact":            getServiceNowImpact(ticket.Severity),
+		"urgency":           serviceNowDefaultUrgency,
+		"impact":            serviceNowDefaultImpact,
+	}
+	// Severity is never read: the incident is driven by Impact and Urgency alone.
+	if fields, ok := ticket.AdditionalFields.(map[string]interface{}); ok {
+		for _, key := range []string{"impact", "urgency"} {
+			code, err := serviceNowLevelCode(key, fields[key])
+			if err != nil {
+				return nil, err
+			}
+			if code != "" {
+				body[key] = code
+			}
+		}
 	}
 	// Assignee flows in via the basic assignee field as a sys_user sys_id (the
 	// create-meta option value); assigned_to accepts that reference directly.
 	if ticket.Assignee != "" {
 		body["assigned_to"] = ticket.Assignee
+	}
+
+	return body, nil
+}
+
+func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) (models.Ticket, error) {
+	host := strings.TrimPrefix(configuration.URL, "https://")
+	apiURL := "https://" + host + "/api/now/v1/table/incident"
+
+	body, err := serviceNowCreateBody(ticket)
+	if err != nil {
+		return models.Ticket{}, err
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -802,6 +885,9 @@ func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfi
 
 	ticket.TicketID = result.Result.Number
 	ticket.Status = "open"
+	// ServiceNow's own Priority is authoritative; the matrix-derived value covers a
+	// response that omits it.
+	ticket.Severity = serviceNowSeverityFromLevels(body["impact"], body["urgency"])
 	if result.Result.Priority != "" {
 		ticket.Severity = getNudgebeeSeverity(result.Result.Priority)
 	}
@@ -811,22 +897,6 @@ func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfi
 	ticket.CreatedAt = &now
 
 	return ticket, nil
-}
-
-// getServiceNowImpact is written next to urgency so ServiceNow's derived Priority
-// lands on the tier the user picked. With the default impact x urgency matrix,
-// impact 2 with urgency 1/2/3 gives Priority 2/3/4 (High/Medium/Low); Highest and
-// Lowest use impact 1 and 3 to reach Priority 1 and 5. Leaving impact at its
-// default of 3 would push every ticket a tier or two lower.
-func getServiceNowImpact(severity string) string {
-	switch strings.ToLower(severity) {
-	case "highest", "critical":
-		return "1"
-	case "lowest":
-		return "3"
-	default:
-		return "2"
-	}
 }
 
 // getServiceNowPriorityLevel maps a Nudgebee severity to the ServiceNow Priority
@@ -845,19 +915,6 @@ func getServiceNowPriorityLevel(severity string) string {
 		return "5"
 	default:
 		return ""
-	}
-}
-
-func getServiceNowPriority(priority string) string {
-	switch strings.ToLower(priority) {
-	case "highest", "critical", "high":
-		return "1"
-	case "medium":
-		return "2"
-	case "low", "lowest":
-		return "3"
-	default:
-		return "3"
 	}
 }
 
@@ -990,9 +1047,19 @@ func (s *ServiceNowService) Update(ctx *gin.Context, config models.TicketConfigu
 	}
 
 	fields := map[string]string{}
+	// Only Impact and Urgency drive severity in ServiceNow; a severity value is never
+	// read. Each one is written only when supplied, so the other keeps its value.
+	for name, raw := range map[string]string{"impact": updateFields.Impact, "urgency": updateFields.Urgency} {
+		code, err := serviceNowLevelCode(name, raw)
+		if err != nil {
+			return err
+		}
+		if code != "" {
+			fields[name] = code
+		}
+	}
 	if updateFields.Severity != "" {
-		fields["urgency"] = getServiceNowPriority(updateFields.Severity)
-		fields["impact"] = getServiceNowImpact(updateFields.Severity)
+		slog.Warn("ServiceNow: ignoring severity on update; set Impact and Urgency instead", "ticket_id", ticketID, "severity", updateFields.Severity)
 	}
 	if assignees := updateFields.AssigneeList(); len(assignees) > 0 {
 		if len(assignees) > 1 {
@@ -1008,6 +1075,9 @@ func (s *ServiceNowService) Update(ctx *gin.Context, config models.TicketConfigu
 		fields["state"] = serviceNowStateCode(updateFields.Status)
 	}
 	if len(fields) == 0 {
+		if updateFields.Severity != "" {
+			return fmt.Errorf("ServiceNow does not accept a severity; set Impact and Urgency instead")
+		}
 		return nil
 	}
 

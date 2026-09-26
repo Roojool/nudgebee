@@ -38,6 +38,20 @@ const getToolIcon = (tool) => {
   }
 };
 
+// ServiceNow derives Priority from Impact x Urgency (1 = High ... 3 = Low) with its default
+// matrix, which works out to impact + urgency - 1. Shown in Nudgebee's own severity names.
+// Pre-selected in the form and used by the backend when a caller omits them (Medium impact, Low urgency).
+const SERVICENOW_DEFAULT_LEVELS = { impact: '2', urgency: '3' };
+const SERVICENOW_SEVERITY_BY_PRIORITY = ['Highest', 'High', 'Medium', 'Low', 'Lowest'];
+const getServiceNowSeverity = (impact, urgency) => {
+  const imp = Number(impact);
+  const urg = Number(urgency);
+  if (!Number.isInteger(imp) || !Number.isInteger(urg) || imp < 1 || urg < 1) {
+    return '';
+  }
+  return SERVICENOW_SEVERITY_BY_PRIORITY[imp + urg - 2] ?? '';
+};
+
 /**
  * TicketFormSection - Main form component for creating and editing tickets
  *
@@ -331,19 +345,22 @@ const TicketFormSection = ({
         .finally(() => {
           setLoadingIssueTypes(false);
         });
+    } else if (selectedConfig?.tool === 'servicenow' && selectedProject) {
+      // ServiceNow has a single incident template; its create-meta carries Impact, Urgency and Assignee.
+      setIssueTypes(['incident']);
+      apiTickets.getTicketMeta(selectedConfig.id, selectedProject.key).then((res) => {
+        const metadata = res?.data?.tickets_get_create_meta?.data || [];
+        setTicketMetadata(metadata);
+        setSelectedIssueTypeTicketMetadata(metadata);
+      });
     } else if (selectedConfig?.tool === 'github') {
       // For GitHub, use predefined issue types
       setIssueTypes(['bug']);
     } else if (selectedConfig?.tool === 'gitlab') {
       // For GitLab, use predefined issue types
       setIssueTypes(['issue']);
-    } else if (
-      selectedConfig?.tool === 'servicenow' ||
-      selectedConfig?.tool === 'pagerduty' ||
-      selectedConfig?.tool === 'zenduty' ||
-      selectedConfig?.tool === 'freshdesk'
-    ) {
-      // For ServiceNow, PagerDuty, ZenDuty, and Freshdesk, use "incident" type
+    } else if (selectedConfig?.tool === 'pagerduty' || selectedConfig?.tool === 'zenduty' || selectedConfig?.tool === 'freshdesk') {
+      // For PagerDuty, ZenDuty, and Freshdesk, use "incident" type
       setIssueTypes(['incident']);
     }
   }, [selectedProject]);
@@ -352,13 +369,34 @@ const TicketFormSection = ({
    * Update selected issue type metadata when issue type changes
    */
   useEffect(() => {
-    if (selectedIssueType && selectedConfig?.tool === 'jira') {
+    if (selectedIssueType && selectedConfig?.tool === 'servicenow') {
+      setSelectedIssueTypeTicketMetadata(ticketMetadata);
+    } else if (selectedIssueType && selectedConfig?.tool === 'jira') {
       const getMetadataOfIssueType = ticketMetadata?.filter((n) => n.name === selectedIssueType);
       if (getMetadataOfIssueType && getMetadataOfIssueType.length > 0) {
         setSelectedIssueTypeTicketMetadata(getMetadataOfIssueType);
       }
     }
   }, [selectedIssueType]);
+
+  /**
+   * Pre-select ServiceNow's default Impact and Urgency once its create-meta has loaded
+   */
+  useEffect(() => {
+    const fields = selectedIssueTypeTicketMetadata?.[0]?.fields;
+    if (isEdit || selectedConfig?.tool !== 'servicenow' || !fields) {
+      return;
+    }
+    setFormData((prev) => {
+      const seeded = { ...prev };
+      Object.entries(SERVICENOW_DEFAULT_LEVELS).forEach(([key, value]) => {
+        if (fields[key] && seeded[key] == null) {
+          seeded[key] = value;
+        }
+      });
+      return seeded;
+    });
+  }, [selectedIssueTypeTicketMetadata]);
 
   /**
    * Update form data when dynamic fields change
@@ -413,6 +451,8 @@ const TicketFormSection = ({
               setSelectedProject(null);
               setSelectedIssueType('');
               setFormData({});
+              setTicketMetadata([]);
+              setSelectedIssueTypeTicketMetadata([]);
             }}
           />
         </Form.Field>
@@ -460,7 +500,14 @@ const TicketFormSection = ({
           onChanges={updateFormValue}
           forceValidate={forceValidate}
           viewOnlyMode={viewOnlyMode}
+          nonClearableFields={selectedConfig?.tool === 'servicenow' ? Object.keys(SERVICENOW_DEFAULT_LEVELS) : []}
         />
+      )}
+
+      {selectedConfig?.tool === 'servicenow' && formData?.impact && formData?.urgency && (
+        <Form.Field label='Severity' helperText='Set by ServiceNow from Impact and Urgency'>
+          <Input id='severity' size='sm' value={getServiceNowSeverity(formData.impact, formData.urgency)} disabled />
+        </Form.Field>
       )}
 
       {/* Subject */}
