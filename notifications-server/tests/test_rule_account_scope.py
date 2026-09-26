@@ -140,41 +140,41 @@ def _existing(scope_mode):
 
 
 def test_older_client_account_id_scopes_to_that_account():
-    assert _resolve_scope({"account_id": ACCT_A}, "troubleshoot", None, []) == (SCOPE_ACCOUNTS, [ACCT_A])
+    assert _resolve_scope({"account_id": ACCT_A}, ["troubleshoot"], None, []) == (SCOPE_ACCOUNTS, [ACCT_A])
 
 
 def test_account_ids_are_deduplicated_in_order():
     data = {"account_ids": [ACCT_B, ACCT_A, ACCT_B, None]}
-    assert _resolve_scope(data, "troubleshoot", None, []) == (SCOPE_ACCOUNTS, [ACCT_B, ACCT_A])
+    assert _resolve_scope(data, ["troubleshoot"], None, []) == (SCOPE_ACCOUNTS, [ACCT_B, ACCT_A])
 
 
 def test_account_ids_win_over_the_mirror():
     data = {"account_id": ACCT_C, "account_ids": [ACCT_A, ACCT_B]}
-    assert _resolve_scope(data, "troubleshoot", None, []) == (SCOPE_ACCOUNTS, [ACCT_A, ACCT_B])
+    assert _resolve_scope(data, ["troubleshoot"], None, []) == (SCOPE_ACCOUNTS, [ACCT_A, ACCT_B])
 
 
 def test_tenant_wide_sources_always_cover_every_account():
     data = {"account_ids": [ACCT_A], "scope_mode": SCOPE_ACCOUNTS}
-    assert _resolve_scope(data, "daily_recap", None, []) == (SCOPE_ALL, [])
+    assert _resolve_scope(data, ["daily_recap"], None, []) == (SCOPE_ALL, [])
 
 
 def test_older_client_cannot_collapse_a_multi_account_rule():
     with pytest.raises(InvalidRuleError):
-        _resolve_scope({"account_id": ACCT_A}, "troubleshoot", _existing(SCOPE_ACCOUNTS), [ACCT_A, ACCT_B])
+        _resolve_scope({"account_id": ACCT_A}, ["troubleshoot"], _existing(SCOPE_ACCOUNTS), [ACCT_A, ACCT_B])
 
 
 def test_older_client_keeps_a_single_account_rule_editable():
-    result = _resolve_scope({"account_id": ACCT_B}, "troubleshoot", _existing(SCOPE_ACCOUNTS), [ACCT_A])
+    result = _resolve_scope({"account_id": ACCT_B}, ["troubleshoot"], _existing(SCOPE_ACCOUNTS), [ACCT_A])
     assert result == (SCOPE_ACCOUNTS, [ACCT_B])
 
 
 def test_dropping_the_accounts_never_widens_a_rule():
     with pytest.raises(InvalidRuleError):
-        _resolve_scope({}, AUTOMATION_SOURCE, _existing(SCOPE_ACCOUNTS), [ACCT_A])
+        _resolve_scope({}, [AUTOMATION_SOURCE], _existing(SCOPE_ACCOUNTS), [ACCT_A])
 
 
 def test_explicit_all_widens_an_account_optional_rule():
-    result = _resolve_scope({"scope_mode": SCOPE_ALL}, AUTOMATION_SOURCE, _existing(SCOPE_ACCOUNTS), [ACCT_A])
+    result = _resolve_scope({"scope_mode": SCOPE_ALL}, [AUTOMATION_SOURCE], _existing(SCOPE_ACCOUNTS), [ACCT_A])
     assert result == (SCOPE_ALL, [])
 
 
@@ -182,18 +182,18 @@ def test_new_account_scoped_rule_needs_accounts_unless_it_asks_for_all():
     # Older clients never send scope_mode, so they still have to name an account.
     for data in ({}, {"scope_mode": SCOPE_ACCOUNTS, "account_ids": []}):
         with pytest.raises(InvalidRuleError):
-            _resolve_scope(data, "troubleshoot", None, [])
-    assert _resolve_scope({"scope_mode": SCOPE_ALL}, "troubleshoot", None, []) == (SCOPE_ALL, [])
+            _resolve_scope(data, ["troubleshoot"], None, [])
+    assert _resolve_scope({"scope_mode": SCOPE_ALL}, ["troubleshoot"], None, []) == (SCOPE_ALL, [])
 
 
 def test_existing_all_accounts_rule_stays_editable():
     # Rules saved without an account before scopes existed were migrated to "all".
-    assert _resolve_scope({}, "troubleshoot", _existing(SCOPE_ALL), []) == (SCOPE_ALL, [])
+    assert _resolve_scope({}, ["troubleshoot"], _existing(SCOPE_ALL), []) == (SCOPE_ALL, [])
 
 
 def test_unknown_scope_mode_is_rejected():
     with pytest.raises(InvalidRuleError):
-        _resolve_scope({"scope_mode": "tenant", "account_ids": [ACCT_A]}, "troubleshoot", None, [])
+        _resolve_scope({"scope_mode": "tenant", "account_ids": [ACCT_A]}, ["troubleshoot"], None, [])
 
 
 # ----------------------------- database fakes -----------------------------

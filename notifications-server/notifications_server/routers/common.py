@@ -18,6 +18,7 @@ from notifications_server.services.channel_watch import ChannelWatchService
 from notifications_server.services.common import CommonService
 from notifications_server.services.message import MessageService
 from notifications_server.services.rules import NotificationRulesService
+from notifications_server.services.route_check import RouteCheckService
 from notifications_server.clients.google_chat_app_client import GoogleChatAppClient
 
 LOG = logging.getLogger(__name__)
@@ -634,6 +635,13 @@ async def list_default_policies(data: Dict[Any, Any]):
 @router.post("/rules/defaults/save", status_code=201, dependencies=[Depends(verify_action_token)])
 async def upsert_default_policy(data: Dict[Any, Any]):
     response = await NotificationRulesService(engine).upsert_default_policy(**data)
+    response.pop("status_code", None)
+    return JSONResponse(response, status_code=201)
+
+
+@router.post("/rules/check", status_code=201, dependencies=[Depends(verify_action_token)])
+async def check_route(data: Dict[Any, Any]):
+    response = await RouteCheckService(engine).check_route(**data)
     response.pop("status_code", None)
     return JSONResponse(response, status_code=201)
 

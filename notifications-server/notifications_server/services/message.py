@@ -27,8 +27,11 @@ from notifications_server.services.response_helpers import success_response, fai
 from notifications_server.services.rules import (
     DEFAULT_CHANNELS,
     DEFAULT_DELIVER,
+    OPTIMIZE_EVENT_BY_MESSAGE_TYPE,
+    OPTIMIZE_SOURCE,
     NotificationRulesService,
     rule_sort_key,
+    rule_sources,
 )
 from notifications_server.services import weekly_digest_report
 from notifications_server.message_templates.slack.weekly_digest_events import digest_link, digest_verdict
@@ -162,6 +165,11 @@ def resolve_outcome(matched_rules, source=None, event_type=None, honour_batch=Tr
 
     def snoozed(entry):
         return bool(entry["expires_at"]) and entry["expires_at"] > now
+
+    # A suppressed rule with an expiry stops messages until then and does nothing after.
+    matched_rules = [
+        entry for entry in matched_rules if not (entry["suppressed"] and entry["expires_at"] and not snoozed(entry))
+    ]
 
     if not non_suppressible:
         suppressing = next((entry for entry in matched_rules if entry["suppressed"]), None)
@@ -323,11 +331,15 @@ def _finding_rule_source(source):
 
 
 def _event_type_matches(rule, source, event_type):
-    """Automation rules must name the event types they cover; a rule with none
-    matches nothing (fail closed). Other sources ignore event types."""
-    if source != AUTOMATION_SOURCE:
+    """A rule for automation alone must name the event types it covers; one with
+    none matches nothing (fail closed). A rule for optimize alone may name event
+    types; none covers them all. A rule over several types covers every event of
+    each. Other sources ignore event types."""
+    if source not in (AUTOMATION_SOURCE, OPTIMIZE_SOURCE) or rule_sources(rule) != (source,):
         return True
     event_types = getattr(rule, "event_types", None)
+    if source == OPTIMIZE_SOURCE and not event_types:
+        return True
     if not event_types or not event_type:
         return False
     return event_type in event_types
@@ -381,6 +393,8 @@ class NotificationRuleMatcher:
         if type_ == "finding":
             finding_priority = ((kwargs.get("parameters") or {}).get("finding") or {}).get("priority")
         event_type = kwargs.get("event_type")
+        if source == OPTIMIZE_SOURCE:
+            event_type = OPTIMIZE_EVENT_BY_MESSAGE_TYPE.get(type_)
 
         all_rules = await self.rules_service.get_notification_rules(tenant_id)
         if not all_rules:
@@ -392,7 +406,7 @@ class NotificationRuleMatcher:
                 rule
                 for rule in all_rules
                 if (
-                    rule.source == source
+                    source in rule_sources(rule)
                     and _scope_matches(rule, account_id)
                     and (rule.namespace == namespace or rule.namespace is None)
                     and (rule.workload == workload or rule.workload is None)

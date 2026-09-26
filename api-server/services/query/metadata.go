@@ -7077,6 +7077,9 @@ var table_metadata = map[string]TableDefinition{
 					nr.scope_mode,
 					COALESCE(nra.account_ids, '[]'::jsonb) as account_ids,
 					nr.exceptions,
+					nr.source_mode,
+					COALESCE(to_jsonb(nr.sources), jsonb_build_array(nr.source)) as sources,
+					COALESCE(nr.is_active, true) as is_active,
 					nr.tenant_id::text as tenant_id,
 					u.display_name as created_by_display_name,
 					COALESCE(nrm.mappings, '[]'::json) as notification_rule_mappings
@@ -7180,6 +7183,18 @@ var table_metadata = map[string]TableDefinition{
 			"exceptions": {
 				Type: ColumnDefinitionTypeJson,
 				Def:  "exceptions",
+			},
+			"source_mode": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "source_mode",
+			},
+			"sources": {
+				Type: ColumnDefinitionTypeJson,
+				Def:  "sources",
+			},
+			"is_active": {
+				Type: ColumnDefinitionTypeBoolean,
+				Def:  "is_active",
 			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,

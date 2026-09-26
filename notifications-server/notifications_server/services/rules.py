@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import inspect, select, text
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy.orm import load_only
@@ -88,14 +88,36 @@ def is_valid_string(s):
 # account, so there is no single account_id to scope the rule to and an
 # account-scoped rule could never match (#28130).
 #   daily_recap        — one nightly digest per tenant
-#   optimize           — FinOps recommendations ranked tenant-wide
 #   weekly_digest      — the weekly event-analysis digest, one per tenant-week
 #   ai_cost            — the AI Cost Daily Report digest, one per tenant-day
-TENANT_WIDE_SOURCES = ("daily_recap", "optimize", "weekly_digest", "ai_cost")
+TENANT_WIDE_SOURCES = ("daily_recap", "weekly_digest", "ai_cost")
 
-# Automation messages carry an account, but a rule may cover every account.
+# Automation and optimize messages carry an account, but a rule may cover every account.
 AUTOMATION_SOURCE = "automation"
-ACCOUNT_OPTIONAL_SOURCES = TENANT_WIDE_SOURCES + (AUTOMATION_SOURCE,)
+OPTIMIZE_SOURCE = "optimize"
+ACCOUNT_OPTIONAL_SOURCES = TENANT_WIDE_SOURCES + (AUTOMATION_SOURCE, OPTIMIZE_SOURCE)
+
+# Every type a rule can cover. The singletons are each managed as the tenant's
+# only rule of its kind, so they are never combined with other types and an
+# all-types rule leaves them out.
+RULE_SOURCES = ("troubleshoot", "slo", "cloud", "optimize", "automation", "weekly_digest", "daily_recap", "ai_cost")
+SINGLETON_SOURCES = ("daily_recap", "ai_cost")
+ALL_TYPES_SOURCES = tuple(s for s in RULE_SOURCES if s not in SINGLETON_SOURCES)
+SOURCE_MODE_ALL = "all"
+SOURCE_MODE_LIST = "list"
+# The mirror written to source for an all-types rule.
+ALL_TYPES_MIRROR_SOURCE = "troubleshoot"
+
+
+def rule_sources(rule):
+    """The types a rule covers."""
+    mode = getattr(rule, "source_mode", None)
+    if mode == SOURCE_MODE_ALL:
+        return ALL_TYPES_SOURCES
+    if mode == SOURCE_MODE_LIST and getattr(rule, "sources", None):
+        return tuple(rule.sources)
+    return (rule.source,)
+
 
 # The event types an automation rule may select. Kept in step with the Event*
 # constants in runbook-server's notification service and the catalogue in the
@@ -109,6 +131,17 @@ AUTOMATION_EVENT_TYPES = (
     "automation.pr.failed",
 )
 
+# Optimize messages are told apart by their message type; a rule selects them by
+# these event ids. A rule without event types covers all of them.
+OPTIMIZE_EVENT_BY_MESSAGE_TYPE = {
+    "recommendation_resolution": "optimize.recommendation.applied",
+    "finding": "optimize.alert.fixed",
+    "recommendation_nudge_digest": "optimize.digest",
+    "recommendation_proactive_nudge": "optimize.nudge",
+    "security_posture_alert": "optimize.security_posture",
+}
+OPTIMIZE_EVENT_TYPES = tuple(OPTIMIZE_EVENT_BY_MESSAGE_TYPE.values())
+
 
 SCOPE_ALL = "all"
 SCOPE_ACCOUNTS = "accounts"
@@ -118,7 +151,20 @@ DEFAULT_DELIVER = "deliver_defaults"
 DEFAULT_CHANNELS = "deliver_channels"
 DEFAULT_DROP = "drop"
 DEFAULT_ACTIONS = (DEFAULT_DELIVER, DEFAULT_CHANNELS, DEFAULT_DROP)
-DEFAULT_POLICY_SOURCES = ("troubleshoot", "optimize", "slo", "cloud", "automation", "daily_recap", "weekly_digest")
+# The row every type falls back to when it has none of its own.
+DEFAULT_ALL_SOURCES = "all"
+# Removes a type's own row, so it follows the all-types row again.
+DEFAULT_INHERIT = "inherit"
+DEFAULT_POLICY_SOURCES = (
+    DEFAULT_ALL_SOURCES,
+    "troubleshoot",
+    "optimize",
+    "slo",
+    "cloud",
+    "automation",
+    "daily_recap",
+    "weekly_digest",
+)
 
 EXCEPTION_KEYS = ("account_ids", "namespaces", "workloads", "aggregation_keys")
 MAX_EXCEPTION_GROUPS = 20
@@ -156,7 +202,7 @@ def normalize_exceptions(raw):
     return groups
 
 
-def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
+def _resolve_scope(rule_data, sources, existing_rule, existing_account_ids):
     """Return (scope_mode, account_ids) for a save. Older clients send only
     account_id. A rule scoped to accounts is only widened by an explicit
     scope_mode of "all", which older clients cannot send."""
@@ -167,7 +213,7 @@ def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
     account_ids = list(dict.fromkeys(str(a) for a in account_ids if a))
     scope_mode = rule_data.get("scope_mode")
 
-    if source in TENANT_WIDE_SOURCES:
+    if all(s in TENANT_WIDE_SOURCES for s in sources):
         # Tenant-wide notifications carry no account, so these rules only make sense for every account.
         return SCOPE_ALL, []
 
@@ -188,7 +234,7 @@ def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
     # needing an account on these sources.
     explicit_all = rule_data.get("scope_mode") == SCOPE_ALL
     if (
-        source not in ACCOUNT_OPTIONAL_SOURCES
+        not all(s in ACCOUNT_OPTIONAL_SOURCES for s in sources)
         and scope_mode != SCOPE_ACCOUNTS
         and not (keeps_existing_all or explicit_all)
     ):
@@ -196,6 +242,32 @@ def _resolve_scope(rule_data, source, existing_rule, existing_account_ids):
     if scope_mode == SCOPE_ACCOUNTS and not account_ids:
         raise InvalidRuleError(Err.OS0010.value[0] % "account_ids")
     return scope_mode, (account_ids if scope_mode == SCOPE_ACCOUNTS else [])
+
+
+def _resolve_sources(rule_data, existing_rule):
+    """Return (source_mode, sources, mirror source) for a save. A client that
+    sends neither sources nor source_mode keeps an existing rule's types and
+    creates a rule for its source."""
+    mode = rule_data.get("source_mode")
+    sent = rule_data.get("sources")
+    if mode is None and sent is None:
+        if existing_rule is not None and getattr(existing_rule, "source_mode", None):
+            return existing_rule.source_mode, existing_rule.sources, existing_rule.source
+        source = rule_data.get("source")
+        return SOURCE_MODE_LIST, [source], source
+    if mode == SOURCE_MODE_ALL:
+        return SOURCE_MODE_ALL, None, ALL_TYPES_MIRROR_SOURCE
+    if mode not in (None, SOURCE_MODE_LIST):
+        raise InvalidRuleError(Err.OS0011.value[0] % "source_mode")
+    if not isinstance(sent, list) or not sent:
+        raise InvalidRuleError(Err.OS0010.value[0] % "sources")
+    sources = list(dict.fromkeys(sent))
+    unknown = [s for s in sources if s not in RULE_SOURCES]
+    if unknown:
+        raise InvalidRuleError(Err.OS0011.value[0] % f"sources: {', '.join(map(str, unknown))}")
+    if len(sources) > 1 and any(s in SINGLETON_SOURCES for s in sources):
+        raise InvalidRuleError(Err.OS0011.value[0] % "sources: daily_recap and ai_cost cannot be combined")
+    return SOURCE_MODE_LIST, sources, sources[0]
 
 
 def _is_uuid(value):
@@ -217,15 +289,35 @@ def _validate_automation_fields(fields):
         raise InvalidRuleError(Err.OS0011.value[0] % "delivery_mode: batch is not available for automation rules")
 
 
-def validate_fields(fields):
+def _validate_optimize_fields(fields):
+    event_types = fields.get("event_types")
+    if event_types is None:
+        return
+    if not isinstance(event_types, list):
+        raise InvalidRuleError(Err.OS0011.value[0] % "event_types")
+    unknown = [e for e in event_types if e not in OPTIMIZE_EVENT_TYPES]
+    if unknown:
+        raise InvalidRuleError(Err.OS0011.value[0] % f"event_types: {', '.join(map(str, unknown))}")
+
+
+def validate_fields(fields, sources=None):
     source = fields.get("source", None)
     name = fields.get("name", None)
     if not name or not is_valid_string(name):
         raise InvalidRuleError(Err.OS0011.value[0] % "name")
     if source is None:
         raise InvalidRuleError(Err.OS0010.value[0] % "source")
-    if source == AUTOMATION_SOURCE:
+    sources = sources or [source]
+    if len(sources) == 1 and sources[0] == AUTOMATION_SOURCE:
         _validate_automation_fields(fields)
+    elif len(sources) == 1 and sources[0] == OPTIMIZE_SOURCE:
+        _validate_optimize_fields(fields)
+    elif fields.get("event_types"):
+        # Events belong to one type; a rule over several types covers all of their events.
+        raise InvalidRuleError(Err.OS0011.value[0] % "event_types: only for a rule of one automation or optimize type")
+    if fields.get("delivery_mode") == "batch" and len(sources) > 1:
+        # The batch digest only sends findings, so other types held for it would never go out.
+        raise InvalidRuleError(Err.OS0011.value[0] % "delivery_mode: batch is only for a rule of one type")
     return None
 
 
@@ -311,7 +403,9 @@ class NotificationRulesService:
 
                 rule_id = rule_data.get("id")
                 rule_name = rule_data.get("name")
-                source = rule_data.get("source")
+                source = rule_data.get("source") or (rule_data.get("sources") or [None])[0]
+                if rule_data.get("source_mode") == SOURCE_MODE_ALL:
+                    source = ALL_TYPES_MIRROR_SOURCE
 
                 fields = {k: v for k, v in rule_data.items() if hasattr(NotificationRules, k)}
                 if "exceptions" in rule_data:
@@ -323,12 +417,17 @@ class NotificationRulesService:
                     )
                 existing_rule = await self._get_existing_rule(session, rule_id, source, tenant_id)
 
-                validate_fields(fields)
+                source_mode, sources, source = _resolve_sources({**rule_data, "source": source}, existing_rule)
+                fields["source"] = source
+                fields["source_mode"] = source_mode
+                fields["sources"] = sources
+                covered = list(ALL_TYPES_SOURCES) if source_mode == SOURCE_MODE_ALL else sources
+                validate_fields(fields, covered)
 
                 existing_account_ids = (
                     await self._get_rule_account_ids(session, existing_rule.id) if existing_rule else []
                 )
-                scope_mode, account_ids = _resolve_scope(rule_data, source, existing_rule, existing_account_ids)
+                scope_mode, account_ids = _resolve_scope(rule_data, covered, existing_rule, existing_account_ids)
                 account_names = await self._get_tenant_account_names(session, tenant_id, account_ids)
                 fields["scope_mode"] = scope_mode
                 exceptions = (
@@ -505,7 +604,14 @@ class NotificationRulesService:
         return policies
 
     async def get_default_policy(self, tenant_id, source):
-        return (await self.get_default_policies(tenant_id)).get(source)
+        """The type's own default, else the all-types default. The singletons
+        (daily email, AI cost report) never follow the all-types default."""
+        policies = await self.get_default_policies(tenant_id)
+        if source in policies:
+            return policies[source]
+        if source in ALL_TYPES_SOURCES:
+            return policies.get(DEFAULT_ALL_SOURCES)
+        return None
 
     async def list_default_policies(self, **kwargs):
         tenant_id = (kwargs.get("session_variables") or {}).get("tenant_id")
@@ -534,7 +640,9 @@ class NotificationRulesService:
             return {"error": "tenant is required", "status_code": 400}
         if source not in DEFAULT_POLICY_SOURCES:
             return {"error": Err.OS0011.value[0] % "source", "status_code": 400}
-        if policy_action not in DEFAULT_ACTIONS:
+        if policy_action == DEFAULT_INHERIT and source == DEFAULT_ALL_SOURCES:
+            return {"error": Err.OS0011.value[0] % "action", "status_code": 400}
+        if policy_action not in DEFAULT_ACTIONS + (DEFAULT_INHERIT,):
             return {"error": Err.OS0011.value[0] % "action", "status_code": 400}
         if policy_action == DEFAULT_CHANNELS:
             if not isinstance(mappings, list) or not mappings:
@@ -550,13 +658,25 @@ class NotificationRulesService:
 
         async with BaseDB.async_session(self.engine)() as session:
             try:
-                values = {"action": policy_action, "mappings": mappings, "updated_by": user_id, "updated_at": utc_now()}
-                # One statement, so two first saves of the same default cannot collide.
-                await session.execute(
-                    pg_insert(NotificationDefaultPolicy)
-                    .values(tenant_id=tenant_id, source=source, **values)
-                    .on_conflict_do_update(index_elements=["tenant_id", "source"], set_=values)
-                )
+                if policy_action == DEFAULT_INHERIT:
+                    await session.execute(
+                        delete(NotificationDefaultPolicy).where(
+                            NotificationDefaultPolicy.tenant_id == tenant_id, NotificationDefaultPolicy.source == source
+                        )
+                    )
+                else:
+                    values = {
+                        "action": policy_action,
+                        "mappings": mappings,
+                        "updated_by": user_id,
+                        "updated_at": utc_now(),
+                    }
+                    # One statement, so two first saves of the same default cannot collide.
+                    await session.execute(
+                        pg_insert(NotificationDefaultPolicy)
+                        .values(tenant_id=tenant_id, source=source, **values)
+                        .on_conflict_do_update(index_elements=["tenant_id", "source"], set_=values)
+                    )
                 self._invalidate_cache(tenant_id)
                 await session.commit()
                 self._invalidate_cache(tenant_id)

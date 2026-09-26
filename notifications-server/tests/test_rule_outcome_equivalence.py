@@ -4,7 +4,9 @@ that with the combination it replaced, over random rule sets that all match one
 event, with no saved default. The only allowed differences are the two decided
 ones: several matched rules mapping one platform to different channels now all
 receive the message, and a suppress rule or active snooze now also stops email.
-`old_outcome` is a frozen copy of the replaced combination.
+`old_outcome` is a frozen copy of the replaced combination. Suppressed rules carry
+no expiry here: the migration that made an expiry end a suppression cleared it on
+every existing suppressed rule.
 """
 
 import random
@@ -20,8 +22,8 @@ CHANNELS = ["#a", "#b", "#c"]
 def random_rules(rng):
     rules = []
     for i in range(rng.randint(1, 5)):
-        snooze = rng.choice([None, None, NOW + timedelta(days=1), NOW - timedelta(days=1)])
         suppressed = rng.random() < 0.2
+        snooze = None if suppressed else rng.choice([None, None, NOW + timedelta(days=1), NOW - timedelta(days=1)])
         mappings = []
         if not suppressed:
             for platform in PLATFORMS:
