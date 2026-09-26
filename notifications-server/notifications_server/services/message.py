@@ -34,6 +34,7 @@ from notifications_server.services.rules import (
     rule_sources,
 )
 from notifications_server.services import weekly_digest_report
+from notifications_server.services.delivery_split import account_sections, has_recommendations, merged_parameters
 from notifications_server.message_templates.slack.weekly_digest_events import digest_link, digest_verdict
 from notifications_server.services.slack.slack import retriable_slack_api_error, slack_channel_not_found_error
 from notifications_server.message_templates import template_mapping
@@ -729,6 +730,14 @@ class DiscordSender(BaseSender):
 # ----------------------------- Grouped Message Handler -----------------------------
 
 
+def grouped_unit(index, group_type, item):
+    """(key, message type, payload) to match one queued alert of a group. An
+    anomaly is queued as its finding, so it is matched as the finding it is."""
+    if group_type == "anomaly":
+        return index, "finding", {"source": "anomaly", "parameters": {"finding": item.get("parameters") or {}}}
+    return index, group_type, item
+
+
 class GroupedMessageHandler:
     def __init__(self, cache: Cache, message_service: "MessageService"):
         self.cache = cache
@@ -804,19 +813,6 @@ class GroupedMessageHandler:
                 batch = [json.loads(item) for item in raw_list]
 
                 async with BaseDB.async_session(self.message_service.engine)() as session:
-                    first_msg = batch[0]
-                    matched_rules, source = await self.message_service.rule_matcher.match_notification_rules(
-                        session, tenant_id, orig_type, first_msg
-                    )
-
-                    default_policy = await self.message_service.rule_matcher.rules_service.get_default_policy(
-                        tenant_id, source
-                    )
-                    outcome = resolve_outcome(matched_rules, source=source, default_policy=default_policy)
-                    if outcome.response is not None:
-                        LOG.debug("Skipping flush for %s due to suppression or batch rule", key)
-                        return {"status": "ok"}
-
                     installed_platforms = await self.message_service.get_installed_platforms_from_cache_or_db(
                         session, tenant_id
                     )
@@ -824,20 +820,29 @@ class GroupedMessageHandler:
                         LOG.warning("No messaging platform installation for tenant %s", tenant_id)
                         return {"status": "ok"}
 
-                    self.message_service.get_channels_from_request_or_defaults(
-                        installed_platforms, outcome.targets, source, first_msg, use_defaults=outcome.use_defaults
-                    )
-                    await self.message_service._apply_gchat_default_fallback(
-                        session, tenant_id, installed_platforms, first_msg
-                    )
-                    params = {"events": [p["parameters"] for p in batch]}
-
-                    platform_responses = await send_in_rounds(
+                    # Each alert is matched on its own, so every channel gets only
+                    # the alerts routed to it; anomalies match as troubleshooting findings.
+                    routes = await self.message_service.route_units(
+                        session,
+                        tenant_id,
+                        [grouped_unit(index, orig_type, item) for index, item in enumerate(batch)],
                         installed_platforms,
-                        lambda platforms: self.message_service.send_template_notification(
-                            session, tenant_id, {"parameters": params}, f"grouped_{orig_type}", platforms
-                        ),
                     )
+                    if not routes:
+                        LOG.debug("Nothing to send for %s: every alert was stopped by the rules", key)
+                        await asyncio.to_thread(redis.delete, key)
+                        return {"status": "ok"}
+
+                    platform_responses = []
+                    for ip, channel, indexes in routes:
+                        self.message_service.point_at(installed_platforms, ip, channel)
+                        params = {"events": [batch[index]["parameters"] for index in indexes]}
+                        platform_responses.extend(
+                            await self.message_service.send_template_notification(
+                                session, tenant_id, {"parameters": params}, f"grouped_{orig_type}", [ip]
+                            )
+                            or []
+                        )
 
                     if platform_responses and all(
                         resp.get("status") == "success" for resp in platform_responses if isinstance(resp, dict)
@@ -918,6 +923,10 @@ class MessageService:
             group_result = await self._maybe_handle_grouped_message(source, parameters, tenant_id, payload)
             if group_result is not None:
                 return group_result
+
+            sections = account_sections(type_, parameters)
+            if sections:
+                return await self.send_rollup(tenant_id, type_, payload, sections)
 
             async with BaseDB.async_session(self.engine)() as session:
                 matched_rules, source = await self.rule_matcher.match_notification_rules(
@@ -1063,6 +1072,66 @@ class MessageService:
             return installs
         overridden = {ip.platform for ip in integration_installs}
         return [ip for ip in installs if ip.platform not in overridden] + integration_installs
+
+    async def route_units(self, session, tenant_id, units, installed_platforms):
+        """Match each unit — (key, message type, payload) for one account or one
+        alert — on its own and group the keys by the channel they go to. Returns
+        [(installation, channel, [keys])]; stopped units go nowhere."""
+        channels = {}
+        for key, type_, payload in units:
+            matched_rules, source = await self.rule_matcher.match_notification_rules(session, tenant_id, type_, payload)
+            default_policy = await self.rule_matcher.rules_service.get_default_policy(tenant_id, source)
+            outcome = resolve_outcome(
+                matched_rules, source=source, event_type=payload.get("event_type"), default_policy=default_policy
+            )
+            if outcome.response is not None:
+                continue
+            self.get_channels_from_request_or_defaults(
+                installed_platforms, outcome.targets, source, payload, use_defaults=outcome.use_defaults
+            )
+            await self._apply_gchat_default_fallback(session, tenant_id, installed_platforms, payload)
+            for ip in installed_platforms:
+                for channel in [ip.to_channel] + list(getattr(ip, "additional_channels", None) or []):
+                    if not channel:
+                        continue
+                    channel_key = (str(ip.id), ip.platform, json.dumps(channel, sort_keys=True, default=str))
+                    channels.setdefault(channel_key, (ip, channel, []))[2].append(key)
+        return list(channels.values())
+
+    @staticmethod
+    def point_at(installed_platforms, ip, channel):
+        """Aim delivery at one channel of one installation only."""
+        for other in installed_platforms:
+            other.to_channel = None
+            other.additional_channels = []
+        ip.to_channel = channel
+
+    async def send_rollup(self, tenant_id, type_, payload, sections):
+        """Send a message covering several accounts: one message per channel, each
+        with only the accounts routed to that channel."""
+        parameters = payload.get("parameters") or {}
+        unit = {key: payload[key] for key in ("source", "type", "channels") if payload.get(key)}
+        units = [(account_id, type_, {**unit, "parameters": {"account_id": account_id}}) for account_id in sections]
+        async with BaseDB.async_session(self.engine)() as session:
+            installed_platforms = await self.get_installed_platforms_from_cache_or_db(session, tenant_id)
+            if not installed_platforms:
+                return [failed_response("", reason="No messaging platform installation found for this tenant")]
+            routes = await self.route_units(session, tenant_id, units, installed_platforms)
+            if not routes:
+                return [system_response("suppressed", "Every account in this message was left out by the rules")]
+            routes = [route for route in routes if has_recommendations(parameters, route[2])]
+            if not routes:
+                return [system_response("dropped", "No account routed to a channel has anything to send")]
+            responses = []
+            for ip, channel, account_ids in routes:
+                self.point_at(installed_platforms, ip, channel)
+                responses.extend(
+                    await self.send_template_notification(
+                        session, tenant_id, {"parameters": merged_parameters(parameters, account_ids)}, type_, [ip]
+                    )
+                    or []
+                )
+            return responses
 
     @staticmethod
     def get_channels_from_request_or_defaults(installed_platforms, matched_rules, source, kwargs, use_defaults=True):

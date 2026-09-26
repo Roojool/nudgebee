@@ -167,6 +167,6 @@ jobs:
         # jsonb tags and nullable match columns (alert-rule mute, epic #38553). Only
         # the Mute tests: triage's other _DB test needs a migrated database.
         run: |
-          go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ ./query/ -run '_DB$' -v
+          go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ ./query/ ./reports/ -run '_DB$' -v
           go test ./triage/ ./eventrule/ -run 'Mute.*_DB$' -v
           go test ./account/ -run 'NotificationRule.*_DB$' -v
