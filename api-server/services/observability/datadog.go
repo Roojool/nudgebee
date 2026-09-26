@@ -13,6 +13,8 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+
+	"golang.org/x/sync/errgroup"
 	"sort"
 	"strconv"
 	"strings"
@@ -1090,31 +1092,80 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 	// the bound is on the whole request rather than on each key in it.
 	retryDeadline := time.Now().Add(datadogRetryBudget(fetchMetricsRequest.RetryBudgetSeconds))
 
-	// failKey records one key's failure and lets the loop carry on to the others.
+	// failKey turns one key's failure into that key's result, so the others keep theirs.
 	//
 	// Every other provider already works this way (newrelic_metrics.go is the clearest
-	// example): a key that fails appends a result carrying its error and the loop
-	// continues. Datadog alone returned an empty OutputMetricQuery, discarding the keys
+	// example). Datadog alone returned an empty OutputMetricQuery, discarding the keys
 	// that had already succeeded -- so one rate-limited response lost a whole rightsizing
-	// run, which is why Datadog is excluded from the shared rightsizing path today.
-	failKey := func(queryKey, what string, cause error) {
+	// run, which is why Datadog is excluded from the shared rightsizing path.
+	failKey := func(queryKey, what string, cause error) []QueryResult {
 		ctx.GetLogger().Warn("DatadogMetricSource.FetchMetricsQuery: "+what,
 			"key", queryKey, "error", cause)
 		msg := cause.Error()
-		finalOutput.Results = append(finalOutput.Results, QueryResult{QueryKey: queryKey, Error: &msg})
+		return []QueryResult{{QueryKey: queryKey, Error: &msg}}
 	}
 
-	for queryKey, rawQuery := range fetchMetricsRequest.Queries {
+	// Datadog is asked one key at a time -- `aggregate` applies to a whole request, so
+	// four CPU percentiles cannot share one. A default rightsizing strategy therefore
+	// sends 7 requests per workload where the old per-provider service sent 2, and
+	// serially that multiplier is the difference between "larger" and "too slow to use".
+	// This is the measured reason the loop is concurrent rather than a guess that it
+	// ought to be.
+	//
+	// Bounded, and deliberately below the key count: firing every key at once is exactly
+	// the burst Datadog rate-limits, and the retry budget above is what absorbs the 429s
+	// this makes more likely. Each goroutine writes its own slot and returns nil, so the
+	// answer does not depend on which request finishes first -- the same shape
+	// validateReferencedLabelValues uses.
+	keys := make([]string, 0, len(fetchMetricsRequest.Queries))
+	for k := range fetchMetricsRequest.Queries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	perKey := make([][]QueryResult, len(keys))
+	eg := new(errgroup.Group)
+	eg.SetLimit(datadogMaxConcurrentKeys)
+	for i := range keys {
+		i := i
+		eg.Go(func() error {
+			queryKey := keys[i]
+			rawQuery := fetchMetricsRequest.Queries[queryKey]
+			perKey[i] = datadogFetchOneKey(ctx, queryKey, rawQuery, fetchMetricsRequest,
+				site, apiKey, appKey, from, to, retryDeadline, failKey)
+			return nil
+		})
+	}
+	_ = eg.Wait()
+	for _, rs := range perKey {
+		finalOutput.Results = append(finalOutput.Results, rs...)
+	}
+
+	return finalOutput, nil
+}
+
+// datadogMaxConcurrentKeys bounds how many of a request's keys are in flight at once.
+const datadogMaxConcurrentKeys = 4
+
+// datadogFetchOneKey answers a single key, returning that key's results -- or the one
+// result describing why it could not be answered. It never returns an error: a key's
+// failure belongs to that key, not to the batch.
+func datadogFetchOneKey(
+	ctx *security.RequestContext,
+	queryKey, rawQuery string,
+	fetchMetricsRequest FetchMetricsRequest,
+	site, apiKey, appKey string,
+	from, to int64,
+	// One instant shared by every key in this request, so the bound is on the request
+	// as a whole. Under this concurrent loop a remaining-budget counter would have to
+	// be decremented from several goroutines at once; a deadline needs no coordination.
+	retryDeadline time.Time,
+	failKey func(string, string, error) []QueryResult,
+) []QueryResult {
+	{
 		injected, injErr := injectDatadogLabels(rawQuery, fetchMetricsRequest.Labels, fetchMetricsRequest.LabelMatchers)
 		if injErr != nil {
-			ctx.GetLogger().Warn("DatadogMetricSource.FetchMetricsQuery: query build failed",
-				"key", queryKey, "error", injErr)
-			errMsg := injErr.Error()
-			finalOutput.Results = append(finalOutput.Results, QueryResult{
-				QueryKey: queryKey,
-				Error:    &errMsg,
-			})
-			continue
+			return failKey(queryKey, "query build failed", injErr)
 		}
 		encodedQuery := url.QueryEscape(injected)
 		url := fmt.Sprintf("https://%s/api/v1/query?from=%d&to=%d&query=%s", site, from, to, encodedQuery)
@@ -1127,24 +1178,20 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 
 		bodyBytes, err := fetchDatadogAPI(ctx, url, headers, retryDeadline)
 		if err != nil {
-			failKey(queryKey, "request failed", err)
-			continue
+			return failKey(queryKey, "request failed", err)
 		}
 
 		var data map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &data); err != nil {
-			failKey(queryKey, "parsing the response failed", err)
-			continue
+			return failKey(queryKey, "parsing the response failed", err)
 		}
 
 		if errMsg, ok := data["error"].(string); ok {
-			failKey(queryKey, "datadog reported an error", errors.New(errMsg))
-			continue
+			return failKey(queryKey, "datadog reported an error", errors.New(errMsg))
 		}
 		queryOutput, err := datadogMapToOutputMetricWithKey(bodyBytes, queryKey)
 		if err != nil {
-			failKey(queryKey, "mapping the response failed", err)
-			continue
+			return failKey(queryKey, "mapping the response failed", err)
 		}
 		// Report the query that actually ran, as the other sources do. Without it a
 		// caller showing "what was asked" (the executed-query tooltip, an evidence
@@ -1152,10 +1199,8 @@ func (s *DatadogMetricSource) FetchMetricsQuery(
 		for i := range queryOutput.Results {
 			queryOutput.Results[i].Query = injected
 		}
-		finalOutput.Results = append(finalOutput.Results, queryOutput.Results...)
+		return queryOutput.Results
 	}
-
-	return finalOutput, nil
 }
 
 type DatadogResponse struct {

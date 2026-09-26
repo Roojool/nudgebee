@@ -34,6 +34,13 @@ from server.recommendation.vertical_rightsizing.strategy.strateggy_nudgebee impo
 
 logger = logging.getLogger("rightsizing")
 
+# Providers whose accounts have a Prometheus the owner-chain pod walk can query. The
+# empty string is the common case: no explicit provider means the account's agent, which
+# ships Prometheus. `metrics_provider` is Optional and arrives as None whenever the
+# trigger names no provider -- the SAME common case -- so it is normalised to "" before
+# being looked up here, which keeps this a set of provider names.
+PROMETHEUS_FAMILY_PROVIDERS = {"", "prometheus", "victoria_metrics", "chronosphere", "cubeapm"}
+
 
 class CriticalRunnerException(Exception):
     pass
@@ -76,15 +83,32 @@ class RecommendationService:
         # one. For the default strategy that is 7 Datadog GETs per workload against
         # the 2 this service makes, which fetches the raw series once and takes the
         # percentiles locally. Three properties of observability/datadog.go make that
-        # multiplier expensive rather than merely larger. Three properties were named
-        # here; two are now fixed in api-server:
+        # multiplier expensive rather than merely larger. The three api-server properties
+        # originally named here are now all fixed -- the key loop is bounded-concurrent,
+        # a key's failure no longer discards the others' results, and the metrics path
+        # retries 429s within a caller-supplied budget.
         #
-        #   - a key's failure no longer discards the other keys' results (FIXED)
-        #   - the metrics path now retries 429s within a caller-supplied budget (FIXED)
-        #   - the key loop still runs SEQUENTIALLY (open)
+        # The carve-out stays anyway, for a reason nobody had written down -- and it is
+        # neither the percentiles nor the executor. On Datadog the COVERAGE COUNT is
+        # resolution-dependent, so it cannot be compared against points_required at all.
         #
-        # The last one is what still makes 7 GETs worse than 2, because they happen one
-        # after another. Fix that in api-server, not here.
+        # The rollup is chosen from how many pods the request names, to stay inside a
+        # point budget. A bucket holding a single sample is credited with its whole
+        # width, so a coarser rollup reports MORE coverage for the same data. Measured on
+        # a dev account, one pod, same 14 days, same three buckets of data:
+        #
+        #     asked about 291 pods -> 36 units (45 min)
+        #     asked about  1 pod   -> 12 units (15 min)
+        #     the old service      -> 96 units (2 hours, Datadog's default 2h buckets)
+        #
+        # Coverage is a property of the pod, not of the batch it was fetched in. Against
+        # a fixed 50-unit floor that decides inclusion, 88 of 288 pods fell below it and
+        # none rose above -- but tuning the floor cannot fix a number that moves with
+        # batch size.
+        #
+        # Unblocking this means making coverage resolution-independent -- a fixed
+        # resolution for the count, or measuring the first-to-last span instead of
+        # counting buckets -- not another pass at the executor.
         via_utilisation = ApiServerMetricsConfigs.rightsizing_via_utilisation and metrics_provider != "datadog"
 
         if via_utilisation:
@@ -98,10 +122,16 @@ class RecommendationService:
             # answers it better than a pod-name prefix does. Keeping it means this
             # switch changes the numbers and not the population they are computed
             # over, which is what makes a before/after diff readable.
+            # The owner-chain walk is PromQL over kube_pod_owner, so only an account
+            # that HAS a Prometheus can use it. Asking it of a Datadog or ES account
+            # returns no pods at all -- and a rightsizing run with no pods produces no
+            # recommendation, silently. Those accounts derive the pod list from the
+            # metric series instead, which UtilisationMetricsService does when it is
+            # given no inventory.
             inventory = (
-                None
-                if metrics_provider == "ES"
-                else PrometheusMetricsService(config, account_id, self._executor, tenant_id=tenant_id)
+                PrometheusMetricsService(config, account_id, self._executor, tenant_id=tenant_id)
+                if (metrics_provider or "") in PROMETHEUS_FAMILY_PROVIDERS
+                else None
             )
             self._metrics_service_loaders = UtilisationMetricsService(
                 config,

@@ -68,22 +68,28 @@ def test_the_flag_on_is_one_service_for_every_provider_but_datadog(metrics_provi
     assert isinstance(loaders, UtilisationMetricsService)
 
 
-def test_datadog_stays_on_its_own_service_until_the_executor_can_carry_the_traffic():
-    """`aggregate` applies to a whole request, so four CPU percentiles cannot share
-    one: 7 Datadog GETs per workload against the 2 the Python service makes.
+def test_datadog_stays_on_its_own_service_because_coverage_is_resolution_dependent():
+    """The executor reasons for this carve-out are fixed. It stays for a different one.
 
-    That multiplier would be tolerable on its own. It is not tolerable against
-    api-server's Datadog metrics executor as it stands — the key loop is sequential,
-    one key's failure discards the whole request's results, and the metrics path has
-    no 429 retry. Unblock by fixing those, not by editing this test.
+    On Datadog the coverage count moves with the ROLLUP, and the rollup is chosen from
+    how many pods the request names. A bucket holding one sample is credited with its
+    whole width, so a coarser rollup reports more coverage for identical data.
+
+    Measured on a dev account -- one pod, same 14 days, same three buckets of data:
+    asked about 291 pods it reported 36 units (45 min); asked about that pod alone, 12
+    units (15 min); the old service, 96 units (2 hours). Coverage is a property of the
+    pod, not of the batch it was fetched in, so comparing it to a fixed points_required
+    is unsound at any value -- 88 of 288 pods fell below the floor and none rose above.
+
+    Unblock by making coverage resolution-independent, not by editing this test.
     """
     loaders = _service(True, metrics_provider="datadog")
     assert isinstance(loaders, DatadogMetricsService)
     assert not isinstance(loaders, UtilisationMetricsService)
 
 
-def test_a_prometheus_account_is_not_caught_by_the_datadog_carve_out():
-    """The carve-out is one provider, not "anything with credentials"."""
+def test_a_prometheus_account_uses_the_shared_service():
+    """Unchanged by the Datadog carve-out being lifted."""
     assert isinstance(_service(True, metrics_provider="prometheus"), UtilisationMetricsService)
     assert isinstance(_service(True, metrics_provider=None), UtilisationMetricsService)
 
@@ -94,6 +100,14 @@ def test_a_prometheus_family_account_keeps_its_pod_inventory_walk():
     population they are computed over."""
     loaders = _service(True, metrics_provider="prometheus")
     assert isinstance(loaders._inventory, PrometheusMetricsService)
+
+    # The COMMON case, and the one most easily lost: the trigger names no provider for
+    # an agent account, so the field arrives as None rather than "". Failing the
+    # membership test here would silently drop the owner-chain walk for the majority of
+    # accounts and fall back to deriving pods from a name prefix -- no error, just a
+    # different population underneath every recommendation.
+    default = _service(True, metrics_provider=None)
+    assert isinstance(default._inventory, PrometheusMetricsService)
 
     es = _service(True, metrics_provider="ES", elasticsearch={"url": "https://es:9200"})
     assert es._inventory is None, "Elasticsearch has no owner-chain walk to keep"
