@@ -2263,6 +2263,7 @@ func (chat *ConversationDao) terminateConversation(ctx *security.RequestContext,
 // The code agent is the only thing that resolves a repo, so the stored value is
 // authoritative once set.
 func (chat *ConversationDao) UpdateConversationMessageConfig(id string, config toolcore.NBQueryConfig) error {
+	config = messageQueryConfig(config)
 	configJson, _ := common.MarshalJson(config)
 
 	query := `UPDATE llm_conversation_messages
@@ -2291,6 +2292,12 @@ func (chat *ConversationDao) UpdateConversationMessageGitRepo(id, gitRepo string
 		return fmt.Errorf("history: failed to update message git repo: %w", err)
 	}
 	return nil
+}
+
+func messageQueryConfig(config toolcore.NBQueryConfig) toolcore.NBQueryConfig {
+	// A delegated target belongs to its child agent row, not the shared turn.
+	config.DelegatedTarget = nil
+	return config
 }
 
 // UpdateConversationMessageFollowupConfig updates only the followup-specific fields in message_config.

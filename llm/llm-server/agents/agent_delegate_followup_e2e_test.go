@@ -73,10 +73,8 @@ func TestDelegateAgent_FollowupResumeExecutesDelegatedWrite(t *testing.T) {
 
 	sc := security.NewRequestContextForTenantAccountAdmin(tenantId, userId, []string{accountId})
 
-	// Clean slate before + after so re-runs don't collide.
-	_ = core.DeleteConversationBySession(sessionId, accountId, userId)
+	t.Logf("Running with preserved sessionId: %s", sessionId)
 	defer func() {
-		_ = core.DeleteConversationBySession(sessionId, accountId, userId)
 		// Best-effort ConfigMap cleanup so the test doesn't leak resources on the
 		// dev cluster. Ignore errors — if the write never happened (Phase C fail)
 		// there's nothing to delete anyway.

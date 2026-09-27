@@ -41,6 +41,29 @@ func TestBuildResumeAgentRequestRestoresClientToolRuntimeFields(t *testing.T) {
 	assert.Equal(t, queryConfig, got.QueryConfig)
 }
 
+func TestDelegatedTargetPersistsOnAgentNotMessage(t *testing.T) {
+	config := toolcore.NBQueryConfig{
+		ToolConfigs:     map[string]string{"aws_execute": "origin"},
+		DelegatedTarget: &toolcore.ExecutionTarget{Provider: "aws", Name: "prod"},
+	}
+	messageConfig := messageQueryConfig(config)
+	require.Nil(t, messageConfig.DelegatedTarget)
+	require.Equal(t, "origin", messageConfig.ToolConfigs["aws_execute"])
+	require.Equal(t, "prod", config.DelegatedTarget.Name)
+
+	encoded := `{"delegated_target":{"provider":"aws","name":"prod"}}`
+	resumed, err := withResumedAgentTarget(messageConfig, ConversationAgent{QueryConfig: &encoded})
+	require.NoError(t, err)
+	require.Equal(t, config.DelegatedTarget, resumed.DelegatedTarget)
+	resumed, err = withResumedAgentTarget(resumed, ConversationAgent{})
+	require.NoError(t, err)
+	require.Nil(t, resumed.DelegatedTarget, "another agent must not inherit the child's target")
+	empty := ""
+	resumed, err = withResumedAgentTarget(config, ConversationAgent{QueryConfig: &empty})
+	require.NoError(t, err)
+	require.Nil(t, resumed.DelegatedTarget, "an empty saved config must not inherit the previous target")
+}
+
 // TestIsResumableAgentStatus locks in the contract for which agent statuses
 // V2's idempotency guard treats as eligible for resume vs already-progressed.
 //

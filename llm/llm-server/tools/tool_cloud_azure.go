@@ -48,6 +48,13 @@ func (t AzureCliTool) ConfirmationKey(toolInput string) string {
 	return targetConfirmationKey(t.Name(), RequestedCloudAccount(req.Arguments))
 }
 
+func (t AzureCliTool) PrepareDelegatedTargetInput(target *core.ExecutionTarget, input string) (string, error) {
+	if target == nil || target.Provider != "azure" || RequestedCloudAccount(core.ParseNBToolCallRequestFromInput(input).Arguments) != "" {
+		return input, nil
+	}
+	return addDelegatedTargetArgument(input, "account", target.Name)
+}
+
 func (t AzureCliTool) RequestedTarget(toolInput string) (string, error) {
 	req := core.ParseNBToolCallRequestFromInput(toolInput)
 	return RequestedCloudAccount(req.Arguments), nil
@@ -126,6 +133,9 @@ func (t AzureCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToo
 	}
 	target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, t.Name(), nbRequestContext.ToolConfig, requested)
 	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	if err := VerifyDelegatedTargetIdentity(nbRequestContext, "azure", target, requested); err != nil {
 		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
 	}
 	provenance := cloudTargetProvenance(target)

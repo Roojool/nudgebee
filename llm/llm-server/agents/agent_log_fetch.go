@@ -129,8 +129,12 @@ func (a *FetchLogsAgent) generateKubeCtlLogQueryAndExecute(ctx *security.Request
 		logs = noMatchingKubectlLogsCaveat(intent.FilterPattern, logs)
 	}
 
-	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, a.accountId, request.ConversationId, "kubectl", logs)
-	bundleSignal, err := runAutoDiagnosticBundle(ctx, a.accountId, request, fileRef)
+	workspaceAccount := request.AccountId
+	if workspaceAccount == "" {
+		workspaceAccount = a.accountId
+	}
+	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, workspaceAccount, request.ConversationId, "kubectl", logs)
+	bundleSignal, err := runAutoDiagnosticBundle(ctx, workspaceAccount, request, fileRef)
 	if err != nil {
 		return core.NBAgentResponse{}, err
 	}
@@ -338,8 +342,12 @@ func (a *FetchLogsAgent) generateDatadogLogQueryAndExecute(ctx *security.Request
 	if matched, reason := looksLikeFetchError("datadog", logs); matched {
 		return errorResponse(a.GetName(), fmt.Errorf("datadog fetch failed: %s", reason)), nil
 	}
-	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, a.accountId, request.ConversationId, "datadog", logs)
-	bundleSignal, err := runAutoDiagnosticBundle(ctx, a.accountId, request, fileRef)
+	workspaceAccount := request.AccountId
+	if workspaceAccount == "" {
+		workspaceAccount = a.accountId
+	}
+	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, workspaceAccount, request.ConversationId, "datadog", logs)
+	bundleSignal, err := runAutoDiagnosticBundle(ctx, workspaceAccount, request, fileRef)
 	if err != nil {
 		return core.NBAgentResponse{}, err
 	}

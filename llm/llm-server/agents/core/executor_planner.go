@@ -159,13 +159,21 @@ func checkMessageTerminationStatus(messageId, accountId, conversationId string) 
 // terminated, using the project's cache abstraction to debounce database
 // lookups.
 func CheckMessageTerminationStatus(messageId, accountId, conversationId string) (bool, error) {
+	if messageId == "" {
+		return false, nil
+	}
 	// Try to get from cache first
 	if val, ok := common.CacheGet(MessageTerminationCacheNamespace, messageId); ok {
 		return string(val) == "true", nil
 	}
 
+	dao := GetConversationDao()
+	if dao == nil {
+		return false, nil
+	}
+
 	// Fetch from database on cache miss
-	message, err := GetConversationDao().GetConversationMessage(messageId, accountId, conversationId)
+	message, err := dao.GetConversationMessage(messageId, accountId, conversationId)
 	if err != nil {
 		return false, err
 	}
@@ -2003,6 +2011,22 @@ func confirmationKeyForAction(tool toolcore.NBTool, action NBAgentPlannerToolAct
 	return action.Tool
 }
 
+func prepareDelegatedActionInput(tool toolcore.NBTool, target *toolcore.ExecutionTarget, action NBAgentPlannerToolAction) (NBAgentPlannerToolAction, error) {
+	if target == nil {
+		return action, nil
+	}
+	preparer, ok := tool.(toolcore.DelegatedTargetInputPreparer)
+	if !ok {
+		return action, nil
+	}
+	input, err := preparer.PrepareDelegatedTargetInput(target, action.ToolInput)
+	if err != nil {
+		return action, err
+	}
+	action.ToolInput = input
+	return action, nil
+}
+
 // lookupToolForPlanner resolves a tool from the static nameToTool map, falling back
 // to dynamic tool lookup via toolcore.GetNBTool (handling aliases like "shell").
 func lookupToolForPlanner(nameToTool map[string]toolcore.NBTool, accountId, toolName string) (toolcore.NBTool, bool) {
@@ -2349,6 +2373,15 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		}, nil, nil
 	}
 
+	var targetErr error
+	action, targetErr = prepareDelegatedActionInput(tool, e.agentRequest.QueryConfig.DelegatedTarget, action)
+	if targetErr != nil {
+		return NBAgentPlannerToolActionStep{
+			Action:      action,
+			Observation: targetErr.Error(),
+			Status:      ToolStatusFailure,
+		}, nil, nil
+	}
 	// validate user access
 	implType := toolcore.ImplTypeFor(tool)
 	finish2, requestType, err2 := IsAgentToolAuthorizedToProcessRequest(e.ctx, e.agent, e.agentRequest, action)
@@ -2363,6 +2396,13 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		common.MetricsToolOperationsTotal(implType, toolName, "success", accountID)
 		common.MetricsToolLatencySeconds(implType, toolName, accountID, time.Since(start).Seconds())
 		return NBAgentPlannerToolActionStep{}, finish2, nil
+	}
+	if e.agentRequest.QueryConfig.DelegatedTarget != nil && requestType != nil && *requestType != toolcore.ToolRequestTypeRead {
+		if validator, ok := tool.(toolcore.WriteTargetInputValidator); ok {
+			if err := validator.ValidateWriteTargetInput(action.ToolInput); err != nil {
+				return NBAgentPlannerToolActionStep{Action: action, Observation: err.Error(), Status: ToolStatusFailure}, nil, nil
+			}
+		}
 	}
 
 	toolResolveDur := time.Since(start)
@@ -2386,6 +2426,9 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 			}
 			if requestType != nil && *requestType != toolcore.ToolRequestTypeRead {
 				selected, resolveErr := e.shellWriteTarget(owner, action)
+				if errors.Is(resolveErr, tools.ErrAmbiguousShellTarget) {
+					return NBAgentPlannerToolActionStep{Action: action, Observation: resolveErr.Error(), Status: ToolStatusFailure}, nil, nil
+				}
 				if resolveErr != nil {
 					return NBAgentPlannerToolActionStep{}, nil, resolveErr
 				}
@@ -3107,6 +3150,11 @@ func (e *plannerExecutor) selectConfigUsingLLM(userQuery string, configs []toolc
 func actionRequestedTarget(tool toolcore.NBTool, action NBAgentPlannerToolAction) (string, error) {
 	if strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand) {
 		_, requested, err := tools.RequestedShellTargetFromInput(action.ToolInput)
+		if errors.Is(err, tools.ErrAmbiguousShellTarget) {
+			// For choosing a connection an ambiguous script names none; writes
+			// are refused later by shellWriteTarget, reads run per invocation.
+			return "", nil
+		}
 		return requested, err
 	}
 	if tool == nil {
@@ -3140,6 +3188,59 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 	if tool == nil {
 		return nil, nil, fmt.Errorf("tool is nil")
 	}
+	// A delegated child with a concrete per-call target does not need the
+	// conversation's config chooser. Resolve the same effective input used at
+	// dispatch, including an inherited default, before considering followups.
+	if e.agentRequest.QueryConfig.DelegatedTarget != nil {
+		inputTool := tool
+		if strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand) {
+			inputTool = tools.ShellTool{}
+		}
+		prepared, err := prepareDelegatedActionInput(inputTool, e.agentRequest.QueryConfig.DelegatedTarget, action)
+		if err != nil {
+			return []NBAgentPlannerToolActionStep{
+				{
+					Action:      action,
+					Observation: err.Error(),
+					Status:      ToolStatusFailure,
+				},
+			}, nil, nil
+		}
+		if strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand) {
+			owner, requested, err := tools.RequestedShellTargetFromInput(prepared.ToolInput)
+			if errors.Is(err, tools.ErrAmbiguousShellTarget) {
+				err = nil // same as actionRequestedTarget: not a reason to fail a read
+			}
+			if err != nil {
+				return []NBAgentPlannerToolActionStep{
+					{
+						Action:      action,
+						Observation: err.Error(),
+						Status:      ToolStatusFailure,
+					},
+				}, nil, nil
+			}
+			if owner == tool.Name() && requested != "" {
+				return nil, nil, nil
+			}
+		} else if scoped, ok := tool.(toolcore.PerCallTargetTool); ok {
+			requested, err := scoped.RequestedTarget(prepared.ToolInput)
+			if err != nil {
+				return []NBAgentPlannerToolActionStep{
+					{
+						Action:      action,
+						Observation: err.Error(),
+						Status:      ToolStatusFailure,
+					},
+				}, nil, nil
+			}
+			if requested != "" {
+				return nil, nil, nil
+			}
+		}
+		action = prepared
+	}
+
 	// If the action explicitly named a target, resolve it with the tenant list
 	// filtered by read access. An explicit target must never fall back to an account picker.
 	if requested, reqErr := actionRequestedTarget(tool, action); reqErr != nil {
@@ -3162,7 +3263,6 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		}
 		return nil, nil, nil
 	}
-
 	// Get available configs for the tool
 	configs, err := toolcore.ListToolConfigs(e.ctx, e.agentRequest.AccountId, tool)
 	shellTarget := strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand)
@@ -4474,9 +4574,18 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 			// requires the tool instance (confirmationApprovedForAction).
 			resumeNameToTool := getNameToTool(nbAgentPlanner.GetTools())
 			// read all current actions as steps
-			for _, action := range executor.currentAction {
-				// A rejection is a tool observation, not an unresolved configuration
-				// or a reason to end the entire planner turn.
+			for i, action := range executor.currentAction {
+				if tool, ok := lookupToolForPlanner(resumeNameToTool, executor.agentRequest.AccountId, action.Tool); ok {
+					prepared, prepErr := prepareDelegatedActionInput(tool, executor.agentRequest.QueryConfig.DelegatedTarget, action)
+					if prepErr != nil {
+						executor.steps = append(executor.steps, NBAgentPlannerToolActionStep{Action: action, Observation: prepErr.Error(), Status: ToolStatusFailure})
+						executor.stepKeys[action.ToolID] = true
+						continue
+					}
+					action = prepared
+					executor.currentAction[i] = prepared
+				}
+				// Check approval against the prepared, target-bound action.
 				if confirmationRejectedForAction(request.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId) {
 					ctx.GetLogger().Info("plannerexecutor: user rejected tool confirmation", "tool", action.Tool, "toolId", action.ToolID)
 					executor.steps = append(executor.steps, NBAgentPlannerToolActionStep{

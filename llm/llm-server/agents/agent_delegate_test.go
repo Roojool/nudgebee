@@ -29,6 +29,53 @@ func TestParseDelegateInput_StructuredArguments(t *testing.T) {
 	assert.Equal(t, 8, maxIter)
 }
 
+func TestDelegateTargetHandoff(t *testing.T) {
+	got, err := toolcore.ParseExecutionTarget(toolcore.NBToolCallRequest{Command: `{"prompt":"check","target":{"provider":"GCP","name":"prod"}}`})
+	require.NoError(t, err)
+	require.Equal(t, &toolcore.ExecutionTarget{Provider: "gcp", Name: "prod"}, got)
+	for _, value := range []any{"prod", map[string]any{"provider": "gcp"}, map[string]any{"provider": "other", "name": "prod"}} {
+		_, err := toolcore.ParseExecutionTarget(toolcore.NBToolCallRequest{Arguments: map[string]any{"target": value}})
+		require.Error(t, err)
+	}
+	require.Contains(t, (&delegateAgentTool{}).InputSchema().Properties, "target")
+}
+
+func TestCustomPlannerToolsDoNotAdvertiseDelegatedTarget(t *testing.T) {
+	for _, name := range []string{WorkflowBuilderAgentName, AgentCodeAnalyzer, VisualizationAgentName, AgentLogAnalysisName, FetchLogsAgentName, WebSearchAgentName} {
+		tool, ok := toolcore.GetNBTool("test-account", name)
+		require.True(t, ok, name)
+		require.NotContains(t, tool.InputSchema().Properties, "target", name)
+	}
+}
+
+func TestObservabilityPlannerToolsAdvertiseDelegatedTarget(t *testing.T) {
+	require.Contains(t, (MetricsAgentTool{}).InputSchema().Properties, "target")
+	require.Contains(t, (TracesAgentTool{}).InputSchema().Properties, "target")
+	logsAgentTool, ok := toolcore.GetNBTool("test-account", LogsAgentName)
+	require.True(t, ok)
+	require.Contains(t, logsAgentTool.InputSchema().Properties, "target")
+	fetchLogsDirect, ok := toolcore.GetNBTool("test-account", FetchLogsDirectToolName)
+	require.True(t, ok)
+	require.Contains(t, fetchLogsDirect.InputSchema().Properties, "target")
+}
+
+func TestTargetedDelegateDoesNotMisattributeOriginObservability(t *testing.T) {
+	for _, tool := range []toolcore.NBTool{MetricsAgentTool{}, TracesAgentTool{}, &fetchLogsDirectTool{accountId: "origin-account"}} {
+		t.Run(tool.Name(), func(t *testing.T) {
+			ctx := toolcore.NbToolContext{
+				AccountId: "origin-account",
+				QueryConfig: toolcore.NBQueryConfig{
+					DelegatedTarget: &toolcore.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod"},
+				},
+			}
+			response, err := tool.Call(ctx, toolcore.NBToolCallRequest{Command: "current CPU or latency"})
+			require.NoError(t, err)
+			require.Equal(t, toolcore.NBToolResponseStatusError, response.Status)
+			require.Contains(t, response.Data, "k8s-prod")
+		})
+	}
+}
+
 func TestParseDelegateInput_JSONCommand(t *testing.T) {
 	input := toolcore.NBToolCallRequest{
 		Command: `{"prompt": "Check slow queries", "tools": ["mysql_query"], "max_iterations": 3}`,

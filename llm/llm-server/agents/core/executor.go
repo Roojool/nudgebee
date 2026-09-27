@@ -1114,6 +1114,12 @@ func refineAgentQuestionAndHandleFollowups(ctx *security.RequestContext, request
 			if request.ParentAgentId == "" && previousQuestion.ParentAgentId != "" {
 				request.ParentAgentId = previousQuestion.ParentAgentId
 			}
+			// The followup context snapshots this specific agent invocation.
+			// Keep its target across legacy resumes without making it a sticky
+			// conversation-level setting via MergeFrom/message_config.
+			if request.QueryConfig.DelegatedTarget == nil {
+				request.QueryConfig.DelegatedTarget = previousQuestion.QueryConfig.DelegatedTarget
+			}
 
 			for k, v := range previousQuestion.QueryConfig.ToolConfigs {
 				existingToolConfigs[k] = v
@@ -1182,7 +1188,11 @@ func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([
 	if request.QueryConfig.SkipConversationHistory {
 		return []prompts.MessageFormatter{}, nil
 	}
-	chatHistory, err := GetConversationDao().LoadConversationMessages(request.AccountId, request.ConversationId, "", "", config.Config.ConversationHistoryWindowSize)
+	dao := GetConversationDao()
+	if dao == nil {
+		return []prompts.MessageFormatter{}, nil
+	}
+	chatHistory, err := dao.LoadConversationMessages(request.AccountId, request.ConversationId, "", "", config.Config.ConversationHistoryWindowSize)
 	if err != nil {
 		ctx.GetLogger().Error("agentexecutor: unable to load chat history", "error", err)
 		return nil, err

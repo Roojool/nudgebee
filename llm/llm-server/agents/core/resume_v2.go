@@ -16,6 +16,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -377,6 +378,10 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	// so no additional DB lookup is needed here. The in-request config is the
 	// source of truth for resume.
 	queryConfig := req.QueryConfig
+	queryConfig, err = withResumedAgentTarget(queryConfig, agent)
+	if err != nil {
+		return NBAgentResponse{}, err
+	}
 
 	// IMPORTANT: pass the user's raw answer as Query. HandleFollowupResponse
 	// (called inside executeAgent → refine) writes request.Query as the
@@ -406,6 +411,19 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	// correctly considers sibling state.
 
 	return executeAgent(ctx, agentImpl, resumeReq)
+}
+
+func withResumedAgentTarget(config toolcore.NBQueryConfig, agent ConversationAgent) (toolcore.NBQueryConfig, error) {
+	config.DelegatedTarget = nil
+	if agent.QueryConfig == nil || *agent.QueryConfig == "" {
+		return config, nil
+	}
+	var saved toolcore.NBQueryConfig
+	if err := json.Unmarshal([]byte(*agent.QueryConfig), &saved); err != nil {
+		return config, fmt.Errorf("resume_v2: decode agent query config: %w", err)
+	}
+	config.DelegatedTarget = saved.DelegatedTarget
+	return config, nil
 }
 
 // buildResumeAgentRequest carries the turn's request forward and overrides only

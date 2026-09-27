@@ -5,9 +5,11 @@ import (
 	"testing"
 
 	"nudgebee/llm/security"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The execution-targets lookup needs a database; planner tests run without
@@ -30,4 +32,100 @@ func TestExecutionTargetsBlockReachesHumanMessage(t *testing.T) {
 
 	empty := (&NBReActPlanner4{request: NBAgentRequest{AgentId: "a", AccountId: "acc-1"}}).humanText("q")
 	assert.NotContains(t, empty, "execution_targets")
+}
+
+func TestDelegatedTargetRendersWithoutOtherTargets(t *testing.T) {
+	block := renderDelegatedTargetBlock(&toolcore.ExecutionTarget{Provider: "gcp", Name: "prod"})
+	assert.Contains(t, block, `"provider":"gcp"`)
+	assert.Contains(t, block, `"name":"prod"`)
+	assert.Contains(t, block, "does not grant access")
+	assert.Contains(t, block, `GCP account "prod"`)
+	assert.Contains(t, block, "not a namespace, label, project", "the name must not be reused as a query filter")
+}
+
+func TestResolveAgentHandoffTarget(t *testing.T) {
+	const account = "origin"
+	configs := map[string][]toolcore.ToolConfig{
+		tools.ToolExecuteKubectlCommand: {
+			{Name: "k8s-prod", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "k8s-id"}}},
+			{Name: "k8s-secret", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "secret-id"}}},
+		},
+		tools.ToolExecuteAwsCliCommand: {
+			{Name: "aws-prod", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "aws-id"}, {Name: "account_number", Value: "123456789012"}}},
+			{Name: "aws-secret", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "secret-id"}}},
+		},
+		tools.ToolExecuteGcpCliCommand: {
+			{Name: "gcp-prod", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "gcp-id"}}},
+		},
+		tools.ToolExecuteAzureCliCommand: {
+			{Name: "azure-prod", Values: []toolcore.ToolConfigValue{{Name: "id", Value: "az-id"}}},
+		},
+	}
+	previous := tools.TenantAccountLister
+	tools.TenantAccountLister = func(_ *security.RequestContext, tool toolcore.NBTool) ([]toolcore.ToolConfig, error) {
+		return configs[tool.Name()], nil
+	}
+	t.Cleanup(func() { tools.TenantAccountLister = previous })
+	ctx := security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{account, "k8s-id", "aws-id", "gcp-id", "az-id"})
+
+	for _, tc := range []struct {
+		provider, requested, canonical, id string
+	}{
+		{"kubernetes", "K8S-PROD", "k8s-prod", "k8s-id"},
+		{"aws", "123456789012", "aws-prod", "aws-id"},
+		{"gcp", "gcp-prod", "gcp-prod", "gcp-id"},
+		{"azure", "azure-prod", "azure-prod", "az-id"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			got, err := tools.ResolveAgentHandoffTarget(ctx, account, &toolcore.ExecutionTarget{Provider: tc.provider, Name: tc.requested})
+			require.NoError(t, err)
+			require.Equal(t, &toolcore.ExecutionTarget{Provider: tc.provider, Name: tc.canonical, AccountID: tc.id}, got)
+		})
+	}
+
+	for _, requested := range []string{"aws-missing", "aws-secret"} {
+		_, err := tools.ResolveAgentHandoffTarget(ctx, account, &toolcore.ExecutionTarget{Provider: "aws", Name: requested})
+		require.ErrorContains(t, err, "not connected or you do not have access")
+		require.Contains(t, err.Error(), "aws-prod")
+		require.NotContains(t, err.Error(), "secret-id")
+	}
+	_, err := tools.ResolveAgentHandoffTarget(ctx, account, &toolcore.ExecutionTarget{Provider: "kubernetes", Name: "k8s-secret"})
+	require.ErrorContains(t, err, "not connected or you do not have access")
+	require.ErrorContains(t, err, "available clusters: k8s-prod")
+	got, err := tools.ResolveAgentHandoffTarget(nil, account, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+	_, err = tools.ResolveAgentHandoffTarget(nil, account, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"})
+	require.ErrorContains(t, err, "security context")
+	_, err = ExecuteAgentToolCall(toolcore.NbToolContext{Ctx: ctx, AccountId: account}, handoffTargetTestAgent{}, toolcore.NBToolCallRequest{
+		Arguments: map[string]any{"target": map[string]any{"provider": "aws", "name": "aws-secret"}},
+	})
+	require.ErrorContains(t, err, "not connected or you do not have access")
+}
+
+type handoffTargetTestAgent struct{ NBAgent }
+
+func (handoffTargetTestAgent) AcceptsExecutionTarget()          {}
+func (handoffTargetTestAgent) GetPlannerType() AgentPlannerType { return AgentPlannerTypeReAct }
+func (handoffTargetTestAgent) GetSupportedTools(*security.RequestContext) []toolcore.NBTool {
+	return nil
+}
+
+type handoffCustomTestAgent struct{ NBAgent }
+
+func (handoffCustomTestAgent) GetPlannerType() AgentPlannerType { return AgentPlannerTypeCustom }
+func (handoffCustomTestAgent) GetName() string                  { return "custom_test" }
+func (handoffCustomTestAgent) GetSupportedTools(*security.RequestContext) []toolcore.NBTool {
+	return nil
+}
+
+func TestNestedAgentDoesNotInheritDelegatedTarget(t *testing.T) {
+	ctx := toolcore.NbToolContext{Ctx: security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"origin-id"}), AccountId: "origin-id", QueryConfig: toolcore.NBQueryConfig{DelegatedTarget: &toolcore.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod"}}}
+	target, err := childAgentTarget(ctx, handoffTargetTestAgent{}, toolcore.NBToolCallRequest{Command: "inspect pods"})
+	require.NoError(t, err)
+	require.Nil(t, target, "a nested child without a target uses the conversation default")
+	_, err = childAgentTarget(ctx, handoffCustomTestAgent{}, toolcore.NBToolCallRequest{Arguments: map[string]any{"target": map[string]any{"provider": "kubernetes", "name": "k8s-prod"}}})
+	require.ErrorContains(t, err, "does not support")
+	require.NotContains(t, (&nbAgentTool{agent: handoffCustomTestAgent{}}).InputSchema().Properties, "target")
+	require.Contains(t, (&nbAgentTool{agent: handoffTargetTestAgent{}, targetSupported: true}).InputSchema().Properties, "target")
 }

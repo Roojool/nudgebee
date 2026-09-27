@@ -70,6 +70,13 @@ func (t AwsCliTool) ConfirmationKey(toolInput string) string {
 	return targetConfirmationKey(t.Name(), RequestedAwsAccount(req.Arguments))
 }
 
+func (t AwsCliTool) PrepareDelegatedTargetInput(target *core.ExecutionTarget, input string) (string, error) {
+	if target == nil || target.Provider != "aws" || RequestedAwsAccount(core.ParseNBToolCallRequestFromInput(input).Arguments) != "" {
+		return input, nil
+	}
+	return addDelegatedTargetArgument(input, "account", target.Name)
+}
+
 // RequestedTarget returns the AWS account a call explicitly names, for the
 // executor's write-access check on that account.
 func (t AwsCliTool) RequestedTarget(toolInput string) (string, error) {
@@ -144,6 +151,9 @@ func (t AwsCliTool) Call(nbRequestContext core.NbToolContext, input core.NBToolC
 	}
 	target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, t.Name(), nbRequestContext.ToolConfig, requested)
 	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	if err := VerifyDelegatedTargetIdentity(nbRequestContext, "aws", target, requested); err != nil {
 		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
 	}
 	provenance := awsTargetProvenance(target)

@@ -507,6 +507,18 @@ func (m KubectlExecuteTool) ConfirmationKey(toolInput string) string {
 	return targetConfirmationKey(m.Name(), requested)
 }
 
+func (m KubectlExecuteTool) PrepareDelegatedTargetInput(target *core.ExecutionTarget, input string) (string, error) {
+	if target == nil || target.Provider != "kubernetes" {
+		return input, nil
+	}
+	req := core.ParseNBToolCallRequestFromInput(input)
+	requested, err := RequestedKubernetesCluster(req.Command, req.Arguments)
+	if err != nil || requested != "" {
+		return input, err
+	}
+	return addDelegatedTargetArgument(input, "cluster", target.Name)
+}
+
 // RequestedTarget returns the cluster a call explicitly names, for the
 // executor's write-access check on that cluster.
 func (m KubectlExecuteTool) RequestedTarget(toolInput string) (string, error) {
@@ -925,6 +937,9 @@ func (m KubectlExecuteTool) Call(nbRequestContext core.NbToolContext, input core
 	}
 	target, err := ResolveKubernetesTarget(nbRequestContext, nbRequestContext.ToolConfig, requested)
 	if err != nil {
+		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
+	}
+	if err := VerifyDelegatedTargetIdentity(nbRequestContext, "kubernetes", target, requested); err != nil {
 		return core.NBToolResponse{Data: err.Error(), Status: core.NBToolResponseStatusError}, err
 	}
 	// crossCluster marks a call that runs somewhere other than the

@@ -114,7 +114,10 @@ type NBQueryConfig struct {
 	SkipConversationHistory bool `json:"skip_conversation_history,omitempty"`
 
 	// Tool infrastructure (managed by executor/planner)
-	ToolConfigs        map[string]string `json:"tool_configs,omitempty"`
+	ToolConfigs map[string]string `json:"tool_configs,omitempty"`
+	// DelegatedTarget is scoped to one child agent invocation. It is saved on
+	// the agent row for resume, never in the conversation's message_config.
+	DelegatedTarget    *ExecutionTarget  `json:"delegated_target,omitempty"`
 	ClientTools        []NBToolCommand   `json:"client_tools,omitempty"`
 	Capabilities       AgentCapabilities `json:"capabilities,omitzero"`
 	ToolConfirmations  map[string]string `json:"tool_confirmations,omitempty"`
@@ -128,7 +131,7 @@ func (q NBQueryConfig) IsEmpty() bool {
 		q.Workload == "" && q.GitRepo == "" && q.AccountId == "" &&
 		q.WorkflowId == "" && q.ExecutionId == "" && len(q.WorkflowDefinition) == 0 && len(q.Labels) == 0 &&
 		q.CurrentCluster == "" && q.CurrentClusterId == "" && q.K8sOrchestratorMode == "" &&
-		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && q.LlmConfigSource == "" && !q.LlmConfigReset && len(q.ToolConfigs) == 0 &&
+		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && q.LlmConfigSource == "" && !q.LlmConfigReset && len(q.ToolConfigs) == 0 && q.DelegatedTarget == nil &&
 		len(q.ClientTools) == 0 && q.Capabilities.IsEmpty() && len(q.ToolConfirmations) == 0 &&
 		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == "" && !q.SkipConversationHistory &&
 		len(q.DiscoveredTools) == 0

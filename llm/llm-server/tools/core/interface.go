@@ -53,6 +53,19 @@ type NBTool interface {
 	InputSchema() ToolSchema
 }
 
+// DelegatedTargetInputPreparer lets a tool apply a child agent's default
+// target to its own input before write authorization and confirmation. Tools
+// own the parsing and precedence of their explicit per-call selectors.
+type DelegatedTargetInputPreparer interface {
+	PrepareDelegatedTargetInput(target *ExecutionTarget, input string) (string, error)
+}
+
+// WriteTargetInputValidator lets a tool refuse a write whose concrete target
+// cannot be established before user approval.
+type WriteTargetInputValidator interface {
+	ValidateWriteTargetInput(input string) error
+}
+
 type NBToolCallRequest struct {
 	Command   string         `json:"command"`
 	Arguments map[string]any `json:"args"`

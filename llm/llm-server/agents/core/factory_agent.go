@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"nudgebee/llm/security"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"strings"
 
@@ -45,11 +46,28 @@ func RegisterNBAgentFactoryWithAliases(agent string, agentFactory func(accountId
 	}
 }
 
+// ExecutionTargetAwareAgent marks a child that can use a delegated execution
+// target. Agent-tools are target-blind unless their implementation opts in.
+type ExecutionTargetAwareAgent interface {
+	AcceptsExecutionTarget()
+}
+
 func NewToolFromAgent(agent NBAgent) toolcore.NBTool {
-	return &nbAgentTool{name: agent.GetName(), description: agent.GetDescription(), input: "Refer description for inputs", output: "Refer description for inputs", agent: agent, toolType: toolcore.NBToolTypeAgent}
+	_, targetSupported := agent.(ExecutionTargetAwareAgent)
+	return &nbAgentTool{name: agent.GetName(), description: agent.GetDescription(), input: "Refer description for inputs", output: "Refer description for inputs", agent: agent, toolType: toolcore.NBToolTypeAgent, targetSupported: targetSupported}
 }
 
 func RegisterNBAgentFactoryAndTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string) {
+	registerNBAgentFactoryAndTool(agent, agentFactory, toolDescription, toolInput, toolOutput, false)
+}
+
+// RegisterTargetAwareNBAgentFactoryAndTool exposes a target only for children
+// whose own execution tools can honor it.
+func RegisterTargetAwareNBAgentFactoryAndTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string) {
+	registerNBAgentFactoryAndTool(agent, agentFactory, toolDescription, toolInput, toolOutput, true)
+}
+
+func registerNBAgentFactoryAndTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string, targetSupported bool) {
 	slog.Info("registering agent", "agent", agent)
 	if _, ok := nbSystemAgents[strings.ToLower(agent)]; ok {
 		slog.Warn("agent already registered", "agent", agent)
@@ -57,7 +75,7 @@ func RegisterNBAgentFactoryAndTool(agent string, agentFactory func(accountId str
 	nbSystemAgents[strings.ToLower(agent)] = agentFactory
 	useResponseAlways := true
 	toolcore.RegisterNBToolFactory(agent, func(accountId string) (toolcore.NBTool, error) {
-		return &nbAgentTool{name: agent, description: toolDescription, input: toolInput, output: toolOutput, useResponseAlways: useResponseAlways, toolType: toolcore.NBToolTypeAgent, accountId: accountId}, nil
+		return &nbAgentTool{name: agent, description: toolDescription, input: toolInput, output: toolOutput, useResponseAlways: useResponseAlways, toolType: toolcore.NBToolTypeAgent, accountId: accountId, targetSupported: targetSupported}, nil
 	})
 }
 
@@ -240,6 +258,7 @@ type nbAgentTool struct {
 	agent             NBAgent
 	toolType          toolcore.NBToolType
 	accountId         string
+	targetSupported   bool
 }
 
 func (m *nbAgentTool) GetAgent(ctx *security.RequestContext) NBAgent {
@@ -270,15 +289,16 @@ func (m *nbAgentTool) Description() string {
 }
 
 func (m *nbAgentTool) InputSchema() toolcore.ToolSchema {
+	properties := map[string]toolcore.ToolSchemaProperty{
+		"command": {Type: toolcore.ToolSchemaTypeString, Description: m.input},
+	}
+	if m.targetSupported {
+		properties["target"] = toolcore.AgentTargetSchemaProperty()
+	}
 	return toolcore.ToolSchema{
-		Type: toolcore.ToolSchemaTypeObject,
-		Properties: map[string]toolcore.ToolSchemaProperty{
-			"command": {
-				Type:        toolcore.ToolSchemaTypeString,
-				Description: m.input,
-			},
-		},
-		Required: []string{"command"},
+		Type:       toolcore.ToolSchemaTypeObject,
+		Properties: properties,
+		Required:   []string{"command"},
 	}
 }
 
@@ -313,6 +333,11 @@ func (m *nbAgentTool) Call(nbRequestContext toolcore.NbToolContext, input toolco
 			Data:   fmt.Sprintf("%s requires a non-empty query describing what to investigate. Provide a plain-text description of the problem or question.", m.name),
 		}, nil
 	}
+	if !m.targetSupported {
+		if target, err := toolcore.ParseExecutionTarget(input); err != nil || target != nil {
+			return toolcore.NBToolResponse{Status: toolcore.NBToolResponseStatusError, Data: "this agent does not accept an execution target"}, nil
+		}
+	}
 
 	agent := m.GetAgent(nbRequestContext.Ctx)
 	if agent == nil {
@@ -324,6 +349,9 @@ func (m *nbAgentTool) Call(nbRequestContext toolcore.NbToolContext, input toolco
 	additionalDetails := map[string]any{
 		nbToolCallAdditionalDatailsAgentId:   resp.AgentId,
 		nbToolCallAdditionalDatailsMessageId: resp.MessageId,
+	}
+	if tgt, _ := childAgentTarget(nbRequestContext, agent, input); tgt != nil {
+		additionalDetails["target"] = map[string]any{"provider": tgt.Provider, "name": tgt.Name}
 	}
 
 	if err != nil {
@@ -430,7 +458,31 @@ func lastNonTrivialStepContent(steps []ToolInvocation) (content string, ok bool)
 	return "", false
 }
 
+func childAgentTarget(ctx toolcore.NbToolContext, agent NBAgent, query toolcore.NBToolCallRequest) (*toolcore.ExecutionTarget, error) {
+	target, err := toolcore.ParseExecutionTarget(query)
+	if err != nil {
+		return nil, fmt.Errorf("agent target: %w", err)
+	}
+	if target == nil {
+		return nil, nil
+	}
+	if _, ok := agent.(ExecutionTargetAwareAgent); !ok {
+		return nil, fmt.Errorf("agent %s does not support a delegated execution target", agent.GetName())
+	}
+	resolved, err := tools.ResolveAgentHandoffTarget(ctx.Ctx, ctx.AccountId, target)
+	if err != nil {
+		return nil, fmt.Errorf("agent target: %w", err)
+	}
+	return resolved, nil
+}
+
 func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent, query toolcore.NBToolCallRequest) (NBAgentResponse, error) {
+	target, err := childAgentTarget(nbRequestContext, agent, query)
+	if err != nil {
+		return NBAgentResponse{}, err
+	}
+	// A nested agent inherits the conversation, not its caller's delegated target.
+	nbRequestContext.QueryConfig.DelegatedTarget = target
 	existingAgentId := ""
 	if nbRequestContext.ToolCallId != "" {
 		existingAgentId = GetConversationDao().GetConversationToolCallChildAgentId(nbRequestContext.ConversationId, nbRequestContext.ParentAgentId, nbRequestContext.ToolCallId)

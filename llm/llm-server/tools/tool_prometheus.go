@@ -312,10 +312,15 @@ func (m PrometheusExecuteTool) Call(nbRequestContext core.NbToolContext, input c
 			}, nil
 		}
 
-		apiDataAny, err := m.executePromQl(nbRequestContext, q, nbRequestContext.AccountId, map[string]any{
+		queryAccountId := nbRequestContext.AccountId
+		if target := nbRequestContext.QueryConfig.DelegatedTarget; target != nil && target.AccountID != "" {
+			queryAccountId = target.AccountID
+		}
+		apiDataAny, err := m.executePromQl(nbRequestContext, q, queryAccountId, map[string]any{
 			"end_time":   endTime.UTC().Format("2006-01-02T15:04:05Z07:00"),
 			"start_time": startTime.UTC().Format("2006-01-02T15:04:05Z07:00"),
 		})
+
 		if err != nil {
 			nbRequestContext.Ctx.GetLogger().Error("unable to execute tool query", "error", err.Error())
 			return core.NBToolResponse{
