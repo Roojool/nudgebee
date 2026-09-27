@@ -36,7 +36,7 @@ func (a VMOrchestratorAgent) GetSupportedTools(ctx *security.RequestContext) []t
 		tools.ToolVMList:                 true,
 		tools.ToolVMExecute:              true,
 		toolcore.ToolExecuteShellCommand: true,
-		RecommendationsAgentName:         true,
+		FinOpsAgentName:                  true,
 		DelegateAgentToolName:            true,
 		SearchToolsToolName:              true,
 		tools.SearchSkillsToolName:       true,
