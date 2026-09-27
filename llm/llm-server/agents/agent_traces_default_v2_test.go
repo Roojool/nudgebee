@@ -127,3 +127,16 @@ func TestFilterDiscoveredTraceAttributes(t *testing.T) {
 		assert.False(t, capped)
 	})
 }
+
+// TestTracesDefaultAgent_CacheScopeAccount guards the scope both traces agents rely on
+// to reuse their system prompt across conversations. Conversation scope keys the cache
+// on the conversation id, so a prompt that is identical for every investigation in an
+// account would never be reused.
+func TestTracesDefaultAgent_CacheScopeAccount(t *testing.T) {
+	v1 := TracesDefaultAgent{accountId: "acct"}
+	assert.Equal(t, core.CacheScopeAccount, v1.GetCacheScope())
+
+	v2 := newTracesDefaultAgentV2("acct", services_server.ObservabilityProvider{})
+	assert.Equal(t, core.CacheScopeAccount, v2.GetCacheScope(),
+		"v2 embeds v1 and must inherit the account scope")
+}

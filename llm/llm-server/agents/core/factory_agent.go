@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"nudgebee/llm/security"
@@ -486,6 +487,23 @@ func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent
 			return refs
 		}(),
 	}
-	resp, err := executeAgent(nbRequestContext.Ctx, agent, agentRequest)
+	resp, err := executeAgent(subAgentCacheContext(nbRequestContext.Ctx), agent, agentRequest)
 	return resp, err
+}
+
+// subAgentCacheContext clears the caching opt-out before a sub-agent runs.
+//
+// A Custom-planner delegator (metrics, traces, ...) is executed under
+// ContextKeyDisableCaching=true because such agents build their own prompt from
+// dynamic content. A delegator has no prompt of its own — it forwards the call —
+// and the sub-agent it reaches builds a stable prompt that is worth caching, so
+// the opt-out must not cross the agent boundary. It stayed set for the whole
+// subtree, which is why no agent reachable only through a delegator had ever
+// created a cache.
+func subAgentCacheContext(ctx *security.RequestContext) *security.RequestContext {
+	goCtx := ctx.GetContext()
+	if disabled, _ := goCtx.Value(ContextKeyDisableCaching).(bool); !disabled {
+		return ctx
+	}
+	return ctx.WithContext(context.WithValue(goCtx, ContextKeyDisableCaching, false))
 }

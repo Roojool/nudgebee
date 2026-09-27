@@ -83,6 +83,22 @@ func (rc *RequestContext) SetContext(ctx context.Context) {
 	rc.context = ctx
 }
 
+// WithContext returns a shallow copy of rc carrying a different inner
+// context.Context. Every other field comes across by struct assignment, so a
+// field added later is copied without touching this method.
+//
+// Use this rather than SetContext when the new value must apply to one call
+// only: SetContext mutates in place, so the caller's own later work would pick
+// the value up too.
+func (rc *RequestContext) WithContext(ctx context.Context) *RequestContext {
+	if rc == nil || ctx == nil {
+		return rc
+	}
+	clone := *rc
+	clone.context = ctx
+	return &clone
+}
+
 func (rc *RequestContext) GetTraceId() string {
 	span := trace.SpanFromContext(rc.context)
 	return span.SpanContext().TraceID().String()
