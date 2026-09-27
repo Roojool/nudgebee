@@ -29,7 +29,7 @@ type VMListTool struct{}
 func (VMListTool) Name() string             { return ToolVMList }
 func (VMListTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 func (VMListTool) Description() string {
-	return "List active VMs in the selected VM account. Use this to resolve exact resource IDs before remote commands. Results are bounded to 25."
+	return "List active VM inventory records in the selected VM account, including inventory status and last-seen time. These fields do not establish live SSH connectivity. Use this to resolve exact resource IDs before remote commands. Results are bounded to 25."
 }
 func (VMListTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{Type: core.ToolSchemaTypeObject, Properties: map[string]core.ToolSchemaProperty{
@@ -38,9 +38,11 @@ func (VMListTool) InputSchema() core.ToolSchema {
 }
 
 type vmInventoryRow struct {
-	ID         string `db:"id" json:"resource_id"`
-	Name       string `db:"name" json:"name"`
-	ResourceID string `db:"resourse_id" json:"inventory_id"`
+	ID              string     `db:"id" json:"resource_id"`
+	Name            string     `db:"name" json:"name"`
+	ResourceID      string     `db:"resourse_id" json:"inventory_id"`
+	InventoryStatus string     `db:"status" json:"inventory_status"`
+	LastSeen        *time.Time `db:"last_seen" json:"last_seen"`
 }
 
 func vmAccount(ctx core.NbToolContext) (string, error) {
@@ -81,7 +83,7 @@ func (VMListTool) Call(ctx core.NbToolContext, input core.NBToolCallRequest) (co
 		return vmToolError(fmt.Errorf("vm list: database: %w", err))
 	}
 	rows := []vmInventoryRow{}
-	err = dbms.Db.SelectContext(ctx.GoContext(), &rows, `SELECT id::text AS id, name, resourse_id FROM cloud_resourses
+	err = dbms.Db.SelectContext(ctx.GoContext(), &rows, `SELECT id::text AS id, name, resourse_id, COALESCE(status, '') AS status, last_seen FROM cloud_resourses
 		WHERE tenant = $1 AND account = $2 AND is_active IS TRUE AND type IN ('VM', 'compute-instance')
 		  AND ($3 = '' OR name ILIKE '%' || $3 || '%' OR resourse_id ILIKE '%' || $3 || '%')
 		ORDER BY name, id LIMIT 26`, tenantID, ctx.AccountId, search)
