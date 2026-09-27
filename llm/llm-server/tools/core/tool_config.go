@@ -556,16 +556,7 @@ func ListToolConfigs(context *security.RequestContext, accountId string, tool NB
 		if err != nil {
 			return configs, err
 		}
-		configs = all
-		// A conversation opened on one of these accounts is narrowed to it, so
-		// the tool auto-selects the current account. Explicit lookups of other
-		// accounts use ListTenantAccountToolConfigs instead.
-		for _, c := range all {
-			if accountIDOf(c) == accountId {
-				configs = []ToolConfig{c}
-				break
-			}
-		}
+		configs = currentAccountConfig(all, accountId)
 
 	case ToolConfigSourceTicketAll:
 		configRows, err := dbms.Query(`
@@ -1192,6 +1183,20 @@ func accountIDOf(c ToolConfig) string {
 		}
 	}
 	return ""
+}
+
+// currentAccountConfig keeps normal tool execution bound to the account that
+// owns the conversation. An inactive or otherwise unavailable current account
+// must produce no configuration; returning the tenant's other active accounts
+// here turns a failed current-account lookup into a cross-account picker.
+// Explicit cross-account callers use ListTenantAccountToolConfigs instead.
+func currentAccountConfig(configs []ToolConfig, accountID string) []ToolConfig {
+	for _, config := range configs {
+		if accountIDOf(config) == accountID {
+			return []ToolConfig{config}
+		}
+	}
+	return nil
 }
 
 // ListTenantAccountToolConfigs lists every account-backed config for an
