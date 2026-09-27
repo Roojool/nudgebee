@@ -114,30 +114,7 @@ func (a *podMetricAction) AutoExecute(ctx playbooks.PlaybookActionContext) (play
 		return nil, errors.New("namespace is required")
 	}
 
-	// Prefer workload-level labels over the raw "pod" label.
-	// For deployment-level alerts (e.g. KubeDeploymentRolloutStuck), the "pod" label
-	// is the kube-state-metrics exporter pod, not the affected deployment's pods.
-	podName := ""
-	if labels != nil {
-		podName = labels["pod"]
-		if labels["deployment"] != "" {
-			podName = labels["deployment"]
-		} else if labels["statefulset"] != "" {
-			podName = labels["statefulset"]
-		} else if labels["daemonset"] != "" {
-			podName = labels["daemonset"]
-		}
-	}
-	// Go-agent findings don't set workload labels — fall back to SubjectOwner
-	// (the resolved owner of the Pod, e.g. the StatefulSet name) so the
-	// regex query catches every Pod backed by the owner. Then to SubjectName.
-	if podName == "" {
-		podName = ctx.GetEvent().SubjectOwner
-	}
-	if podName == "" {
-		podName = ctx.GetEvent().SubjectName
-	}
-
+	podName := podMetricTarget(ctx.GetEvent())
 	if podName == "" {
 		return nil, errors.New("no pod or workload label found")
 	}
@@ -148,6 +125,56 @@ func (a *podMetricAction) AutoExecute(ctx playbooks.PlaybookActionContext) (play
 		"resource_type": a.autodetectResource,
 	}
 	return a.Execute(ctx, params)
+}
+
+// podMetricTarget picks the name the metrics are queried for: a workload name
+// (matched as a prefix across its pods) or a single pod name (matched exactly).
+//
+// Workload labels win over the raw "pod" label: for deployment-level alerts
+// (e.g. KubeDeploymentRolloutStuck) the "pod" label is the kube-state-metrics
+// exporter pod, not the affected deployment's pods.
+//
+// Go-agent findings set no labels. When their subject is a pod, that pod is the
+// target, not its owner: every provider's utilisation query wraps the matched
+// series in sum(), so a prefix match on the owner reports the whole workload's
+// usage and limits as one series. On an OOMKilled DaemonSet pod that read as a
+// 4.6 GiB working set against an 8.4 GiB limit, for a container killed at 600 Mi.
+// The owner is only the fallback when the subject names no pod.
+func podMetricTarget(event playbooks.PlaybookEvent) string {
+	labels := event.Labels
+	if labels != nil {
+		switch {
+		case labels["deployment"] != "":
+			return labels["deployment"]
+		case labels["statefulset"] != "":
+			return labels["statefulset"]
+		case labels["daemonset"] != "":
+			return labels["daemonset"]
+		case labels["pod"] != "":
+			return labels["pod"]
+		}
+	}
+	if isPodSubjectTarget(event, event.SubjectName) {
+		return event.SubjectName
+	}
+	if event.SubjectOwner != "" {
+		return event.SubjectOwner
+	}
+	return event.SubjectName
+}
+
+// isPodSubjectTarget reports whether name is the event's own pod subject, chosen
+// by podMetricTarget because no label identified a workload or pod. podMetricKind
+// uses the same test, so a pod picked here is always matched exactly: a
+// labels["kind"] set without a workload label would otherwise turn the full pod
+// name into a prefix (pod=~"<pod>-.*") and match nothing.
+func isPodSubjectTarget(event playbooks.PlaybookEvent, name string) bool {
+	if name == "" || name != event.SubjectName || !strings.EqualFold(event.SubjectType, "pod") {
+		return false
+	}
+	labels := event.Labels
+	return labels == nil || (labels["deployment"] == "" && labels["statefulset"] == "" &&
+		labels["daemonset"] == "" && labels["pod"] == "")
 }
 
 type podMetricEnricherParams struct {
@@ -262,6 +289,9 @@ func workloadKindForUtilisation(kind string) string {
 // match on a workload name and a workload that genuinely has no data produce
 // byte-identical output, which is how the empty-card bug survived review.
 func podMetricKind(ctx playbooks.PlaybookActionContext, params podMetricEnricherParams) string {
+	if isPodSubjectTarget(ctx.GetEvent(), params.PodName) {
+		return "pod"
+	}
 	// Use regex match for workload names (Deployment, StatefulSet, DaemonSet,
 	// ReplicaSet, Job, ReplicationController) since their pod names have a
 	// random suffix appended by the workload controller. StatefulSet was
@@ -287,12 +317,18 @@ func podMetricKind(ctx playbooks.PlaybookActionContext, params podMetricEnricher
 		strings.EqualFold(kind, "statefulset") ||
 		strings.EqualFold(kind, "job") ||
 		strings.EqualFold(kind, "replicationcontroller")
+	// A workload label only asks for a prefix match when it IS the name being
+	// queried. When the target is the raw "pod" label, a sibling label names
+	// something else: "job" is Prometheus's scrape job on nearly every alert
+	// (job="kube-state-metrics"), and a prefix on the pod's full name
+	// (pod=~"<pod>-.*") matches nothing.
 	if !useRegex && ctx.GetEvent().Labels != nil {
-		useRegex = ctx.GetEvent().Labels["deployment"] != "" ||
-			ctx.GetEvent().Labels["statefulset"] != "" ||
-			ctx.GetEvent().Labels["daemonset"] != "" ||
-			ctx.GetEvent().Labels["job"] != "" ||
-			ctx.GetEvent().Labels["replicaset"] != ""
+		for _, key := range []string{"deployment", "statefulset", "daemonset", "job", "replicaset"} {
+			if value := ctx.GetEvent().Labels[key]; value != "" && value == params.PodName {
+				useRegex = true
+				break
+			}
+		}
 	}
 	// Implicit workload-name signal: AutoExecute resolves `pod_name` to
 	// `SubjectOwner` (the owner workload, e.g. the StatefulSet name) when
