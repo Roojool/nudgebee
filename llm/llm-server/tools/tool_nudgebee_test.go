@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,11 +22,19 @@ import (
 )
 
 func startNudgebeeQueryStub(t *testing.T, handler func(action string, input map[string]any) (int, string)) func() {
+	return startNudgebeeQueryStubWithExpectedUser(t, "user-1", handler)
+}
+
+func startNudgebeeQueryStubForSystemUser(t *testing.T, handler func(action string, input map[string]any) (int, string)) func() {
+	return startNudgebeeQueryStubWithExpectedUser(t, "", handler)
+}
+
+func startNudgebeeQueryStubWithExpectedUser(t *testing.T, expectedUser string, handler func(action string, input map[string]any) (int, string)) func() {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/rpc/query", r.URL.Path)
 		assert.Equal(t, "tenant-123", r.Header.Get("x-tenant-id"))
-		assert.Equal(t, "user-1", r.Header.Get("x-user-id"))
+		assert.Equal(t, expectedUser, r.Header.Get("x-user-id"))
 
 		var payload struct {
 			Action struct {
@@ -57,6 +66,43 @@ func nudgebeeContextWithoutUser() core.NbToolContext {
 	return core.NbToolContext{
 		AccountId: "acc-1",
 		Ctx:       security.NewRequestContext(context.Background(), secCtx, logger, nil, nil),
+	}
+}
+
+func nudgebeeContextWithSystemUser() core.NbToolContext {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	secCtx := &security.SecurityContext{}
+	payload := fmt.Sprintf(`{"TenantId":"tenant-123","UserId":%q,"Roles":["tenant_admin"]}`, security.GetSystemUserId())
+	if err := json.Unmarshal([]byte(payload), secCtx); err != nil {
+		panic(err)
+	}
+	return core.NbToolContext{
+		AccountId: "acc-1",
+		Ctx:       security.NewRequestContext(context.Background(), secCtx, logger, nil, nil),
+	}
+}
+
+func TestNudgebeeToolsAllowSystemUser(t *testing.T) {
+	cleanup := startNudgebeeQueryStubForSystemUser(t, func(action string, input map[string]any) (int, string) {
+		return http.StatusOK, `{"rows":[]}`
+	})
+	defer cleanup()
+
+	calls := []func() (core.NBToolResponse, error){
+		func() (core.NBToolResponse, error) {
+			return NudgebeeAccountsListTool{}.Call(nudgebeeContextWithSystemUser(), core.NBToolCallRequest{Arguments: map[string]any{}})
+		},
+		func() (core.NBToolResponse, error) {
+			return NudgebeeIntegrationsListTool{}.Call(nudgebeeContextWithSystemUser(), core.NBToolCallRequest{Arguments: map[string]any{}})
+		},
+		func() (core.NBToolResponse, error) {
+			return NudgebeeAgentHealthGetTool{}.Call(nudgebeeContextWithSystemUser(), core.NBToolCallRequest{Arguments: map[string]any{"account_id": "acc-1"}})
+		},
+	}
+	for _, call := range calls {
+		resp, err := call()
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
 	}
 }
 

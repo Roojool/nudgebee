@@ -692,7 +692,8 @@ func nudgebeeLimit(input core.NBToolCallRequest, defaultLimit int) int {
 // api-server treats a tenant id without a user id as an internal tenant-admin
 // call, which is valid for background jobs but would silently elevate an
 // interactive Nubi request. Self-awareness tools therefore require a real
-// requesting user before crossing the service boundary.
+// requesting user (or the authorized system user sentinel for automated
+// background triage) before crossing the service boundary.
 func doNudgebeeQueryRequest(nbCtx core.NbToolContext, action string, input map[string]any) (string, error) {
 	if err := requireNudgebeeUser(nbCtx); err != nil {
 		return "", err
@@ -704,7 +705,13 @@ func requireNudgebeeUser(nbCtx core.NbToolContext) error {
 	if nbCtx.Ctx == nil || nbCtx.Ctx.GetSecurityContext() == nil {
 		return errors.New("nudgebee: authenticated user context is required")
 	}
-	if strings.TrimSpace(nbCtx.Ctx.GetSecurityContext().EffectiveUserIdForRPC()) == "" {
+	sc := nbCtx.Ctx.GetSecurityContext()
+	// Allow automated background triage / event-analysis flows executing under the system-user sentinel.
+	if sc.GetUserId() == security.GetSystemUserId() {
+		return nil
+	}
+	// For interactive requests, require a real user ID so an unauthenticated call cannot elevate to tenant-admin.
+	if strings.TrimSpace(sc.GetUserId()) == "" || strings.TrimSpace(sc.EffectiveUserIdForRPC()) == "" {
 		return errors.New("nudgebee: requesting user is required; refusing tenant-admin fallback")
 	}
 	return nil
