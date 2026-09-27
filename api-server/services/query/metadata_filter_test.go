@@ -318,3 +318,127 @@ func TestExtractFilterSQL_AndFilterSurvivesForPartiallyScopedGenerator(t *testin
 	assert.True(t, exists,
 		"the account restriction must remain for the outer WHERE, or results widen across accounts")
 }
+
+func TestAdminGetIntegrationsV2_CategoryFilterPushdown(t *testing.T) {
+	def := table_metadata["admin_get_integrations_v2"]
+	request := QueryRequest{
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"category": {Eq: "database"},
+			},
+		},
+	}
+	sql, req, err := def.DefGenerator(nil, "acc-1", request)
+	require.NoError(t, err)
+	assert.Contains(t, sql, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	_, hasCategory := req.Where.Binary["category"]
+	assert.False(t, hasCategory, "category filter should be extracted from top-level Binary clause")
+}
+
+func TestAdminGetIntegrationsGroupingV2_CategoryFilterPushdown(t *testing.T) {
+	def := table_metadata["admin_get_integrations_grouping_v2"]
+	request := QueryRequest{
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"category": {Eq: "database"},
+			},
+		},
+	}
+	sql, req, err := def.DefGenerator(nil, "acc-1", request)
+	require.NoError(t, err)
+	assert.Contains(t, sql, "WHERE EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	_, hasCategory := req.Where.Binary["category"]
+	assert.False(t, hasCategory, "category filter should be extracted from top-level Binary clause")
+}
+
+func TestAdminGetIntegrationsGroupingV2_CombinedCategoryAndCloudAccount(t *testing.T) {
+	def := table_metadata["admin_get_integrations_grouping_v2"]
+	request := QueryRequest{
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"cloud_account_id": {Eq: "ca-1"},
+				"category":         {Eq: "database"},
+			},
+		},
+	}
+	sql, req, err := def.DefGenerator(nil, "acc-1", request)
+	require.NoError(t, err)
+	assert.Contains(t, sql, "WHERE EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id AND ica_filter.cloud_account_id = 'ca-1') AND EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	_, hasCategory := req.Where.Binary["category"]
+	assert.False(t, hasCategory)
+	_, hasAccount := req.Where.Binary["cloud_account_id"]
+	assert.False(t, hasAccount)
+}
+
+func TestAdminGetIntegrationsV2_CategoryFilterUnderAnd(t *testing.T) {
+	def := table_metadata["admin_get_integrations_v2"]
+	newReq := func() QueryRequest {
+		return QueryRequest{
+			Columns: []QueryColumn{{Name: "id"}, {Name: "name"}, {Name: "type"}},
+			Where: QueryWhereClause{
+				And: []QueryWhereClause{
+					{Binary: BinaryWhereClause{"category": {Eq: "database"}}},
+				},
+			},
+		}
+	}
+	subquerySQL, req, err := def.DefGenerator(nil, "acc-1", newReq())
+	require.NoError(t, err)
+	assert.Contains(t, subquerySQL, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	assert.Empty(t, req.Where.And, "category filter inside _and must be pruned from request to prevent outer WHERE validation errors")
+
+	// Verify end-to-end GenerateSqlQuery succeeds without "column category defined in where clause not found"
+	fullSQL, err := GenerateSqlQuery(nil, "acc-1", newReq(), def)
+	require.NoError(t, err)
+	assert.Contains(t, fullSQL, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+}
+
+func TestAdminGetIntegrationsGroupingV2_CategoryFilterUnderAnd(t *testing.T) {
+	def := table_metadata["admin_get_integrations_grouping_v2"]
+	newReq := func() QueryRequest {
+		return QueryRequest{
+			Columns: []QueryColumn{{Name: "count"}},
+			Where: QueryWhereClause{
+				And: []QueryWhereClause{
+					{Binary: BinaryWhereClause{"category": {Eq: "database"}}},
+				},
+			},
+		}
+	}
+	subquerySQL, req, err := def.DefGenerator(nil, "acc-1", newReq())
+	require.NoError(t, err)
+	assert.Contains(t, subquerySQL, "WHERE EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	assert.Empty(t, req.Where.And, "category filter inside _and must be pruned from request to prevent outer WHERE validation errors")
+
+	// Verify end-to-end GenerateSqlQuery succeeds
+	fullSQL, err := GenerateSqlQuery(nil, "acc-1", newReq(), def)
+	require.NoError(t, err)
+	assert.Contains(t, fullSQL, "WHERE EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+}
+
+func TestAdminGetIntegrationsV2_CategoryFilterUnderAnd_WithOtherFilters(t *testing.T) {
+	def := table_metadata["admin_get_integrations_v2"]
+	newReq := func() QueryRequest {
+		return QueryRequest{
+			Columns: []QueryColumn{{Name: "id"}, {Name: "name"}, {Name: "status"}},
+			Where: QueryWhereClause{
+				And: []QueryWhereClause{
+					{Binary: BinaryWhereClause{"category": {Eq: "database"}}},
+					{Binary: BinaryWhereClause{"status": {Eq: "active"}}},
+				},
+			},
+		}
+	}
+	subquerySQL, req, err := def.DefGenerator(nil, "acc-1", newReq())
+	require.NoError(t, err)
+	assert.Contains(t, subquerySQL, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	// The category clause is removed, while the status clause is preserved
+	require.Len(t, req.Where.And, 1)
+	assert.Equal(t, "active", req.Where.And[0].Binary["status"][Eq])
+
+	fullSQL, err := GenerateSqlQuery(nil, "acc-1", newReq(), def)
+	require.NoError(t, err)
+	assert.Contains(t, fullSQL, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type AND LOWER(it_filter.category) = 'database')")
+	assert.Contains(t, fullSQL, "status")
+	assert.Contains(t, fullSQL, "'active'")
+}

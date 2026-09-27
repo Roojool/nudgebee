@@ -106,6 +106,159 @@ func TestNudgebeeAccountsListTool(t *testing.T) {
 	assert.NotContains(t, resp.Data, "account_access")
 }
 
+func TestNudgebeeIntegrationsListTool(t *testing.T) {
+	t.Run("filter by category database", func(t *testing.T) {
+		var gotAction string
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotAction, gotInput = action, input
+			return http.StatusOK, `{"rows":[{"id":"i1","name":"Postgres Prod","type":"postgresql","status":"active"}]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "database",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		assert.Equal(t, "integrations_list", gotAction)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, "database", where["category"].(map[string]any)["_eq"])
+		// Verify fetch limit is default 100 + 1 for category queries
+		assert.EqualValues(t, 101, gotInput["limit"])
+	})
+
+	t.Run("filter by category alias databases", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"rows":[]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "databases",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, "database", where["category"].(map[string]any)["_eq"])
+	})
+
+	t.Run("filter by category alias queue maps to messaging_queue", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"rows":[]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "queue",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, "messaging_queue", where["category"].(map[string]any)["_eq"])
+	})
+
+	t.Run("filter by category alias observability maps to observability_platform", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"rows":[]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "observability",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, "observability_platform", where["category"].(map[string]any)["_eq"])
+	})
+
+	t.Run("filter by explicit types slice preserving case", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"rows":[]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"types": []string{"ES", "postgresql"},
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, []any{"ES", "postgresql"}, where["type"].(map[string]any)["_in"])
+	})
+
+	t.Run("filter by single exact type preserving case", func(t *testing.T) {
+		var gotInput map[string]any
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			gotInput = input
+			return http.StatusOK, `{"rows":[]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"type": "ES",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		where := gotInput["where"].(map[string]any)
+		assert.Equal(t, "ES", where["type"].(map[string]any)["_eq"])
+		// Verify fetch limit is default 20 + 1
+		assert.EqualValues(t, 21, gotInput["limit"])
+	})
+
+	t.Run("conflicting selectors return error", func(t *testing.T) {
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "database",
+			"type":     "github",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
+		assert.Contains(t, resp.Data, "specify at most one of 'category', 'type', or 'types'")
+	})
+
+	t.Run("exact limit rows returned is not marked truncated", func(t *testing.T) {
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			assert.EqualValues(t, 3, input["limit"]) // limit 2 + 1 probe
+			return http.StatusOK, `{"rows":[{"id":"1"},{"id":"2"}]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"limit": 2,
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		assert.Contains(t, resp.Data, `"truncated":false`)
+		assert.Contains(t, resp.Data, `"total_returned":2`)
+	})
+
+	t.Run("extra probe row marks truncated true and is trimmed", func(t *testing.T) {
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			assert.EqualValues(t, 3, input["limit"]) // limit 2 + 1 probe
+			return http.StatusOK, `{"rows":[{"id":"1"},{"id":"2"},{"id":"3"}]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsListTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"limit": 2,
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+		assert.Contains(t, resp.Data, `"truncated":true`)
+		assert.Contains(t, resp.Data, `"total_returned":2`)
+		assert.NotContains(t, resp.Data, `"id":"3"`, "extra probe row must be trimmed")
+	})
+}
+
 func TestNudgebeeCountsUseAggregateActions(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -137,6 +290,32 @@ func TestNudgebeeCountsUseAggregateActions(t *testing.T) {
 			assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
 		})
 	}
+
+	t.Run("integrations count by category", func(t *testing.T) {
+		cleanup := startNudgebeeQueryStub(t, func(action string, input map[string]any) (int, string) {
+			assert.Equal(t, "integrations_aggregate", action)
+			where := input["where"].(map[string]any)
+			assert.Equal(t, "database", where["category"].(map[string]any)["_eq"])
+			return http.StatusOK, `{"rows":[{"count":5}]}`
+		})
+		defer cleanup()
+
+		resp, err := NudgebeeIntegrationsCountTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "database",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusSuccess, resp.Status)
+	})
+
+	t.Run("integrations count conflicting selectors return error", func(t *testing.T) {
+		resp, err := NudgebeeIntegrationsCountTool{}.Call(newTriageToolContext("acc-1"), core.NBToolCallRequest{Arguments: map[string]any{
+			"category": "database",
+			"type":     "github",
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, core.NBToolResponseStatusError, resp.Status)
+		assert.Contains(t, resp.Data, "specify at most one of 'category', 'type', or 'types'")
+	})
 }
 
 func TestNudgebeeIntegrationGetStatusTool(t *testing.T) {

@@ -831,6 +831,58 @@ func extractFilterSQL(request *QueryRequest, filterName string, sqlColumn string
 	return sql
 }
 
+// cleanEmptyAndClauses recursively prunes empty QueryWhereClause nodes from where.And.
+func cleanEmptyAndClauses(where *QueryWhereClause) {
+	if where == nil || len(where.And) == 0 {
+		return
+	}
+	active := make([]QueryWhereClause, 0, len(where.And))
+	for i := range where.And {
+		cleanEmptyAndClauses(&where.And[i])
+		if len(where.And[i].Binary) > 0 || len(where.And[i].And) > 0 || len(where.And[i].Or) > 0 || where.And[i].Not != nil {
+			active = append(active, where.And[i])
+		}
+	}
+	where.And = active
+}
+
+// extractCategoryFilterSQL extracts equality/IN filter(s) for "category" from request.Where,
+// generates the SQL fragment (e.g. " AND LOWER(it_filter.category) = 'database'"), and
+// removes the filter from its owning Binary map, including inside _and clauses.
+//
+// Unlike extractFilterSQL (which leaves filters inside _and in place for outer WHERE
+// enforcement because some DefGenerators push into loosely-scoped subqueries), category
+// is NOT a declared column on the outer integrations relation and is fully constrained
+// by the EXISTS subquery pushdown against integration_types. Leaving it in _and causes
+// generateWhereClause to fail with "column category defined in where clause not found".
+func extractCategoryFilterSQL(request *QueryRequest, sqlColumn string) string {
+	if request == nil {
+		return ""
+	}
+	dialect := &postgresDialect{}
+	var parts []string
+	for {
+		filter, holder := locateBinaryFilter(&request.Where, "category")
+		if holder == nil {
+			break
+		}
+		if eqVal, ok := filter[Eq]; ok {
+			parts = append(parts, " AND "+sqlColumn+" = "+dialect.QuoteLiteral(eqVal))
+		} else if inVal, ok := filter[In]; ok {
+			if vals, ok := inVal.([]any); ok && len(vals) > 0 {
+				quoted := make([]string, len(vals))
+				for i, v := range vals {
+					quoted[i] = dialect.QuoteLiteral(v)
+				}
+				parts = append(parts, " AND "+sqlColumn+" IN ("+strings.Join(quoted, ",")+")")
+			}
+		}
+		delete(holder, "category")
+	}
+	cleanEmptyAndClauses(&request.Where)
+	return strings.Join(parts, "")
+}
+
 // renderFilterSQLForColumn is extractFilterSQL without the delete: it renders the
 // eq/IN fragment against an arbitrary sqlColumn and leaves request.Where untouched.
 // Must run before extractFilterSQL, which deletes the top-level filter this then
@@ -7332,6 +7384,14 @@ var table_metadata = map[string]TableDefinition{
 				accountClause = " AND EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id" + accountIdFilter + ")"
 			}
 
+			// Optional category filter — restricts the returned list to integrations
+			// whose type belongs to the specified category in integration_types.
+			categoryFilter := extractCategoryFilterSQL(&request, "LOWER(it_filter.category)")
+			categoryClause := ""
+			if categoryFilter != "" {
+				categoryClause = " AND EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type" + categoryFilter + ")"
+			}
+
 			def := `(
 			SELECT
 				i.id::text as id,
@@ -7413,7 +7473,7 @@ var table_metadata = map[string]TableDefinition{
 				JOIN integrations ii ON ii.id = icv.integration_id
 				GROUP BY icv.integration_id
 			) icv_agg ON icv_agg.integration_id = i.id
-			WHERE 1=1` + existsClause + accountClause + `
+			WHERE 1=1` + existsClause + accountClause + categoryClause + `
 		) as integrations_v2`
 			return def, request, nil
 		},
@@ -7487,13 +7547,21 @@ var table_metadata = map[string]TableDefinition{
 		PermissionModule:   "integrations",
 		Name:               "admin_get_integrations_grouping_v2",
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
-			// Mirror the cloud_account_id pushdown from admin_get_integrations_v2
+			// Mirror the cloud_account_id and category pushdown from admin_get_integrations_v2
 			// so the row count stays in sync with the filtered row set when the
-			// caller passes a cloud_account_id predicate.
+			// caller passes a cloud_account_id or category predicate.
 			accountIdFilter := extractFilterSQL(&request, "cloud_account_id", "ica_filter.cloud_account_id")
-			accountClause := ""
+			categoryFilter := extractCategoryFilterSQL(&request, "LOWER(it_filter.category)")
+			var whereClauses []string
 			if accountIdFilter != "" {
-				accountClause = " WHERE EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id" + accountIdFilter + ")"
+				whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM integrations_cloud_accounts ica_filter WHERE ica_filter.integration_id = i.id"+accountIdFilter+")")
+			}
+			if categoryFilter != "" {
+				whereClauses = append(whereClauses, "EXISTS (SELECT 1 FROM integration_types it_filter WHERE it_filter.name = i.type"+categoryFilter+")")
+			}
+			whereClause := ""
+			if len(whereClauses) > 0 {
+				whereClause = " WHERE " + strings.Join(whereClauses, " AND ")
 			}
 			def := `(
 			SELECT
@@ -7504,7 +7572,7 @@ var table_metadata = map[string]TableDefinition{
 				i.status,
 				i.created_at,
 				i.tenant_id::text as tenant_id
-			FROM integrations i` + accountClause + `
+			FROM integrations i` + whereClause + `
 		) as integrations_grouping`
 			return def, request, nil
 		},

@@ -88,8 +88,8 @@ func (a *NudgebeeAgent) GetSystemPrompt(_ *security.RequestContext, _ core.NBAge
 			"For product concepts, definitions, setup and how-to questions, call nudgebee_docs_search once and ground the answer in the returned documentation. If it returns relevant evidence, answer directly without synonym, refinement, or follow-up searches. Retry at most once, and only when the tool explicitly reports no matching documentation.",
 			"For current counts, configuration, status, names, providers or synchronization state, call the matching nudgebee_* live-data tool. Never answer current state from documentation, memory, conversation history or examples.",
 			"Describe Kubernetes and VM/proxy rows as installed agents or collectors. For AWS, Azure, and GCP accounts without an installed collector, describe synchronization as agentless collection even if backend health is represented by an agent record.",
-			"For a single live-state question, make exactly one purpose-built call: use a *_count tool for how-many questions and a *_list tool for show/list questions. Put every explicit status, provider, type or name constraint into that first call; never make a broad discovery call first.",
-			"Use group_by only when the user asks for a breakdown across groups. When the user asks about one provider or integration type, filter by cloud_provider or type instead.",
+			"For a single live-state question, make exactly one purpose-built call: use a *_count tool for how-many questions and a *_list tool for show/list questions. Put every explicit status, provider, category, type or name constraint into that first call; when asking for a category like database integrations, pass category='database' or filter in one call; never make sequential calls iterating through possible types when category or multiple types apply.",
+			"Use group_by only when the user asks for a breakdown across groups. When the user asks about one provider, category, or integration type, filter by cloud_provider, category, or type instead.",
 			"For mixed questions, call documentation and live-data tools as independent actions, then combine the evidence into one concise answer.",
 			"A recorded integration status means configured state, not runtime health. Never call an active integration healthy from status alone.",
 			"For Nudgebee agent, collector, heartbeat, or feature connectivity questions, call nudgebee_agent_health_get. Treat Kubernetes workload readiness as supporting runtime evidence, not proof of Nudgebee-recorded health.",
@@ -130,10 +130,10 @@ func (a *NudgebeeAgent) GetSystemPrompt(_ *security.RequestContext, _ core.NBAge
 				"Fetch one account by an exact id or name supplied by the user or returned by nudgebee_accounts_list.",
 			},
 			tools.ToolNudgebeeIntegrationsList: {
-				"Show/list configured integrations; include every user-provided name, type and status filter in the first call.",
+				"Show/list configured integrations; filter by category (e.g. database, messaging, ticketing, observability_platform), type, or name in a single call.",
 			},
 			tools.ToolNudgebeeIntegrationsCount: {
-				"Answer how many configured integrations are visible; filter a requested type/status directly and group only for an explicit breakdown.",
+				"Answer how many configured integrations are visible; filter by category (e.g. database), type, or status in a single call.",
 			},
 			tools.ToolNudgebeeIntegrationGetStatus: {
 				"Report configured status or resolve a named integration to its exact id. If multiple names match, show the matches instead of guessing. Configured status is not health.",
