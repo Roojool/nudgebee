@@ -325,3 +325,35 @@ func TestKnowledgeProcedureReadsPastHundredLinesWithinByteBudget(t *testing.T) {
 	require.LessOrEqual(t, len(text), knowledgeReadBytes)
 	require.Contains(t, text, "Read output limited")
 }
+
+func TestKnowledgePDFNamedLoadPreservesPurpose(t *testing.T) {
+	for _, category := range []string{"sop", "fact"} {
+		t.Run(category, func(t *testing.T) {
+			old := config.Config
+			t.Cleanup(func() { config.Config = old })
+			config.Config.LlmServerKnowledgeWorkspaceEnabled = true
+			db, mock := skillFetchingDB(t)
+			defer func() { _ = db.Close() }()
+			ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: t.Name(), ConversationId: "conv", MessageId: "msg", Query: "PDF guide"}
+			mock.ExpectQuery(`SELECT id, name, COALESCE`).WithArgs(ctx.AccountId, "", "PDF guide").WillReturnRows(sqlmock.NewRows([]string{"id", "name", "kb_type", "integration_id", "md5", "bytes", "note_category", "data_format"}).AddRow("pdf-test", "PDF guide", "manual", nil, "version", 100, category, "pdf"))
+			mock.ExpectQuery(`SELECT id, name, .*LEFT.* FROM llm_knowledgebases`).WithArgs(ctx.AccountId, sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{"id", "name", "data", "data_format", "note_category"}).AddRow("pdf-test", "PDF guide", "", "pdf", category))
+			rag := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `[{"document":"Last page scope","metadata":{"collection":"kb_pdf-test","retrieval_id":"page-6","content_sha256":"abc","content_bytes":15},"similarity_score":0.9}]`)
+			}))
+			defer rag.Close()
+			config.Config.RAGServerUrl = rag.URL + "/"
+			resp, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": "PDF guide"}})
+			require.NoError(t, err)
+			require.Equal(t, core.NBToolResponseStatusSuccess, resp.Status, fmt.Sprint(resp.Data))
+			require.Contains(t, fmt.Sprint(resp.Data), core.KnowledgePurposeGuidance(core.KnowledgePurpose("manual", category)))
+			id := regexp.MustCompile(`knowledge:[a-f0-9]+`).FindString(fmt.Sprint(resp.Data))
+			candidate, ok := core.LoadKnowledgeCandidate(ctx.AccountId, ctx.ConversationId, ctx.MessageId, id)
+			require.True(t, ok)
+			require.Equal(t, core.KnowledgePurpose("manual", category), candidate.Purpose)
+			require.Empty(t, candidate.KBID)
+			require.Equal(t, "page-6", candidate.DocumentID)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}

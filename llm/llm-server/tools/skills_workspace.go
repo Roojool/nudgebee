@@ -75,6 +75,8 @@ func (m LoadSkillsTool) callWorkspaceKnowledge(ctx core.NbToolContext, input cor
 					scoped = append(scoped, doc)
 				}
 			}
+			// PDF chunks need their account-owned category before handles are cached.
+			scoped = core.ResolveManualKnowledge(ctx.Ctx, ctx.AccountId, scoped)
 			menu := cacheSearchKnowledgeCandidates(ctx, scoped)
 			if len(menu) == 0 {
 				return knowledgeFailure(fmt.Errorf("no indexed documents found in this knowledge base"))
