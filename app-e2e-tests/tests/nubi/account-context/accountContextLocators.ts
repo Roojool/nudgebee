@@ -239,8 +239,13 @@ export class AccountContextLocators extends CommonLocators {
     await this.accountListbox.waitFor({ state: "visible", timeout });
 
     const groupHeaders = this.accountListbox.locator('[role="button"]');
+    const options = this.accountListbox.locator('[role="option"]');
+    // A single-provider tenant renders a flat list: no headers, options visible directly.
     await expect
-      .poll(() => groupHeaders.count(), { timeout, message: "the account picker never listed a group to expand" })
+      .poll(async () => (await groupHeaders.count()) + (await options.count()), {
+        timeout,
+        message: "the account picker never listed a group or an account",
+      })
       .toBeGreaterThan(0);
 
     const groupCount = await groupHeaders.count();

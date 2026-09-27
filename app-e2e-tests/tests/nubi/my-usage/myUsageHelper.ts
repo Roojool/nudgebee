@@ -47,9 +47,7 @@ export async function selectMyUsageTab(page: Page, locators: MyUsageLocators, te
 // Logs in, opens the Nubi panel and lands on b-Cortex > Insights > My Usage. The
 // modal inherits the page's own account (NubiBrainNav passes resolvedAccountId), and
 // the login lands on a cluster, so the header filter opens narrowed to that account.
-// Picking All accounts cannot clear it: handleAccountChange stores `id || null`, and
-// `pickedAccountId ?? accountId` then falls straight back to the page's account —
-// so every case here works in the account-scoped view and switches BETWEEN accounts.
+// Every case here works in that account-scoped view and switches BETWEEN accounts.
 export async function openMyUsage(page: Page): Promise<MyUsageLocators> {
   const loginPage = new LoginPage(page);
   const nubi = new NubiLocators(page);
@@ -92,8 +90,13 @@ async function revealOption(locators: MyUsageLocators, option: Locator): Promise
     await locators.openListbox.waitFor({ state: "visible", timeout: 15000 });
   }
   const groupHeaders = locators.openListbox.locator('[role="button"]');
+  const options = locators.openListbox.locator('[role="option"]');
+  // A single-provider tenant renders a flat list: no headers, options visible directly.
   await expect
-    .poll(() => groupHeaders.count(), { timeout: 15000, message: "the account picker never listed a group to expand" })
+    .poll(async () => (await groupHeaders.count()) + (await options.count()), {
+      timeout: 15000,
+      message: "the account picker never listed a group or an account",
+    })
     .toBeGreaterThan(0);
   const groupCount = await groupHeaders.count();
   for (let i = 0; i < groupCount; i++) {
@@ -133,16 +136,6 @@ export async function switchToAnotherAccount(page: Page, locators: MyUsageLocato
 // account is on screen.
 export async function peekAccountPicker(locators: MyUsageLocators): Promise<void> {
   await revealOption(locators, locators.realAccountOption);
-}
-
-// Surfaces one option by typing its label into the panel's search box: ds/Select
-// opens every group while a search is non-empty (isGroupOpen in Select.tsx), which
-// is the contract-backed way to reach an entry whose group the header walk left
-// collapsed. The panel must already be open.
-export async function searchAccountOption(locators: MyUsageLocators, label: string): Promise<void> {
-  await locators.searchInput.fill(label);
-  await expect(locators.searchInput).toHaveValue(label, { timeout: 10000 });
-  await expect(locators.accountOption(label)).toBeVisible({ timeout: 15000 });
 }
 
 // Escape is routed by MUI to the topmost modal — the panel — so b-Cortex stays open.

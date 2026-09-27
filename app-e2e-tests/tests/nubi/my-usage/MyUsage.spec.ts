@@ -20,7 +20,6 @@ import {
   peekAccountPicker,
   remountMyUsage,
   requiredTenantName,
-  searchAccountOption,
   selectedAccountLabel,
   switchToAnotherAccount,
   waitForUsageLoaded,
@@ -114,7 +113,7 @@ test.describe("Nubi My Usage Tab", () => {
   );
 
   test(
-    "Nubi My Usage sanity - open the b-Cortex account filter, verify it offers at least one real account, search it for All accounts, verify that entry is offered, close it with Escape without picking, verify b-Cortex stays open with the same account in scope and no budget-status read is sent",
+    "Nubi My Usage sanity - open the b-Cortex account filter, verify it offers at least one real account and no synthetic All accounts entry, close it with Escape without picking, verify b-Cortex stays open with the same account in scope and no budget-status read is sent",
     { tag: ["@dev", "@sanity", "@negative", "@functional"] },
     async ({ page }) => {
       test.setTimeout(240000);
@@ -126,8 +125,8 @@ test.describe("Nubi My Usage Tab", () => {
       await peekAccountPicker(locators);
       // One real account is the precondition the switching cases below rely on.
       await expect(locators.realAccountOption, "the account picker offers no real account on this tenant").toBeVisible({ timeout: 15000 });
-      await searchAccountOption(locators, ALL_ACCOUNTS_LABEL);
-      await expect(locators.accountOption(ALL_ACCOUNTS_LABEL)).toBeVisible();
+      // "All accounts" is the empty-filter placeholder now, not an option.
+      await expect(locators.accountOption(ALL_ACCOUNTS_LABEL)).toHaveCount(0);
 
       await closeAccountPicker(page, locators);
       await expect(locators.accountSelect).toHaveText(before);

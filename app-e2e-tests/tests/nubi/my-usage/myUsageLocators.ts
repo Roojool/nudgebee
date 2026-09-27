@@ -42,7 +42,6 @@ export class MyUsageLocators extends CommonLocators {
   readonly accountSelect: Locator;
   readonly openListbox: Locator;
   readonly realAccountOption: Locator;
-  readonly searchInput: Locator;
   readonly matrix: Locator;
   readonly matrixEventAnalysisHeader: Locator;
   readonly matrixChatHeader: Locator;
@@ -97,9 +96,6 @@ export class MyUsageLocators extends CommonLocators {
     this.openListbox = page.locator('[role="listbox"]:visible');
     // Any account entry other than the synthetic All accounts one.
     this.realAccountOption = this.openListbox.locator('[role="option"]').filter({ hasNotText: ALL_ACCOUNTS_LABEL }).first();
-    // ds/Select's search box (shown past eight options); it has no label, so the
-    // placeholder is its only handle, scoped to the open panel.
-    this.searchInput = this.openListbox.getByPlaceholder(/^Search/).or(this.openListbox.locator("input").first()).first();
 
     // UsageMatrix: the "Scope" header cell is its only fixed text, so the matrix
     // Box is reached by walking up from it (cell → header grid → matrix).

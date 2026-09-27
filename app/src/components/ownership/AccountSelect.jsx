@@ -18,7 +18,8 @@ const renderAccountGroupIcon = (provider) =>
 const ALL_ACCOUNTS_VALUE = '__all__';
 
 // Single-select of the tenant's cloud accounts. Shared by the rule modal, the
-// bulk-assign modal, and (with includeAllOption) b-Cortex's header filter.
+// bulk-assign modal, b-Cortex's header filter, and (with includeAllOption) the
+// admin AI & Tools account filter.
 // Value is the account id; label is account_name.
 // `providerFilter` optionally narrows the list by cloud_provider — e.g. K8S from
 // ./accountProviders to show only Kubernetes clusters in K8s rule flows. Default = all.

@@ -267,12 +267,12 @@ export class NubiLocators {
   // this never came up there. Picks the first real account so Create becomes
   // reachable, same as an admin narrowing the filter by hand.
   //
-  // AccountSelect (ds/Select, `grouped`) always has 2+ groups once any real
-  // account exists — the synthetic "All accounts" entry is its own group
-  // ('All'), so `effectiveGrouped` is true and every group renders collapsed
-  // behind a group-header button. Expanding those headers in order is what
-  // makes an option clickable regardless of which provider group holds the
-  // first real account.
+  // AccountSelect (ds/Select, `grouped`) groups by cloud provider only when
+  // there are 2+ groups — then every group renders collapsed behind a
+  // group-header button, and expanding those headers in order is what makes an
+  // option clickable regardless of which provider group holds the first real
+  // account. With a single provider the list is flat: no headers, options
+  // visible straight away.
   //
   // Every locator below is matched by ARIA attribute rather than through
   // getByRole. ds/Select renders its panel as a nested MUI Menu with
@@ -301,8 +301,12 @@ export class NubiLocators {
     // collapsed for good, so the option wait below could only time out. The
     // headers are what has to be waited for, not the panel.
     const groupHeaders = listbox.locator('[role="button"]');
+    const options = listbox.locator('[role="option"]');
     await expect
-      .poll(() => groupHeaders.count(), { timeout, message: "the account picker never listed a group to expand" })
+      .poll(async () => (await groupHeaders.count()) + (await options.count()), {
+        timeout,
+        message: "the account picker never listed a group or an account",
+      })
       .toBeGreaterThan(0);
 
     const groupCount = await groupHeaders.count();
