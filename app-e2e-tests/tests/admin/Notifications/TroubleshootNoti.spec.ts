@@ -12,7 +12,7 @@ test("Add Troubleshooting Notification Rule", { tag: ["@dev", "@test", "@oss", "
 
   const locators = await navigateToNewNotificationRule(page);
 
-  await locators.troubleshootTab.click();
+  await locators.selectOnlyType(locators.troubleshootTab);
 
   await selectCluster(locators, page);
 

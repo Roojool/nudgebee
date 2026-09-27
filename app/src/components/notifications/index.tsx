@@ -1,423 +1,449 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Typography } from '@mui/material';
-import React, { useEffect, useRef, useState } from 'react';
+import SearchIcon from '@mui/icons-material/Search';
+import { ExpandMore, MoreVert } from '@mui/icons-material';
 import { ListingLayout } from '@ui/ListingLayout';
-import FilterDropdown from '@ui/FilterDropdown';
 import { Button as DsButton } from '@ui/Button';
-import DownloadButton from '@shared/buttons/DownloadButton';
-import Datetime from '@shared/format/Datetime';
+import { Chip } from '@ui/Chip';
+import { Input } from '@ui/Input';
+import { Label } from '@ui/Label';
+import { Callout } from '@ui/Callout';
+import { DropdownMenu } from '@ui/DropdownMenu';
+import Tooltip from '@ui/Tooltip';
+import { toast } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
-import NotificationRuleModal from './NotificationRuleModal';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { DeleteIconRed, EditIcon } from '@assets';
 import apiNotifications from '@api1/notification';
 import apiDashboard from '@api1/home';
-import apiKubernetes from '@api1/kubernetes';
-import SafeIcon from '@shared/icons/SafeIcon';
-import CloudProviderIcon from '@shared/icons/CloudIcon';
-import { DeleteIconRed as deleteIcon, EditIcon } from '@assets';
+import apiUser from '@api1/user';
 import { canManage } from '@lib/auth';
 import useAdminAction from '@components/user-management/useAdminAction';
-import DeleteNotificationRuleModal from './DeleteNotificationRuleModal';
-import Text from '@shared/format/Text';
-import apiUser from '@api1/user';
 import { ds } from 'src/utils/colors';
-import { safeJSONParse, snakeToTitleCase } from 'src/utils/common';
-import { PlatformChannelBadge } from '@shared/icons/IconTextBadge';
-import { Label } from '@ui/Label';
-import Tooltip from '@ui/Tooltip';
-import { ruleAccountIds } from './ruleAccounts';
+import DeleteNotificationRuleModal from './DeleteNotificationRuleModal';
+import { RULE_TYPE, RULE_TYPES, RuleTypeKey, isRuleTypeKey } from './rules/catalogue';
+import { Rule, RuleIssue, newRule, ruleFromRow, ruleIssues, toUpsertInput, typesOf, whatText, whoText } from './rules/model';
+import { useDestinations } from './rules/destinations';
+import { Fallbacks, fallbacksFromPolicies } from './rules/fallback';
+import { CoversCell, FallbackSentence, RuleSentence, RuleStatusLabel, TypeChip } from './rules/RuleParts';
+import RuleEditorModal, { EditorRequest, RuleAccount } from './rules/RuleEditorModal';
+import FallbackModal from './rules/FallbackModal';
+import TestNotificationModal from './rules/TestNotificationModal';
+import OnlySomeAccountsModal from './rules/OnlySomeAccountsModal';
 
-const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
+const NOTIFICATIONS_TABLE_ID = 'Notifications';
+const HEADERS = [
+  { name: 'Rule', width: '58%' },
+  { name: 'Covers', width: '20%' },
+  { name: 'Status', width: '12%' },
+  { name: '', width: '10%' },
+];
+
+type Filter = 'all' | RuleTypeKey;
 
 const Notifications = () => {
-  const [rowsPerPage, setRowsPerPage] = useState(apiUser.getUserPreferencesTablePageSize());
-  const notificationId = 'Notifications';
-
-  const [totalRows, setTotalRows] = useState(0);
-  // Start in the loading state so the table shows the skeleton immediately on
-  // mount instead of briefly flashing "No Data Available" before the first
-  // rules fetch (which is gated on isFetchCluster) kicks in.
+  const canWrite = canManage('notifications', 'Write');
+  const [rules, setRules] = useState<Rule[]>([]);
+  const [accounts, setAccounts] = useState<RuleAccount[]>([]);
+  const [fallbacks, setFallbacks] = useState<Fallbacks>(fallbacksFromPolicies([]));
   const [loading, setLoading] = useState(true);
-  const [currentPage, setCurrentPage] = useState<number>(0);
-  const [allNameSpaces, setAllNameSpaces] = useState([]);
-  const [namespaceOption, setNamespaceOption] = useState([]);
-  const [notificationTableData, setNotificationTableData] = useState([]);
-  const [openNotificationRule, setOpenNotificationRule] = useState(false);
-  // Preset source type when the Create Rule modal is opened from an admin
-  // Overview "Create a … alert" quick-link (empty for the toolbar's own button).
-  const [createSource, setCreateSource] = useState('');
-  const [clusterOption, setClusterOption] = useState<any[]>([]);
-  const [selectedCluster, setSelectedCluster] = useState<string>('');
-  const [selectedClusterId, setSelectedClusterId] = useState<string>('');
-  const [selectedNamespace, setSelectedNamespace] = useState<string>('');
-  const [nsWorkloadOptions, setNSWorkloadOptions] = useState<any>([]);
-  const [selectedWorkload, setSelectedWorkload] = useState<string>('');
-  const [activeEditRuleData, setActiveEditRuleData] = useState<any>({});
-  const [deleteRuleModalVisible, setDeleteRuleModalVisible] = useState<boolean>(false);
-  const [editingSource, setEditingSource] = useState('');
-  const [clusterMap, setClusterMap] = useState<Map<string, string>>(new Map());
-
-  const [isFetchCluster, setIsFetchCluster] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const rawRulesRef = useRef<any[]>([]);
+  const [filter, setFilter] = useState<Filter>('all');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState<number>(apiUser.getUserPreferencesTablePageSize() || 10);
+  const [editor, setEditor] = useState<EditorRequest | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Rule | null>(null);
+  const [testOpen, setTestOpen] = useState(false);
+  const [fallbackFocus, setFallbackFocus] = useState<RuleTypeKey | null | undefined>(undefined);
+  const [onlyOpen, setOnlyOpen] = useState(false);
+  const [flashId, setFlashId] = useState<string | null>(null);
+  const destinations = useDestinations(canWrite);
 
-  const getClustersData = async () => {
-    try {
-      const response = await apiDashboard.getCloudAccounts();
-      if (response && response.length > 0) {
-        const clusters = response.map((item: any) => ({
-          id: item.id,
-          label: item.account_name,
-          value: item.account_name,
-          group: item.cloud_provider || 'Other',
-        }));
-        const map = new Map<string, string>();
-        response.forEach((item: any) => {
-          map.set(item.id, item.account_name);
-        });
-        setClusterMap(map);
-        setClusterOption(clusters);
-      } else {
-        setClusterOption([]);
-        setClusterMap(new Map());
-      }
-      setIsFetchCluster(true);
-    } catch (error) {
-      console.error(error);
-      // Still release the gate so rules load (clusters show '-') instead of
-      // leaving the table stuck on the loader.
-      setIsFetchCluster(true);
-    }
-  };
-
-  useEffect(() => {
-    getClustersData();
-    getAllNameSpacesData();
+  const load = useCallback(async () => {
+    const [rulesRes, accountsRes, policiesRes] = await Promise.all([
+      apiNotifications.listRules(),
+      apiDashboard.getCloudAccounts().catch(() => []),
+      apiNotifications.getDefaultPolicies(),
+    ]);
+    setLoadFailed(!!rulesRes.error);
+    setRules((rulesRes.rows || []).map(ruleFromRow));
+    setAccounts((accountsRes || []).map((a: any) => ({ id: a.id, name: a.account_name, provider: a.cloud_provider || 'Other' })));
+    setFallbacks(fallbacksFromPolicies(policiesRes.policies || []));
+    setLoading(false);
   }, []);
 
-  const getAllNameSpacesData = async () => {
-    try {
-      const response: any = await apiKubernetes.getAllK8sNamespaces();
-      setAllNameSpaces(response?.data);
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  const getAllWorkloadsData = async () => {
-    try {
-      if (selectedNamespace) {
-        const query: any = {};
-        query['namespace'] = selectedNamespace;
-        query['kind'] = ['Deployment', 'Rollout'];
-        const response: any = await apiKubernetes.getAllK8sWorkload(query);
-        const workloadNameArray: string[] = response?.data.map((item: any) => item.name);
-        const uniqueWorkloadNames = Array.from(new Set(workloadNameArray));
-        setNSWorkloadOptions(uniqueWorkloadNames);
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
   useEffect(() => {
-    getAllWorkloadsData();
-  }, [selectedNamespace]);
+    load();
+  }, [load]);
 
-  const BEST_PRACTICES_HEADER = [
-    { name: 'Name', width: '15%' },
-    { name: 'Source', width: '10%' },
-    { name: 'Cluster', width: '12%' },
-    { name: 'Application', width: '18%' },
-    { name: 'Channels', width: '18%' },
-    { name: 'Status', width: '8%' },
-    { name: 'Created By', width: '10%' },
-    { name: 'Created At', width: '12%' },
-    '',
-  ];
+  const accountName = useMemo(() => {
+    const names = new Map(accounts.map((a) => [a.id, a.name]));
+    return (id: string) => names.get(id) || 'Unknown account';
+  }, [accounts]);
+  const accountIds = useMemo(() => accounts.map((a) => a.id), [accounts]);
 
-  const renderRuleAccounts = (item: any) => {
-    if (item.scope_mode !== 'accounts') {
-      return <Text value='All accounts' />;
+  const openNew = (patch: Partial<Rule>, pauseFor?: EditorRequest['pauseFor']) => {
+    const types = patch.types || [filter !== 'all' ? filter : 'troubleshoot'];
+    // There is one daily email rule; adding one edits it.
+    const daily = types !== 'all' && types[0] === 'daily_recap' ? rules.find((r) => r.types !== 'all' && r.types.includes('daily_recap')) : undefined;
+    if (daily) {
+      setEditor({ rule: daily, isNew: false });
+      return;
     }
-    const names = ruleAccountIds(item).map((id) => clusterMap.get(id) || 'Unknown account');
-    if (names.length <= 1) {
-      return <Text value={names[0] || 'No accounts'} />;
-    }
-    return (
-      <Tooltip title={names.join(', ')}>
-        <Typography sx={{ fontSize: 'var(--ds-text-body)', color: ds.gray[700], width: 'fit-content' }}>{`${names.length} accounts`}</Typography>
-      </Tooltip>
-    );
+    const ek = types !== 'all' && types.length === 1 ? RULE_TYPE[types[0]].defaultEvents : undefined;
+    setEditor({ rule: newRule({ events: ek || null, ...patch, types }), isNew: true, pauseFor });
   };
 
-  const handleEditRuleModal = (e: any, item: any) => {
-    // Look up fresh data from ref to avoid stale closure data
-    const freshItem = rawRulesRef.current.find((r: any) => r.id === item.id) || item;
-    setActiveEditRuleData(freshItem);
-    setEditingSource(freshItem.source.toLowerCase());
-    setOpenNotificationRule(true);
-  };
-
-  const handleDeleteRuleModal = (e: any, item: any) => {
-    setActiveEditRuleData(item);
-    setDeleteRuleModalVisible(true);
-  };
-
-  const filterNamespaces = (allNameSpaces: any, clusterName: string) => {
-    const clusterId: any = clusterOption.filter((item: any) => {
-      if (item.label == clusterName) {
-        return item;
-      }
-    });
-    const accountSpecificNamespaces = allNameSpaces
-      ?.filter((e: any) => e.cloud_account_id == clusterId[0]?.id)
-      .map((item: any) => {
-        return {
-          value: item.namespace_name,
-          label: item.namespace_name,
-        };
-      });
-    setNamespaceOption(accountSpecificNamespaces);
-  };
-
-  useEffect(() => {
-    filterNamespaces(allNameSpaces, selectedCluster);
-  }, [selectedCluster, allNameSpaces]);
-
-  useEffect(() => {
-    if (isFetchCluster) {
-      listNotificationRules();
-    }
-  }, [currentPage, rowsPerPage, selectedCluster, selectedNamespace, selectedWorkload, isFetchCluster]);
-
-  const listNotificationRules = () => {
-    const limit = rowsPerPage;
-    const offset = rowsPerPage * currentPage;
-    setLoading(true);
-    const query: any = { excludeSource: 'ai_cost' }; // managed from the Cost Report tab's own schedule modal instead
-    if (selectedClusterId) {
-      query.accountId = selectedClusterId;
-    }
-    if (selectedNamespace) {
-      query.namespace = selectedNamespace;
-    }
-    if (selectedWorkload) {
-      query.workload = selectedWorkload;
-    }
-
-    apiNotifications.getNotificationRules(query, limit, offset).then((res: any) => {
-      setLoadFailed(Boolean(res?.error));
-      const notificationRulesList: any = [];
-      const rawRows = res?.data?.notifications_list_rules?.rows || [];
-      rawRows.forEach((item: any) => {
-        item.notification_rule_mappings = safeJSONParse(item?.notification_rule_mappings) || [];
-        const data = [];
-        data.push({
-          component: <Text value={item.name} />,
-        });
-        data.push({ component: <Text value={snakeToTitleCase(item.source)} /> });
-        data.push({ component: renderRuleAccounts(item) });
-        data.push({
-          component: (
-            <Box>
-              <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[700] }}>
-                {item.workload || '-'}
-              </Typography>
-              {item.namespace && <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>ns: {item.namespace}</Typography>}
-            </Box>
-          ),
-        });
-        data.push({
-          component: (() => {
-            if (!item.notification_rule_mappings || item.notification_rule_mappings.length === 0) {
-              return <Text value='-' />;
-            }
-            return (
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)' }}>
-                {item.notification_rule_mappings.map((mapping: any, index: number) => {
-                  let channelName = '-';
-                  if (mapping.platform === 'slack') {
-                    channelName = mapping.channels?.name || '-';
-                  } else if (mapping.platform === 'ms_teams') {
-                    channelName = mapping.channels?.channels?.[0]?.name || mapping.channels?.name || '-';
-                  } else if (mapping.platform === 'email') {
-                    if (mapping.channels?.emails?.[0]) {
-                      channelName = mapping.channels.emails[0];
-                    } else if (Array.isArray(mapping.channels) && mapping.channels[0]) {
-                      channelName = mapping.channels[0];
-                    } else if (mapping.channels?.exclusion_emails?.length > 0) {
-                      const count = mapping.channels.exclusion_emails.length;
-                      channelName = `${count} user${count > 1 ? 's' : ''} excluded`;
-                    } else {
-                      return null;
-                    }
-                  } else {
-                    channelName = mapping.channels?.name || '-';
-                  }
-                  return (
-                    <PlatformChannelBadge key={`${mapping.platform}-${index}`} platform={mapping.platform} channelName={channelName} size='medium' />
-                  );
-                })}
-              </Box>
-            );
-          })(),
-        });
-        data.push({
-          component: <Label text={item.is_suppressed ? 'Suppressed' : 'Active'} tone={item.is_suppressed ? 'neutral' : 'success'} size='sm' />,
-        });
-        data.push({ text: <Text value={item.created_by_display_name || '-'} /> });
-        data.push({ component: <Datetime value={item.created_at} baseDate={new Date()} /> });
-        data.push({
-          component: (
-            <Box display={'flex'} flexDirection={'row'} alignItems={'center'} justifyContent={'flex-end'}>
-              {canManage('notifications', 'Write') ? (
-                <>
-                  <Box sx={{ mr: 'var(--ds-space-2)' }}>
-                    <DsButton
-                      tone='ghost'
-                      composition='icon-only'
-                      aria-label='Delete'
-                      id={`${item.name}-delete`}
-                      onClick={(e) => {
-                        handleDeleteRuleModal(e, item);
-                      }}
-                      icon={<SafeIcon src={deleteIcon} alt='delete' width={18} height={18} />}
-                    />
-                  </Box>
-                  <DsButton
-                    tone='ghost'
-                    composition='icon-only'
-                    aria-label='Edit'
-                    onClick={(e) => {
-                      handleEditRuleModal(e, item);
-                    }}
-                    icon={<SafeIcon src={EditIcon} alt='edit' width={18} height={18} />}
-                  />
-                </>
-              ) : (
-                <></>
-              )}
-            </Box>
-          ),
-        });
-        notificationRulesList.push(data);
-      });
-      rawRulesRef.current = rawRows;
-      setNotificationTableData(notificationRulesList);
-      setTotalRows(res?.data?.notifications_aggregate_rules?.rows?.[0]?.count || 0);
-      setLoading(false);
-    });
-  };
-
-  const handleButtonAction = () => {
-    setCreateSource('');
-    setOpenNotificationRule(true);
-  };
-
-  // Admin Overview "Create a … alert" / "Schedule a weekly digest" quick-links
-  // land here with ?action=alert-<source> and open the Create Rule modal preset
-  // to that source type.
+  // Admin Overview "Create a … alert" / "Schedule a weekly digest" quick-links.
   useAdminAction(['alert-troubleshoot', 'alert-optimize', 'alert-slo', 'alert-weekly_digest'], (action: string) => {
-    if (!canManage('notifications', 'Write')) return;
-    setCreateSource(action.replace('alert-', ''));
-    setOpenNotificationRule(true);
+    if (!canWrite) return;
+    const key = action.replace('alert-', '');
+    if (isRuleTypeKey(key)) openNew({ types: [key] });
   });
 
+  const saveRule = async (rule: Rule, message: string, extra: Record<string, any> = {}) => {
+    const res = await apiNotifications.upsertRule({ ...toUpsertInput(rule), ...extra });
+    if (res.error) toast.error(res.error);
+    else toast.success(message);
+    load();
+  };
+
+  const runFix = async (issue: RuleIssue) => {
+    if (!issue.fix) return;
+    if (issue.fix.kind === 'delete') {
+      const res: any = await apiNotifications.deleteNotificationRule(issue.fix.rule.id);
+      if (res?.data?.data?.notification_rule_delete) toast.success('Rule removed');
+      else toast.error('Couldn’t remove the rule. Try again in a minute.');
+      load();
+      return;
+    }
+    await saveRule(issue.fix.rule, `Updated “${issue.fix.rule.name}”`);
+  };
+
+  const showRule = (id: string) => {
+    setTestOpen(false);
+    setFilter('all');
+    setQuery('');
+    const index = rules.findIndex((r) => r.id === id);
+    if (index >= 0) setPage(Math.floor(index / rowsPerPage));
+    setFlashId(id);
+    setTimeout(() => document.getElementById(`rule-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+    setTimeout(() => setFlashId(null), 1800);
+  };
+
+  const visible = rules.filter((r) => {
+    if (filter !== 'all' && !typesOf(r).includes(filter)) return false;
+    if (!query) return true;
+    return `${r.name} ${whatText(r)} ${whoText(r, accountName)}`.toLowerCase().includes(query.toLowerCase());
+  });
+  const pageRules = visible.slice(page * rowsPerPage, (page + 1) * rowsPerPage);
+  const filterType = filter !== 'all' ? filter : null;
+
+  const addMenu = [
+    { id: 'add-rule-blank', label: 'Blank rule', onSelect: () => openNew({}) },
+    {
+      id: 'add-rule-stop-account',
+      label: 'Stop everything from an account',
+      onSelect: () => openNew({ types: 'all', scope: 'some', action: 'drop' }),
+    },
+    {
+      id: 'add-rule-pause',
+      label: 'Pause alerts for a while',
+      onSelect: () => openNew({ types: ['troubleshoot', 'slo'], scope: 'some', action: 'drop' }, '24h'),
+    },
+    { id: 'add-rule-only-accounts', label: 'Only get alerts from some accounts', onSelect: () => setOnlyOpen(true) },
+    {
+      id: 'add-rule-mute-automation',
+      label: 'Mute automation chatter',
+      onSelect: () => openNew({ types: ['automation'], events: RULE_TYPE.automation.defaultEvents!, action: 'drop' }),
+    },
+  ];
+
+  const ruleRow = (rule: Rule) => {
+    const issues = ruleIssues(rule, rules, accountIds, accountName).filter((i) => i.kind !== 'info');
+    const name = (
+      <Typography id={`rule-${rule.id}`} sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
+        {rule.name}
+      </Typography>
+    );
+    const row: any = [
+      {
+        component: (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], py: ds.space[1] }}>
+            {rule.description ? (
+              <Tooltip title={rule.description}>
+                <span>{name}</span>
+              </Tooltip>
+            ) : (
+              name
+            )}
+            <Box sx={{ fontSize: ds.text.body, color: ds.gray[600], lineHeight: 1.7 }}>
+              <RuleSentence rule={rule} accountName={accountName} />
+            </Box>
+            {issues.map((issue) => (
+              <Callout
+                key={issue.text}
+                tone={issue.kind === 'critical' ? 'critical' : issue.kind === 'warning' ? 'warning' : 'info'}
+                message={issue.text}
+                action={issue.fix && canWrite ? { label: issue.fix.label, id: `fix-${rule.id}`, onClick: () => runFix(issue) } : undefined}
+              />
+            ))}
+          </Box>
+        ),
+        data: rule.name,
+      },
+      { component: <CoversCell rule={rule} /> },
+      { component: <RuleStatusLabel rule={rule} /> },
+      {
+        component: canWrite ? (
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: ds.space[1] }}>
+            <DsButton
+              tone='ghost'
+              composition='icon-only'
+              aria-label={`Edit ${rule.name}`}
+              id={`${rule.name}-edit`}
+              onClick={() => setEditor({ rule, isNew: false })}
+              icon={<SafeIcon src={EditIcon} alt='' width={18} height={18} />}
+            />
+            <DropdownMenu
+              align='end'
+              trigger={
+                <DsButton
+                  tone='ghost'
+                  composition='icon-only'
+                  aria-label={`More actions for ${rule.name}`}
+                  id={`${rule.name}-more`}
+                  icon={<MoreVert />}
+                />
+              }
+              items={[
+                ...(rule.active
+                  ? []
+                  : [
+                      {
+                        id: `${rule.name}-turn-on`,
+                        label: 'Turn on',
+                        onSelect: () => saveRule({ ...rule }, `“${rule.name}” is on`, { is_active: true }),
+                      },
+                    ]),
+                {
+                  id: `${rule.name}-duplicate`,
+                  label: 'Duplicate',
+                  onSelect: () => setEditor({ rule: { ...rule, id: undefined, name: `${rule.name} copy` }, isNew: true, named: true }),
+                },
+                {
+                  id: `${rule.name}-delete`,
+                  label: 'Delete',
+                  tone: 'danger' as const,
+                  icon: <SafeIcon src={DeleteIconRed} alt='' width={14} height={14} />,
+                  onSelect: () => setDeleteTarget(rule),
+                },
+              ]}
+            />
+          </Box>
+        ) : (
+          <></>
+        ),
+      },
+    ];
+    if (flashId === rule.id) row.sx = { '& td': { backgroundColor: ds.blue[100] } };
+    return row;
+  };
+
+  const fallbackRow: any = [
+    {
+      component: (
+        <Box id='fallback' sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], py: ds.space[1] }}>
+          <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>When no rule matches</Typography>
+          <Box sx={{ fontSize: ds.text.body, color: ds.gray[600], lineHeight: 1.7 }}>
+            <FallbackSentence fallbacks={fallbacks} type={filterType} />
+          </Box>
+        </Box>
+      ),
+    },
+    { component: filterType ? <TypeChip type={filterType} /> : <Label text='Everything else' tone='neutral' size='sm' textTransform='none' /> },
+    { component: <Label text='Fallback' tone='neutral' size='sm' textTransform='none' /> },
+    {
+      component:
+        canWrite && filterType !== 'daily_recap' ? (
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <DsButton
+              tone='ghost'
+              composition='icon-only'
+              aria-label='Edit when no rule matches'
+              id='edit-fallback'
+              onClick={() => setFallbackFocus(filterType)}
+              icon={<SafeIcon src={EditIcon} alt='' width={18} height={18} />}
+            />
+          </Box>
+        ) : (
+          <></>
+        ),
+    },
+  ];
+  fallbackRow.sx = { '& td': { backgroundColor: ds.background[200] } };
+
+  const emptyRow: any = [
+    {
+      component: (
+        <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: ds.space[1], py: ds.space[3] }}>
+          <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>
+            {query ? `No rules match “${query}”` : `No rules for ${filterType ? RULE_TYPE[filterType].label : 'anything'} yet`}
+          </Typography>
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>
+            Notifications without a rule follow “When no rule matches” below.
+          </Typography>
+        </Box>
+      ),
+    },
+    { component: <></> },
+    { component: <></> },
+    {
+      component:
+        canWrite && !query ? (
+          <DsButton id='empty-add-rule' tone='secondary' size='sm' onClick={() => openNew({})}>
+            Add rule
+          </DsButton>
+        ) : (
+          <></>
+        ),
+    },
+  ];
+
+  const tableData = loading ? [] : [...(pageRules.length ? pageRules.map(ruleRow) : [emptyRow]), fallbackRow];
+
+  const count = (key: Filter) => (key === 'all' ? rules.length : rules.filter((r) => typesOf(r).includes(key)).length);
+  const filterChip = (key: Filter) => (
+    <Tooltip key={key} title={key === 'all' ? 'Every rule' : RULE_TYPE[key].includes.join(' ')}>
+      <span>
+        <Chip
+          id={`filter-${key}`}
+          variant='filter'
+          size='sm'
+          pressed={filter === key}
+          count={count(key)}
+          icon={key === 'all' ? undefined : <SafeIcon src={RULE_TYPE[key].icon} alt='' width={12} height={12} />}
+          onClick={() => {
+            setFilter(key);
+            setPage(0);
+          }}
+        >
+          {key === 'all' ? 'All' : RULE_TYPE[key].label}
+        </Chip>
+      </span>
+    </Tooltip>
+  );
+
   return (
-    <Box position={'relative'}>
-      <NotificationRuleModal
-        open={openNotificationRule}
-        createSource={createSource}
-        handleClose={() => {
-          setOpenNotificationRule(false);
-          setActiveEditRuleData({});
-          setEditingSource('');
-          setCreateSource('');
-        }}
-        listNotificationRules={listNotificationRules}
-        notificationRuleObject={activeEditRuleData}
-        editingSource={editingSource}
-      />
-      <DeleteNotificationRuleModal
-        open={deleteRuleModalVisible}
-        handleClose={() => {
-          setDeleteRuleModalVisible(false);
-          setActiveEditRuleData({});
-        }}
-        ruleData={activeEditRuleData}
-        listNotificationRules={listNotificationRules}
-      />
+    <Box position='relative'>
       <ListingLayout id='notification-container'>
         <ListingLayout.Toolbar
           actions={
             <>
-              <DownloadButton onClick={() => ({ tableId: notificationId })} />
-              {canManage('notifications', 'Write') && (
-                <DsButton id='notification-rule' tone='primary' size='md' onClick={() => handleButtonAction()}>
-                  Create Rule
-                </DsButton>
+              <Box sx={{ width: 200 }}>
+                <Input
+                  id='search-rules'
+                  size='sm'
+                  placeholder='Search rules'
+                  aria-label='Search rules'
+                  leadingIcon={<SearchIcon fontSize='small' />}
+                  value={query}
+                  onChange={(value: string) => {
+                    setQuery(value);
+                    setPage(0);
+                  }}
+                />
+              </Box>
+              <DsButton id='test-notification' tone='secondary' size='md' onClick={() => setTestOpen(true)}>
+                Test a notification
+              </DsButton>
+              {canWrite && (
+                <DropdownMenu
+                  align='end'
+                  items={addMenu}
+                  trigger={
+                    <DsButton id='notification-rule' tone='primary' size='md' icon={<ExpandMore />} iconPlacement='end'>
+                      Add rule
+                    </DsButton>
+                  }
+                />
               )}
             </>
           }
         >
-          <FilterDropdown
-            id='notification-filter-cluster'
-            label='Cluster'
-            grouped
-            groupIcon={renderAccountGroupIcon}
-            options={clusterOption}
-            value={selectedCluster ? clusterOption.find((o) => o.value === selectedCluster) ?? null : null}
-            onSelect={(_e: any, item: any) => {
-              const value = item?.value || '';
-              setSelectedCluster(value);
-              setSelectedClusterId(clusterOption.find((option) => option.value === value)?.id || '');
-              setSelectedNamespace('');
-              setSelectedWorkload('');
-            }}
-          />
-          <FilterDropdown
-            id='notification-filter-namespace'
-            label='Namespace'
-            options={namespaceOption || []}
-            value={selectedNamespace ? { label: selectedNamespace, value: selectedNamespace } : null}
-            disabled={!(selectedCluster?.length > 0)}
-            onSelect={(_e: any, item: any) => {
-              setSelectedNamespace(item?.value || '');
-              setSelectedWorkload('');
-            }}
-          />
-          <FilterDropdown
-            id='notification-filter-application'
-            label='Application'
-            options={nsWorkloadOptions || []}
-            value={selectedWorkload ? { label: selectedWorkload, value: selectedWorkload } : null}
-            disabled={!(selectedNamespace?.length > 0)}
-            onSelect={(_e: any, item: any) => {
-              setSelectedWorkload(item?.value || '');
-            }}
-          />
+          <Box role='tablist' aria-label='Filter by type' sx={{ display: 'flex', flexWrap: 'wrap', gap: ds.space[1] }}>
+            {filterChip('all')}
+            {RULE_TYPES.map((t) => filterChip(t.key))}
+          </Box>
         </ListingLayout.Toolbar>
-
+        {filterType && RULE_TYPE[filterType].rollup && (
+          <Typography sx={{ px: ds.space[4], fontSize: ds.text.small, color: ds.gray[600] }}>
+            {`${RULE_TYPE[filterType].rollup!.charAt(0).toUpperCase()}${RULE_TYPE[filterType].rollup!.slice(1)}`} cover several accounts; each channel
+            only gets the accounts its rules allow.
+          </Typography>
+        )}
+        {filterType === 'automation' && (
+          <Typography sx={{ px: ds.space[4], fontSize: ds.text.small, color: ds.gray[600] }}>
+            Approval requests always go out; no rule can stop them.
+          </Typography>
+        )}
         <ListingLayout.Body>
           <CustomTable
-            headers={BEST_PRACTICES_HEADER}
-            tableData={notificationTableData as any}
+            headers={HEADERS}
+            tableData={tableData}
             rowsPerPage={rowsPerPage}
-            totalRows={totalRows}
-            onPageChange={(page: number, limit: number) => {
-              setCurrentPage(page - 1);
+            totalRows={visible.length || 1}
+            pageNumber={page + 1}
+            onPageChange={(next: number, limit: number) => {
+              setPage(next - 1);
               setRowsPerPage(limit);
             }}
-            id={notificationId}
+            onSortChange={() => undefined}
+            id={NOTIFICATIONS_TABLE_ID}
             loading={loading}
             emptyStateText={loadFailed ? "Couldn't load notification rules. Try again in a minute." : undefined}
             showExpandable={false}
             upperHeaders={[]}
-            onSortChange={() => undefined}
-            stickyColumnIndex='10'
-            pageNumber={currentPage + 1}
           />
         </ListingLayout.Body>
       </ListingLayout>
+
+      <RuleEditorModal
+        request={editor}
+        rules={rules}
+        accounts={accounts}
+        destinations={destinations}
+        onClose={() => setEditor(null)}
+        onSaved={() => {
+          setEditor(null);
+          load();
+        }}
+      />
+      <FallbackModal
+        open={fallbackFocus !== undefined}
+        focusType={fallbackFocus ?? null}
+        fallbacks={fallbacks}
+        destinations={destinations}
+        onClose={() => setFallbackFocus(undefined)}
+        onSaved={load}
+      />
+      <TestNotificationModal open={testOpen} defaultType={filterType} accounts={accounts} onClose={() => setTestOpen(false)} onShowRule={showRule} />
+      <OnlySomeAccountsModal
+        open={onlyOpen}
+        accounts={accounts}
+        destinations={destinations}
+        rules={rules}
+        onClose={() => setOnlyOpen(false)}
+        onSaved={load}
+      />
+      <DeleteNotificationRuleModal
+        open={!!deleteTarget}
+        handleClose={() => setDeleteTarget(null)}
+        ruleData={deleteTarget || {}}
+        sentence={deleteTarget ? <RuleSentence rule={deleteTarget} accountName={accountName} /> : null}
+        listNotificationRules={load}
+      />
     </Box>
   );
 };

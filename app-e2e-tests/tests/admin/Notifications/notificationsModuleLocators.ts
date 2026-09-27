@@ -3,25 +3,21 @@ import { Page, Locator } from "@playwright/test";
 import { NotificationLocators } from "./NotificationLocators";
 import { RULES_TABLE } from "./notificationsModuleConstants";
 
-// Extends NotificationLocators rather than restating it: the rule modal's name input,
-// source tabs, enable switch, Create Rule button and success toasts are already declared
-// there and are inherited unchanged. Only the listing surface, the scope filters and the
-// delete dialog are new here.
-//
-// Every primary below is an id. app/src/components/notifications/ renders zero
-// data-testid across all five of its files (0 in index.tsx, NotificationRuleModal.tsx,
-// DeleteNotificationRuleModal.tsx, ChannelAccountMapping.tsx and WatchedChannels.tsx),
-// so rung 3 of the ladder is the highest rung available for these elements.
+// Extends NotificationLocators rather than restating it: the rule editor's name input,
+// type chips, Do choice, Add rule button and success toasts are declared there and
+// are inherited unchanged. Only the listing surface, its filter chips, search and
+// the delete dialog are new here.
 export class NotificationsModuleLocators extends NotificationLocators {
   readonly listingRoot: Locator;
   readonly rulesTable: Locator;
   readonly rulesTableBody: Locator;
   readonly ruleRows: Locator;
-  readonly emptyState: Locator;
 
-  readonly clusterFilter: Locator;
-  readonly namespaceFilter: Locator;
-  readonly applicationFilter: Locator;
+  readonly allFilterChip: Locator;
+  readonly weeklyDigestFilterChip: Locator;
+  readonly searchInput: Locator;
+  readonly testNotificationBtn: Locator;
+  readonly fallbackRow: Locator;
 
   readonly ruleDialog: Locator;
   readonly ruleSubmitBtn: Locator;
@@ -49,47 +45,22 @@ export class NotificationsModuleLocators extends NotificationLocators {
     // a plain row count is accurate. Requiring a <td> still excludes the header row.
     this.ruleRows = this.rulesTableBody.locator("tr:has(td)");
 
-    // EmptyData puts `${id}-no-data` on its heading when the table has no rows.
-    this.emptyState = page
-      .locator(`#${RULES_TABLE}-no-data`)
-      .or(this.listingRoot.getByText("No Data Available", { exact: false }))
-      .first();
+    // One chip per notification type, each with its rule count.
+    this.allFilterChip = page.locator("#filter-all");
+    this.weeklyDigestFilterChip = page.locator("#filter-weekly_digest");
+    this.searchInput = page.locator("#search-rules");
+    this.testNotificationBtn = page.locator("#test-notification");
+    // "When no rule matches" is the last row on every page of the listing.
+    this.fallbackRow = this.ruleRows.filter({ has: page.locator("#fallback") });
 
-    // FilterDropdown renders its trigger as <button id={`auto-complete-${toKebabCase(id)}`}>
-    // (app/src/components/common/ds/FilterDropdown.jsx), so the DOM id is the prop id from
-    // index.tsx with that prefix — not the prop id on its own.
-    this.clusterFilter = page
-      .locator("#auto-complete-notification-filter-cluster")
-      .or(this.listingRoot.getByRole("button", { name: /Cluster/i }))
-      .first();
+    this.ruleDialog = page.locator('[role="dialog"]').filter({ has: page.locator("#notificationName") }).first();
+    this.ruleSubmitBtn = page.locator("#save-rule");
+    this.ruleCancelBtn = page.locator("#cancel-rule");
+    // The editor shows why a save was refused next to its buttons.
+    this.nameError = page.locator("#rule-error");
 
-    this.namespaceFilter = page
-      .locator("#auto-complete-notification-filter-namespace")
-      .or(this.listingRoot.getByRole("button", { name: /Namespace/i }))
-      .first();
-
-    this.applicationFilter = page
-      .locator("#auto-complete-notification-filter-application")
-      .or(this.listingRoot.getByRole("button", { name: /Application/i }))
-      .first();
-
-    // Both dialogs render #submit and #cancel, so every button below is scoped to its own
-    // dialog by the title that dialog shows. Unscoped, `.or()` resolves in document order
-    // and a delete confirmation could click the rule form's Save.
-    this.ruleDialog = page.locator('[role="dialog"]').filter({ hasText: "Rule Name" }).first();
-
-    this.ruleSubmitBtn = this.ruleDialog.locator("#submit").or(this.ruleDialog.getByRole("button", { name: /^Save$|^Submit$/i })).first();
-
-    this.ruleCancelBtn = this.ruleDialog.locator("#cancel").or(this.ruleDialog.getByRole("button", { name: /^Cancel$/i })).first();
-
-    // ds/Input renders its message as <span id={`${inputId}-error`} role="alert">, so the
-    // error is addressable directly rather than by matching its text on the page.
-    this.nameError = page.locator("#notificationName-error").or(this.ruleDialog.getByRole("alert")).first();
-
-    this.deleteDialog = page.locator('[role="dialog"]').filter({ hasText: "Confirm Delete" }).first();
-
+    this.deleteDialog = page.locator('[role="dialog"]').filter({ hasText: "Delete rule" }).first();
     this.deleteConfirmBtn = this.deleteDialog.locator("#submit").or(this.deleteDialog.getByRole("button", { name: /^Delete$/i })).first();
-
     this.deleteCancelBtn = this.deleteDialog.locator("#cancel").or(this.deleteDialog.getByRole("button", { name: /^Cancel$/i })).first();
 
     // Access & Users is the top-level tab Audit Log now lives under (AnchorComponent's
@@ -115,10 +86,10 @@ export class NotificationsModuleLocators extends NotificationLocators {
     return this.ruleRows.filter({ hasText: name });
   }
 
-  // index.tsx gives the delete button id={`${item.name}-delete`}. The generated name
-  // contains spaces, so the attribute form is required — as a `#` selector the spaces
-  // would parse as descendant combinators.
-  deleteBtnForRule(name: string): Locator {
-    return this.rowByName(name).locator(`[id="${name}-delete"]`).or(this.rowByName(name).getByRole("button", { name: "Delete" })).first();
+  // Delete sits in each row's ⋮ menu, id `${name}-delete`; the menu opens from `${name}-more`.
+  // The generated name contains spaces, so the attribute form is required.
+  async openDeleteForRule(name: string): Promise<void> {
+    await this.rowByName(name).locator(`[id="${name}-more"]`).click();
+    await this.page.locator(`[id="${name}-delete"]`).click();
   }
 }

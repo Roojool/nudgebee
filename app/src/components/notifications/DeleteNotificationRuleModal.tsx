@@ -9,10 +9,18 @@ interface DeleteNotificationRuleModalProps {
   open: boolean;
   handleClose: () => void;
   ruleData: any;
+  // The rule as a sentence, so it's clear what stops applying.
+  sentence?: React.ReactNode;
   listNotificationRules: () => void;
 }
 
-const DeleteNotificationRuleModal: React.FC<DeleteNotificationRuleModalProps> = ({ open = false, handleClose, ruleData, listNotificationRules }) => {
+const DeleteNotificationRuleModal: React.FC<DeleteNotificationRuleModalProps> = ({
+  open = false,
+  handleClose,
+  ruleData,
+  sentence,
+  listNotificationRules,
+}) => {
   const [isDeleting, setIsDeleting] = useState(false);
 
   const handleConfirmDelete = () => {
@@ -21,7 +29,7 @@ const DeleteNotificationRuleModal: React.FC<DeleteNotificationRuleModalProps> = 
       .deleteNotificationRule(ruleData.id)
       .then((res: any) => {
         if (res?.data?.data.notification_rule_delete) {
-          snackbar.success('Notification deleted successfully');
+          snackbar.success('Rule deleted');
           listNotificationRules();
           handleClose();
         } else {
@@ -43,17 +51,18 @@ const DeleteNotificationRuleModal: React.FC<DeleteNotificationRuleModalProps> = 
         width='xs'
         open={open}
         handleClose={handleClose}
-        title={`Confirm Delete`}
+        title='Delete rule'
         contentStyles={{ padding: 'var(--ds-space-1)' }}
         rightComponentOnTitle={''}
         loader={isDeleting}
       >
         <Box sx={{ m: 'var(--ds-space-5) var(--ds-space-5) var(--ds-space-3) var(--ds-space-6)' }}>
-          <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[600] }}>
-            Are you sure you want to Delete Notification?
-          </Typography>
           <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
             {ruleData.name}
+          </Typography>
+          {sentence && <Typography sx={{ fontSize: ds.text.body, color: ds.gray[600], mt: ds.space[1] }}>{sentence}</Typography>}
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], mt: ds.space[2] }}>
+            After deleting, these notifications follow the other rules and “When no rule matches”.
           </Typography>
         </Box>
         <Box

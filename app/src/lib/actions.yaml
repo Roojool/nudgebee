@@ -4536,6 +4536,41 @@ actions:
           value_from_env: NOTIFICATION_SERVER_TOKEN
     permissions:
       - role: tenant_admin
+  - name: notifications_list_default_policies
+    comment: List what happens to notifications no rule matches, for all types and per type
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/defaults'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
+  - name: notifications_upsert_default_policy
+    comment: Set what happens to notifications no rule matches, for all types or one type
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/defaults/save'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+  - name: notifications_check_route
+    comment: Check where a notification would go under the current rules, without sending it
+    definition:
+      kind: synchronous
+      handler: '{{NOTIFICATION_SERVICE_URL}}/api/rules/check'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: NOTIFICATION_SERVER_TOKEN
+    permissions:
+      - role: tenant_admin
+      - role: tenant_admin_readonly
   - name: observability_list_provider_capabilities
     comment: List logs, metrics and traces capabilities per observability provider
     definition:

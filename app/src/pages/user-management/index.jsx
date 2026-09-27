@@ -125,7 +125,7 @@ const baseFilters = (baseTitle) => [
     Body: Notifications,
     module: 'notifications',
     description:
-      'Rules that decide which troubleshooting, optimization, SLO and cloud events are delivered — for which clusters and applications, and to which channels.',
+      'Rules decide which troubleshooting, SLO, cloud spend, optimization and automation notifications are delivered, and where. Every matching rule applies; if any says Don’t send, it isn’t sent.',
   },
   {
     name: 'Integrations',

@@ -12,7 +12,7 @@ test("Add Optimization Notification Rule", { tag: ["@dev", "@test", "@oss", "@re
 
   const locators = await navigateToNewNotificationRule(page);
 
-  await locators.optimizationTab.click();
+  await locators.selectOnlyType(locators.optimizationTab);
 
   await selectCluster(locators, page);
 
