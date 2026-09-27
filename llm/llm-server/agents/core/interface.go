@@ -491,15 +491,15 @@ const AgentPlannerTypeReAct3 AgentPlannerType = "react_3"
 
 // AgentPlannerTypeReAct4 is the provider-native tool-calling ENGINE (also not a
 // declared type). Like ReAct3 it is produced at runtime, not returned by any
-// agent's GetPlannerType(): a ReAct/Orchestrating agent resolves to ReAct4 only
-// when LlmServerReAct4Enabled is set AND the resolved provider/model supports
+// agent's GetPlannerType(): a ReAct/Orchestrating agent resolves to ReAct4
+// when LlmServerPlannerEngine is auto/react4 AND the resolved provider/model supports
 // native tool calling (see SupportsNativeTools / useReAct4Engine); otherwise it
 // falls back to ReAct3. See docs/planner_react_4.md.
 const AgentPlannerTypeReAct4 AgentPlannerType = "react_4"
 
 // NBAgentReAct4Provider is an opt-in marker. An agent implementing it with
 // PrefersReAct4() == true runs under the ReAct4 native tool-calling planner
-// regardless of LlmServerReAct4Enabled — but never bypasses the capability
+// regardless of LlmServerPlannerEngine — but never bypasses the capability
 // gate: if the resolved provider/model lacks native tool support it still falls
 // back to ReAct3 (fail-closed, see useReAct4Engine).
 //

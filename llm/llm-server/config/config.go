@@ -733,9 +733,8 @@ type appConfig struct {
 	CacheRedisServerPort         int    `mapstructure:"redis_server_port"`
 
 	// Feature flags
-	EnableEnhancedQueryAgentsResponse bool `mapstructure:"enable_enhanced_query_agents_response"`
-	RemediationAgentEnabled           bool `mapstructure:"remediation_agent_enabled"`
-	LlmSummarizationParallelEnabled   bool `mapstructure:"llm_server_summarization_parallel_enabled"`
+	RemediationAgentEnabled         bool `mapstructure:"remediation_agent_enabled"`
+	LlmSummarizationParallelEnabled bool `mapstructure:"llm_server_summarization_parallel_enabled"`
 	// LlmServerPreflightMaxMessageBytes is the per-message byte cap applied before every LLM call.
 	// Messages exceeding this are hard-truncated to prevent token-limit errors from large payloads.
 	// Default 0 means use the built-in default (1.5 MB). Set to -1 to disable.
@@ -758,12 +757,11 @@ type appConfig struct {
 	// enforces grounding, not tool choice. Default off; enable per env after
 	// monitoring `SDG_no_data_rate` on dev to confirm no over-firing.
 	LlmServerSDGGroundingContractEnabled bool `mapstructure:"llm_server_sdg_grounding_contract_enabled"`
-	// LlmServerReAct4Enabled gates the provider-native tool-calling planner
-	// (ReAct4). Default true: a ReAct/Orchestrating agent routes to ReAct4 when
-	// its resolved provider/model supports native tools (SupportsNativeTools);
-	// an explicit false remains the rollback path to ReAct3. See
-	// docs/planner_react_4.md.
-	LlmServerReAct4Enabled bool `mapstructure:"llm_server_react4_enabled"`
+	// LlmServerPlannerEngine selects the planner engine: "auto" (default: uses
+	// ReAct4 native tool calling if supported by the provider/model, else falls back
+	// to ReAct3 prompt-based tool calling), "react3" (forces ReAct3 XML tool calling),
+	// or "react4" (forces ReAct4 native tool calling).
+	LlmServerPlannerEngine string `mapstructure:"llm_server_planner_engine"`
 	// LlmServerThinkToolEnabled gates injection of the `think` tool into the
 	// six orchestrator agents (k8s / aws / azure / gcp / datadog / finops).
 	// Default flipped to false 2026-07-12 after 30d prod data showed the
@@ -800,18 +798,8 @@ type appConfig struct {
 	// sub-agents and mid-loop iterations keep the dynamic resolution.
 	// Empty disables the override.
 	LlmServerOrchestratorThinkingLevel string `mapstructure:"llm_server_orchestrator_thinking_level"`
-	// Deprecated compatibility input for deployments that have not migrated to
-	// LLM_SERVER_ORCHESTRATOR_THINKING_LEVEL. The canonical value wins when both
-	// are set; remove this after one deployment migration window.
-	LlmServerReact3OrchestratorThinkingLevel string `mapstructure:"llm_server_react3_orchestrator_thinking_level"`
-	// KGToolsEnabled gates Knowledge Graph tools (kg_list_nodes, kg_list_path) on
-	// the service_dependency_graph agent, enabling static topology + CALLS queries
-	// alongside runtime metrics. Defaults to false — enable per-tenant for canary first.
-	KGToolsEnabled bool `mapstructure:"llm_server_kg_tools_enabled"`
-	// KGGetNodeEnabled independently gates the kg_get_node drill-down tool. Takes
-	// effect only when KGToolsEnabled=true (kg_get_node is part of the KG family).
-	// Split from KGToolsEnabled so the drill-down can be canaried or disabled
-	// separately if its payload size or latency proves problematic.
+	// KGGetNodeEnabled gates the kg_get_node drill-down tool on the
+	// service_dependency_graph agent. Defaults to false.
 	KGGetNodeEnabled bool `mapstructure:"llm_server_kg_get_node_enabled"`
 	// LlmServerSkillSelectionTopK, when > 0, enables question-aware skill selection.
 	// At top-level entry the executor scores every active KB mapped to the agent
@@ -883,7 +871,6 @@ type appConfig struct {
 	// to this budget. Default 2048; clamped to a 256 minimum.
 	LlmServerSubAgentEvidenceMaxChars int  `mapstructure:"llm_server_sub_agent_evidence_max_chars"`
 	EvaluationEnabled                 bool `mapstructure:"llm_server_evaluation_enabled"`
-	AutoIdentifyAccountEnabled        bool `mapstructure:"llm_server_auto_identify_account_enabled"`
 
 	// Termination cache configs
 	LlmServerMessageTerminationCacheTTLSeconds int `mapstructure:"llm_server_message_termination_cache_ttl_seconds"`
@@ -1289,7 +1276,6 @@ func init() {
 	viper.SetDefault("llm_provider_session_token", "")
 	viper.SetDefault("llm_provider_embedding_model", "text-embedding-ada-002")
 	viper.SetDefault("llm_provider_max_retries", 5)
-	viper.SetDefault("llm_thinking_level_native_enabled", true)
 	viper.SetDefault("llm_anthropic_thinking_enabled", false)
 	viper.SetDefault("llm_provider_thinking_level", "")  // empty = not configured (use per-model default); "minimal"/"low"/"medium"/"high" = explicit level
 	viper.SetDefault("llm_provider_thinking_budget", -1) // -1: model default, 0: disable, >0: token budget (global override, wins over the per-tier budgets below)
@@ -1519,7 +1505,6 @@ func init() {
 	viper.SetDefault("redis_user_password", "")
 
 	// Feature flags - default to false to use old implementation
-	viper.SetDefault("enable_enhanced_query_agents_response", true)
 	viper.SetDefault("llm_server_summarization_parallel_enabled", true)
 	viper.SetDefault("conversation_context_enabled", true)
 	viper.SetDefault("conversation_history_window_size", 6)
@@ -1527,19 +1512,17 @@ func init() {
 	viper.SetDefault("enable_llm_reference_title_generation", false)
 	viper.SetDefault("llm_server_slack_compact_response", false)
 	viper.SetDefault("llm_server_sdg_grounding_contract_enabled", false)
-	// ReAct4 is the default planner; an explicit false override remains the rollback path.
-	viper.SetDefault("llm_server_react4_enabled", true)
+	// Planner engine: "auto" (default) routes native-capable providers to ReAct4, others to ReAct3.
+	// Can be set to "react3" or "react4" to force an engine.
+	viper.SetDefault("llm_server_planner_engine", "auto")
 	viper.SetDefault("llm_server_orchestrator_query_model_downshift_enabled", false)
 	viper.SetDefault("llm_server_orchestrator_thinking_level", "")
-	viper.SetDefault("llm_server_react3_orchestrator_thinking_level", "")
 	// Flipped false 2026-07-12 — see LlmServerThinkToolEnabled docstring.
 	// Any env that wants the tool back sets LLM_SERVER_THINK_TOOL_ENABLED=true
 	// (env override still wins over SetDefault).
 	viper.SetDefault("llm_server_think_tool_enabled", false)
-	viper.SetDefault("llm_server_kg_tools_enabled", true)
 	viper.SetDefault("llm_server_kg_get_node_enabled", false)
 	viper.SetDefault("llm_server_evaluation_enabled", false)
-	viper.SetDefault("llm_server_auto_identify_account_enabled", false)
 
 	viper.SetDefault("llm_server_message_termination_cache_ttl_seconds", 15)
 	viper.SetDefault("llm_server_message_terminated_cache_ttl_minutes", 10)
@@ -1579,8 +1562,6 @@ func init() {
 	viper.SetDefault("llm_memory_ttl_stale_days", 180)
 	viper.SetDefault("llm_memory_ttl_cleanup_interval_hours", 24)
 	viper.SetDefault("llm_server_waiting_expire_days", 14)
-
-	viper.SetDefault("llm_server_productivity_metrics_enabled", false)
 
 	viper.SetDefault("llm_server_productivity_metrics_enabled", false)
 
@@ -1765,7 +1746,7 @@ func init() {
 
 	viper.AutomaticEnv()
 	orchestratorThinkingLevelSet := configKeyExplicitlySet("llm_server_orchestrator_thinking_level")
-	legacyOrchestratorThinkingLevelSet := configKeyExplicitlySet("llm_server_react3_orchestrator_thinking_level")
+	plannerEngineSet := configKeyExplicitlySet("llm_server_planner_engine")
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		fmt.Println("Error unmarshalling config:", err)
@@ -1773,9 +1754,15 @@ func init() {
 	Config.LlmServerOrchestratorThinkingLevel = resolveOrchestratorThinkingLevelConfig(
 		Config.LlmServerOrchestratorThinkingLevel,
 		orchestratorThinkingLevelSet,
-		Config.LlmServerReact3OrchestratorThinkingLevel,
-		legacyOrchestratorThinkingLevelSet,
 	)
+
+	Config.LlmServerPlannerEngine, err = resolvePlannerEngineConfig(
+		Config.LlmServerPlannerEngine,
+		plannerEngineSet,
+	)
+	if err != nil {
+		panic(err.Error())
+	}
 
 	if Config.OtelExporterOtlpEndpoint == "" {
 		Config.OtelExporterOtlpEndpoint = "127.0.0.1:4317"
@@ -1823,14 +1810,24 @@ func configKeyExplicitlySet(key string) bool {
 	return exists
 }
 
-func resolveOrchestratorThinkingLevelConfig(canonical string, canonicalSet bool, legacy string, legacySet bool) string {
+func resolveOrchestratorThinkingLevelConfig(canonical string, canonicalSet bool) string {
 	if canonicalSet {
 		return canonical
 	}
-	if legacySet {
-		return legacy
-	}
 	return "medium"
+}
+
+func resolvePlannerEngineConfig(rawEngine string, explicitlySet bool) (string, error) {
+	if !explicitlySet || strings.TrimSpace(rawEngine) == "" {
+		return "auto", nil
+	}
+	normalized := strings.ToLower(strings.TrimSpace(rawEngine))
+	switch normalized {
+	case "auto", "react3", "react4":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("invalid llm_server_planner_engine %q: supported values are %q, %q, %q", rawEngine, "auto", "react3", "react4")
+	}
 }
 
 // OrphanRecoveryHorizon bounds how stale an abandoned conversation may be and still

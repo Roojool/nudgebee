@@ -1,8 +1,8 @@
 # ReAct4 Planner — Design Document
 
-> **Status:** Phases 0–3b implemented and merged on the feature branch, all gated
-> on by default (`LlmServerReAct4Enabled=true`), with explicit false as the
-> rollback path. Remaining: Phase 4 (provider
+> **Status:** Phases 0–3b implemented and merged on the feature branch, all routed
+> via `LlmServerPlannerEngine` ("auto" by default, with "react3" as the
+> rollback path). Remaining: Phase 4 (provider
 > round-trip validation + eval parity, both needing a live env) and Phase 5 (XML
 > deletion). This document is the plan of record for moving from prompt-driven
 > (XML) function calling to **provider-native tool calling**. It mirrors the
@@ -106,7 +106,7 @@ ReAct4 adds `AgentPlannerTypeReAct4 = "react_4"` and one more resolution layer:
 
 ```
 declared type (ReAct | Orchestrating)
-  → ReAct4  if  LlmServerReAct4Enabled(agent/account) AND SupportsNativeTools(provider, model)
+  → ReAct4  if  LlmServerPlannerEngine != "react3" AND SupportsNativeTools(provider, model)
   → ReAct3  otherwise
 ```
 
@@ -275,7 +275,7 @@ rebuilds history from persisted turns instead of rebuilding a scratchpad string.
 
 ## Coexistence & Rollout
 
-1. **Run ReAct4 behind `LlmServerReAct4Enabled` (default on)**, capability-gated. Native-capable
+1. **Run ReAct4 under `LlmServerPlannerEngine` (default "auto")**, capability-gated. Native-capable
    providers use ReAct4; ReAct3 remains the fallback for unsupported providers/models and explicit
    ReAct3 agents.
 2. **Eval before flip.** Run the existing eval framework (`agents/core/evaluator.go`:
@@ -316,7 +316,7 @@ rebuilds history from persisted turns instead of rebuilding a scratchpad string.
 
 | Phase | Work | Gate |
 |-------|------|------|
-| 0 ✅ | `SupportsNativeTools`, `AgentPlannerTypeReAct4`, `LlmServerReAct4Enabled`, routing seam in `executor.go` (`useReAct4Engine`, logs decision, runs react_3 until the native planner lands) | Unit tests on routing — **done** |
+| 0 ✅ | `SupportsNativeTools`, `AgentPlannerTypeReAct4`, `LlmServerPlannerEngine`, routing seam in `executor.go` (`useReAct4Engine`, logs decision, runs react_3 until the native planner lands) | Unit tests on routing — **done** |
 | 1 ✅ | `ToolSchema → []llms.Tool` conversion (reuses existing `nbToolsToLlmTools`); `update_notebook` control tool (`tools/tool_notebook.go`) | Tool defs render + call round-trips — **done** |
 | 2 ✅ (engine) | `NBReActPlanner4` native plan loop, terminal detection, steps→native-message reconstruction, `ToolCalls`→actions, notebook-as-tool, Marshal/Unmarshal, parallel/write gate extended, wired into `createAgentPlanner` | Unit tests on parse/render/marshal — **done**; provider round-trip is an eval concern (Phase 4) |
 | 2b ✅ | `planner_react_4_base.txt` (native operating instructions + notebook-tool discipline + shared rules, no XML grammar), rendered + prepended in `NewReActAgent4`. `effectivePlannerType` stays react_3 so the react-style formatter/citation gates keep working unchanged (react_4 assigns the same E1/E2 DisplayIDs) | Base-prompt gating tests — **done** |

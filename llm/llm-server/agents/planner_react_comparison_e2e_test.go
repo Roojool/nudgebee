@@ -101,8 +101,8 @@ func TestReAct3VsReAct4Comparison(t *testing.T) {
 		t.Skipf("provider %q is not native-tools capable — react_4 would fall back to react_3; nothing to compare", provider)
 	}
 
-	origFlag := config.Config.LlmServerReAct4Enabled
-	t.Cleanup(func() { config.Config.LlmServerReAct4Enabled = origFlag })
+	origEngine := config.Config.LlmServerPlannerEngine
+	t.Cleanup(func() { config.Config.LlmServerPlannerEngine = origEngine })
 
 	// Correctness may drop this much before it counts as a regression — native
 	// tool calling can legitimately reword answers. Tune to taste.
@@ -210,12 +210,11 @@ func pctDeltaF(oldV, newV float64) string {
 // planner sees the other's history.
 func runReact4ComparisonCase(t *testing.T, sc *security.RequestContext, accountID, userID string, c react4ComparisonCase, react4 bool) react4RunResult {
 	t.Helper()
-	config.Config.LlmServerReAct4Enabled = react4
-
-	planner := "react3"
+	planner := core.PlannerEngineReAct3
 	if react4 {
-		planner = "react4"
+		planner = core.PlannerEngineReAct4
 	}
+	config.Config.LlmServerPlannerEngine = planner
 
 	agent, ok := core.GetNBAgent(sc, c.agent, accountID, core.AgentStatusEnabled)
 	if !ok {

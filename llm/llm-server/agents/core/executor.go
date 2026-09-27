@@ -1308,7 +1308,11 @@ func useReAct4Engine(ctx *security.RequestContext, agent NBAgent, request NBAgen
 	if p, ok := agent.(NBAgentReAct4Provider); ok {
 		forced = p.PrefersReAct4()
 	}
-	if !config.Config.LlmServerReAct4Enabled && !forced {
+	engine := config.Config.LlmServerPlannerEngine
+	if engine == "" {
+		engine = PlannerEngineAuto
+	}
+	if strings.EqualFold(engine, PlannerEngineReAct3) && !forced {
 		return false
 	}
 	declared := agent.GetPlannerType()
@@ -1317,7 +1321,7 @@ func useReAct4Engine(ctx *security.RequestContext, agent NBAgent, request NBAgen
 	}
 	provider := GetLLMProvider(ctx, request.AccountId, agent.GetName(), true, request.ConversationId)
 	model := GetLLMModelName(ctx, request.AccountId, provider, agent.GetName(), true, request.ConversationId)
-	return shouldUseReAct4(declared, config.Config.LlmServerReAct4Enabled, forced, provider, model)
+	return shouldUseReAct4(declared, engine, forced, provider, model)
 }
 
 func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, systemMessage string, messageHistoryFomatter []prompts.MessageFormatter, initialNotebook string) (NBAgentPlanner, error) {
@@ -1328,9 +1332,9 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		nbAgentPlanner, err = NewPromptAgent(ctx, request, agent, systemMessage, messageHistoryFomatter)
 	} else if agent.GetPlannerType() == AgentPlannerTypeReAct || agent.GetPlannerType() == AgentPlannerTypeReAct3 || agent.GetPlannerType() == AgentPlannerTypeOrchestrating {
 		// Orchestrating, ReAct and ReAct3 execute as react_3 by default, or as
-		// react_4 (provider-native tool calling) when LlmServerReAct4Enabled is
-		// set AND the resolved provider/model supports native tools
-		// (useReAct4Engine). An explicit false override rolls back to ReAct3.
+		// react_4 (provider-native tool calling) when LlmServerPlannerEngine is
+		// auto/react4 AND the resolved provider/model supports native tools
+		// (useReAct4Engine). An explicit "react3" override forces ReAct3.
 		// See docs/planner_react_4.md.
 		//
 		// react_4 receives the react_3-style agent systemMessage (built via the
