@@ -210,10 +210,9 @@ export class AccountContextLocators extends CommonLocators {
       .first();
   }
 
-  // The synthetic "All accounts" entry, and the nth real account, in the open picker.
-  // Both are built off the listbox field rather than a passed-in handle so a caller can
-  // name the option it wants *before* the panel is open — which is what lets
-  // openAccountPanel below expand only as far as that option.
+  // The nth real account in the open picker. Built off the listbox field rather than a
+  // passed-in handle so a caller can name the option it wants *before* the panel is
+  // open — which is what lets openAccountPanel below expand only as far as that option.
 
   realAccountOption(index: number): Locator {
     return this.accountListbox.locator('[role="option"]').filter({ hasNotText: "All accounts" }).nth(index);

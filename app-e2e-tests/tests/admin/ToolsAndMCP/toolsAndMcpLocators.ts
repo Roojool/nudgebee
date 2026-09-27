@@ -341,8 +341,7 @@ export class ToolsAndMcpLocators extends CommonLocators {
     await this.openOptionList.first().waitFor({ state: "visible", timeout: 20000 });
   }
 
-  // Every account label the filter offers, minus the synthetic "All accounts"
-  // entry AccountSelect prepends via includeAllOption.
+  // Every account label the filter offers.
   async accountOptionLabels(): Promise<string[]> {
     await this.accountFilter.click();
     await this.revealAccountOptions();
