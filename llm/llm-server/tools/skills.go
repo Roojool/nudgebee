@@ -55,7 +55,7 @@ func (m LoadSkillsTool) Name() string {
 func (m LoadSkillsTool) Description() string {
 	const procedureReadGuidance = " For a potentially relevant SOP/procedure, finish reading its applicability, scope and prerequisites before dependent investigation or delegation; do not launch those actions in parallel with this load. If it does not apply, proceed without following it; a title match alone does not establish applicability."
 	if config.Config.LlmServerKnowledgeWorkspaceEnabled {
-		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.` + procedureReadGuidance + " Continue truncated reads as needed using keyword or start_line."
+		return `Loads one exact account skill or discovered candidate ID. Large indexed documents are saved to the workspace. Use keyword or start_line to read bounded sections through this tool. Integration names return document candidates for selection. Unknown names are never substituted.` + procedureReadGuidance + " Continue truncated reads using the returned start_byte cursor when present, or refine keyword/start_line."
 	}
 	return `Loads discovered knowledge candidates by candidate id, or active account knowledge bases by exact name. Unknown names are not searched or substituted; use search_skills for discovery. You MUST use the 'skill_name' parameter. For multiple entries, provide ids or names as a single comma-separated string.` + procedureReadGuidance + " If the excerpt omits scope or prerequisites and the full document is unavailable, report that applicability is unverified; do not repeatedly reload the same excerpt or assume the procedure applies."
 }
@@ -75,6 +75,7 @@ func (m LoadSkillsTool) InputSchema() core.ToolSchema {
 		Properties: map[string]core.ToolSchemaProperty{
 			"keyword":    {Type: core.ToolSchemaTypeString, Description: "Find matching lines in one selected knowledge document. Bounded output; refine the keyword for more specific matches."},
 			"start_line": {Type: core.ToolSchemaTypeInteger, Description: "Read one document starting at this 1-based line number."},
+			"start_byte": {Type: core.ToolSchemaTypeInteger, Description: "Continue a truncated read at the returned 0-based byte cursor. Do not combine with keyword or start_line."},
 			"skill_name": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The candidate id shown in <skill-lists> (preferred), or an exact account skill name. For multiple entries, use a comma-separated string. Do NOT pass an array or list.",
@@ -87,6 +88,7 @@ func (m LoadSkillsTool) InputSchema() core.ToolSchema {
 	} else {
 		delete(schema.Properties, "keyword")
 		delete(schema.Properties, "start_line")
+		delete(schema.Properties, "start_byte")
 	}
 	return schema
 }

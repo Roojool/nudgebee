@@ -310,9 +310,13 @@ name cache. Discovery caches at most 4 KiB of text and exact document handles.
 
 `LLM_SERVER_KNOWLEDGE_WORKSPACE_ENABLED` defaults to true. With this default,
 `load_skills` accepts one candidate/name and optional `keyword` or `start_line`.
+When a bounded read stops inside a line, its response gives a `start_byte`
+cursor for continuation; use that cursor without `keyword` or `start_line`.
 Small documents stay inline; large indexed documents are saved to the conversation
 workspace and read selectively through the same tool. No shell tool is required.
 Account access, source version and workspace integrity are rechecked on reads.
+Each read scans the source to EOF to verify its content hash, even when the
+returned excerpt is small.
 
 When disabled, legacy loads label partial content as an excerpt. They do not offer byte pagination of the source. Exact-name loads recheck live
 rows and integration retrieval. Candidate TTL is 30 minutes and large bodies

@@ -45,6 +45,62 @@ func TestKnowledgeLongAndBoundaryLines(t *testing.T) {
 	}
 }
 
+type countingKnowledgeReader struct {
+	io.Reader
+	bytes int
+}
+
+func (r *countingKnowledgeReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += n
+	return n, err
+}
+
+func TestKnowledgeLongLineContinuationAndIntegrityScan(t *testing.T) {
+	body := "Scope: " + strings.Repeat("x", 12*1024) + " FINAL-RESTRICTION\nNext step\n"
+	version := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
+	firstReader := &countingKnowledgeReader{Reader: strings.NewReader(body)}
+	first, err := readKnowledgeLines(firstReader, version, "", 1)
+	require.NoError(t, err)
+	require.Equal(t, len(body), firstReader.bytes, "the integrity check scans to EOF even for a bounded response")
+	require.NotContains(t, first, "FINAL-RESTRICTION")
+	require.Contains(t, first, "start_byte=")
+	var cursor int64
+	_, err = fmt.Sscanf(first[strings.Index(first, "start_byte="):], "start_byte=%d", &cursor)
+	require.NoError(t, err)
+	secondReader := &countingKnowledgeReader{Reader: strings.NewReader(body)}
+	second, err := readKnowledgeLinesFromByte(secondReader, version, "", 1, cursor, core.KnowledgePurposeReference)
+	require.NoError(t, err)
+	require.Equal(t, len(body), secondReader.bytes)
+	require.Contains(t, second, "FINAL-RESTRICTION")
+	require.Contains(t, second, "Next step")
+	_, err = readKnowledgeLinesFromByte(strings.NewReader(body+"changed"), version, "", 1, cursor, core.KnowledgePurposeReference)
+	require.ErrorContains(t, err, "changed")
+}
+
+func BenchmarkKnowledgeLateRead(b *testing.B) {
+	body := strings.Repeat("ordinary line\n", 200000) + "FINAL-CANARY\n"
+	version := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
+	for _, tc := range []struct {
+		name    string
+		keyword string
+		line    int
+	}{
+		{"late-line", "", 200001},
+		{"late-keyword", "FINAL-CANARY", 1},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ReportMetric(float64(len(body)), "input-bytes/op")
+			for i := 0; i < b.N; i++ {
+				if _, err := readKnowledgeLines(strings.NewReader(body), version, tc.keyword, tc.line); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestKnowledgeWorkspaceToolRoundTrip(t *testing.T) {
 	old := config.Config
 	t.Cleanup(func() { config.Config = old })
@@ -114,6 +170,21 @@ func TestKnowledgeWorkspaceToolRoundTrip(t *testing.T) {
 	require.Equal(t, 1, downloads)
 	require.Equal(t, 1, uploads)
 	require.Equal(t, 1, validations)
+	continued, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: map[string]any{"skill_name": c.ID, "start_byte": float64(len(body) - len("FINAL-CANARY\n"))}})
+	require.NoError(t, err)
+	require.Equal(t, core.NBToolResponseStatusSuccess, continued.Status)
+	require.Contains(t, continued.Data, "FINAL-CANARY")
+	for _, args := range []map[string]any{
+		{"skill_name": c.ID, "start_byte": 1, "keyword": "FINAL-CANARY"},
+		{"skill_name": c.ID, "start_byte": 1, "start_line": 1},
+		{"skill_name": c.ID, "start_byte": 0, "keyword": ""},
+		{"skill_name": c.ID, "start_byte": 0, "start_line": 1},
+	} {
+		invalid, err := (LoadSkillsTool{}).Call(ctx, core.NBToolCallRequest{Arguments: args})
+		require.NoError(t, err)
+		require.Equal(t, core.NBToolResponseStatusError, invalid.Status, args)
+		require.Contains(t, invalid.Data, "cannot be combined", args)
+	}
 	inline, ref, err := PrepareKnowledgeForAnalysis(ctx, c)
 	require.NoError(t, err)
 	require.Empty(t, inline)
