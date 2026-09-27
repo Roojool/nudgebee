@@ -723,17 +723,30 @@ func (a *signozLogsAction) AutoExecute(ctx playbooks.PlaybookActionContext) (pla
 		}
 	} else if ctx.GetEvent().SubjectName != "" && namespace != "" {
 		workloadName := getEventWorkload(ctx.GetEvent())
+		nameItem := map[string]any{
+			"value": workloadName,
+			"op":    "contains",
+			"key": map[string]any{
+				"key": "k8s.deployment.name",
+			},
+		}
+		title := "Workload Logs For - " + workloadName
+		// A pod event reads that pod's logs, not its owner's: see eventPodSubject.
+		if pod := eventPodSubject(ctx.GetEvent()); pod != "" {
+			nameItem = map[string]any{
+				"value": pod,
+				"op":    "=",
+				"key": map[string]any{
+					"key": "k8s.pod.name",
+				},
+			}
+			title = "Pod Logs For - " + pod
+		}
 		params = map[string]any{
 			"query": map[string]any{
 				"op": "AND",
 				"items": []map[string]any{
-					{
-						"value": workloadName,
-						"op":    "contains",
-						"key": map[string]any{
-							"key": "k8s.deployment.name",
-						},
-					},
+					nameItem,
 					{
 						"value": namespace,
 						"op":    "=",
@@ -743,7 +756,7 @@ func (a *signozLogsAction) AutoExecute(ctx playbooks.PlaybookActionContext) (pla
 					},
 				},
 			},
-			"title": "Workload Logs For - " + workloadName,
+			"title": title,
 		}
 	}
 	return a.Execute(ctx, params)
@@ -1613,6 +1626,23 @@ func getEventWorkload(event playbooks.PlaybookEvent) string {
 	return event.SubjectName
 }
 
+// eventPodSubject returns the pod an event is about, or "" when its subject is
+// not a pod.
+//
+// Evidence for a pod event has to come from that pod. getEventWorkload resolves
+// to the owner, which is right for trace and service queries but wrong for logs
+// and metrics: a workload-scoped log query returns every replica's lines (and
+// `kubectl logs <kind>/<owner>` reads one arbitrary replica), and every
+// provider's utilisation query sums all the owner's pods into one series. On an
+// OOMKilled DaemonSet pod that put another node's logs and the whole fleet's
+// memory under the killed pod's finding.
+func eventPodSubject(event playbooks.PlaybookEvent) string {
+	if strings.EqualFold(event.SubjectType, "pod") {
+		return event.SubjectName
+	}
+	return ""
+}
+
 // Kubernetes object naming rules (RFC 1123). Namespaces are labels; workload and pod
 // names are subdomains, so they additionally allow dots.
 var (
@@ -1816,6 +1846,12 @@ func traceIDFilterSurvivesStrip(mapping map[string]string, filter QueryRequestKe
 func (a *observabilityLogAction) autoExecuteByWorkload(ctx playbooks.PlaybookActionContext) (playbooks.PlaybookActionResponse, error) {
 	workloadName := getEventWorkload(ctx.GetEvent())
 	namespace := getEventNamespace(ctx.GetEvent())
+	where := buildWorkloadLogWhereClause(workloadName, namespace)
+	// A pod event reads that pod's logs, not its owner's: see eventPodSubject.
+	if pod := eventPodSubject(ctx.GetEvent()); pod != "" {
+		workloadName = pod
+		where = buildPodLogWhereClause(pod, namespace)
+	}
 
 	// Anchor on the event window (floored/capped by resolveLogQueryWindow) rather than a
 	// fixed lookback from now, so logs for an event that ended hours ago still line up
@@ -1831,7 +1867,7 @@ func (a *observabilityLogAction) autoExecuteByWorkload(ctx playbooks.PlaybookAct
 		EndTime:   endTime,
 		Limit:     1000,
 		QueryRequest: LogsQueryBuilderRequest{
-			Where: buildWorkloadLogWhereClause(workloadName, namespace),
+			Where: where,
 		},
 	})
 
@@ -1879,18 +1915,7 @@ func (a *observabilityLogAction) fetchLogsViaRelay(ctx playbooks.PlaybookActionC
 	// to the owning workload ("llm-server", not "llm-server-8b5f-tc2jd"), so the
 	// matching kind is SubjectOwnerKind. Reading SubjectType here instead pairs a
 	// deployment name with kind "pod".
-	event := ctx.GetEvent()
-	kind := ""
-	if event.SubjectOwner != "" && workloadName == event.SubjectOwner && event.SubjectOwnerKind != "" {
-		kind = event.SubjectOwnerKind
-	}
-	if kind == "" && event.Labels != nil {
-		kind = event.Labels["kind"]
-	}
-	// Fall back to SubjectType for agent-generated events (lowercase, e.g. "deployment")
-	if kind == "" {
-		kind = event.SubjectType
-	}
+	kind := relayLogKind(ctx.GetEvent(), workloadName)
 
 	if kubectlLogKinds[strings.ToLower(kind)] {
 		resp, err := a.fetchLogsViaKubectl(ctx, kind, workloadName, namespace)
@@ -1904,6 +1929,23 @@ func (a *observabilityLogAction) fetchLogsViaRelay(ctx playbooks.PlaybookActionC
 	}
 
 	return a.fetchLogsViaLogsEnricher(ctx, workloadName, namespace)
+}
+
+// relayLogKind is the kind that describes name for `kubectl logs <kind>/<name>`.
+func relayLogKind(event playbooks.PlaybookEvent, name string) string {
+	// The pod subject itself: `kubectl logs pod/<name>`. Any workload kind here
+	// would read one arbitrary replica instead.
+	if pod := eventPodSubject(event); pod != "" && name == pod {
+		return "pod"
+	}
+	if event.SubjectOwner != "" && name == event.SubjectOwner && event.SubjectOwnerKind != "" {
+		return event.SubjectOwnerKind
+	}
+	if event.Labels != nil && event.Labels["kind"] != "" {
+		return event.Labels["kind"]
+	}
+	// Fall back to SubjectType for agent-generated events (lowercase, e.g. "deployment")
+	return event.SubjectType
 }
 
 // fetchLogsViaLogsEnricher uses the relay agent's logs_enricher to fetch logs for a pod.
@@ -2178,6 +2220,18 @@ func buildWorkloadLogWhereClause(workloadName, namespace string) query.QueryWher
 	return query.QueryWhereClause{
 		And: []query.QueryWhereClause{
 			{Binary: query.BinaryWhereClause{"app": {query.Eq: workloadName}}},
+			{Binary: query.BinaryWhereClause{"namespace": {query.Eq: namespace}}},
+		},
+	}
+}
+
+// buildPodLogWhereClause is buildWorkloadLogWhereClause for a single pod. "pod" is
+// a canonical key every source that maps "app" also maps (Elasticsearch expands it
+// across shipper field names), so it reaches at least as many backends.
+func buildPodLogWhereClause(podName, namespace string) query.QueryWhereClause {
+	return query.QueryWhereClause{
+		And: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{"pod": {query.Eq: podName}}},
 			{Binary: query.BinaryWhereClause{"namespace": {query.Eq: namespace}}},
 		},
 	}

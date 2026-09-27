@@ -682,6 +682,47 @@ func TestGetEventWorkload_OwnerStillWinsForPods(t *testing.T) {
 	assert.Equal(t, "checkout", got)
 }
 
+// A pod event's logs and metrics come from that pod. The owner path returned
+// every replica's lines, `kubectl logs daemonset/<owner>` read one arbitrary
+// replica, and the utilisation query summed all of them — an OOMKilled
+// DaemonSet pod was captioned with another node's logs and the fleet's memory.
+func TestPodEventEvidenceTargetsThePod(t *testing.T) {
+	pod := playbooks.PlaybookEvent{
+		SubjectType:      "pod",
+		SubjectName:      "log-shipper-x7k2p",
+		SubjectOwner:     "log-shipper",
+		SubjectOwnerKind: "DaemonSet",
+		SubjectNamespace: "logging",
+	}
+
+	assert.Equal(t, "log-shipper-x7k2p", eventPodSubject(pod))
+	assert.Equal(t, "pod", relayLogKind(pod, eventPodSubject(pod)),
+		"kubectl logs daemonset/<owner> reads one arbitrary replica")
+	name, kind := workloadMetricTarget(pod)
+	assert.Equal(t, "log-shipper-x7k2p", name)
+	assert.Equal(t, "pod", kind, "any workload kind prefix-matches and sums the owner's pods")
+
+	where := buildPodLogWhereClause("log-shipper-x7k2p", "logging")
+	require.Len(t, where.And, 2)
+	assert.Equal(t, "log-shipper-x7k2p", where.And[0].Binary["pod"][query.Eq])
+	assert.Equal(t, "logging", where.And[1].Binary["namespace"][query.Eq])
+
+	// Non-pod subjects keep the owner path unchanged.
+	job := playbooks.PlaybookEvent{SubjectType: "job", SubjectName: "nightly-report-29836288",
+		SubjectOwner: "nightly-report", SubjectOwnerKind: "cronjob"}
+	assert.Equal(t, "", eventPodSubject(job))
+	name, kind = workloadMetricTarget(job)
+	assert.Equal(t, getEventWorkload(job), name)
+	assert.Equal(t, workloadKindFromEvent(job), kind)
+
+	deploy := playbooks.PlaybookEvent{SubjectType: "deployment", SubjectName: "checkout",
+		SubjectOwner: "checkout", SubjectOwnerKind: "Deployment"}
+	assert.Equal(t, "Deployment", relayLogKind(deploy, getEventWorkload(deploy)))
+
+	// No pod subject and no name must not read as "pod".
+	assert.Equal(t, "", relayLogKind(playbooks.PlaybookEvent{}, ""))
+}
+
 func TestGetEventWorkload_JobOwnedByItselfIsUnchanged(t *testing.T) {
 	// A standalone Job owns itself; both branches agree, and must keep agreeing.
 	got := getEventWorkload(playbooks.PlaybookEvent{

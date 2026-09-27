@@ -169,7 +169,7 @@ func podMetricTarget(event playbooks.PlaybookEvent) string {
 // labels["kind"] set without a workload label would otherwise turn the full pod
 // name into a prefix (pod=~"<pod>-.*") and match nothing.
 func isPodSubjectTarget(event playbooks.PlaybookEvent, name string) bool {
-	if name == "" || name != event.SubjectName || !strings.EqualFold(event.SubjectType, "pod") {
+	if name == "" || name != eventPodSubject(event) {
 		return false
 	}
 	labels := event.Labels

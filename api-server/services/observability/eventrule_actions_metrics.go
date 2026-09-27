@@ -542,7 +542,7 @@ func (a *observabilityMetricsAction) AutoExecute(ctx playbooks.PlaybookActionCon
 // covered: it has no per-pod K8s CPU metric without Container Insights, so it
 // falls through to FetchMetricUtilisation's unsupported-provider error.
 func (a *observabilityMetricsAction) autoExecuteByWorkload(ctx playbooks.PlaybookActionContext) (playbooks.PlaybookActionResponse, error) {
-	workloadName := getEventWorkload(ctx.GetEvent())
+	workloadName, kind := workloadMetricTarget(ctx.GetEvent())
 	namespace := getEventNamespace(ctx.GetEvent())
 	if workloadName == "" || namespace == "" {
 		return nil, errors.New("observabilityMetricsAction: workload name and namespace required for fallback")
@@ -568,11 +568,9 @@ func (a *observabilityMetricsAction) autoExecuteByWorkload(ctx playbooks.Playboo
 	// path resolves it too; ES used to need "cpu_real" because its query builder
 	// mapped only that one key.
 	const cpuKey = "cpu_usage"
-	kind := workloadKindFromEvent(ctx.GetEvent())
 
-	// getEventWorkload returns SubjectOwner (the controller) when present, else
-	// SubjectName; kind is derived to match so the per-provider builders apply the
-	// right filter (kube_deployment vs kube_stateful_set, pod=~"name-.*" vs pod="name").
+	// workloadMetricTarget pairs the name with its kind so the per-provider builders
+	// apply the right filter (kube_deployment vs kube_stateful_set, pod=~"name-.*" vs pod="name").
 	request := map[string]any{
 		"workload_namespace": namespace,
 		"workload_name":      workloadName,
@@ -594,6 +592,16 @@ func (a *observabilityMetricsAction) autoExecuteByWorkload(ctx playbooks.Playboo
 	}
 
 	return buildWorkloadMetricsResponse(request, metricsoutput), nil
+}
+
+// workloadMetricTarget is the name and kind the utilisation query is keyed on. A
+// pod event reads that pod, not the sum over its owner's pods (see
+// eventPodSubject); kind "pod" makes every builder match the name exactly.
+func workloadMetricTarget(ev playbooks.PlaybookEvent) (string, string) {
+	if pod := eventPodSubject(ev); pod != "" {
+		return pod, "pod"
+	}
+	return getEventWorkload(ev), workloadKindFromEvent(ev)
 }
 
 // workloadKindFromEvent derives the K8s workload kind (deployment / statefulset /

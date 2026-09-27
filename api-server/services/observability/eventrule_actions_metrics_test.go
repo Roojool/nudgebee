@@ -6,6 +6,7 @@ import (
 	"nudgebee/services/eventrule/playbooks"
 	"nudgebee/services/internal/testenv"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,18 +319,20 @@ func TestAutoExecuteByWorkloadIntegration(t *testing.T) {
 		Annotations: map[string]string{},
 		StartedAt:   &start,
 		EndedAt:     &end,
-		// getEventWorkload keys on SubjectOwner first; SubjectName is the fallback.
-		// Set both so the query targets the workload regardless.
+		// A "pod" subject is queried as that pod (workloadMetricTarget), so the
+		// subject type follows TEST_WORKLOAD_KIND: a workload kind exercises the
+		// owner path, "pod" the exact-pod path.
 		SubjectName:      workload,
 		SubjectOwner:     workload,
 		SubjectOwnerKind: ownerKind,
-		SubjectType:      "pod",
+		SubjectType:      strings.ToLower(ownerKind),
 		SubjectNamespace: namespace,
 	}
 
 	ctx := playbooks.NewPlaybookActionContext(env[testenv.Tenant], env[testenv.Account], slog.Default(), event)
 
-	t.Logf("resolved kind=%q workload=%q namespace=%q", workloadKindFromEvent(event), getEventWorkload(event), getEventNamespace(event))
+	name, kind := workloadMetricTarget(event)
+	t.Logf("resolved kind=%q workload=%q namespace=%q", kind, name, getEventNamespace(event))
 
 	action := &observabilityMetricsAction{}
 	resp, err := action.autoExecuteByWorkload(ctx)
