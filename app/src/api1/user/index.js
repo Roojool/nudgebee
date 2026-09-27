@@ -45,6 +45,13 @@ export const PREFERENCE_CLOUD_TOUR_SEEN = 'cloud_tour_seen';
 // than this are "unread". Replaces the standalone `nb.productUpdates.lastSeenAt`
 // key so it lives in the consolidated `nudgebee.userPreferences` entry.
 export const PREFERENCE_PRODUCT_UPDATES_LAST_SEEN = 'product_updates_last_seen';
+// Map of tenantId -> ISO timestamp until which the setup progress banner
+// (home) stays hidden for that tenant, then returns — a snooze, not a
+// dismissal. Scoped per tenant like PREFERENCE_RECENT_PAGE_SEARCHES above: an
+// admin who dismisses this while viewing one tenant must not silently
+// suppress it on another tenant sharing the same browser. It gates nothing
+// (the underlying gate is accounts, not this flag) — see SetupProgressBanner.tsx.
+export const PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL = 'setup_banner_hidden_until';
 
 const availablePreferences = [
   PREFERENCE_LAST_ACCOUNT_ID,
@@ -61,6 +68,7 @@ const availablePreferences = [
   PREFERENCE_TICKETS_TOUR_SEEN,
   PREFERENCE_CLOUD_TOUR_SEEN,
   PREFERENCE_PRODUCT_UPDATES_LAST_SEEN,
+  PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL,
 ];
 
 export const GET_CLOUD_ACCOUNTS = `
@@ -652,6 +660,27 @@ const apiUser = {
     const existing = prefs[PREFERENCE_RECENT_PAGE_SEARCHES] || {};
     apiUser.storeUserPreferences(PREFERENCE_RECENT_PAGE_SEARCHES, { ...existing, [tenantId]: updated });
     return updated;
+  },
+
+  // ISO timestamp a tenant's setup-progress-banner snooze runs until, or
+  // undefined if never snoozed (or no tenant id yet). Scoped per tenant —
+  // see PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL above.
+  getSetupBannerHiddenUntil: function (tenantId) {
+    if (!tenantId) {
+      return undefined;
+    }
+    const prefs = apiUser.getUserPreferences() || {};
+    const map = prefs[PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL] || {};
+    return map[tenantId];
+  },
+
+  setSetupBannerHiddenUntil: function (until, tenantId) {
+    if (!until || !tenantId) {
+      return;
+    }
+    const prefs = apiUser.getUserPreferences() || {};
+    const existing = prefs[PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL] || {};
+    apiUser.storeUserPreferences(PREFERENCE_SETUP_BANNER_HIDDEN_UNTIL, { ...existing, [tenantId]: until });
   },
 
   // Whether the K8s-agent banner for a given cluster has been dismissed by the

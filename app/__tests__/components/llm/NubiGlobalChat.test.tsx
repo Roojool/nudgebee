@@ -13,7 +13,8 @@ jest.mock('@context/NubiGlobalChatContext', () => ({
   useNubiGlobalChat: jest.fn(),
   NUBI_GLOBAL_CHAT_SHORTCUT_LABEL: '⌘J',
   isNubiFullPageRoute: (pathname: string) => pathname.startsWith('/ask-nudgebee'),
-  isNubiLauncherHiddenRoute: (pathname: string) => ['/investigate', '/automation/[workflowId]'].some((route: string) => pathname.startsWith(route)),
+  isNubiLauncherHiddenRoute: (pathname: string) =>
+    ['/investigate', '/automation/[workflowId]', '/setup'].some((route: string) => pathname.startsWith(route)),
 }));
 
 jest.mock('@context/DataContext', () => ({
@@ -232,6 +233,12 @@ describe('NubiGlobalChat', () => {
 
   it('hides only the launcher on pages that own their opener', () => {
     mockPathname.current = '/investigate';
+    render(<NubiGlobalChat />);
+    expect(screen.queryByTestId('nubi-global-chat-launcher')).not.toBeInTheDocument();
+  });
+
+  it('hides the launcher on the Setup Center, a locked fresh tenant has nothing to chat about yet', () => {
+    mockPathname.current = '/setup';
     render(<NubiGlobalChat />);
     expect(screen.queryByTestId('nubi-global-chat-launcher')).not.toBeInTheDocument();
   });

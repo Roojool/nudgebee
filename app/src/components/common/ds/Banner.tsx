@@ -61,9 +61,17 @@ export interface BannerProps {
 }
 
 const SURFACE_TOKENS: Record<BannerSurface, { padding: string; radius: string; marginBottom: string }> = {
-  page: { padding: 'var(--ds-space-3) var(--ds-space-4)', radius: 'var(--ds-radius-lg)', marginBottom: 'var(--ds-space-4)' },
+  page: { padding: 'var(--ds-space-3) var(--ds-space-4)', radius: 'var(--ds-radius-xl)', marginBottom: 'var(--ds-space-4)' },
   section: { padding: 'var(--ds-space-2) var(--ds-space-3)', radius: 'var(--ds-radius-lg)', marginBottom: 'var(--ds-space-3)' },
 };
+
+// Deliberately not FEEDBACK_TONES[tone].textColor: that field is tone-colored
+// (blue-700/green-700/amber-700/red-700) for Callout's use. On a Banner, a
+// tone-colored title/message read as a second severity signal stacked on top
+// of the icon and border — the same signal twice. Banner keeps copy neutral
+// and leaves tone to the icon/border alone; Callout is unaffected.
+const TITLE_COLOR = 'var(--ds-gray-700)';
+const MESSAGE_COLOR = 'var(--ds-gray-600)';
 
 export function Banner({
   tone,
@@ -110,7 +118,7 @@ export function Banner({
                 ? {
                     fontSize: 'var(--ds-text-small)',
                     fontWeight: 'var(--ds-font-weight-medium)',
-                    color: cfg.textColor,
+                    color: TITLE_COLOR,
                     textDecoration: 'underline',
                     padding: 0,
                     '&:hover': { textDecoration: 'none' },
@@ -121,7 +129,7 @@ export function Banner({
                     padding: '0 10px',
                     fontSize: 'var(--ds-text-caption)',
                     fontWeight: 'var(--ds-font-weight-medium)',
-                    color: cfg.textColor,
+                    color: TITLE_COLOR,
                     backgroundColor: 'var(--ds-background-100)',
                     border: `1px solid ${cfg.border}`,
                     borderRadius: 'var(--ds-radius-sm)',
@@ -143,13 +151,12 @@ export function Banner({
       role={role}
       sx={{
         display: 'flex',
-        alignItems: 'center',
         gap: 'var(--ds-space-3)',
         padding: surf.padding,
         backgroundColor: cfg.bg,
         border: `1px solid ${cfg.border}`,
         borderRadius: surf.radius,
-        color: cfg.textColor,
+        color: MESSAGE_COLOR,
       }}
     >
       <Box component={Icon as React.ElementType} aria-hidden='true' sx={{ fontSize: 18, color: cfg.iconColor, flexShrink: 0 }} />
@@ -159,14 +166,16 @@ export function Banner({
             component='div'
             sx={{
               fontSize: 'var(--ds-text-body)',
+              fontFamily: 'var(--ds-font-display)',
               fontWeight: 'var(--ds-font-weight-semibold)',
-              color: cfg.textColor,
+              color: TITLE_COLOR,
+              lineHeight: 1.4,
             }}
           >
             {title}
           </Box>
         )}
-        <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', lineHeight: 1.5 }}>
+        <Box component='span' sx={{ fontSize: 'var(--ds-text-small)', lineHeight: 1.2 }}>
           {message}
         </Box>
         {actionsPlacement === 'below' && actionsNode}

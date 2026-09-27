@@ -207,6 +207,15 @@ const COMMON_WEBHOOK_LABEL_KEYS = [
   'rule_type',
 ];
 
+/**
+ * `editData`'s default of `null` with no other annotation left TypeScript
+ * inferring the prop as `null | undefined` for any `.tsx` caller — narrower
+ * than what the component actually does with it (`editData.integrations_cloud_accounts`,
+ * `editData?.source`, …), just never hit before because every caller so far
+ * has been a `.jsx` file, unchecked either way. `propTypes` below already
+ * documents it as `PropTypes.object`; this just gives that same fact to `tsc`.
+ * @param {{ editData?: Record<string, unknown> | null }} props
+ */
 const IntegrationDynamicFormModal = ({
   integrationName,
   openModal,
@@ -347,7 +356,23 @@ const IntegrationDynamicFormModal = ({
         //   never cloud-eligible, hence !isAgentSource.
         // 'es' is the ES page's integrationName (account-form.jsx passes {'ES'}); the
         // check lowercases it, so 'es' — not 'elasticsearch' — is what matches here.
-        const CLOUD_CAPABLE_INTEGRATIONS = ['datadog', 'observe', 'dynatrace', 'splunk_observability_platform', 'solarwinds', 'elasticsearch', 'es'];
+        // chronosphere/jaeger: both are hosted/SaaS-reachable backends with no
+        // proprietary k8s-column dependency (unlike the loggly/pinot/hive/
+        // azure_app_insights/signoz group above), and neither carries a documented
+        // product decision restricting it the way New Relic does — their absence
+        // here looked like an oversight, not a decision (interim call, pending
+        // product confirmation — see docs/setup-center-build-spec.md §9).
+        const CLOUD_CAPABLE_INTEGRATIONS = [
+          'datadog',
+          'observe',
+          'dynatrace',
+          'splunk_observability_platform',
+          'solarwinds',
+          'elasticsearch',
+          'es',
+          'chronosphere',
+          'jaeger',
+        ];
         const isWebhook = configs.category === 'incident_webhook' || (integrationName || '').toLowerCase().includes('webhook');
         // The VM agent (forager) is the exception to the !isAgentSource rule above.
         // That rule excludes agent-sourced providers because they need an

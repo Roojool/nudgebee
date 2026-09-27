@@ -20,10 +20,18 @@ async function globalSetup(_config: FullConfig) {
   const browser = await chromium.launch({ headless: !!process.env.CI });
   try {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const context = await browser.newContext({ baseURL: process.env.BASE_URL });
+      const context = await browser.newContext({
+        baseURL: process.env.BASE_URL,
+      });
       // Seeded before the first page load so the tour flags land in the storageState saved below,
       // which every test context restores — that is what suppresses the popups suite-wide.
       await suppressTourPopups(context);
+      // No setup-gate seeding: the gate is derived from the tenant's cloud
+      // accounts, not from a browser flag, so there is nothing a storageState
+      // can carry. **The suite therefore depends on the e2e tenant having at
+      // least one non-deleted cloud account.** Wipe them and every test in
+      // every area redirects to /setup — a total failure whose cause is
+      // invisible from the specs, because no spec mentions the gate.
       const page = await context.newPage();
       try {
         // Select the cluster here too. ClusterDropDown persists the choice to
@@ -35,7 +43,10 @@ async function globalSetup(_config: FullConfig) {
         // force: this is the run that resolves and records the tenant, so it must
         // switch for real rather than trusting a tenant recorded by an earlier run.
         const loginPage = new LoginPage(page);
-        const selection = await loginPage.doFullLogin({ selectCluster: true, force: true });
+        const selection = await loginPage.doFullLogin({
+          selectCluster: true,
+          force: true,
+        });
 
         // Reload and re-check before saving. doFullLogin verified the live page, which
         // does not prove the selection is actually IN the state about to be persisted —
@@ -46,13 +57,17 @@ async function globalSetup(_config: FullConfig) {
 
         mkdirSync(path.dirname(AUTH_STATE_PATH), { recursive: true });
         await context.storageState({ path: AUTH_STATE_PATH });
-        console.log(`[global-setup] Authenticated session saved to ${AUTH_STATE_PATH}`);
+        console.log(
+          `[global-setup] Authenticated session saved to ${AUTH_STATE_PATH}`
+        );
         await context.close();
         return;
       } catch (err) {
         await context.close().catch(() => {});
         const message = err instanceof Error ? err.message : String(err);
-        console.warn(`[global-setup] Login attempt ${attempt}/${MAX_ATTEMPTS} failed: ${message}`);
+        console.warn(
+          `[global-setup] Login attempt ${attempt}/${MAX_ATTEMPTS} failed: ${message}`
+        );
         if (attempt === MAX_ATTEMPTS) throw err;
       }
     }

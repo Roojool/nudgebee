@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import { NubiGlobalChatProvider, useNubiGlobalChat } from '@context/NubiGlobalChatContext';
+import { NubiGlobalChatProvider, useNubiGlobalChat, isNubiLauncherHiddenRoute } from '@context/NubiGlobalChatContext';
 
 const mockPathname = { current: '/optimise' };
 const mockPageAccount = { current: 'account-123' as string | undefined };
@@ -217,5 +217,21 @@ describe('NubiGlobalChatProvider', () => {
       fireEvent.keyDown(window, { key: 'j', metaKey: true });
     });
     expect(screen.getByTestId('state')).toHaveTextContent('closed');
+  });
+});
+
+describe('isNubiLauncherHiddenRoute', () => {
+  it('hides on the Setup Center — a locked fresh tenant has nothing to chat about yet', () => {
+    expect(isNubiLauncherHiddenRoute('/setup')).toBe(true);
+  });
+
+  it('still hides on the other pages that own their own opener', () => {
+    expect(isNubiLauncherHiddenRoute('/investigate')).toBe(true);
+    expect(isNubiLauncherHiddenRoute('/automation/[workflowId]')).toBe(true);
+  });
+
+  it('leaves the launcher up everywhere else', () => {
+    expect(isNubiLauncherHiddenRoute('/optimise')).toBe(false);
+    expect(isNubiLauncherHiddenRoute('/automation')).toBe(false);
   });
 });

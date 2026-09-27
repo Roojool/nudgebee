@@ -41,6 +41,7 @@ import WorkflowIconBlue from '@assets/workflow/workflow-icon-blue.icon.svg';
 
 import SafeIcon from '@shared/icons/SafeIcon';
 import { useRouter } from 'next/router';
+import { useSetupGate } from '@context/SetupGateContext';
 import { useData } from '@context/DataContext';
 import { hasWriteAccess } from '@lib/auth';
 import apiKubernetes from '@api1/kubernetes';
@@ -80,6 +81,7 @@ const AGENT_UPGRADE_DOCS_URL = docsUrl('/docs/installation/agent/installation/up
 const Header1 = ({ showBorder = false }) => {
   const { data } = useSession({ required: true });
   const router = useRouter();
+  const { locked: setupLocked } = useSetupGate();
   const { assistantName, baseTitle, nubiIconUrl } = useTenantBranding();
   const { selectedCluster, allCluster } = useData();
   const selectedClusterRef = useRef(selectedCluster);
@@ -730,7 +732,7 @@ const Header1 = ({ showBorder = false }) => {
           }
         />
       )}
-      {allCluster && allCluster.length > 0 && !allCluster.some((c) => c.value !== 'demo') && !loading && (
+      {!setupLocked && allCluster && allCluster.length > 0 && !allCluster.some((c) => c.value !== 'demo') && !loading && (
         <Box
           data-testid='demo-account-banner'
           sx={{
@@ -846,7 +848,20 @@ const Header1 = ({ showBorder = false }) => {
               </Box>
             </Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], justifyContent: 'center', flex: 1 }}>
-              <GlobalPageSearch hasClusterDropdown={anchorActiveTab.showActiveCluster} />
+              {/* Global search is the only control in this header that navigates,
+                  and unlike everything around it, it is not behind an
+                  `anchorActiveTab` flag — so on `/setup`, where that never
+                  resolves, it renders while the rest of the bar goes quiet.
+                  Every result it offers is a route the gate bounces straight
+                  back, so it promises a journey it cannot deliver.
+
+                  Hidden, not disabled: a greyed search box invites a click and
+                  explains nothing. Product Updates and Notifications hide the
+                  same way below — a fresh, locked tenant has no updates or
+                  notifications of its own yet, so both read as clutter on
+                  this page. Help stays, since it opens docs rather than
+                  anything scoped to the tenant. */}
+              {!setupLocked && <GlobalPageSearch hasClusterDropdown={anchorActiveTab.showActiveCluster} />}
             </Box>
             <Box display={'flex'} alignItems={'center'} justifyContent={'flex-end'} gap={ds.space[3]}>
               <Box sx={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: ds.space[2] }}>
@@ -1034,52 +1049,56 @@ const Header1 = ({ showBorder = false }) => {
               </Box>
               <DsDivider orientation='vertical' sx={{ minHeight: ds.space.mul(0, 16), marginLeft: 0, marginRight: 0 }} />
               <Box sx={{ display: 'flex', flexDirection: 'row', gap: ds.space[2] }}>
-                <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+                {!setupLocked && (
+                  <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+                    <DsButton
+                      composition='icon-only'
+                      tone='secondary'
+                      size='md'
+                      tooltip='Product Updates'
+                      tooltipPlacement='bottom'
+                      tooltipDisableFlip
+                      aria-label='Product Updates'
+                      icon={<CampaignOutlinedIcon fontSize='small' />}
+                      onClick={openProductUpdates}
+                      data-testid='product-updates-trigger'
+                    />
+                    {productUpdates.unreadCount > 0 && (
+                      <Box
+                        aria-hidden
+                        sx={{
+                          position: 'absolute',
+                          // Superscript: lift above the icon's top-right corner.
+                          top: '-6px',
+                          right: '-6px',
+                          pointerEvents: 'none',
+                        }}
+                      >
+                        <Chip
+                          variant='count'
+                          size='micro'
+                          tone='critical'
+                          solid
+                          count={productUpdates.unreadCount}
+                          // White ring so the count chip reads as a distinct superscript, not part of the icon.
+                          sx={{ boxShadow: '0 0 0 1.5px var(--ds-background-100)' }}
+                        />
+                      </Box>
+                    )}
+                  </Box>
+                )}
+                {!setupLocked && (
                   <DsButton
                     composition='icon-only'
                     tone='secondary'
                     size='md'
-                    tooltip='Product Updates'
+                    tooltip='Coming Soon'
                     tooltipPlacement='bottom'
                     tooltipDisableFlip
-                    aria-label='Product Updates'
-                    icon={<CampaignOutlinedIcon fontSize='small' />}
-                    onClick={openProductUpdates}
-                    data-testid='product-updates-trigger'
+                    aria-label='Notifications'
+                    icon={<SafeIcon alt='Notification Icon' src={NotificationOutlineIconDark} />}
                   />
-                  {productUpdates.unreadCount > 0 && (
-                    <Box
-                      aria-hidden
-                      sx={{
-                        position: 'absolute',
-                        // Superscript: lift above the icon's top-right corner.
-                        top: '-6px',
-                        right: '-6px',
-                        pointerEvents: 'none',
-                      }}
-                    >
-                      <Chip
-                        variant='count'
-                        size='micro'
-                        tone='critical'
-                        solid
-                        count={productUpdates.unreadCount}
-                        // White ring so the count chip reads as a distinct superscript, not part of the icon.
-                        sx={{ boxShadow: '0 0 0 1.5px var(--ds-background-100)' }}
-                      />
-                    </Box>
-                  )}
-                </Box>
-                <DsButton
-                  composition='icon-only'
-                  tone='secondary'
-                  size='md'
-                  tooltip='Coming Soon'
-                  tooltipPlacement='bottom'
-                  tooltipDisableFlip
-                  aria-label='Notifications'
-                  icon={<SafeIcon alt='Notification Icon' src={NotificationOutlineIconDark} />}
-                />
+                )}
                 <Box className='headerHelpMenu'>
                   <DropdownMenu
                     align='end'

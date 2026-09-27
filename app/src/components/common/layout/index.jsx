@@ -67,6 +67,7 @@ import Tooltip from '@ui/Tooltip';
 import ApiTokens from '@shared/settings/ApiTokens';
 import { tenantSwitcher } from '@lib/tenantSwitcherService';
 import { useData } from '@context/DataContext';
+import { useSetupGate, SETUP_ROUTE } from '@context/SetupGateContext';
 import { createGetMenuItem, generateMenuItems } from './UserMenuItems';
 import NubiBrainNav from './NubiBrainNav';
 import { ds } from 'src/utils/colors';
@@ -321,6 +322,10 @@ const SideDrawerButton = ({ item = {}, isFlyoutOpen = false, onHoverOpen, onHove
 
 const PageLayout = ({ children }) => {
   const router = useRouter();
+  // A tenant with no cloud accounts is held on the Setup Center — see
+  // SetupGateContext. Dimming the rail is the visible half; the redirect in
+  // that provider is what actually enforces it.
+  const { locked: navLocked } = useSetupGate();
 
   // State
   const [anchorElUser, setAnchorElUser] = useState(null);
@@ -786,33 +791,57 @@ const PageLayout = ({ children }) => {
               <Box sx={{ width: COLLAPSED_WIDTH, ...styles.sideDrawer }}>
                 <Box className='inner-side-drawer'>
                   <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', marginTop: 'var(--ds-space-3)' }}>
-                    <Link href={homeUrl} passHref>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      {/* oxlint-disable nextjs/no-img-element -- dynamic branding URL; next/image requires static domain allowlist */}
-                      {!brandingLoading && logoSrc && (
-                        <img
-                          src={logoSrc}
-                          alt={baseTitle}
-                          aria-label={baseTitle}
-                          width={50}
-                          height={40}
-                          style={{ maxWidth: ds.space.mul(0, 25), maxHeight: ds.space.mul(1, 10), objectFit: 'contain' }}
-                        />
-                      )}
-                      {/* oxlint-enable nextjs/no-img-element */}
-                    </Link>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    {/* oxlint-disable nextjs/no-img-element -- dynamic branding URL; next/image requires static domain allowlist */}
+                    {!brandingLoading &&
+                      logoSrc &&
+                      (() => {
+                        const logo = (
+                          <img
+                            src={logoSrc}
+                            alt={baseTitle}
+                            aria-label={baseTitle}
+                            width={50}
+                            height={40}
+                            style={{ maxWidth: ds.space.mul(0, 25), maxHeight: ds.space.mul(1, 10), objectFit: 'contain' }}
+                          />
+                        );
+                        // While gated, the logo is a mark, not a link. It sat outside the
+                        // locked wrapper below, so clicking it started a navigation the
+                        // route guard then reversed — a visible flash, and the one place
+                        // "nothing is clickable" visibly wasn't true.
+                        //
+                        // Dropped rather than dimmed: the rail is greyed because those are
+                        // destinations you cannot reach yet, but a faded brand mark just
+                        // reads as a broken page.
+                        return navLocked ? (
+                          logo
+                        ) : (
+                          <Link href={homeUrl} passHref>
+                            {logo}
+                          </Link>
+                        );
+                      })()}
+                    {/* oxlint-enable nextjs/no-img-element */}
                   </Box>
                   <Box sx={styles.separator} />
 
                   {menuItems.map((item, idx) => (
                     <React.Fragment key={item.id || `${item.text}-${idx}`}>
+                      {/* A separator's own sx (styles.subSeparator/styles.separator) draws a
+                          `display: 'list-item'` rule with a fixed, left-aligned width — it needs
+                          to stay a direct child of .inner-side-drawer to render at that position.
+                          Wrapping the whole .map() output (separators included) in the dimming
+                          Box below used to push every separator to the left edge instead. */}
                       {['Troubleshoot', 'Infra', 'Tickets'].includes(item.text) && <Box sx={styles.subSeparator} />}
-                      <SideDrawerButton
-                        item={item}
-                        isFlyoutOpen={!!flyout && flyout.item.id === item.id}
-                        onHoverOpen={openFlyout}
-                        onHoverClose={scheduleFlyoutClose}
-                      />
+                      <Box sx={navLocked ? { pointerEvents: 'none', opacity: 0.35, filter: 'grayscale(1)' } : undefined}>
+                        <SideDrawerButton
+                          item={item}
+                          isFlyoutOpen={!!flyout && flyout.item.id === item.id}
+                          onHoverOpen={navLocked ? undefined : openFlyout}
+                          onHoverClose={navLocked ? undefined : scheduleFlyoutClose}
+                        />
+                      </Box>
                     </React.Fragment>
                   ))}
 
@@ -825,13 +854,32 @@ const PageLayout = ({ children }) => {
                   />
 
                   {/* Auto-launches the first-login sidebar walkthrough once; renders nothing. */}
-                  <FirstLoginTour />
+                  {/* Both tours point at rail items — pointless while the rail is
+                      `pointer-events: none` at 35% opacity, and worse than pointless if a
+                      tour library still manages to focus/scroll to a target a user cannot
+                      click. Held until the rail is live.
+
+                      `pathname !== SETUP_ROUTE` too, not just `!navLocked` — the same gap
+                      PendingAgentInstallBanner below is guarded against: SetupCenter's own
+                      account-create callback can flip navLocked false while the user is
+                      still on /setup mid-wizard (see that banner's comment for the exact
+                      mechanism). Without the route check, the welcome card can pop up over
+                      the Setup Center's own "waiting for agent" panel — and since
+                      PREFERENCE_APP_TOUR_SEEN latches the instant the user clicks "Let's go"
+                      (FirstLoginTour.jsx), clicking through there burns the one-shot flag
+                      before the user ever reaches a finished dashboard. */}
+                  {!navLocked && router.pathname !== SETUP_ROUTE && <FirstLoginTour />}
 
                   {/* Offers a section's guided tour on first visit (Troubleshoot); renders nothing. */}
-                  <SectionFirstVisitTour />
+                  {!navLocked && router.pathname !== SETUP_ROUTE && <SectionFirstVisitTour />}
 
                   <Box sx={styles.userMenuContainer}>
-                    <Box sx={{ mb: 'var(--ds-space-3)' }}>
+                    {/* b-Cortex/AI & Tools opens a modal, not a navigation, so the
+                        route guard's redirect never catches a click here while
+                        gated — it needs its own lock, same treatment as the rail
+                        above. The account menu below stays reachable on purpose:
+                        signing out must work regardless of gate state. */}
+                    <Box sx={{ mb: 'var(--ds-space-3)', ...(navLocked ? { pointerEvents: 'none', opacity: 0.35, filter: 'grayscale(1)' } : {}) }}>
                       <NubiBrainNav surface='dark' />
                     </Box>
                     <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -929,10 +977,22 @@ const PageLayout = ({ children }) => {
                 <Container maxWidth={false} sx={{ maxWidth: ds.space.mul(0, 900) }} style={{ paddingInline: 0 }}>
                   {/* Reminder for a Kubernetes account whose install command was never
                       run. Lives here, not on one page: the add-cluster modal is reachable
-                      from the header everywhere, so the reminder has to follow the user. */}
-                  <ErrorBoundary resetKey={router.asPath}>
-                    <PendingAgentInstallBanner />
-                  </ErrorBoundary>
+                      from the header everywhere, so the reminder has to follow the user.
+
+                      Suppressed on /setup specifically — not on `navLocked`, which is not
+                      the same condition. The K8s wizard's own account-create callback
+                      (`refreshReadiness` in SetupCenter) re-reads the gate the instant step
+                      1 submits, so `navLocked` flips false while the user is still on
+                      /setup watching step 2 (the install command, waiting for the agent).
+                      Gating on navLocked would let this banner render at exactly that
+                      moment, stacked on the card's own "waiting for agent" state for the
+                      same account. The route is the one thing that stays true for as long
+                      as the duplicate would. */}
+                  {router.pathname !== SETUP_ROUTE && (
+                    <ErrorBoundary resetKey={router.asPath}>
+                      <PendingAgentInstallBanner />
+                    </ErrorBoundary>
+                  )}
                   <ErrorBoundary resetKey={router.asPath}>{children}</ErrorBoundary>
                 </Container>
               </Box>

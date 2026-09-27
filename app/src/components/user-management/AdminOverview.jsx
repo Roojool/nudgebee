@@ -4,6 +4,7 @@ import Tabs from '@shared/navigation/Tabs';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import OverviewCards from './AdminOverviewCards';
 import AdminConnections from './AdminConnections';
+import useAdminAction from './useAdminAction';
 
 // The admin landing tab (first in the strip, default no-hash landing at
 // /user-management). Two internal sub-views, switched by a filter toggle:
@@ -12,7 +13,8 @@ import AdminConnections from './AdminConnections';
 //
 // The sub-view is component-local state, not a URL fragment: like Tenant
 // Settings' own General/Label/Features tabs, it isn't separately hash-routed or
-// listed in global search. The tab itself (#overview) is.
+// listed in global search. The tab itself (#overview) is. `?action=overview-connections`
+// (the /home setup progress banner's link) opens it on Connections.
 
 const SUB_VIEWS = {
   tabOptions: [
@@ -23,6 +25,7 @@ const SUB_VIEWS = {
 
 const AdminOverview = () => {
   const [subView, setSubView] = useState('overview');
+  useAdminAction('overview-connections', () => setSubView('connections'));
 
   return (
     <Box>

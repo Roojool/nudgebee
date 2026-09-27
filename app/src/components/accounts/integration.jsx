@@ -855,6 +855,10 @@ const Integrations = () => {
       setLoading(true);
       try {
         const res = await apiAccount.getAllAccount();
+        // `getAllAccount` returns its error rather than rejecting. Route it into
+        // the catch below, so a failed lookup reads as a failure rather than as
+        // a tenant with no integrations at all.
+        if (res instanceof Error) throw res;
         const dataMap = normalizeApiResponse(res?.data);
         const processedSections = generateSectionData(dataMap);
         setSectionsData(processedSections);
