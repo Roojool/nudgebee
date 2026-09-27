@@ -287,6 +287,9 @@ interface AutoSuggestTextareaProps {
   onDraftSubmitted?: (id: string) => void;
   externalAgentsLoading?: boolean;
   submitOnModEnter?: boolean;
+  // Rendered first in the footer row, before the agent and model pickers
+  // (the Ask page puts its account chip here).
+  leadingControls?: React.ReactNode;
 }
 
 // A whole-config selection: the config decides the model, per task, using its
@@ -986,6 +989,7 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
     onDraftChange,
     externalAgentsLoading = false,
     submitOnModEnter = false,
+    leadingControls,
   },
   forwardedRef
 ) {
@@ -1573,6 +1577,7 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
             pt: 'var(--ds-space-1)',
           }}
         >
+          {leadingControls}
           {imagesEnabled && (
             <>
               <input

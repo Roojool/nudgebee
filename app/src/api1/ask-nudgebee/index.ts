@@ -566,6 +566,7 @@ const api = {
                 created_at
                 source
                 title
+                account_id
                 user_display_name
                 user_username
                 for_status
@@ -576,7 +577,7 @@ const api = {
         `;
 
     const where: any = {};
-    where.account_id = { _eq: data.account_id };
+    where.account_id = Array.isArray(data.account_id) ? { _in: data.account_id } : { _eq: data.account_id };
     if (data.latestLastRecordedAt) {
       where.updated_at = { _gt: data.latestLastRecordedAt };
     }
@@ -630,6 +631,7 @@ const api = {
           created_at: row.created_at,
           source: row.source,
           title: row.title,
+          account_id: row.account_id,
           user: { display_name: row.user_display_name, username: row.user_username },
           for_status: forStatus ? [forStatus] : [],
           llm_conversation_saveds: row.is_saved ? [{ conversation_id: row.id }] : [],

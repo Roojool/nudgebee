@@ -29,6 +29,10 @@ import { Toggle } from '@ui/Toggle';
 import { Modal } from '@ui/Modal';
 import { useRouter } from 'next/router';
 import { getUserSession } from '@lib/auth';
+import { applyFiltersOnRouter } from '@lib/router';
+import FilterDropdown from '@ui/FilterDropdown';
+import CloudProviderIcon from '@shared/icons/CloudIcon';
+import { useData } from '@context/DataContext';
 
 const conversationSources = [
   { value: 'UserInvestigation', label: 'User Chat' },
@@ -53,8 +57,11 @@ const TYPE_GROUPS = {
   Queries: ['PrometheusQuery', 'LokiQuery', 'ESQuery'],
 };
 
+const parseAccountIds = (raw) => (raw ? String(raw).split(',').filter(Boolean) : []);
+
+const renderAccountGroupIcon = (provider) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
+
 const ConversationList = ({
-  accountId,
   onSelectConversation,
   selectedId,
   isConversationListVisible,
@@ -102,6 +109,46 @@ const ConversationList = ({
 
   const [selectedSources, setSelectedSources] = useState(allSourceValues);
   const [selectedType, setSelectedType] = useState('All');
+
+  // The list spans every account the user can see; ?accountIds= narrows it. An empty
+  // selection still sends the full id list rather than omitting the filter: the
+  // conversations table is only indexed by (account_id, updated_at), so an unfiltered
+  // tenant-wide query would sort the whole tenant on every 5s poll.
+  const { allCluster } = useData();
+  // allCluster always carries the synthetic 'demo' account, which has no conversations and
+  // must never reach the backend (the api layer drops every scalar 'demo' request).
+  const accounts = useMemo(() => (allCluster || []).filter((c) => c.value && c.value !== 'demo'), [allCluster]);
+  const [filterAccountIds, setFilterAccountIds] = useState(() => parseAccountIds(router.query.accountIds));
+  const allAccountIds = useMemo(() => accounts.map((c) => c.value), [accounts]);
+  const queryAccountIds = filterAccountIds.length > 0 ? filterAccountIds : allAccountIds;
+  // Effects key on the ids by value: allCluster can be re-set to an identical list.
+  const queryAccountKey = queryAccountIds.join(',');
+  const accountNames = useMemo(() => new Map(accounts.map((c) => [c.value, c.label])), [accounts]);
+  const accountProviders = useMemo(() => new Map(accounts.map((c) => [c.value, c.cloud_provider])), [accounts]);
+  const accountOptions = useMemo(
+    () =>
+      accounts.map((c) => ({
+        value: c.value,
+        label: c.label,
+        group: c.cloud_provider || 'Other',
+        searchText: c.label,
+      })),
+    [accounts]
+  );
+  const accountFilterValue = useMemo(() => accountOptions.filter((o) => filterAccountIds.includes(o.value)), [accountOptions, filterAccountIds]);
+  // A single-account list says the account once, in the filter; every row repeating it is noise.
+  const showRowAccount = filterAccountIds.length !== 1;
+
+  useEffect(() => {
+    if (!router.isReady) return;
+    setFilterAccountIds(parseAccountIds(router.query.accountIds));
+  }, [router.isReady, router.query.accountIds]);
+
+  const handleAccountFilterChange = (_e, value) => {
+    const ids = (value || []).map((v) => v.value);
+    setFilterAccountIds(ids);
+    applyFiltersOnRouter(router, { accountIds: ids.join(',') }, { shallow: true });
+  };
 
   const handleTypeSelect = (value) => {
     const next = value || 'All';
@@ -203,7 +250,7 @@ const ConversationList = ({
     inFlightEpochRef.current = epoch;
     setLoading(true);
     const query = {
-      account_id: accountId,
+      account_id: queryAccountIds,
       source:
         selectedSources.length > 0
           ? selectedSources
@@ -357,6 +404,7 @@ const ConversationList = ({
         message,
         created_at: item.created_at,
         source: item.source,
+        accountId: item.account_id,
         status,
         userName: item?.user?.display_name ?? '-',
         email: item?.user?.username ?? '-',
@@ -409,9 +457,10 @@ const ConversationList = ({
     // filter the user just left.
     requestEpochRef.current += 1;
 
-    // 2. STOP if the list is not visible.
+    // 2. STOP if the list is not visible, or the accounts to query have not loaded yet.
     // This prevents API calls and polling when the drawer is closed.
-    if (!isConversationListVisible) {
+    // Until the router is ready ?accountIds= is not read yet, so the first fetch would be for every account.
+    if (!isConversationListVisible || queryAccountIds.length === 0 || !router.isReady) {
       return;
     }
 
@@ -420,7 +469,7 @@ const ConversationList = ({
     // that fetch is triggered manually by the 'onEnterPress' in SearchInput. A filter /
     // account / source change still has to refetch, otherwise switching to 'Mine' mid-search
     // leaves the previous filter's rows on screen.
-    const queryIdentity = JSON.stringify([accountId, scope, stateFilter, selectedSources]);
+    const queryIdentity = JSON.stringify([queryAccountIds, scope, stateFilter, selectedSources]);
     const queryIdentityChanged = queryIdentity !== lastQueryIdentityRef.current;
     lastQueryIdentityRef.current = queryIdentity;
     if (searchText !== '' && !queryIdentityChanged) {
@@ -447,7 +496,8 @@ const ConversationList = ({
       }
     };
   }, [
-    accountId,
+    queryAccountKey,
+    router.isReady,
     scope,
     stateFilter,
     selectedSources,
@@ -459,10 +509,10 @@ const ConversationList = ({
   // list. Refreshed on scope/account change and on a slow interval while the
   // drawer is visible.
   useEffect(() => {
-    if (!accountId || !isConversationListVisible) return undefined;
+    if (queryAccountIds.length === 0 || !isConversationListVisible || !router.isReady) return undefined;
     let active = true;
     const countQuery = (extra) => ({
-      account_id: accountId,
+      account_id: queryAccountIds,
       source: allSourceValues,
       limit: 1,
       offset: 0,
@@ -492,7 +542,7 @@ const ConversationList = ({
       active = false;
       clearInterval(interval);
     };
-  }, [accountId, scope, isConversationListVisible]);
+  }, [queryAccountKey, router.isReady, scope, isConversationListVisible]);
 
   useEffect(() => {
     if (page > 0) {
@@ -514,7 +564,7 @@ const ConversationList = ({
 
   const handleSelectConversation = (conversation) => {
     setSelectedConversation(conversation);
-    onSelectConversation(conversation.sessionId, conversation.userName ?? '-');
+    onSelectConversation(conversation.sessionId, conversation.userName ?? '-', conversation.accountId);
   };
 
   const handleScroll = (event) => {
@@ -616,8 +666,8 @@ const ConversationList = ({
             />
           </Box>
 
-          {/* Row 1: scope (Mine/Everyone) */}
-          <Box sx={{ px: ds.space[3] }}>
+          {/* Row 1: scope (Mine/Everyone) + accounts */}
+          <Box sx={{ px: ds.space[3], display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
             <Toggle
               options={[
                 { value: 'Mine', label: 'Mine', icon: UserIconOutline },
@@ -627,6 +677,24 @@ const ConversationList = ({
               size='sm'
               onChange={(value) => handleScopeChange(value)}
             />
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <FilterDropdown
+                id='conv-account-filter'
+                label=''
+                placeholder='All accounts'
+                size='sm'
+                multiple
+                grouped
+                groupIcon={renderAccountGroupIcon}
+                options={accountOptions}
+                value={accountFilterValue}
+                onSelect={handleAccountFilterChange}
+                searchPlaceholder='Search accounts'
+                disablePortal={false}
+                data-testid='conv-account-filter'
+                sx={{ minWidth: 'unset', width: '100%' }}
+              />
+            </Box>
           </Box>
 
           {/* Row 2: type menu, then Saved, then Waiting */}
@@ -832,8 +900,34 @@ const ConversationList = ({
                           </Box>
                         )}
                       </Box>
-                      {/* Row 2: Source badge + Author */}
-                      <Box display='flex' alignItems='center' gap={ds.space.mul(0, 3)} mt={ds.space[1]} sx={{ pl: ds.space.mul(1, 5) }}>
+                      {/* Row 2: Account + Source badge + Author */}
+                      <Box display='flex' alignItems='center' gap={ds.space.mul(0, 3)} mt={ds.space[1]} sx={{ pl: ds.space.mul(1, 5), minWidth: 0 }}>
+                        {showRowAccount && item.data.accountId && (
+                          <Box
+                            data-testid='conv-row-account'
+                            title={accountNames.get(item.data.accountId) || item.data.accountId}
+                            sx={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: ds.space[1],
+                              minWidth: 0,
+                              maxWidth: ds.space.mul(2, 15),
+                              px: ds.space.mul(0, 3),
+                              py: ds.space[0],
+                              borderRadius: ds.radius.sm,
+                              fontSize: 'var(--ds-text-caption)',
+                              fontFamily: ds.font.sans,
+                              fontWeight: 'var(--ds-font-weight-medium)',
+                              backgroundColor: 'var(--ds-brand-100)',
+                              color: 'var(--ds-brand-500)',
+                            }}
+                          >
+                            <CloudProviderIcon cloud_provider={accountProviders.get(item.data.accountId)} width='12px' height='12px' />
+                            <Box component='span' sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {accountNames.get(item.data.accountId) || 'Unknown account'}
+                            </Box>
+                          </Box>
+                        )}
                         {item.data.source && sourceLabels[item.data.source] && (
                           <Box
                             sx={{
@@ -919,7 +1013,6 @@ const ConversationList = ({
 };
 
 ConversationList.propTypes = {
-  accountId: PropTypes.string,
   onSelectConversation: PropTypes.func.isRequired,
   selectedId: PropTypes.string,
   isConversationListVisible: PropTypes.bool,

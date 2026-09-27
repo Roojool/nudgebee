@@ -141,7 +141,8 @@ export interface FollowupRequest {
 export type ConversationActiveFilter = 'All' | 'Mine' | 'Saved' | 'Waiting';
 
 export interface ConversationHistoryRequest {
-  account_id: string;
+  // One account (`_eq`) or several (`_in`), e.g. the Ask page's all-accounts chat list.
+  account_id: string | string[];
   skipTotalCount?: boolean;
   latestLastRecordedAt?: string;
   source?: string | string[];

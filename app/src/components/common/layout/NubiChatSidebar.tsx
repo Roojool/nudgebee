@@ -399,7 +399,6 @@ const NubiChatSidebar: React.FC<NubiChatSidebarProps> = ({
               conversationId={urlConversationId}
               source={sourceProp || (context?.type === 'workflow' ? 'workflow_builder' : 'ask_nudgbee_chat')}
               categorySource={categorySource}
-              showBorder={false}
               apiMode={apiModeProp || (context?.type === 'workflow' || context?.type === 'workflowbuilder' ? 'workflow' : 'investigate')}
               // Session comes from props; the shared pointer would load another workflow's chat.
               persistLastSession={false}
