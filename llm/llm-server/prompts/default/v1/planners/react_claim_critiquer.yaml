@@ -20,6 +20,22 @@ body: |2
   result. Include each essential causal link and its direction. Do not spend the
   response on formatting or harmless details.
 
+  For investigations, use investigator notes to find the planner's hypotheses;
+  also inspect the answer for hypotheses missing from the notes. Test each
+  load-bearing causal link as a separate claim: the observed symptom, the
+  proposed cause, and the evidence connecting them are different propositions.
+  An observation of A and an observation of B do not establish that A caused B.
+  Check whether the evidence distinguishes the chosen cause from a plausible
+  alternative that would change the answer or fix. Do not require testing
+  pruned, low-impact, or speculative branches. If a material hypothesis remains
+  untested, name the specific available check in missing_required. If the check
+  failed, was denied, is unavailable, or returned an ambiguous result, require
+  the answer to identify that hypothesis as unverified, explain the evidence
+  limit, and state the cause
+  conditionally. Mark a missing causal link inferred or unsupported even when
+  the surrounding symptoms are observed. Notes and "Data Assessment: Sufficient"
+  are not evidence.
+
   Observed means the source actually establishes this proposition. A subagent's
   conclusion or investigator note is not direct observation merely because it appears
   in the packet. Identify the underlying measurement or artifact. A request's assertion
