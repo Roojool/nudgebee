@@ -328,27 +328,33 @@ export const ruleIssues = (rule: Rule, others: Rule[], accountIds: string[], acc
     out.push({ kind: 'info', text: `Doesn’t apply to ${listText(noAccountTypes.map((t) => RULE_TYPE[t].noun))}: they always cover every account.` });
   }
   if (rule.action !== 'send') return out;
-  const combos: { type: RuleTypeKey; account: string | null }[] = [];
+  // Every (type, event, account) the rule sends; each event of a type with events is checked on its own.
+  const combos: { type: RuleTypeKey; event: string | null; account: string | null }[] = [];
+  const ek = eventTypeOf(rule.types);
   types.forEach((type) => {
-    if (!RULE_TYPE[type].accounts) {
-      if (rule.scope === 'all') combos.push({ type, account: null });
-      return;
-    }
-    const accounts = rule.scope === 'some' ? rule.accounts : accountIds.filter((a) => !rule.except.includes(a));
-    accounts.forEach((account) => combos.push({ type, account }));
+    const defs = RULE_TYPE[type].events;
+    const events: (string | null)[] = defs ? (type === ek && rule.events ? rule.events : defs.map((e) => e.id)) : [null];
+    const accounts: (string | null)[] = !RULE_TYPE[type].accounts
+      ? rule.scope === 'all'
+        ? [null]
+        : []
+      : rule.scope === 'some'
+      ? rule.accounts
+      : accountIds.filter((a) => !rule.except.includes(a));
+    events.forEach((event) => accounts.forEach((account) => combos.push({ type, event, account })));
   });
   const blocked = new Map<string, Rule>();
-  combos.forEach(({ type, account }) => {
+  combos.forEach(({ type, event, account }) => {
     const sample: Sample = {
       account,
       namespace: rule.namespace || undefined,
       workload: rule.workload || undefined,
       alert: rule.alert || undefined,
       severity: rule.severity || 'high',
-      event: rule.events?.[0] || null,
+      event,
     };
     const by = others.find((o) => o.id !== rule.id && stops(o, now) && covers(o, type, sample));
-    if (by) blocked.set(`${type}|${account ?? ''}`, by);
+    if (by) blocked.set(`${type}|${event ?? ''}|${account ?? ''}`, by);
   });
   if (!blocked.size) return out;
   const first = blocked.values().next().value as Rule;
@@ -375,10 +381,18 @@ export const ruleIssues = (rule: Rule, others: Rule[], accountIds: string[], acc
     return out;
   }
   const names = Array.from(new Set(Array.from(blocked.values()).map((r) => `“${r.name}”`)));
-  const parts = Array.from(blocked.keys()).map((key) => {
-    const [type, account] = key.split('|');
-    return `${account ? `${accountName(account)} ` : ''}${RULE_TYPE[type as RuleTypeKey].noun}`;
-  });
+  const parts = Array.from(
+    new Set(
+      Array.from(blocked.keys()).map((key) => {
+        const [type, event, account] = key.split('|');
+        // A saved rule can name an event this page no longer lists; show its id.
+        const label = event
+          ? RULE_TYPE[type as RuleTypeKey].events?.find((e) => e.id === event)?.label.toLowerCase() ?? event
+          : RULE_TYPE[type as RuleTypeKey].noun;
+        return `${account ? `${accountName(account)} ` : ''}${label}`;
+      })
+    )
+  );
   out.push({ kind: 'info', text: `Partly stopped: ${listText(names)} stops ${listText(parts.slice(0, 3))}${parts.length > 3 ? ' and more' : ''}.` });
   return out;
 };

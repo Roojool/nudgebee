@@ -180,6 +180,42 @@ describe('coverage and conflicts', () => {
     expect(ruleIssues(ended, [ended], ids, name)[0]).toMatchObject({ kind: 'ended', fix: { kind: 'delete' } });
   });
 
+  it('checks every event a rule sends, not only the first', () => {
+    const silenceChatter = newRule({
+      id: 'c',
+      name: 'Silence automation task updates',
+      types: ['automation'],
+      events: ['automation.task.completed', 'automation.task.progress', 'automation.pr.created'],
+      action: 'drop',
+    });
+    const same = newRule({ id: 'x', types: ['automation'], events: ['automation.task.completed', 'automation.pr.created'], except: ['a1'] });
+    expect(ruleIssues(same, [silenceChatter, same], ids, name)[0]).toMatchObject({ kind: 'warning' });
+    const withFailures = newRule({ id: 'y', types: ['automation'], events: ['automation.task.completed', 'automation.task.failed'] });
+    const [partly] = ruleIssues(withFailures, [silenceChatter, withFailures], ids, name);
+    expect(partly.kind).toBe('info');
+    expect(partly.text).toContain('run completed');
+    expect(partly.text).not.toContain('run failed');
+  });
+
+  it('names an event it no longer lists by its id instead of failing', () => {
+    const silenceOld = newRule({ id: 'o', name: 'Silence retired', types: ['automation'], events: ['automation.task.retired'], action: 'drop' });
+    const sendOld = newRule({ id: 'p', types: ['automation'], events: ['automation.task.retired', 'automation.task.failed'] });
+    const [partly] = ruleIssues(sendOld, [silenceOld, sendOld], ids, name);
+    expect(partly.text).toContain('automation.task.retired');
+  });
+
+  it('checks each event of a type inside a rule over several types', () => {
+    const silenceChatter = newRule({
+      id: 'c',
+      name: 'Silence chatter',
+      types: ['automation'],
+      events: ['automation.task.completed'],
+      action: 'drop',
+    });
+    const both = newRule({ id: 'z', types: ['troubleshoot', 'automation'] });
+    expect(ruleIssues(both, [silenceChatter, both], ids, name)[0].kind).toBe('info');
+  });
+
   it('ignores rules that are off', () => {
     expect(ruleIssues(devToChannel, [{ ...silenceAll, active: false }, devToChannel], ids, name)).toEqual([]);
   });

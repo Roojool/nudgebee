@@ -390,16 +390,23 @@ const RuleEditorModal: React.FC<Props> = ({ request, rules, accounts, destinatio
             {RULE_TYPES.map((t) => typeChip(t.key))}
           </Box>
           {ek && (
-            <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: ds.space[1] }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
               {RULE_TYPE[ek].events!.map((ev) => {
                 const selected = draft.events || RULE_TYPE[ek].defaultEvents || [];
                 return (
                   <Checkbox
                     key={ev.id}
                     id={`event-${ev.id}`}
-                    size='sm'
-                    label={ev.label}
-                    description={ev.description}
+                    size='md'
+                    label={
+                      <>
+                        {ev.label}
+                        <Box component='span' sx={{ color: ds.gray[600] }}>
+                          {' · '}
+                          {ev.description}
+                        </Box>
+                      </>
+                    }
                     checked={selected.includes(ev.id)}
                     onChange={(checked) => update({ events: checked ? [...selected, ev.id] : selected.filter((e) => e !== ev.id) })}
                   />
@@ -407,7 +414,7 @@ const RuleEditorModal: React.FC<Props> = ({ request, rules, accounts, destinatio
               })}
             </Box>
           )}
-          {ek === 'automation' && <Hint>Approval requests always go out.</Hint>}
+          {ek === 'automation' && <Hint>Approval requests always go out and can’t be selected.</Hint>}
           {draft.types === 'all' && <Hint>Every type, including ones added later, except the daily email. Approval requests always go out.</Hint>}
           {draft.types !== 'all' && types.some((t) => RULE_TYPE[t].rollup) && (
             <Hint>Digests covering several accounts are split: each channel only gets the accounts its rules allow.</Hint>
