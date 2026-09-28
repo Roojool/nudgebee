@@ -1300,6 +1300,22 @@ func withoutTemperature() llms.CallOption {
 	}
 }
 
+// "nemotron-3" then "-" or end: excludes 3.5 / 30 until they are validated.
+var nemotron3 = regexp.MustCompile(`(?i)nemotron-3(-|$)`)
+
+// modelSamplingOptions go after the caller's options so they win. Nemotron 3 -> its model
+// card's tool-calling 0.6 / top_p 0.95, fixed on purpose: vendor contract, not a tenant knob
+// (greedy 0.0 leaks tool calls as text, #38236). Assumes rejects temperature => rejects top_p.
+func modelSamplingOptions(provider, model string) []llms.CallOption {
+	if !ModelSupportsTemperature(provider, model) {
+		return []llms.CallOption{withoutTemperature()}
+	}
+	if nemotron3.MatchString(model) {
+		return []llms.CallOption{llms.WithTemperature(0.6), llms.WithTopP(0.95)}
+	}
+	return nil
+}
+
 // resolveThinkingBudget returns the thinking-token ceiling for the given model
 // tier, or -1 if nothing should be applied. The global override wins whenever
 // it's >= 0 (0 means "disable thinking", a real value, not "unset"); an
@@ -1499,9 +1515,7 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 	// This ensures cache is always correct for the current model, including fallback models
 	messagesToSend := rc.promptMessages
 	optionsToSend := append([]llms.CallOption(nil), rc.options...)
-	if !ModelSupportsTemperature(rc.currentProvider, rc.currentModel) {
-		optionsToSend = append(optionsToSend, withoutTemperature())
-	}
+	optionsToSend = append(optionsToSend, modelSamplingOptions(rc.currentProvider, rc.currentModel)...)
 	rc.lastCacheInfo = nil // Reset cache info
 	rc.lastTTFTMs = nil
 	rc.lastWasStreaming = false
