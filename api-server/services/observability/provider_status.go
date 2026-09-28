@@ -27,6 +27,11 @@ type ProviderConnectionStatus struct {
 	IntegrationName string `json:"integration_name,omitempty"`
 	Connected       bool   `json:"connected"`
 	Error           string `json:"error,omitempty"`
+	// Note is advisory: the probe passed, but something about the integration is
+	// unusable — CubeAPM serving queries while its alert-rule API rejects the
+	// credential. It must never affect Connected, or one integration's missing
+	// capability would mark all three signals it serves as broken.
+	Note string `json:"note,omitempty"`
 }
 
 // ProviderStatusKey is the server-managed key on agent.connection_status that
@@ -40,10 +45,20 @@ const ProviderStatusKey = "providerStatus"
 var (
 	resolveProviderForStatus = getLogsMetricsTracesProviderWithIntegration
 	probeIntegration         = core.TestIntegrationConnection
+	integrationNotes         = core.ConnectionNotesForIntegration
 	agentDetailsForStatus    = account.GetAgentConnectionDetails
 )
 
 var providerTypesForStatus = []string{"logs", "metrics", "traces"}
+
+// firstNote keeps the payload to one line: a status row has room for a sentence,
+// not a list. A second note would mean giving the view its own section.
+func firstNote(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	return notes[0]
+}
 
 // agentReportedProvider is the backend the agent last told us it was wired to for a
 // signal, mirroring the mapping in getLogsMetricsTracesProviderWithIntegration.
@@ -106,6 +121,9 @@ func CheckProviderStatus(ctx *security.RequestContext, accountId string) ([]Prov
 	agentFeatures, agentErr := agentDetailsForStatus(accountId)
 
 	statuses := make([]ProviderConnectionStatus, 0, len(providerTypesForStatus))
+	// One integration commonly serves several signals; fetch its notes once.
+	notesByIntegration := map[string]string{}
+
 	for _, providerType := range providerTypesForStatus {
 		status := ProviderConnectionStatus{ProviderType: providerType}
 
@@ -142,6 +160,15 @@ func CheckProviderStatus(ctx *security.RequestContext, accountId string) ([]Prov
 			status.Error = probeErr.Error()
 		} else {
 			status.Connected = true
+			// Only when the probe passed — a failure already says more than a
+			// note could. Cached, or this cron would make the same call per signal.
+			if cached, seen := notesByIntegration[integration.Id]; seen {
+				status.Note = cached
+			} else {
+				note := firstNote(integrationNotes(ctx, provider, source, accountId))
+				notesByIntegration[integration.Id] = note
+				status.Note = note
+			}
 		}
 		statuses = append(statuses, status)
 	}

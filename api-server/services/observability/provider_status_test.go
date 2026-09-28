@@ -18,8 +18,12 @@ type resolvedProvider struct {
 
 func stubProviderStatusSeams(t *testing.T, resolved map[string]resolvedProvider, probe func(id string) error) *[]string {
 	t.Helper()
-	origResolve, origProbe := resolveProviderForStatus, probeIntegration
-	t.Cleanup(func() { resolveProviderForStatus, probeIntegration = origResolve, origProbe })
+	origResolve, origProbe, origNotes := resolveProviderForStatus, probeIntegration, integrationNotes
+	t.Cleanup(func() {
+		resolveProviderForStatus, probeIntegration, integrationNotes = origResolve, origProbe, origNotes
+	})
+	// Default: no notes. Tests that care override it after calling this helper.
+	integrationNotes = func(_ *security.RequestContext, _, _, _ string) []string { return nil }
 
 	probed := []string{}
 	resolveProviderForStatus = func(_ *security.RequestContext, _ string, _ string, providerType string, _ string) (string, string, *core.IntegrationDto, error) {
@@ -291,5 +295,45 @@ func TestProviderStatusStampIsDroppedWhenNoIntegrationServesAnySignal(t *testing
 	})
 	if !hasIntegrationServedSignal(withIntegration) {
 		t.Error("a single integration-served signal must keep the stamp")
+	}
+}
+
+// A note must never change whether a signal reads as connected: one integration
+// commonly serves all three, and none of them use alert rules.
+func TestProviderStatusNoteDoesNotAffectConnected(t *testing.T) {
+	integration := &core.IntegrationDto{Id: "int-1", Name: "cube apm test", Type: "cubeapm", Source: "user"}
+	resolved := map[string]resolvedProvider{
+		"logs":    {provider: "cubeapm", source: "user", integration: integration},
+		"metrics": {provider: "cubeapm", source: "user", integration: integration},
+		"traces":  {provider: "cubeapm", source: "user", integration: integration},
+	}
+	stubProviderStatusSeams(t, resolved, func(string) error { return nil })
+
+	calls := 0
+	integrationNotes = func(_ *security.RequestContext, _, _, _ string) []string {
+		calls++
+		return []string{"Queries work, but alert-rule management is unauthorised."}
+	}
+
+	statuses, err := CheckProviderStatus(security.NewRequestContextForSuperAdmin(nil, nil, nil), "acct-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for signal, status := range byType(statuses) {
+		if !status.Connected {
+			t.Errorf("%s: Connected = false; a note must not disconnect a signal that probed clean", signal)
+		}
+		if status.Error != "" {
+			t.Errorf("%s: Error = %q; a note is not an error", signal, status.Error)
+		}
+		if status.Note == "" {
+			t.Errorf("%s: Note is empty; the advisory should be carried to the view", signal)
+		}
+	}
+
+	// One integration, one fetch — this runs on a cron for every account.
+	if calls != 1 {
+		t.Errorf("notes fetched %d times for one integration, want 1", calls)
 	}
 }

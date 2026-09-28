@@ -667,6 +667,9 @@ const AgentHealth = () => {
       source: viaIntegration ? `Integration "${viaIntegration.integration_name}"` : provider ? 'Agent' : '',
       lastChecked: viaIntegration ? providerStatus?.checkedAt : provider ? agentFeatures.healthCheckedAt : '',
       error: entry?.error || '',
+      // Advisory, and separate from `error` — the signal works, something else
+      // about its integration does not.
+      note: entry?.note || '',
     };
   });
 
@@ -1488,6 +1491,22 @@ const AgentHealth = () => {
                         </Typography>
                       </Box>
                     ))}
+                    {/* Full width, not a label/value row: it is a sentence about the
+                        integration, and the value column holds short strings. */}
+                    {signal.note && (
+                      <Box
+                        data-testid={`observability-${signal.key}-note`}
+                        sx={{
+                          mt: ds.space[2],
+                          p: ds.space[2],
+                          borderRadius: 'var(--ds-radius-2)',
+                          backgroundColor: ds.amber[100],
+                          border: `1px solid ${ds.amber[300]}`,
+                        }}
+                      >
+                        <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700] }}>{signal.note}</Typography>
+                      </Box>
+                    )}
                   </Box>
                 </Card>
               ))}

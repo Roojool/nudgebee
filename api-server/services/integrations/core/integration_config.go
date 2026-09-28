@@ -1911,6 +1911,34 @@ func applySchemaDefaults(integration Integration, configValues []IntegrationConf
 	return configValues
 }
 
+// ConnectionNotesForIntegration returns advisory notes for a SAVED integration —
+// the by-id counterpart to what TestIntegrationConnectionByConfig collects for an
+// unsaved form. It does not probe connectivity: the caller has already done that,
+// and a note must never influence whether a signal reads as connected.
+func ConnectionNotesForIntegration(ctx *security.RequestContext, integrationType, source, accountID string) []string {
+	integration, found := GetIntegrationBySource(integrationType, source)
+	if !found {
+		return nil
+	}
+	noter, ok := integration.(ConnectionNoter)
+	if !ok {
+		return nil
+	}
+
+	rows, err := ListIntegrationConfigs(ctx, accountID, integrationType)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+	values, err := DecryptConfigValues(rows[0].Configs)
+	if err != nil {
+		// Advisory: failing to read a note must not surface as a fault.
+		ctx.GetLogger().Warn("integrations: could not decrypt config for connection notes",
+			"type", integrationType, "account_id", accountID, "error", err)
+		return nil
+	}
+	return noter.ConnectionNotes(ctx, values, accountID)
+}
+
 // DecryptConfigValues returns a copy of the config values with encrypted fields
 // decrypted (is_encrypted cleared). For values read from the database ONLY. Never
 // pass it values from a request: decrypting client-supplied ciphertext is the
