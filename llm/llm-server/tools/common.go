@@ -663,6 +663,74 @@ func parseTimeValue(value any) (time.Time, error) {
 	}
 }
 
+// hasWindowArgs reports whether a tool call carries any explicit time-window control.
+func hasWindowArgs(args map[string]any) bool {
+	for _, k := range []string{"range", "duration", "start_time", "end_time", "start", "end", "starttime", "endtime"} {
+		if _, ok := args[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// windowFromTimestampBounds derives a search window from timestamp bounds the agent wrote
+// into the filter itself (`{"timestamp": {"_gte": "…"}}`) when it gave no window argument.
+//
+// Without this the call fell back to the default last hour: the filter asked for 18:18–18:48
+// yesterday, the backend was searched over the last hour, and the answer was zero rows for a
+// window that had plenty. Only bounds that must hold for every row count — top-level and
+// under _and; a bound inside _or or _not does not constrain the window. A lone lower bound
+// runs to now; a lone upper bound covers the hour before it.
+func windowFromTimestampBounds(where core.QueryWhereClause, now time.Time) (time.Time, time.Time, bool) {
+	var lo, hi time.Time
+	var walk func(w core.QueryWhereClause)
+	walk = func(w core.QueryWhereClause) {
+		for field, ops := range w.Binary {
+			switch strings.ToLower(field) {
+			case "timestamp", "_timestamp", "@timestamp", "time":
+			default:
+				continue
+			}
+			for op, v := range ops {
+				t, err := parseTimeValue(v)
+				if err != nil {
+					continue
+				}
+				switch op {
+				case core.Gt, core.Gte:
+					if lo.IsZero() || t.After(lo) {
+						lo = t
+					}
+				case core.Lt, core.Lte:
+					if hi.IsZero() || t.Before(hi) {
+						hi = t
+					}
+				}
+			}
+		}
+		for _, c := range w.And {
+			walk(c)
+		}
+	}
+	walk(where)
+
+	switch {
+	case !lo.IsZero() && !hi.IsZero():
+		if hi.Before(lo) {
+			return time.Time{}, time.Time{}, false
+		}
+		return lo.UTC(), hi.UTC(), true
+	case !lo.IsZero():
+		if lo.After(now) {
+			return time.Time{}, time.Time{}, false
+		}
+		return lo.UTC(), now.UTC(), true
+	case !hi.IsZero():
+		return hi.Add(-time.Hour).UTC(), hi.UTC(), true
+	}
+	return time.Time{}, time.Time{}, false
+}
+
 // ExtractStartEndtimeFromLabels extracts start and end times from a map of labels.
 // It checks for common key pairs like (start_time, end_time) and (start, end).
 // It also checks for a 'range' or 'duration' key to calculate start time relative to end time (defaults to Now).
@@ -723,6 +791,30 @@ func resolveWindowFromLabels(labels map[string]any) (time.Time, time.Time, bool)
 		}
 
 		// Swap if start > end (malformed event labels).
+		if startTime.After(endTime) {
+			startTime, endTime = endTime, startTime
+		}
+		return startTime, endTime, true
+	}
+
+	// 1b. An ISO-8601 interval in the range slot ("2026-09-25T18:18:00Z/2026-09-25T18:48:00Z").
+	// The logs agent writes absolute windows this way; it is not a duration, so it used to
+	// fail ParseDuration below and the caller silently fell back to the last hour — the
+	// agent then analysed logs from the wrong window and reported zero in the one it asked for.
+	for _, k := range []string{"range", "duration"} {
+		valStr, ok := labels[k].(string)
+		if !ok {
+			continue
+		}
+		startStr, endStr, found := strings.Cut(strings.TrimSpace(valStr), "/")
+		if !found {
+			continue
+		}
+		startTime, errStart := parseTimeValue(strings.TrimSpace(startStr))
+		endTime, errEnd := parseTimeValue(strings.TrimSpace(endStr))
+		if errStart != nil || errEnd != nil {
+			continue
+		}
 		if startTime.After(endTime) {
 			startTime, endTime = endTime, startTime
 		}

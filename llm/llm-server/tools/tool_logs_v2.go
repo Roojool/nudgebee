@@ -121,6 +121,14 @@ func (t *NBLogToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToo
 	if _, ok := args["end_time"]; !ok && queryBuilder.EndTime != "" {
 		args["end_time"] = queryBuilder.EndTime
 	}
+	// A window written into the filter (timestamp bounds) is still the window asked for;
+	// without this the search ran over the default last hour and missed it entirely.
+	if !hasWindowArgs(args) {
+		if from, to, ok := windowFromTimestampBounds(queryBuilder.Where, time.Now()); ok {
+			args["start_time"] = from.Format(time.RFC3339Nano)
+			args["end_time"] = to.Format(time.RFC3339Nano)
+		}
+	}
 
 	start := time.Now().Add(-1 * time.Hour)
 	end := time.Now()
