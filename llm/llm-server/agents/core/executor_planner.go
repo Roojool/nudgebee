@@ -2147,6 +2147,11 @@ func ensureToolConfigs(m map[string]string) map[string]string {
 func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, queryContext string) (NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
 	// Normalize tool name: trim whitespace that XML parsing may leave
 	action.Tool = strings.TrimSpace(action.Tool)
+	// [[Time:…]] macros are what the shared time-handling rule tells every model
+	// to write. react_3 expanded them in its own planner; react_4 handed them to
+	// tools verbatim (events_execute then failed on a literal "[[Time:-24h]]").
+	// Expanding here covers every planner and keeps cache keys date-resolved.
+	action.ToolInput = common.SubstituteDateMacros(action.ToolInput)
 
 	// --- Guard: Reject tool names that are clearly invalid (LLM hallucination of "..." from truncated context)
 	if isInvalidToolName(action.Tool) {
