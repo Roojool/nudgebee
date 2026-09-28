@@ -21,6 +21,7 @@ from server.recommendation.vertical_rightsizing.services.metrics_utilisation_ser
     MEMORY_WORKING_SET_KEY,
     OOMKILLED_LIMIT_KEY,
     UtilisationMetricsService,
+    _pods_from_collapsed,
     _plan_requests,
 )
 
@@ -217,9 +218,17 @@ def test_a_pod_with_no_measurement_is_dropped_rather_than_carried_as_nan():
 # --- what reaches the call --------------------------------------------------------
 
 
-def test_the_pod_list_and_the_step_reach_every_request():
-    """Without the pod list the query is workload-wide, and Datadog sizes its rollup
-    budget on the pod count it was given. Without the step, `count` is not in steps."""
+def test_the_request_asks_for_the_workload_not_for_a_list_of_pods():
+    """The request names the workload; enumerating its pods on top is the caller doing
+    the layer's job, and it makes the request scale with how often the workload
+    redeploys.
+
+    That breaks both providers: on Prometheus the query exceeds -search.maxQueryLen and
+    is rejected (#39137); on Datadog one series per named pod blows the point budget, so
+    the rollup coarsens and per-pod coverage stops meaning anything.
+
+    The step still travels, because `count` is expressed in steps.
+    """
     service = _service()
     sent = _capture(service, {})
 
@@ -234,8 +243,72 @@ def test_the_pod_list_and_the_step_reach_every_request():
 
     assert len(sent) == 6
     for request in sent:
-        assert request["pod_names"] == ["app-abc-1", "app-abc-2"]
+        assert request["pod_names"] is None, "the pod list must not be sent"
         assert request["step"] == timedelta(seconds=75)
+
+
+def test_an_empty_pod_list_keeps_nothing_rather_than_everything():
+    """The distinction has to survive the CALL SITE, not just the filter.
+
+    `if object.pods` treats an empty list as falsy, which turns "the caller resolved
+    the owner chain and found no pods" into "no set supplied" -- keeping every pod the
+    workload prefix matched, including a sibling's. That is how a workload gets sized
+    on its neighbour's pods.
+    """
+    service = _service()
+    _capture(service, {"max": {MEMORY_WORKING_SET_KEY: [_series("sibling-worker-xyz", 9.9e9)]}})
+
+    result = asyncio.run(service.gather_data(_object(pods=()), _Strategy(["MaxMemoryLoader"]), timedelta(days=14)))
+
+    assert result["MaxMemoryLoader"] == {}
+
+
+def test_a_sibling_workloads_pods_are_dropped_from_the_answer():
+    """Workload scope returns a SUPERSET: the layer falls back to a name prefix, and
+    `services-server` also matches `services-server-worker` pods. Verified on dev, 412
+    returned where 337 are correct.
+
+    The container label does not disambiguate them — the sibling runs a container of the
+    same name — so the owner-chain pod set is what removes them.
+    """
+    series = [
+        {
+            "metric": {"pod": "services-server-abc-1", "container": "services-server"},
+            "timestamps": [1],
+            "values": [1.0],
+        },
+        {
+            "metric": {"pod": "services-server-worker-xyz-9", "container": "services-server"},
+            "timestamps": [1],
+            "values": [99.0],
+        },
+    ]
+    kept = _pods_from_collapsed(series, "services-server", {"services-server-abc-1"})
+    assert set(kept) == {"services-server-abc-1"}, "the sibling's pod must not survive"
+
+
+def test_no_resolved_pod_set_keeps_everything_but_an_empty_one_keeps_nothing():
+    """None and an empty set are different answers.
+
+    None means the caller resolved nothing and every returned pod is kept. EMPTY means
+    the caller looked and found none — conflating them would size a workload on its
+    neighbours' pods.
+    """
+    series = [{"metric": {"pod": "app-1", "container": "app"}, "timestamps": [1], "values": [1.0]}]
+    assert set(_pods_from_collapsed(series, "app", None)) == {"app-1"}
+    assert _pods_from_collapsed(series, "app", set()) == {}
+
+
+def test_the_container_filter_still_runs_before_the_pod_filter():
+    """Neither is sufficient alone: the sibling shares the container name, and a sidecar
+    shares the pod name."""
+    series = [
+        {"metric": {"pod": "app-1", "container": "app"}, "timestamps": [1], "values": [1.0]},
+        {"metric": {"pod": "app-1", "container": "istio-proxy"}, "timestamps": [1], "values": [50.0]},
+    ]
+    kept = _pods_from_collapsed(series, "app", {"app-1"})
+    assert set(kept) == {"app-1"}
+    assert kept["app-1"][0][1] == 1.0, "the sidecar's value must not be read as the app's"
 
 
 def test_the_hint_is_forwarded_exactly_as_given():

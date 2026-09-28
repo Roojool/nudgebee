@@ -27,7 +27,7 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
@@ -157,7 +157,25 @@ class UtilisationMetricsService(MetricsService):
 
         end = datetime.now(timezone.utc)
         start = end - period
-        pod_names = [p.name for p in object.pods] if object.pods else None
+        # Ask for the WORKLOAD, not for a list of pods. The request already names the
+        # workload; enumerating its pods on top of that is the caller doing the layer's
+        # job, and it makes the request scale with how often the workload redeploys.
+        #
+        # That breaks both providers, differently. On Prometheus the query exceeds
+        # -search.maxQueryLen and is rejected outright (#39137). On Datadog it is
+        # accepted and quietly degrades: one series per named pod blows the per-pod point
+        # budget, so the rollup coarsens, and coverage -- buckets x bucket width -- stops
+        # meaning anything, because a bucket holding one sample is credited with its
+        # whole width.
+        #
+        # Workload scope returns a strict SUPERSET of this workload's pods, because the
+        # layer falls back to a name prefix that a sibling can share. Verified on dev:
+        # services-server returns 412 where 337 are correct, and an exact match where no
+        # sibling shares the prefix. So the right pods are all present, and the wrong ones
+        # are dropped below -- where the owner-chain answer already lives.
+        # `is None`, not falsiness: an EMPTY list is the caller saying it resolved the
+        # owner chain and found nothing, so it must keep nothing, not everything.
+        wanted_pods = None if object.pods is None else {p.name for p in object.pods}
 
         plan = _plan_requests(requested)
         if not plan:
@@ -166,7 +184,7 @@ class UtilisationMetricsService(MetricsService):
         try:
             answers = await asyncio.gather(
                 *[
-                    self._fetch(object, keys, aggregate=agg, start=start, end=end, pod_names=pod_names, step=step)
+                    self._fetch(object, keys, aggregate=agg, start=start, end=end, pod_names=None, step=step)
                     for agg, keys in plan
                 ]
             )
@@ -188,7 +206,7 @@ class UtilisationMetricsService(MetricsService):
                 continue
             key, aggregate = key_and_agg
             series = (by_aggregate.get(aggregate) or {}).get(key) or []
-            result[name] = _pods_from_collapsed(series, object.container)
+            result[name] = _pods_from_collapsed(series, object.container, wanted_pods)
         return result
 
     async def _fetch(
@@ -262,13 +280,23 @@ def _plan_requests(requested: List[str]) -> List[tuple]:
     return sorted(by_aggregate.items())
 
 
-def _pods_from_collapsed(series: List[dict], container: str) -> PodsTimeData:
+def _pods_from_collapsed(series: List[dict], container: str, wanted_pods: Optional[Set[str]] = None) -> PodsTimeData:
     """One [[timestamp, value]] row per pod, for the requested container only.
 
     The strategy reads ``values[0, 1]`` — a scalar per pod — so a collapsed answer is
     exactly the shape it wants and no reduction happens here. Filtering by container
     first matters because the keys are per container: a sidecar's memory under the
     application's pod name would otherwise be read as the application's.
+
+    ``wanted_pods`` is the owner-chain answer, and it is applied AFTER the container
+    filter rather than instead of it. Neither is sufficient alone: a prefix-sharing
+    sibling runs a container of the same name (verified on dev, services-server-worker
+    pods report ``container="services-server"``), so container alone lets the sibling in
+    and pod alone lets a sidecar in.
+
+    ``None`` means the caller resolved no pod set and every returned pod is kept. An
+    EMPTY set is a different answer -- the caller looked and found none -- and keeps
+    nothing.
     """
     pods: PodsTimeData = {}
     for entry in series or []:
@@ -277,6 +305,8 @@ def _pods_from_collapsed(series: List[dict], container: str) -> PodsTimeData:
             continue
         pod = metric.get("pod") or ""
         if not pod:
+            continue
+        if wanted_pods is not None and pod not in wanted_pods:
             continue
         timestamps = entry.get("timestamps") or []
         values = entry.get("values") or []
