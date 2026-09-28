@@ -253,23 +253,22 @@ func TestSplunkEnterpriseSeriesWhereOmitsEmptyNamespace(t *testing.T) {
 	assert.NotContains(t, where, `k8s.namespace.name=""`)
 }
 
-// A workload value carrying a wildcard must match literally rather than widening the
-// filter — otherwise a workload named `*` would report every family in the index.
-func TestSplunkEnterpriseSeriesWhereEscapesWildcards(t *testing.T) {
+// A workload value is quoted with its quote escaped, so it cannot break out of the
+// literal. A '*' in it stays a wildcard: Splunk honours no escape for '*' inside a quoted
+// term, so no rendering can make it literal, and Kubernetes names cannot contain one.
+func TestSplunkEnterpriseSeriesWhereQuotesValues(t *testing.T) {
 	exact, err := splunkEnterpriseSeriesWhere(
 		seriesMatchCandidate{NamespaceLabel: "namespace", WorkloadLabel: "container", MatchType: matchTypeExact},
 		"otel_metrics", "prod", `we*b"x`)
 	require.NoError(t, err)
-	assert.Contains(t, exact, `\*`, "a literal asterisk must be escaped")
-	assert.Contains(t, exact, `\"`, "a quote must not close the literal")
+	assert.Contains(t, exact, `k8s.container.name="we*b\"x"`, "a quote must not close the literal")
 
-	// The prefix form appends its OWN trailing wildcard after escaping, so the escaped
-	// interior asterisk and the live trailing one must both be present.
+	// The prefix form appends its own trailing wildcard.
 	prefix, err := splunkEnterpriseSeriesWhere(
 		seriesMatchCandidate{NamespaceLabel: "namespace", WorkloadLabel: "pod", MatchType: matchTypePrefix},
-		"otel_metrics", "prod", "we*b")
+		"otel_metrics", "prod", "web")
 	require.NoError(t, err)
-	assert.Contains(t, prefix, `k8s.pod.name="we\*b*"`)
+	assert.Contains(t, prefix, `k8s.pod.name="web*"`)
 }
 
 // Splunk unreachable must surface, not read back as "this workload has no metrics".

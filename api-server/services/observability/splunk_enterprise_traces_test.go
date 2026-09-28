@@ -69,7 +69,7 @@ func TestSplunkEnterpriseTraceWhereClauseRefusesFullyDroppedGroup(t *testing.T) 
 	}}
 	_, err := buildSplunkEnterpriseTraceWhereClause(where)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no field this span schema can express")
+	assert.Contains(t, err.Error(), "no field this schema can express")
 }
 
 func TestSplunkEnterpriseTraceWhereClauseKeepsExpressibleSiblings(t *testing.T) {

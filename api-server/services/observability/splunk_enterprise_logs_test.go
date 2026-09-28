@@ -20,17 +20,18 @@ import (
 // ----- escaping and identifier safety ---------------------------------------
 
 func TestEscapeSplunkString(t *testing.T) {
-	// The asterisk is the interesting one: unescaped it is an SPL wildcard, so a literal
-	// value containing it would silently widen the filter instead of failing closed.
-	assert.Equal(t, `pod\*name`, escapeSplunkString("pod*name"))
+	// '*' passes through: Splunk honours no escape for it in a quoted term (`"chec\*"`
+	// still matches "checkout" on Splunk 10.x), so it is a wildcard either way and
+	// emitting `\*` only pretended otherwise.
+	assert.Equal(t, `pod*name`, escapeSplunkString("pod*name"))
 	assert.Equal(t, `say \"hi\"`, escapeSplunkString(`say "hi"`))
 	assert.Equal(t, `a\\b`, escapeSplunkString(`a\b`))
 	assert.Equal(t, "one two", escapeSplunkString("one\ntwo"))
 	assert.Equal(t, "plain", escapeSplunkString("plain"))
 }
 
-// Backslash must be escaped before the quote and star, or the escapes introduced for
-// those would themselves be escaped and the literal would break.
+// Backslash must be escaped before the quote, or the escape introduced for the quote
+// would itself be escaped and the literal would break.
 func TestEscapeSplunkString_OrderIsBackslashFirst(t *testing.T) {
 	assert.Equal(t, `\\\"`, escapeSplunkString(`\"`))
 }
@@ -169,7 +170,7 @@ func TestBuildSplunkEnterpriseWhereClause_RejectsUnsafeFieldName(t *testing.T) {
 func TestBuildSplunkEnterpriseWhereClause_RejectsUnsupportedOperator(t *testing.T) {
 	where := query.QueryWhereClause{
 		Binary: query.BinaryWhereClause{
-			"pod": {query.Gt: "x"},
+			"pod": {query.Regex: "x.*"},
 		},
 	}
 	_, err := buildSplunkEnterpriseWhereClause(where)
@@ -535,15 +536,31 @@ func TestSplunkEnterpriseLogSource_ImplementsLogSource(t *testing.T) {
 	var _ QueryRequestKeyFilter = &SplunkEnterpriseLogSource{}
 }
 
+// splunkOperandFor returns a well-formed operand for op: a list for the set operators, a
+// number for the comparisons, a word otherwise.
+func splunkOperandFor(op string) any {
+	switch query.BinaryWhereClauseType(op) {
+	case query.In, query.NotIn:
+		return []any{"x", "y"}
+	case query.Gt, query.Gte, query.Lt, query.Lte:
+		return 5
+	default:
+		return "x"
+	}
+}
+
 func TestSplunkEnterpriseLogSource_SupportedOperators(t *testing.T) {
 	ops := (&SplunkEnterpriseLogSource{}).GetSupportedOperators()
-	assert.ElementsMatch(t, []string{"_eq", "_neq", "_contains", "_ilike"}, ops)
+	assert.ElementsMatch(t, []string{
+		"_eq", "_neq", "_contains", "_icontains", "_nicontains", "_like", "_ilike", "_nlike",
+		"_in", "_not_in", "_gt", "_gte", "_lt", "_lte",
+	}, ops)
 
 	// Every advertised operator must actually build, or the builder UI offers a filter
 	// that fails at query time.
 	for _, op := range ops {
 		where := query.QueryWhereClause{
-			Binary: query.BinaryWhereClause{"pod": {query.BinaryWhereClauseType(op): "x"}},
+			Binary: query.BinaryWhereClause{"pod": {query.BinaryWhereClauseType(op): splunkOperandFor(op)}},
 		}
 		_, err := buildSplunkEnterpriseWhereClause(where)
 		assert.NoError(t, err, "advertised operator %q must be supported by the builder", op)

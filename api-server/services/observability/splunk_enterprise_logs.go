@@ -2,6 +2,7 @@ package observability
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"nudgebee/services/common"
@@ -121,7 +122,7 @@ var splunkEnterpriseDisallowedCommands = map[string]bool{
 }
 
 func (s *SplunkEnterpriseLogSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_ilike"}
+	return splunkEnterpriseFilterOperators
 }
 
 func (s *SplunkEnterpriseLogSource) GetLabelMapping() map[string]string {
@@ -144,14 +145,15 @@ type splunkEnterpriseSearchResponse struct {
 
 // escapeSplunkString escapes a value for a double-quoted SPL literal.
 //
-// The asterisk matters as much as the quote here: inside a quoted SPL value an unescaped
-// '*' is a wildcard, so a filter on a literal pod name containing '*' would silently
-// widen instead of failing. Order is load-bearing - backslash first, or the escapes
-// introduced for the quote and star would themselves be escaped.
+// '*' is deliberately left alone. Inside a quoted search term Splunk treats it as a
+// wildcard and honours no escape for it - `name="chec\*"` still matches "checkout" on
+// Splunk 10.x - so there is no way to match a literal asterisk, and emitting `\*` only
+// suggested otherwise. Kubernetes names cannot contain '*', so a caller that sends one
+// means a wildcard, and that is what it gets. Order is load-bearing - backslash first,
+// or the escape introduced for the quote would itself be escaped.
 func escapeSplunkString(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, `"`, `\"`)
-	value = strings.ReplaceAll(value, `*`, `\*`)
 	// A newline cannot break out of a quoted literal, but it does corrupt the
 	// form-encoded search parameter and produces an opaque Splunk parse error.
 	value = strings.ReplaceAll(value, "\n", " ")
@@ -238,6 +240,148 @@ func validateSplunkEnterpriseQuery(spl string) error {
 	return nil
 }
 
+// splunkEnterpriseFilterOperators are the operators buildSplunkEnterpriseBinaryClause
+// renders. Logs and traces advertise exactly this list, so a capability check can never
+// promise an operator the builder then rejects.
+var splunkEnterpriseFilterOperators = []string{
+	string(query.Eq), string(query.Nq),
+	string(query.Contains), string(query.IContains), string(query.NIContains),
+	string(query.Like), string(query.ILike), string(query.NLike),
+	string(query.In), string(query.NotIn),
+	string(query.Gt), string(query.Gte), string(query.Lt), string(query.Lte),
+}
+
+// errSplunkEnterpriseGroupInexpressible marks a filter group whose every predicate named
+// a field the schema cannot express. It is not a user error in itself: inside an OR the
+// branch is skipped, and only where skipping would widen the result (AND, NOT, top level)
+// does it surface as one.
+var errSplunkEnterpriseGroupInexpressible = errors.New("filter group has no field this schema can express")
+
+// splunkEnterpriseFilterSchema is what differs between the log and trace filter builds:
+// the canonical->Splunk field mapping, and an optional hook that rewrites each binary
+// group before it is rendered (the trace source drops fields a span cannot express).
+type splunkEnterpriseFilterSchema struct {
+	mapping map[string]string
+	// prepare returns the group to render and how many predicates it removed because the
+	// schema cannot express them. A predicate removed because it is always true (not
+	// counted) leaves an empty group that means "no restriction".
+	prepare func(query.BinaryWhereClause) (query.BinaryWhereClause, int, error)
+}
+
+var splunkEnterpriseLogFilterSchema = splunkEnterpriseFilterSchema{mapping: splunkEnterpriseLogLabelMapping}
+
+// splunkEnterpriseLikePattern renders a LIKE value as the body of a quoted SPL term.
+//
+// A value carrying SQL '%' wildcards is a pattern: '%' becomes Splunk's '*' and the match
+// is anchored, so "panic%" is a prefix and "%x%" a substring. Keeping '%' literally (the
+// old behaviour) made every such pattern match nothing, and '%' is what the logs agent
+// writes. A bare word keeps the substring match callers have always had. '_' stays
+// literal: Splunk has no single-character wildcard, and '_' is far more common as a
+// literal in field values than as an intended wildcard.
+func splunkEnterpriseLikePattern(value string) string {
+	escaped := escapeSplunkString(value)
+	if strings.Contains(value, "%") {
+		return strings.ReplaceAll(escaped, "%", "*")
+	}
+	return "*" + escaped + "*"
+}
+
+// splunkEnterpriseListValues reads an _in / _not_in operand, which arrives from JSON as
+// []any (or []string from Go callers).
+func splunkEnterpriseListValues(op query.BinaryWhereClauseType, v any) ([]string, error) {
+	var out []string
+	switch list := v.(type) {
+	case []any:
+		for _, item := range list {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+	case []string:
+		out = append(out, list...)
+	default:
+		return nil, fmt.Errorf("operator %s needs a list of values, got %T", op, v)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("operator %s needs at least one value", op)
+	}
+	return out, nil
+}
+
+// splunkEnterpriseFilterNumber reads the operand of a numeric comparison. SPL compares
+// numerically only when both sides are numbers, so a non-numeric operand is rejected
+// rather than silently compared as text.
+func splunkEnterpriseFilterNumber(op query.BinaryWhereClauseType, v any) (string, error) {
+	switch n := v.(type) {
+	case float64:
+		return strconv.FormatFloat(n, 'f', -1, 64), nil
+	case float32:
+		return strconv.FormatFloat(float64(n), 'f', -1, 32), nil
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", n), nil
+	case json.Number:
+		if _, err := n.Float64(); err != nil {
+			return "", fmt.Errorf("operator %s needs a number, got %q", op, n)
+		}
+		return n.String(), nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return "", fmt.Errorf("operator %s needs a number, got %q", op, n)
+		}
+		return strconv.FormatFloat(f, 'f', -1, 64), nil
+	default:
+		return "", fmt.Errorf("operator %s needs a number, got %T", op, v)
+	}
+}
+
+// renderSplunkEnterprisePredicate renders one field/operator pair as a single SPL term
+// that is safe to join with AND or OR without further parentheses.
+//
+// Splunk term matching is case-insensitive by default, so _eq, _like and _contains are
+// already the case-insensitive variants; there is no case-sensitive form to offer.
+func renderSplunkEnterprisePredicate(col string, op query.BinaryWhereClauseType, v any) (string, error) {
+	switch op {
+	case query.Eq:
+		return fmt.Sprintf(`%s="%s"`, col, escapeSplunkString(fmt.Sprintf("%v", v))), nil
+	case query.Nq:
+		return fmt.Sprintf(`NOT %s="%s"`, col, escapeSplunkString(fmt.Sprintf("%v", v))), nil
+	case query.Contains, query.IContains:
+		return fmt.Sprintf(`%s="*%s*"`, col, escapeSplunkString(fmt.Sprintf("%v", v))), nil
+	case query.NIContains:
+		return fmt.Sprintf(`NOT %s="*%s*"`, col, escapeSplunkString(fmt.Sprintf("%v", v))), nil
+	case query.Like, query.ILike:
+		return fmt.Sprintf(`%s="%s"`, col, splunkEnterpriseLikePattern(fmt.Sprintf("%v", v))), nil
+	case query.NLike:
+		return fmt.Sprintf(`NOT %s="%s"`, col, splunkEnterpriseLikePattern(fmt.Sprintf("%v", v))), nil
+	case query.In, query.NotIn:
+		values, err := splunkEnterpriseListValues(op, v)
+		if err != nil {
+			return "", err
+		}
+		terms := make([]string, len(values))
+		for i, value := range values {
+			terms[i] = fmt.Sprintf(`%s="%s"`, col, escapeSplunkString(value))
+		}
+		joined := "(" + strings.Join(terms, " OR ") + ")"
+		if op == query.NotIn {
+			return "NOT " + joined, nil
+		}
+		return joined, nil
+	case query.Gt, query.Gte, query.Lt, query.Lte:
+		n, err := splunkEnterpriseFilterNumber(op, v)
+		if err != nil {
+			return "", err
+		}
+		symbol := map[query.BinaryWhereClauseType]string{query.Gt: ">", query.Gte: ">=", query.Lt: "<", query.Lte: "<="}[op]
+		return col + symbol + n, nil
+	default:
+		return "", fmt.Errorf("unsupported binary operator for Splunk: %s", op)
+	}
+}
+
+// buildSplunkEnterpriseBinaryClause renders one binary group's predicates, joined by AND
+// and parenthesised whenever there is more than one. The parentheses are load-bearing:
+// SPL binds OR tighter than AND, so an unwrapped `a AND b` inside an OR would regroup as
+// a AND (b OR ...) and change what matches.
 func buildSplunkEnterpriseBinaryClause(binary query.BinaryWhereClause, mapping map[string]string) (string, error) {
 	// Field iteration order over a map is random; sorting keeps the generated SPL stable
 	// so it is diffable in logs and assertable in tests.
@@ -266,90 +410,126 @@ func buildSplunkEnterpriseBinaryClause(binary query.BinaryWhereClause, mapping m
 
 		for _, opName := range opNames {
 			op := query.BinaryWhereClauseType(opName)
-			strVal := escapeSplunkString(fmt.Sprintf("%v", ops[op]))
-			switch op {
-			case query.Eq:
-				parts = append(parts, fmt.Sprintf(`%s="%s"`, col, strVal))
-			case query.Nq:
-				parts = append(parts, fmt.Sprintf(`NOT %s="%s"`, col, strVal))
-			case query.Contains, query.ILike:
-				// Both map to the same wildcard match. SPL term matching is
-				// case-insensitive by default, so a substring match is inherently an
-				// _ilike - there is no case-sensitive variant to distinguish _contains
-				// from, and advertising one would misrepresent what Splunk does.
-				parts = append(parts, fmt.Sprintf(`%s="*%s*"`, col, strVal))
-			default:
-				return "", fmt.Errorf("unsupported binary operator for Splunk: %s", op)
+			part, err := renderSplunkEnterprisePredicate(col, op, ops[op])
+			if err != nil {
+				return "", err
 			}
+			parts = append(parts, part)
 		}
 	}
-	return strings.Join(parts, " AND "), nil
+	return joinSplunkEnterpriseParts(parts, " AND "), nil
+}
+
+// joinSplunkEnterpriseParts joins rendered terms, parenthesising any multi-term result
+// so it can be nested anywhere without changing precedence.
+func joinSplunkEnterpriseParts(parts []string, sep string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		return "(" + strings.Join(parts, sep) + ")"
+	}
 }
 
 // buildSplunkEnterpriseWhereClause renders a log filter, using the log label mapping.
 func buildSplunkEnterpriseWhereClause(where query.QueryWhereClause) (string, error) {
-	return buildSplunkEnterpriseWhereClauseWithMapping(where, splunkEnterpriseLogLabelMapping)
+	return buildSplunkEnterpriseFilter(where, splunkEnterpriseLogFilterSchema)
 }
 
-// buildSplunkEnterpriseWhereClauseWithMapping is the mapping-agnostic core. Logs and
-// traces share the clause structure but map canonical field names onto different Splunk
-// fields, so the mapping is a parameter rather than a package-level constant.
-func buildSplunkEnterpriseWhereClauseWithMapping(where query.QueryWhereClause, mapping map[string]string) (string, error) {
-	if len(where.Binary) > 0 {
-		return buildSplunkEnterpriseBinaryClause(where.Binary, mapping)
-	}
+// buildSplunkEnterpriseFilter renders a filter tree. Every part a clause carries -
+// _binary, _and, _or and _not - is ANDed together, as in the Hasura boolean expressions
+// the clause is modelled on. (Returning as soon as _binary was non-empty silently
+// dropped any sibling group, so filters came back wider than asked.)
+//
+// An empty result means "no restriction". A group whose predicates were all
+// inexpressible for the schema returns errSplunkEnterpriseGroupInexpressible, which only
+// an OR may absorb.
+func buildSplunkEnterpriseFilter(where query.QueryWhereClause, schema splunkEnterpriseFilterSchema) (string, error) {
+	var parts []string
 
-	if len(where.And) > 0 {
-		var parts []string
-		for _, c := range where.And {
-			part, err := buildSplunkEnterpriseWhereClauseWithMapping(c, mapping)
+	if len(where.Binary) > 0 {
+		binary, dropped := where.Binary, 0
+		if schema.prepare != nil {
+			var err error
+			if binary, dropped, err = schema.prepare(where.Binary); err != nil {
+				return "", err
+			}
+		}
+		// Whatever else the node carries, its siblings are ANDed with this group, so
+		// rendering nothing for it would drop the restriction and widen the result.
+		// Only an OR branch may absorb the error (buildSplunkEnterpriseOr).
+		if len(binary) == 0 && dropped > 0 {
+			return "", errSplunkEnterpriseGroupInexpressible
+		}
+		if len(binary) > 0 {
+			part, err := buildSplunkEnterpriseBinaryClause(binary, schema.mapping)
 			if err != nil {
 				return "", err
 			}
-			if part != "" {
-				parts = append(parts, part)
-			}
+			parts = append(parts, part)
 		}
-		if len(parts) == 0 {
-			return "", nil
+	}
+
+	for _, c := range where.And {
+		part, err := buildSplunkEnterpriseFilter(c, schema)
+		if err != nil {
+			return "", err
 		}
-		if len(parts) == 1 {
-			return parts[0], nil
+		if part != "" {
+			parts = append(parts, part)
 		}
-		return "(" + strings.Join(parts, " AND ") + ")", nil
 	}
 
 	if len(where.Or) > 0 {
-		var parts []string
-		for _, c := range where.Or {
-			part, err := buildSplunkEnterpriseWhereClauseWithMapping(c, mapping)
-			if err != nil {
-				return "", err
-			}
-			if part != "" {
-				parts = append(parts, part)
-			}
+		part, err := buildSplunkEnterpriseOr(where.Or, schema)
+		if err != nil {
+			return "", err
 		}
-		if len(parts) == 0 {
-			return "", nil
+		if part != "" {
+			parts = append(parts, part)
 		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " OR ") + ")", nil
 	}
 
 	if where.Not != nil {
-		notPart, err := buildSplunkEnterpriseWhereClauseWithMapping(*where.Not, mapping)
+		notPart, err := buildSplunkEnterpriseFilter(*where.Not, schema)
 		if err != nil {
 			return "", err
 		}
 		if notPart != "" {
-			return fmt.Sprintf("NOT (%s)", notPart), nil
+			parts = append(parts, fmt.Sprintf("NOT (%s)", notPart))
 		}
 	}
 
-	return "", nil
+	return joinSplunkEnterpriseParts(parts, " AND "), nil
+}
+
+// buildSplunkEnterpriseOr renders an OR group. An inexpressible branch is skipped - the
+// other branches can still answer, which is how a caller-OR-callee search keeps its
+// caller side when the callee side names a field Splunk lacks. A branch with no
+// restriction at all makes the whole OR unrestricted.
+func buildSplunkEnterpriseOr(branches []query.QueryWhereClause, schema splunkEnterpriseFilterSchema) (string, error) {
+	var parts []string
+	skipped := 0
+	for _, c := range branches {
+		part, err := buildSplunkEnterpriseFilter(c, schema)
+		if errors.Is(err, errSplunkEnterpriseGroupInexpressible) {
+			skipped++
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if part == "" {
+			return "", nil
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 && skipped > 0 {
+		return "", errSplunkEnterpriseGroupInexpressible
+	}
+	return joinSplunkEnterpriseParts(parts, " OR "), nil
 }
 
 // splunkEnterpriseLimit clamps a requested page size into the supported range.

@@ -185,9 +185,7 @@ func buildSplunkMetricMatcher(m LabelMatcher) (string, error) {
 	case "_neq", "!=":
 		return fmt.Sprintf(`%s!="%s"`, label, value), nil
 	case "_prefix":
-		// Deliberately appends an UNESCAPED trailing wildcard. escapeSplunkString turns a
-		// literal `*` into `\*`, so a caller that embedded the wildcard in Value would get
-		// an escaped asterisk and match nothing. Used for pod-name prefixes, where the
+		// Appends the trailing wildcard. Used for pod-name prefixes, where the
 		// replica-hash suffix is unknown.
 		return fmt.Sprintf(`%s="%s*"`, label, value), nil
 	case "_like", "_contains", "=~":

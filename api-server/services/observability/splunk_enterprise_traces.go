@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"nudgebee/services/common"
@@ -50,6 +51,9 @@ var splunkEnterpriseTraceLabelMapping = map[string]string{
 	"resource":           "attributes.http.target",
 	// The callee of a client span. OTel writes this as net.peer.name / peer.service.
 	"destination_workload_name": "attributes.net.peer.name",
+	// The trace UI filters the callee by destination_name; a span has only the one peer
+	// name, so both canonical spellings resolve to it.
+	"destination_name": "attributes.net.peer.name",
 }
 
 // splunkEnterpriseTraceUnsupportedFields are canonical filter fields a span in Splunk
@@ -165,7 +169,7 @@ func (s *SplunkEnterpriseTraceSource) GetLabelMapping() map[string]string {
 }
 
 func (s *SplunkEnterpriseTraceSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_ilike"}
+	return splunkEnterpriseFilterOperators
 }
 
 // splunkEnterpriseTraceContext resolves the account's config and its trace index,
@@ -213,20 +217,55 @@ func stripSplunkEnterpriseUnsupportedTraceFields(binary query.BinaryWhereClause)
 	return kept, dropped
 }
 
-func buildSplunkEnterpriseTraceWhereClause(where query.QueryWhereClause) (string, error) {
-	if len(where.Binary) > 0 {
-		binary, dropped := stripSplunkEnterpriseUnsupportedTraceFields(where.Binary)
-		if len(binary) == 0 {
-			// Every predicate in this group was inexpressible. Returning "" would render
-			// the group as no restriction at all: harmless inside an OR, but silently
-			// matching everything inside an AND. A filter that cannot be honoured must
-			// not widen the result set.
-			return "", fmt.Errorf(
-				"splunk enterprise: trace filter group has no field this span schema can express (dropped %d)", dropped)
+// prepareSplunkEnterpriseTraceGroup is the trace schema's per-group rewrite. It runs on
+// every binary group in the tree, not only the top-level one: a caller-OR-callee search
+// nests the unsupported field inside an _or, where a bare field matching nothing would
+// take the whole branch down with it.
+func prepareSplunkEnterpriseTraceGroup(binary query.BinaryWhereClause) (query.BinaryWhereClause, int, error) {
+	kept, dropped := stripSplunkEnterpriseUnsupportedTraceFields(binary)
+
+	if ops, ok := kept["trace_source"]; ok {
+		// Every span a Splunk index holds came from an OpenTelemetry exporter, so
+		// trace_source="otel" is always true (the service map sends it on every query)
+		// and anything else can never match. Dropping the tautology is what the New
+		// Relic and Datadog sources do; the impossible value fails loudly rather than
+		// rendering a bare field that silently matches nothing.
+		for op, v := range ops {
+			if op != query.Eq || !strings.EqualFold(fmt.Sprintf("%v", v), "otel") {
+				return nil, 0, fmt.Errorf(
+					"splunk enterprise: trace_source %s %v cannot match - every Splunk span is an OpenTelemetry span", op, v)
+			}
 		}
-		return buildSplunkEnterpriseBinaryClause(binary, splunkEnterpriseTraceLabelMapping)
+		rest := make(query.BinaryWhereClause, len(kept)-1)
+		for field, fieldOps := range kept {
+			if field != "trace_source" {
+				rest[field] = fieldOps
+			}
+		}
+		kept = rest
 	}
-	return buildSplunkEnterpriseWhereClauseWithMapping(where, splunkEnterpriseTraceLabelMapping)
+
+	if _, ok := kept["duration_ns"]; ok {
+		// Duration is end_time - start_time, computed after the search; the search
+		// clause has no field to compare. Rendering it bare would match no span.
+		return nil, 0, fmt.Errorf("splunk enterprise: filtering traces by duration_ns is not supported yet")
+	}
+	return kept, dropped, nil
+}
+
+var splunkEnterpriseTraceFilterSchema = splunkEnterpriseFilterSchema{
+	mapping: splunkEnterpriseTraceLabelMapping,
+	prepare: prepareSplunkEnterpriseTraceGroup,
+}
+
+func buildSplunkEnterpriseTraceWhereClause(where query.QueryWhereClause) (string, error) {
+	clause, err := buildSplunkEnterpriseFilter(where, splunkEnterpriseTraceFilterSchema)
+	if errors.Is(err, errSplunkEnterpriseGroupInexpressible) {
+		// Nothing left to render would mean no restriction at all. A filter that cannot
+		// be honoured must not widen the result set.
+		return "", fmt.Errorf("splunk enterprise: trace %w", err)
+	}
+	return clause, err
 }
 
 // splunkEnterpriseTraceLimit clamps a requested page size into the supported range.

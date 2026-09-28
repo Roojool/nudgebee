@@ -158,7 +158,7 @@ func splunkEnterpriseSeriesWhere(c seriesMatchCandidate, index, namespace, workl
 	}
 
 	// Pod names carry a replica-hash suffix, so the workload is a PREFIX of the pod.
-	// _prefix is what appends the trailing wildcard, after escaping any the caller sent.
+	// _prefix is what appends the trailing wildcard.
 	operator := "_eq"
 	if c.MatchType == matchTypePrefix {
 		operator = "_prefix"
