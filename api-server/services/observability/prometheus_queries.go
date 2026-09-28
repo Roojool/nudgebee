@@ -326,12 +326,12 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 			// Handle Container Filter Logic
 			if safeMeta.ContainerName != "" {
 				containerFilter = fmt.Sprintf(`%s, container="%s"`, basePodFilter, safeMeta.ContainerName)
-				containerIDFilter = fmt.Sprintf(` container_id=~"/k8s/%s/%s/.*"`, safeMeta.Namespace, safeMeta.Name)
+				containerIDFilter = " " + promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, "")
 			} else {
 				// --- FIX: This ELSE block was missing ---
 				// If no container_name is provided, we still need a filter (usually excluding empty containers)
 				containerFilter = fmt.Sprintf(`%s, container!=""`, basePodFilter)
-				containerIDFilter = fmt.Sprintf(` container_id=~"/k8s/%s/%s/.*"`, safeMeta.Namespace, safeMeta.Name)
+				containerIDFilter = " " + promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, "")
 			}
 
 		} else {
@@ -346,7 +346,7 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 				// counts every container twice — a namespace row read ~2x the truth.
 				containerFilter = fmt.Sprintf(`%s, container!=""`, basePodFilter)
 			}
-			containerIDFilter = fmt.Sprintf(` container_id=~"/k8s/%s/.*"`, safeMeta.Namespace)
+			containerIDFilter = " " + promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, "", "")
 		}
 	}
 
@@ -712,9 +712,9 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "sensitive_log_messages":
 			queries[metricKey] = "sum(increase(container_sensitive_log_messages_total{__CLUSTER__}[5m])) by (pattern, container_id, regex, name, pattern_hash)"
 		case "container_error_log_count_with_pod":
-			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ container_id=~"%s", level=~"critical|error|exception"}[5m])) by (container_id)`, safeMeta.Name)
+			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ %s, level=~"critical|error|exception"}[5m])) by (container_id)`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, ""))
 		case "container_error_log_count_with_workload":
-			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ container_id=~"%s", level=~"critical|error"}[5m])) by (container_id)`, safeMeta.Name)
+			queries[metricKey] = fmt.Sprintf(`sum(increase(container_log_messages_total{ __CLUSTER__ %s, level=~"critical|error"}[5m])) by (container_id)`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, ""))
 		// Error and request counts as separate series, so a consumer can apply its own
 		// smoothing to the ratio instead of inheriting whatever this layer chose. The
 		// anomaly detector needs exactly that: it divides by (requests + K) to stop a
@@ -736,21 +736,21 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "workload_http_error_rate":
 			queries[metricKey] = fmt.Sprintf(`sum by(destination_workload_name, destination_workload_namespace)(rate(container_http_requests_total{ __CLUSTER__ status=~"5..|4..", destination_workload_name=~"%s", destination_workload_namespace=~"%s"}[1h])) / sum by(destination_workload_name, destination_workload_namespace)(rate(container_http_requests_total{ __CLUSTER__ destination_workload_name=~"%s", destination_workload_namespace=~"%s"}[1h]))`, safeMeta.Name, safeMeta.Namespace, safeMeta.Name, safeMeta.Namespace)
 		case "container_http_latency_p90":
-			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.90, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.90, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_latency_p99":
-			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.99, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_latency_p95":
-			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.95, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.95, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_latency_p50":
-			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.50, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.50, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_latency_mean":
-			queries[metricKey] = fmt.Sprintf(`sum(rate(container_http_requests_duration_seconds_total_sum{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) / sum(rate(container_http_requests_duration_seconds_total_count{ __CLUSTER__ container_id=~"%s", destination_workload_namespace!="external", destination_workload_namespace!=""}[1h]))`, safeMeta.ContainerName, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`sum(rate(container_http_requests_duration_seconds_total_sum{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) / sum(rate(container_http_requests_duration_seconds_total_count{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h]))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName), promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_request_count":
-			queries[metricKey] = fmt.Sprintf(`sum(increase(container_http_requests_total{ __CLUSTER__ container_id=~"%s"}[1h]))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`sum(increase(container_http_requests_total{ __CLUSTER__ %s}[1h]))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_http_error_status_count":
-			queries[metricKey] = fmt.Sprintf(`sum by(status) (increase(container_http_requests_total{ __CLUSTER__ status=~"4..|5..",container_id=~"%s"}[1h]))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`sum by(status) (increase(container_http_requests_total{ __CLUSTER__ status=~"4..|5..",%s}[1h]))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_top_destination_services":
-			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (rate(container_http_requests_total{ __CLUSTER__ container_id=~"%s"}[1h])))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (rate(container_http_requests_total{ __CLUSTER__ %s}[1h])))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "cpu_usage_pod":
 			queries[metricKey] = fmt.Sprintf(`sum(irate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s"}[1m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request_pod":
@@ -758,13 +758,13 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "cpu_limit_pod":
 			queries[metricKey] = fmt.Sprintf(`kube_pod_container_resource_limits{resource = "cpu", namespace="%s", pod=~"%s"}`, safeMeta.Namespace, safeMeta.Name)
 		case "container_top_http_requests":
-			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (rate(container_http_requests_total{ __CLUSTER__ container_id=~"%s"}[1h])))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (rate(container_http_requests_total{ __CLUSTER__ %s}[1h])))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_top_cpu_usage":
 			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{ __CLUSTER__ pod=~"%s", namespace=~"%s"}[1h])))`, safeMeta.Name, safeMeta.Namespace)
 		case "container_top_memory_usage":
 			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (pod, namespace) (rate(container_memory_working_set_bytes{ __CLUSTER__ pod=~"%s", namespace=~"%s"}[1h])))`, safeMeta.Name, safeMeta.Namespace)
 		case "container_top_http_error_calls":
-			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (increase(container_http_requests_total{ __CLUSTER__ status=~"4..|5..",container_id=~"%s"}[1h])))`, safeMeta.ContainerName)
+			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (increase(container_http_requests_total{ __CLUSTER__ status=~"4..|5..",%s}[1h])))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		}
 	}
 	promApplyAggregate(queries, safeMeta.Aggregate, rangeW, stepW)
@@ -881,6 +881,50 @@ func promNodeAllocatable(nodeName, resource string) string {
 func promSpecOnNode(metric, nodeName, resource string) string {
 	return fmt.Sprintf(`max by (namespace, pod, container) (%s{__CLUSTER__ %s})`,
 		metric, promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
+}
+
+// promContainerIDPath matches the eBPF metrics' container_id, which is a PATH and not a
+// name: `/k8s/<namespace>/<pod>/<container>`.
+//
+// Every caller of it was filtering `container_id=~"<name>"`, and Prometheus anchors its
+// regexes, so that required container_id to EQUAL the name. It never can. Measured on
+// dev: the workload form returned 0 series where this one returns 696, and the same held
+// for container_log_messages_total (0 vs 50) and container_net_tcp_bytes_received_total
+// (0 vs 21). The affected keys had been answering nothing on every provider.
+//
+// The pod segment needs the `-` : a workload's pods are `<workload>-<hash>-<id>`, so
+// matching `<workload>/` alone lands on a pod called exactly the workload name, which
+// does not exist. That is the same prefix-vs-exact trap the pod selectors carry, and the
+// reason it is one helper rather than a format string at each call site.
+// `kind` decides whether the pod segment is a prefix or an exact name. At pod scope the
+// caller's Name IS the pod (see the `safeMeta.Kind == "pod"` arm of the pod matcher), so
+// appending `-.*` there asks for a pod whose name extends a full pod name -- which no pod
+// has. Passing the kind rather than a bare bool keeps that decision legible at the 17 call
+// sites, where `true` would read as an unexplained flag.
+func promContainerIDPath(kind, namespace, workload, container string) string {
+	// QuoteMeta before the string escape, the same order and for the same reason as
+	// promPodNameAlternation: these are REGEX segments, so a name containing "." (RFC1123
+	// allows it) would otherwise match any character there, and the reverse order leaves
+	// QuoteMeta's backslashes unescaped for the PromQL literal.
+	quote := func(v string) string { return escapePromQLString(regexp.QuoteMeta(v)) }
+	pod := ".*"
+	if workload != "" {
+		pod = quote(workload) + "-.*"
+		// "" is treated as pod too: an unspecified kind reaches the pod-scoped keys with
+		// a pod in Name, the same reading the rest of this package takes.
+		if kind == "pod" || kind == "" {
+			pod = quote(workload)
+		}
+	}
+	c := ".*"
+	if container != "" {
+		c = quote(container)
+	}
+	ns := ".*"
+	if namespace != "" {
+		ns = quote(namespace)
+	}
+	return fmt.Sprintf(`container_id=~"/k8s/%s/%s/%s"`, ns, pod, c)
 }
 
 // promSelector joins a scope filter with extra matchers into one selector body.
