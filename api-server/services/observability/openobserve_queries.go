@@ -48,6 +48,14 @@ type openObserveClusterCandidate struct {
 	Counter bool
 	// ExcludeIdle restricts to busy CPU time on families that break usage down by mode.
 	ExcludeIdle bool
+	// Matchers narrow a family that packs several quantities into one metric name.
+	// The OTel receiver publishes both network directions as k8s_pod_network_io and
+	// separates them with a `direction` label, where cAdvisor uses two metric names.
+	Matchers []string
+	// Increase asks for the counter's RISE across each bucket rather than its rate.
+	// A bytes-per-bucket key is not a bytes-per-second key, and answering one with the
+	// other is wrong by exactly the bucket width.
+	Increase bool
 }
 
 // openObserveClusterRole is the abstract quantity a candidate list resolves.
@@ -59,6 +67,8 @@ const (
 	ooRoleMemTotal    openObserveClusterRole = "mem_total"
 	ooRoleMemAvail    openObserveClusterRole = "mem_available"
 	ooRoleMemUsed     openObserveClusterRole = "mem_used"
+	ooRoleNetRx       openObserveClusterRole = "net_receive"
+	ooRoleNetTx       openObserveClusterRole = "net_transmit"
 )
 
 // OpenObserveClusterCandidates is the probe order per role. Package-level so tests can
@@ -95,6 +105,19 @@ var OpenObserveClusterCandidates = map[openObserveClusterRole][]openObserveClust
 		{Family: "k8s_node_memory_usage"},
 		{Family: "node_resources_memory_used_bytes"},
 	},
+	// cAdvisor gives each direction its own metric name; the OTel receiver gives both
+	// one name and a `direction` label. Probing in this order means an instance scraping
+	// cAdvisor needs no translation, and one fed by OTel is translated automatically --
+	// neither has to be configured, and an instance carrying both gets the name it
+	// already agrees with Prometheus on.
+	ooRoleNetRx: {
+		{Family: "container_network_receive_bytes_total", Increase: true},
+		{Family: "k8s_pod_network_io", Increase: true, Matchers: []string{`direction="receive"`}},
+	},
+	ooRoleNetTx: {
+		{Family: "container_network_transmit_bytes_total", Increase: true},
+		{Family: "k8s_pod_network_io", Increase: true, Matchers: []string{`direction="transmit"`}},
+	},
 }
 
 // openObserveClusterKeys are the utilisation keys served by this file rather than by the
@@ -120,6 +143,9 @@ var openObserveClusterKeys = map[string][]openObserveClusterRole{
 	"p50_mem":         {ooRoleMemUsed, ooRoleMemTotal, ooRoleMemAvail},
 	"p90_mem":         {ooRoleMemUsed, ooRoleMemTotal, ooRoleMemAvail},
 	"max_usage_mem":   {ooRoleMemUsed, ooRoleMemTotal, ooRoleMemAvail},
+	// Bytes per bucket, so they are trends rather than scalars.
+	"network_receive_bytes_increase":  {ooRoleNetRx},
+	"network_transmit_bytes_increase": {ooRoleNetTx},
 }
 
 // ooBaseQueryKey namespaces the internal probe keys so they cannot collide with a caller's
@@ -131,11 +157,16 @@ func ooBaseQueryKey(role openObserveClusterRole, i int) string {
 // buildOpenObserveClusterQuery renders one candidate. Each is a single aggregated selector --
 // no `or`, no arithmetic, no subquery -- which is the subset OpenObserve evaluates correctly.
 func buildOpenObserveClusterQuery(c openObserveClusterCandidate, rateWindow string) string {
-	selector := c.Family + "{}"
+	var matchers []string
 	if c.ExcludeIdle {
-		selector = fmt.Sprintf("%s{mode!=\"idle\"}", c.Family)
+		matchers = append(matchers, `mode!="idle"`)
 	}
-	if c.Counter {
+	matchers = append(matchers, c.Matchers...)
+	selector := fmt.Sprintf("%s{%s}", c.Family, strings.Join(matchers, ","))
+	switch {
+	case c.Increase:
+		return fmt.Sprintf("sum(increase(%s[%s]))", selector, rateWindow)
+	case c.Counter:
 		return fmt.Sprintf("sum(rate(%s[%s]))", selector, rateWindow)
 	}
 	return fmt.Sprintf("sum(%s)", selector)
@@ -145,11 +176,16 @@ func buildOpenObserveClusterQuery(c openObserveClusterCandidate, rateWindow stri
 // OpenObserve-safe path below, everything else by the Prometheus builders, which OpenObserve
 // evaluates correctly. Results from both are merged under the caller's original metric keys.
 func fetchOpenObserveUtilisation(ctx *security.RequestContext, req GetUtilisationTrendRequest, meta RequestMetadata, integrationSource string, instant bool) (OutputMetricQuery, error) {
-	var clusterKeys, passthrough []string
+	var clusterKeys, perPodKeys, passthrough []string
 	for _, m := range meta.RequestedMetrics {
-		if _, ok := openObserveClusterKeys[m]; ok {
+		switch {
+		case openObserveClusterKeys[m] != nil:
 			clusterKeys = append(clusterKeys, m)
-		} else {
+		// Served natively because the METRIC is absent under the name the Prometheus
+		// builders use, not because the engine cannot evaluate their query.
+		case ooServesPerPod(m):
+			perPodKeys = append(perPodKeys, m)
+		default:
 			passthrough = append(passthrough, m)
 		}
 	}
@@ -164,6 +200,14 @@ func fetchOpenObserveUtilisation(ctx *security.RequestContext, req GetUtilisatio
 			queries = buildPrometheusWorkloadQueries(meta, passthrough)
 		}
 		res, err := fetchOpenObserveFallbackRounds(ctx, req, integrationSource, queries, instant)
+		if err != nil {
+			return out, err
+		}
+		out.Results = append(out.Results, res...)
+	}
+
+	if len(perPodKeys) > 0 {
+		res, err := fetchOpenObservePerPod(ctx, req, meta, integrationSource, perPodKeys)
 		if err != nil {
 			return out, err
 		}
@@ -260,6 +304,9 @@ func fetchOpenObserveClusterAggregates(ctx *security.RequestContext, req GetUtil
 		}
 	}
 
+	netRx, haveNetRx := resolved[ooRoleNetRx]
+	netTx, haveNetTx := resolved[ooRoleNetTx]
+
 	cpuUsage, haveCPUUsage := resolved[ooRoleCPUUsage]
 	cpuCap, haveCPUCap := resolved[ooRoleCPUCapacity]
 	memTotal, haveMemTotal := resolved[ooRoleMemTotal]
@@ -279,6 +326,10 @@ func fetchOpenObserveClusterAggregates(ctx *security.RequestContext, req GetUtil
 			results = append(results, ooScalar(key, cpuUsage, haveCPUUsage, ooPercentile(0.90), probed[ooRoleCPUUsage]))
 		case "max_usage_cpu":
 			results = append(results, ooScalar(key, cpuUsage, haveCPUUsage, ooMax, probed[ooRoleCPUUsage]))
+		case "network_receive_bytes_increase":
+			results = append(results, ooTrend(key, netRx, haveNetRx, probed[ooRoleNetRx]))
+		case "network_transmit_bytes_increase":
+			results = append(results, ooTrend(key, netTx, haveNetTx, probed[ooRoleNetTx]))
 		case "cpu_usage_trend":
 			results = append(results, ooTrend(key, cpuUsage, haveCPUUsage, probed[ooRoleCPUUsage]))
 		case "mem_total":

@@ -52,6 +52,17 @@ var canonicalMetricLabels = map[string]map[string]string{
 		"kube_job":                    CanonicalWorkload,
 		"kube_cronjob":                CanonicalWorkload,
 	},
+	// OpenObserve is fed by the OTel collector's kubeletstats receiver, which uses the
+	// k8s semantic-convention attribute names rather than cAdvisor's. Without this the
+	// values arrive correct under names nothing joins on -- the same silent empty join
+	// that cost Elasticsearch its volume recommendations.
+	"openobserve": {
+		"k8s_pod_name":        CanonicalPod,
+		"k8s_container_name":  CanonicalContainer,
+		"k8s_namespace_name":  CanonicalNamespace,
+		"k8s_node_name":       CanonicalNode,
+		"k8s_deployment_name": CanonicalWorkload,
+	},
 	"newrelic": {
 		"podName":        CanonicalPod,
 		"containerName":  CanonicalContainer,

@@ -344,3 +344,41 @@ func TestOpenObserveClusterStepParsesAnyDuration(t *testing.T) {
 	assert.Equal(t, 45, openObserveClusterStep(RequestMetadata{Step: "banana"}, GetUtilisationTrendRequest{StepInterval: 45}))
 	assert.Equal(t, 60, openObserveClusterStep(RequestMetadata{}, req))
 }
+
+// The fallback is per-NAME within one provider, not across providers.
+//
+// cAdvisor publishes each network direction under its own metric name; the OTel receiver
+// publishes both under k8s_pod_network_io and separates them with a `direction` label.
+// Probing cAdvisor first means an instance already agreeing with Prometheus needs no
+// translation, and one fed by OTel is translated without anyone configuring it.
+func TestOpenObserveNetworkCandidates_FallBackFromCadvisorToOtel(t *testing.T) {
+	rx := OpenObserveClusterCandidates[ooRoleNetRx]
+	require.Len(t, rx, 2)
+
+	assert.Equal(t, "container_network_receive_bytes_total", rx[0].Family)
+	assert.Empty(t, rx[0].Matchers, "the cAdvisor name IS the direction")
+
+	assert.Equal(t, "k8s_pod_network_io", rx[1].Family)
+	assert.Equal(t, []string{`direction="receive"`}, rx[1].Matchers,
+		"one OTel family carries both directions, so it must be narrowed")
+
+	tx := OpenObserveClusterCandidates[ooRoleNetTx]
+	assert.Equal(t, []string{`direction="transmit"`}, tx[1].Matchers)
+	assert.NotEqual(t, rx[1].Matchers, tx[1].Matchers,
+		"receive and transmit must not resolve to the same series")
+}
+
+// A bytes-per-bucket key is not a bytes-per-second key. Answering one with the other is
+// wrong by exactly the bucket width, and both look plausible on a chart.
+func TestBuildOpenObserveClusterQuery_IncreaseIsNotRate(t *testing.T) {
+	inc := buildOpenObserveClusterQuery(OpenObserveClusterCandidates[ooRoleNetRx][1], "300s")
+	assert.Contains(t, inc, "increase(")
+	assert.NotContains(t, inc, "rate(")
+	assert.Contains(t, inc, `direction="receive"`)
+
+	// A plain counter still uses rate; only the per-bucket keys changed.
+	rate := buildOpenObserveClusterQuery(OpenObserveClusterCandidates[ooRoleCPUUsage][0], "300s")
+	assert.Contains(t, rate, "rate(")
+	assert.NotContains(t, rate, "increase(")
+	assert.Contains(t, rate, `mode!="idle"`, "ExcludeIdle must survive alongside Matchers")
+}
