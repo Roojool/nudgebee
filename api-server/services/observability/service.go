@@ -3376,6 +3376,13 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		canonicaliseUtilisationLabels(out.Results, metricsProvider)
 		return out, err
 
+	// Splunk cannot execute PromQL at all, so none of the Prometheus builders apply --
+	// every utilisation key is rendered as SPL in splunk_enterprise_queries.go.
+	case "splunk_enterprise":
+		out, err := fetchSplunkEnterpriseUtilisation(ctx, req, meta, integrationSource, instant)
+		canonicaliseUtilisationLabels(out.Results, metricsProvider)
+		return out, err
+
 	case "ES":
 		out, err := fetchESMetricUtilisation(ctx, req, meta)
 		canonicaliseUtilisationLabels(out.Results, metricsProvider)

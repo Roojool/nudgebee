@@ -238,15 +238,15 @@ func TestWorkloadMetricEvidence_IsEmptyWhereTheProviderHasNoSuchMetric(t *testin
 }
 
 // A provider the utilisation layer has no builder for at all is an error; both callers
-// skip a failed metric, so the event simply carries no such card. Splunk rather than
-// CubeAPM, which the utilisation layer now serves through the Prometheus builders.
+// skip a failed metric, so the event simply carries no such card. Azure App Insights
+// rather than CubeAPM or Splunk Enterprise, which the utilisation layer now serves.
 func TestWorkloadMetricEvidence_FailsForAProviderWithNoUtilisationSupport(t *testing.T) {
-	stubUtilisationProvider(t, "splunk_enterprise", "user")
+	stubUtilisationProvider(t, "azure_app_insights", "user")
 
 	end := time.Now().UTC()
 	_, err := WorkloadMetricEvidence(testRequestContext(), "acc", "api", "shop", "Deployment", "cpu", "Cpu Metric", end.Add(-time.Hour), end)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "splunk_enterprise")
+	assert.Contains(t, err.Error(), "azure_app_insights")
 }
 
 // Only series Datadog labels as nanocores are scaled: memory, and CPU requests and
