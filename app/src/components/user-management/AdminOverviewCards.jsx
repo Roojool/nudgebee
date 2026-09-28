@@ -70,6 +70,23 @@ const CARDS = [
     ],
   },
   {
+    fragment: 'integrations',
+    title: 'Integrations',
+    icon: IntegrationsIcon,
+    description: 'Connect clouds, clusters, observability tools, ticketing and messaging.',
+    stats: [
+      { key: 'connected', one: 'connected', many: 'connected' },
+      { key: 'accounts', one: 'account', many: 'accounts' },
+    ],
+    links: [
+      { label: 'Connect a cloud account', hash: 'integrations', query: { integration: 'account' } },
+      { label: 'Add Kubernetes clusters', hash: 'integrations', query: { integration: 'cloud' } },
+      { label: 'Add logs, metrics and traces', hash: 'integrations', query: { integration: 'observability' } },
+      { label: 'Connect messaging and ticketing', hash: 'integrations', query: { integration: 'alert' } },
+      { label: 'Browse all providers', hash: 'integrations' },
+    ],
+  },
+  {
     fragment: 'notification-rules',
     title: 'Notification Rules',
     icon: NotificationIcon1,
@@ -87,23 +104,6 @@ const CARDS = [
       { label: 'Create an SLO alert', hash: 'notification-rules', action: 'alert-slo' },
       { label: 'Schedule a weekly digest', hash: 'notification-rules', action: 'alert-weekly_digest' },
       { label: 'Manage notification channels', hash: 'integrations', query: { integration: 'alert' } },
-    ],
-  },
-  {
-    fragment: 'integrations',
-    title: 'Integrations',
-    icon: IntegrationsIcon,
-    description: 'Connect clouds, clusters, observability tools, ticketing and messaging.',
-    stats: [
-      { key: 'connected', one: 'connected', many: 'connected' },
-      { key: 'accounts', one: 'account', many: 'accounts' },
-    ],
-    links: [
-      { label: 'Connect a cloud account', hash: 'integrations', query: { integration: 'account' } },
-      { label: 'Add Kubernetes clusters', hash: 'integrations', query: { integration: 'cloud' } },
-      { label: 'Add logs, metrics and traces', hash: 'integrations', query: { integration: 'observability' } },
-      { label: 'Connect messaging and ticketing', hash: 'integrations', query: { integration: 'alert' } },
-      { label: 'Browse all providers', hash: 'integrations' },
     ],
   },
   {

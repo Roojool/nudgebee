@@ -115,6 +115,14 @@ const baseFilters = (baseTitle) => [
       },
     ],
   },
+  {
+    name: 'Integrations',
+    fragment: 'integrations',
+    icon: IntegrationsIcon,
+    Body: Integrations,
+    module: 'integrations',
+    description: `Connect ${baseTitle} to your clouds, observability platforms, ticketing, repositories and messaging tools — and see what is already connected.`,
+  },
   // id is pinned so the DOM id (#anchor-tab-Notifications) that app-e2e-tests
   // locates the tab by stays stable if the label ever changes independently.
   {
@@ -126,14 +134,6 @@ const baseFilters = (baseTitle) => [
     module: 'notifications',
     description:
       'Rules decide which troubleshooting, SLO, cloud spend, optimization and automation notifications are delivered, and where. Every matching rule applies; if any says Don’t send, it isn’t sent.',
-  },
-  {
-    name: 'Integrations',
-    fragment: 'integrations',
-    icon: IntegrationsIcon,
-    Body: Integrations,
-    module: 'integrations',
-    description: `Connect ${baseTitle} to your clouds, observability platforms, ticketing, repositories and messaging tools — and see what is already connected.`,
   },
   // AI & Tools (docs/ia-consolidation-plan.md, PR 3) — "what the AI is made
   // of", relocated out of the Settings modal into Admin. Same tabOptions

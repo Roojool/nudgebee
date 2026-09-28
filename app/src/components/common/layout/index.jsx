@@ -410,13 +410,6 @@ const PageLayout = ({ children }) => {
         icon: DollarIcon,
       },
       {
-        text: 'Resolutions',
-        path: '/optimise#resolutions',
-        id: 'sidenav-optimise-resolutions',
-        module: 'recommendations',
-        icon: RecommendationResolutionIcon,
-      },
-      {
         text: 'Configuration',
         path: '/optimise#configuration',
         id: 'sidenav-optimise-configuration',
@@ -429,6 +422,13 @@ const PageLayout = ({ children }) => {
         id: 'sidenav-optimise-security',
         module: 'recommendations',
         icon: SecuritytoolsBlue,
+      },
+      {
+        text: 'Resolutions',
+        path: '/optimise#resolutions',
+        id: 'sidenav-optimise-resolutions',
+        module: 'recommendations',
+        icon: RecommendationResolutionIcon,
       },
       { text: 'Auto Optimize', path: '/optimise#auto-optimize', id: 'sidenav-optimise-auto-optimize', module: 'autooptimize', icon: AutomateBlue },
       ...(llmAnalyserEnabled && canReadAccount
@@ -597,18 +597,18 @@ const PageLayout = ({ children }) => {
             icon: User1,
           },
           {
-            text: 'Notification Rules',
-            path: '/user-management#notification-rules',
-            id: 'sidenav-admin-notifications',
-            module: 'notifications',
-            icon: NotificationIcon1,
-          },
-          {
             text: 'Integrations',
             path: '/user-management#integrations',
             id: 'sidenav-admin-integrations',
             module: 'integrations',
             icon: IntegrationsIcon,
+          },
+          {
+            text: 'Notification Rules',
+            path: '/user-management#notification-rules',
+            id: 'sidenav-admin-notifications',
+            module: 'notifications',
+            icon: NotificationIcon1,
           },
           // Agents, Tools & MCP, Functions, Providers, Gateway, Egress Filter,
           // Budgets & Limits, Memory Policy and RCA Format all live under this
