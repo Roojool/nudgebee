@@ -345,8 +345,9 @@ export const ruleIssues = (rule: Rule, others: Rule[], accountIds: string[], acc
   types.forEach((type) => {
     const defs = RULE_TYPE[type].events;
     const events: (string | null)[] = defs ? (type === ek && rule.events ? rule.events : defs.map((e) => e.id)) : [null];
+    // Matches covers(): a type without accounts is sent only when the whole rule has no accounts or covers them all.
     const accounts: (string | null)[] = !RULE_TYPE[type].accounts
-      ? rule.scope === 'all'
+      ? rule.scope === 'all' || coversNoAccounts(rule.types)
         ? [null]
         : []
       : rule.scope === 'some'

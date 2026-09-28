@@ -223,6 +223,16 @@ describe('coverage and conflicts', () => {
     expect(ruleIssues(both, [silenceChatter, both], ids, name)[0].kind).toBe('info');
   });
 
+  it('checks a type without accounts only where the rule sends it', () => {
+    const silenceDigest = newRule({ id: 'w', name: 'Silence digests', types: ['weekly_digest'], action: 'drop' });
+    // Saved with every account, so a digest-only rule left on "some" still sends.
+    const digestOnly = newRule({ id: 'd1', types: ['weekly_digest'], scope: 'some', accounts: ['a1'] });
+    expect(ruleIssues(digestOnly, [silenceDigest, digestOnly], ids, name)[0]).toMatchObject({ kind: 'warning' });
+    // With account-scoped types alongside, the rule never sends digests.
+    const mixed = newRule({ id: 'd2', types: ['troubleshoot', 'weekly_digest'], scope: 'some', accounts: ['a1'] });
+    expect(ruleIssues(mixed, [silenceDigest, mixed], ids, name).map((i) => i.kind)).toEqual(['info']);
+  });
+
   it('ignores rules that are off', () => {
     expect(ruleIssues(devToChannel, [{ ...silenceAll, active: false }, devToChannel], ids, name)).toEqual([]);
   });
