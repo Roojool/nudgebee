@@ -34,12 +34,25 @@ func (m MetricsSeriesMatchTool) Name() string { return ToolMetricsSeriesMatch }
 func (m MetricsSeriesMatchTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 
 func (m MetricsSeriesMatchTool) Description() string {
+	filter, _ := m.prefixFilter()
 	return `Discovers the metric families that ACTUALLY have series for a specific workload, grouped by the labels that identify the workload.
 		Usage:
 		* Input: workload (required, e.g. deployment/service name) and namespace (optional but recommended).
 		* Output: groups of {namespace_label, workload_label, match_type, families[]}. A workload may emit under several layers (e.g. eBPF vs scraped) with different labels.
 
-		Purpose: Call this when a templated query returns no data for a known workload. Pick a family from the result and filter it by the namespace_label/workload_label reported with it (match_type "prefix" => use =~"<workload>.*"). Do NOT reuse labels from one group on a family from another.`
+		Purpose: Call this when a templated query returns no data for a known workload. Pick a family from the result and filter it by the namespace_label/workload_label reported with it (match_type "prefix" => use ` + filter + `). Do NOT reuse labels from one group on a family from another.`
+}
+
+// prefixFilter is how a "prefix" group is filtered, in the query language the account's
+// metrics tool speaks, plus an example of it. Pod names carry a replica-hash suffix, so a
+// prefix group is only reachable through a wildcard, and the two languages spell it
+// differently: mstats WHERE has no regex operator, and PromQL has no bare `*`. Handing a
+// Splunk agent the PromQL form sent it to a filter its SPL tool cannot run.
+func (m MetricsSeriesMatchTool) prefixFilter() (filter, example string) {
+	if strings.EqualFold(m.Provider, splunkEnterpriseMetricProvider) {
+		return `<workload_label>="<workload>*"`, `k8s.pod.name="<workload>*"`
+	}
+	return `=~"<workload>.*"`, "pod"
 }
 
 func (m MetricsSeriesMatchTool) InputSchema() core.ToolSchema {
@@ -124,15 +137,24 @@ func (m MetricsSeriesMatchTool) Call(nbRequestContext core.NbToolContext, input 
 	}
 
 	if len(resp.Matches) == 0 {
-		return seriesMatchEmptyResponse(workload, namespace, resp.Truncated), nil
+		result := seriesMatchEmptyResponse(workload, namespace, resp.Truncated)
+		// A lookup that searched every convention and found nothing is as settled as one
+		// that found families, so it is cached the same way; asking again only re-runs the
+		// whole sweep for the same answer. A cut-short one is not an answer and is not kept.
+		if !resp.Truncated {
+			metricsListCache.Store(cacheKey, metricsListCacheEntry{response: result, expiry: time.Now().Add(seriesMatchCacheTTL())})
+		}
+		return result, nil
 	}
 
+	filter, example := m.prefixFilter()
 	out := map[string]any{
 		"workload":  workload,
 		"namespace": namespace,
 		"matches":   resp.Matches,
 		"truncated": resp.Truncated,
-		"note":      "Pick a family from a group's 'families' and filter it by THAT group's namespace_label and workload_label. match_type \"prefix\" => use =~\"<workload>.*\" (e.g. pod). Do not mix labels across groups.",
+		"note": fmt.Sprintf("Pick a family from a group's 'families' and filter it by THAT group's namespace_label and workload_label. match_type \"prefix\" => use %s (e.g. %s). Do not mix labels across groups.",
+			filter, example),
 	}
 	data, err := common.MarshalJson(out)
 	if err != nil {

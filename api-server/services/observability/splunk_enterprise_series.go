@@ -40,7 +40,10 @@ const (
 //
 // The WHERE clause is rendered by buildSplunkMetricMatcher, the same helper that builds
 // mstats filters, so discovery and the follow-up query cannot disagree about dimension
-// spelling, value escaping or what "prefix" means.
+// spelling, value escaping or what "prefix" means. Each match reports the dimensions its
+// WHERE clause actually filtered on (k8s.namespace.name, k8s.pod.name, …) rather than
+// the canonical convention names: the agent writes its follow-up mstats from those
+// labels, and no Splunk series carries a dimension called `pod` or `workload`.
 func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestContext, req FetchMetricSeriesRequest) (MetricSeriesResult, error) {
 	cfg, index, err := splunkEnterpriseMetricContext(ctx, req.AccountId)
 	if err != nil {
@@ -68,10 +71,11 @@ func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestCo
 
 	deadline := time.Now().Add(splunkEnterpriseSeriesBudget)
 
-	families := make([][]string, len(SeriesMatchCandidates))
-	truncated := make([]bool, len(SeriesMatchCandidates))
-	errs := make([]error, len(SeriesMatchCandidates))
-	probed := make([]bool, len(SeriesMatchCandidates))
+	candidates := splunkEnterpriseSeriesCandidates()
+	families := make([][]string, len(candidates))
+	truncated := make([]bool, len(candidates))
+	errs := make([]error, len(candidates))
+	probed := make([]bool, len(candidates))
 
 	// Several canonical conventions collapse onto one Splunk dimension — `app` and
 	// `workload` both map to k8s.deployment.name — and would otherwise cost a duplicate
@@ -82,7 +86,7 @@ func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestCo
 
 	eg := new(errgroup.Group)
 	eg.SetLimit(seriesMatchMaxConcurrency)
-	for i, candidate := range SeriesMatchCandidates {
+	for i, candidate := range candidates {
 		where, werr := splunkEnterpriseSeriesWhere(candidate, index, req.Namespace, req.Workload)
 		if werr != nil {
 			// An unsafe dimension or value is this candidate's problem alone; the other
@@ -112,7 +116,7 @@ func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestCo
 
 	probedCount, failures := 0, 0
 	var firstErr error
-	for i, candidate := range SeriesMatchCandidates {
+	for i, candidate := range candidates {
 		if !probed[i] {
 			continue
 		}
@@ -121,6 +125,10 @@ func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestCo
 			continue
 		}
 		failures++
+		// This convention was never actually searched, so the result no longer covers
+		// every convention. Flagging it truncated is what keeps an empty answer from
+		// reading as "this workload emits no metrics" when one search merely failed.
+		truncated[i] = true
 		if firstErr == nil {
 			firstErr = errs[i]
 		}
@@ -135,7 +143,48 @@ func (s *SplunkEnterpriseMetricSource) FetchMetricSeries(ctx *security.RequestCo
 		return MetricSeriesResult{}, firstErr
 	}
 
-	return assembleSeriesResult(SeriesMatchCandidates, families, truncated), nil
+	return assembleSeriesResult(candidates, families, truncated), nil
+}
+
+// splunkEnterpriseSeriesCandidates is the shared candidate table restated in the
+// dimension names Splunk stores, with the conventions that have an OTel dimension first.
+//
+// It is not the shared table as-is for two reasons. The result reports the labels each
+// family was found under, so they have to be the dimensions the WHERE clause used. And
+// the sweep runs at bounded concurrency under one budget, while the shared table leads
+// with eBPF and scrape conventions (destination_workload_name, job, statefulset, …) that
+// an OTel-shaped index rarely carries — in table order, the conventions most likely to
+// answer queue behind the ones least likely to. Those are kept rather than pruned,
+// because Prometheus-receiver metrics forwarded into Splunk keep their raw label names;
+// they are just searched last.
+//
+// The shared table is only read, never reordered in place: the Prometheus and
+// OpenObserve sources iterate it too.
+func splunkEnterpriseSeriesCandidates() []seriesMatchCandidate {
+	mapped := make([]seriesMatchCandidate, 0, len(SeriesMatchCandidates))
+	var raw []seriesMatchCandidate
+	for _, c := range SeriesMatchCandidates {
+		resolved := seriesMatchCandidate{
+			NamespaceLabel: splunkEnterpriseMetricDimension(c.NamespaceLabel),
+			WorkloadLabel:  splunkEnterpriseMetricDimension(c.WorkloadLabel),
+			MatchType:      c.MatchType,
+		}
+		if _, ok := splunkEnterpriseMetricLabelMapping[c.WorkloadLabel]; ok {
+			mapped = append(mapped, resolved)
+		} else {
+			raw = append(raw, resolved)
+		}
+	}
+	return append(mapped, raw...)
+}
+
+// splunkEnterpriseMetricDimension is the Splunk dimension a canonical label is stored
+// under, or the label itself when it has no OTel spelling.
+func splunkEnterpriseMetricDimension(label string) string {
+	if mapped, ok := splunkEnterpriseMetricLabelMapping[label]; ok {
+		return mapped
+	}
+	return label
 }
 
 // splunkEnterpriseSeriesWhere renders the mcatalog WHERE clause for one candidate.

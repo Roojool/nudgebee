@@ -8,6 +8,7 @@ package observability
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"nudgebee/services/integrations"
@@ -163,11 +164,80 @@ func TestSplunkEnterpriseFetchMetricSeriesGroupsByCandidate(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{"nb_mesh_requests_total"}, got["destination_workload_name"])
-	assert.Equal(t, []string{"nb_checkout_orders_total"}, got["workload"],
+	assert.Equal(t, []string{"nb_checkout_orders_total"}, got["k8s.deployment.name"],
 		"k8s.deployment.name is what the `workload` convention maps to")
-	assert.Equal(t, []string{"k8s.pod.cpu.usage", "k8s.pod.memory.usage"}, got["container"])
-	assert.Equal(t, []string{"k8s.pod.cpu.usage", "k8s.pod.memory.usage"}, got["pod"],
+	assert.Equal(t, []string{"k8s.pod.cpu.usage", "k8s.pod.memory.usage"}, got["k8s.container.name"])
+	assert.Equal(t, []string{"k8s.pod.cpu.usage", "k8s.pod.memory.usage"}, got["k8s.pod.name"],
 		"pod is a PREFIX match: the replica suffix must not prevent the match")
+}
+
+// The agent writes its follow-up mstats from the labels a match reports. Canonical names
+// (`pod`, `workload`) are not Splunk dimensions, so reporting them sends that query to a
+// field no series carries — an empty result for a workload discovery just found.
+func TestSplunkEnterpriseFetchMetricSeriesReportsFilteredDimensions(t *testing.T) {
+	series := splunkSeriesFixture()
+	server, _ := splunkSeriesServer(t, series)
+	defer server.Close()
+	patchSplunkSeriesConfig(t, server.URL)
+
+	out, err := (&SplunkEnterpriseMetricSource{}).FetchMetricSeries(mockRequestContext(), FetchMetricSeriesRequest{
+		AccountId: "test", Namespace: "prod", Workload: "checkout",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, out.Matches)
+
+	for _, m := range out.Matches {
+		assert.NotContains(t, splunkEnterpriseMetricLabelMapping, m.NamespaceLabel,
+			"%q is a canonical name, not the dimension Splunk filtered on", m.NamespaceLabel)
+		assert.NotContains(t, splunkEnterpriseMetricLabelMapping, m.WorkloadLabel,
+			"%q is a canonical name, not the dimension Splunk filtered on", m.WorkloadLabel)
+
+		// Round trip: a filter written from the reported labels, the way the agent writes
+		// it, must find every family the match reported.
+		value := `"checkout"`
+		if m.MatchType == matchTypePrefix {
+			value = `"checkout*"`
+		}
+		where := fmt.Sprintf(`index="otel_metrics" AND %s="prod" AND %s=%s`, m.NamespaceLabel, m.WorkloadLabel, value)
+		for _, family := range m.Families {
+			found := false
+			for _, s := range series {
+				if s["metric_name"] == family && splunkWhereMatches(where, s) {
+					found = true
+				}
+			}
+			assert.True(t, found, "%s is not reachable through the reported labels (%s)", family, where)
+		}
+	}
+}
+
+// The OTel conventions have to be searched before the eBPF/scrape ones an OTel index
+// rarely carries, or the sweep's budget is spent on likely misses first. This is also
+// the one Splunk-specific view of the shared table, so it must not disturb that table.
+func TestSplunkEnterpriseSeriesCandidatesPutOTelDimensionsFirst(t *testing.T) {
+	shared := append([]seriesMatchCandidate(nil), SeriesMatchCandidates...)
+
+	candidates := splunkEnterpriseSeriesCandidates()
+
+	assert.Equal(t, shared, SeriesMatchCandidates,
+		"the shared table feeds the Prometheus and OpenObserve sources and must not be reordered or rewritten")
+	require.Len(t, candidates, len(SeriesMatchCandidates), "reordered, not pruned")
+
+	otel := map[string]bool{}
+	for _, dim := range splunkEnterpriseMetricLabelMapping {
+		otel[dim] = true
+	}
+	seenRaw := false
+	for _, c := range candidates {
+		if !otel[c.WorkloadLabel] {
+			seenRaw = true
+			continue
+		}
+		assert.False(t, seenRaw, "%s is queued behind a convention with no OTel dimension", c.WorkloadLabel)
+	}
+	assert.Contains(t, candidates, seriesMatchCandidate{
+		NamespaceLabel: "k8s.namespace.name", WorkloadLabel: "k8s.pod.name", MatchType: matchTypePrefix,
+	}, "the pod convention keeps its prefix match once resolved")
 }
 
 // The whole point of series-match is that it discriminates. A family that only has
@@ -199,6 +269,8 @@ func TestSplunkEnterpriseFetchMetricSeriesUnknownWorkloadIsEmptyNotError(t *test
 	})
 	require.NoError(t, err)
 	assert.Empty(t, out.Matches)
+	assert.False(t, out.Truncated,
+		"every convention was searched, so this empty is complete — what lets the tool say no series exist")
 }
 
 // `app` and `workload` both map to k8s.deployment.name, so they render an identical
@@ -222,11 +294,13 @@ func TestSplunkEnterpriseFetchMetricSeriesDedupesCollapsedConventions(t *testing
 	assert.Len(t, *searches, len(SeriesMatchCandidates)-1,
 		"exactly one candidate pair collapses onto another (app -> workload)")
 
-	labels := map[string]bool{}
+	deployment := 0
 	for _, m := range out.Matches {
-		labels[m.WorkloadLabel] = true
+		if m.WorkloadLabel == "k8s.deployment.name" {
+			deployment++
+		}
 	}
-	assert.False(t, labels["app"], "the deduped convention must not appear as its own group")
+	assert.Equal(t, 1, deployment, "the deduped convention must not appear as its own group")
 }
 
 // Discovery must filter server-side. A WHERE clause that dropped the workload predicate
@@ -386,6 +460,34 @@ func TestSplunkEnterpriseFetchMetricSeriesSurvivesPartialFailure(t *testing.T) {
 	for _, m := range out.Matches {
 		got[m.WorkloadLabel] = m.Families
 	}
-	assert.Equal(t, []string{"nb_checkout_orders_total"}, got["workload"])
-	assert.Empty(t, got["pod"], "the convention whose search failed reports nothing")
+	assert.Equal(t, []string{"nb_checkout_orders_total"}, got["k8s.deployment.name"])
+	assert.Empty(t, got["k8s.pod.name"], "the convention whose search failed reports nothing")
+	assert.True(t, out.Truncated, "a convention that was never searched makes the answer partial")
+}
+
+// A failed search is a convention nobody looked at. If the rest found nothing, the answer
+// is "could not tell", not "no metrics" — the agent stops investigating on the latter.
+func TestSplunkEnterpriseFetchMetricSeriesFailedCandidateIsNotAnEmptyAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(r.Form.Get("search"), "k8s.pod.name=") {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"messages":[{"type":"ERROR","text":"search timed out"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+	patchSplunkSeriesConfig(t, server.URL)
+
+	out, err := (&SplunkEnterpriseMetricSource{}).FetchMetricSeries(mockRequestContext(), FetchMetricSeriesRequest{
+		AccountId: "test", Namespace: "prod", Workload: "checkout",
+	})
+	require.NoError(t, err, "the other conventions answered, so this is a partial result, not a failure")
+	assert.Empty(t, out.Matches)
+	assert.True(t, out.Truncated, "an empty result with a failed convention must not read as complete")
 }

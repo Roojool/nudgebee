@@ -15,7 +15,7 @@ import (
 const SplunkEnterpriseMetricsAgentName = "splunk_enterprise_metrics"
 
 // splunkEnterpriseProvider is the provider key api-server resolves Splunk Enterprise
-// metrics under; the discovery tools send it so they enumerate Splunk's mcatalog rather
+// metrics under; the discovery tools send it so they enumerate Splunk's catalog rather
 // than the "prometheus" default they otherwise assume.
 const splunkEnterpriseProvider = "splunk_enterprise"
 
@@ -117,7 +117,7 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 		"**Your Primary Goal:** Answer user questions about metrics stored in Splunk Enterprise.",
 		fmt.Sprintf("**Your Method:** Write an SPL `| mstats` search and execute it via `%s`. This is SPL, NOT PromQL — PromQL syntax (`rate()`, `{label=\"x\"}`) will be rejected.", tools.ToolSplunkMetricsQuery),
 		"**Query Rules (the backend rejects any query that breaks them):**",
-		"  1. Start with `| mstats` (values) or `| mcatalog` (catalog lookups).",
+		"  1. Start with `| mstats`. Which metrics, dimensions or values exist is answered by the discovery tools below, never by SPL.",
 		fmt.Sprintf("  2. Name the metrics index exactly as `%s` in the WHERE clause. No other index can be queried.", idx),
 		"  3. Alias the value `AS nb_value` — e.g. `avg(k8s.pod.cpu.usage) AS nb_value`. Values in any other column are dropped. One metric per query.",
 		"  4. Pass the time window as the tool's `range` (e.g. `15m`, `1h`) or `start_time`/`end_time`. Do NOT put earliest/latest in the SPL.",
@@ -129,11 +129,15 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 		"  **CPU:** `k8s.pod.cpu.usage` (cores), `k8s.pod.cpu.utilization`, `container.cpu.usage`, `container.cpu.utilization`, `k8s.node.cpu.usage`",
 		"  **Memory:** `k8s.pod.memory.usage` (bytes), `k8s.pod.memory.working_set`, `container.memory.usage`, `container.memory.working_set`, `k8s.node.memory.usage`",
 		"  **Network:** `k8s.pod.network.io`, `k8s.pod.network.rx_bytes`, `k8s.pod.network.errors`",
-		fmt.Sprintf("  If a name is not certain, call `%s` with a keyword (e.g. `cpu`, `memory`) first — it lists the metric names this index really holds. `%s` with a metric name lists its dimensions; `%s` lists a dimension's values.", tools.ToolMetricsList, tools.ToolMetricsLabelsList, tools.ToolMetricsLabelValues),
+		"**Discovery (metric names and dimensions are environment-specific — discover, don't assume):**",
+		fmt.Sprintf("  - For a value question about a named workload, query the common metric names above first. If that mstats query returns empty for a KNOWN workload, do NOT conclude 'no data': call `%s` with the workload (and namespace). It returns the metric families that actually have series for it, grouped by the dimensions that identify it. Pick a family from a group and filter it by THAT group's `namespace_label`/`workload_label` (match_type `prefix` means `<workload_label>=\"<workload>*\"`). Do not mix dimensions across groups.", tools.ToolMetricsSeriesMatch),
+		fmt.Sprintf("  - When the question itself is which metrics a named workload has, `%s` is the answer — call it directly.", tools.ToolMetricsSeriesMatch),
+		fmt.Sprintf("  - Use `%s` (keyword, e.g. `cpu`, `memory`) and `%s` (a metric's dimensions) only when you do NOT have a concrete workload name. `%s` lists a dimension's values.", tools.ToolMetricsList, tools.ToolMetricsLabelsList, tools.ToolMetricsLabelValues),
+		fmt.Sprintf("  - If `%s` answers \"No metric series found\", the workload has no metrics in this index for the window: say so and stop. If it answers \"Inconclusive\", do not conclude that.", tools.ToolMetricsSeriesMatch),
 		"**CPU utilization:** `k8s.pod.cpu.usage` is CPU cores in use (1.0 = one full core). Report it as cores (or millicores), and as a percentage only if a limit/utilization metric exists to divide by — never invent a limit.",
 		fmt.Sprintf("**Self-Correction (when `%s` returns an error or empty `payload`):**", tools.ToolSplunkMetricsQuery),
 		"  1. Read the error text — it names the rule that was broken. Fix exactly that.",
-		fmt.Sprintf("  2. Empty result: confirm the metric name with `%s`, then the dimension value with `%s`.", tools.ToolMetricsList, tools.ToolMetricsLabelValues),
+		fmt.Sprintf("  2. Empty result for a named workload: call `%s` (see Discovery) rather than guessing another name. Without a workload name, confirm the metric name with `%s`, then the dimension value with `%s`.", tools.ToolMetricsSeriesMatch, tools.ToolMetricsList, tools.ToolMetricsLabelValues),
 		"  3. Widen the time range: `15m` → `1h` → `6h`. Drop filters one at a time.",
 		"  NEVER retry the same query unchanged. Maximum 4 retries total.",
 		"**Final Answer:** Report the metric values (peak / avg / latest) per pod or series in a concise SRE-style summary, and name the metric(s) you queried.",
@@ -143,7 +147,7 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 		fmt.Sprintf("You MUST execute every value query via `%s` before answering.", tools.ToolSplunkMetricsQuery),
 		fmt.Sprintf("Every mstats query MUST contain `%s` and `AS nb_value`.", idx),
 		"NEVER write PromQL. NEVER query event indexes (logs/traces) for metric values.",
-		"NEVER report 'no data' after only one query with guessed names — verify the metric and dimension values first.",
+		fmt.Sprintf("NEVER report 'no data' after only one query with guessed names — for a named workload, `%s` must confirm it first; otherwise verify the metric and dimension values.", tools.ToolMetricsSeriesMatch),
 		"Do not ask the user for clarification — make the best assumption and proceed.",
 	}
 
@@ -175,6 +179,17 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 			},
 			Explanation: "Point-in-time ranking: omit span and group by pod.",
 		},
+		{
+			Question: "What metrics does the payments service emit in namespace prod?",
+			AnswerSteps: []core.NBAgentPromptExampleAnswerStep{
+				{
+					Tool:        tools.ToolMetricsSeriesMatch,
+					Input:       `{"workload":"payments","namespace":"prod"}`,
+					Explanation: "One call answers it: the families grouped by the dimensions that found them.",
+				},
+			},
+			Explanation: "A which-metrics question about a named workload is a series match, not an SPL search.",
+		},
 	}
 
 	return core.NBAgentPrompt{
@@ -183,7 +198,7 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 		Constraints:  constraints,
 		ToolUsage: map[string][]string{
 			tools.ToolSplunkMetricsQuery: {
-				"Executes an SPL `| mstats` / `| mcatalog` search against the Splunk metrics index.",
+				"Executes an SPL `| mstats` search against the Splunk metrics index.",
 				fmt.Sprintf("Input: `command` (SPL containing `%s` and `AS nb_value`) and `range` (e.g. `15m`).", idx),
 				"Output: Metric series (labels, timestamps, values) with min/max/avg stats.",
 			},
@@ -197,6 +212,12 @@ func (s SplunkEnterpriseMetricsAgent) buildSystemPrompt(index string) core.NBAge
 				"Input: metric name.",
 				"Output: Dimension names.",
 			},
+			tools.ToolMetricsSeriesMatch: {
+				"DETERMINISTIC discovery for a NAMED workload: the metric families that actually have series for it, grouped by the Splunk dimensions that identify it.",
+				"Use it when an mstats query returns empty for a workload you can name, or when the question is which metrics that workload has.",
+				"Input: workload (required), namespace (recommended).",
+				"Output: groups of {namespace_label, workload_label, match_type, families[]}. Filter a family by its group's dimensions; match_type `prefix` => `<workload_label>=\"<workload>*\"`.",
+			},
 		},
 		Examples:     examples,
 		OutputFormat: "Markdown SRE-style summary with metric values (peak / avg / latest) per series and the metric names queried. Do not include raw SPL unless asked.",
@@ -209,6 +230,7 @@ func (s SplunkEnterpriseMetricsAgent) GetSupportedTools(ctx *security.RequestCon
 		tools.MetricsListTool{Provider: splunkEnterpriseProvider},
 		tools.ListMetricsLabelsTool{Provider: splunkEnterpriseProvider},
 		tools.ListMetricsLabelValuesTool{Provider: splunkEnterpriseProvider},
+		tools.MetricsSeriesMatchTool{Provider: splunkEnterpriseProvider},
 	}
 }
 

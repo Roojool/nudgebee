@@ -33,10 +33,10 @@ func init() {
 	})
 }
 
-// SplunkMetricsQueryTool runs a raw SPL metrics search (`| mstats` / `| mcatalog`)
-// against the account's Splunk Enterprise metrics index. It exists because
-// prometheus_execute validates PromQL before sending anything, while the Splunk metric
-// source only accepts SPL — so no query could satisfy both.
+// SplunkMetricsQueryTool runs a raw SPL `| mstats` search against the account's Splunk
+// Enterprise metrics index. It exists because prometheus_execute validates PromQL before
+// sending anything, while the Splunk metric source only accepts SPL — so no query could
+// satisfy both.
 type SplunkMetricsQueryTool struct{}
 
 func (m SplunkMetricsQueryTool) Name() string {
@@ -48,11 +48,12 @@ func (m SplunkMetricsQueryTool) GetType() core.NBToolType {
 }
 
 func (m SplunkMetricsQueryTool) Description() string {
-	return `Executes a Splunk SPL metrics search (mstats / mcatalog) against the Splunk Enterprise metrics index.
+	return `Executes a Splunk SPL mstats search against the Splunk Enterprise metrics index.
 
 	Usage:
-	* Input: "command" is the SPL, starting with "| mstats" or "| mcatalog". mstats MUST alias its value "AS nb_value" and name the metrics index as index="<index>". Pass the time window via "range" (e.g. "15m", "1h") or "start_time"/"end_time" — not earliest/latest inside the SPL.
-	* Output: Metric time-series (labels, timestamps, values) with per-series min/max/avg.`
+	* Input: "command" is the SPL, starting with "| mstats". It MUST alias its value "AS nb_value" and name the metrics index as index="<index>". Pass the time window via "range" (e.g. "15m", "1h") or "start_time"/"end_time" — not earliest/latest inside the SPL.
+	* Output: Metric time-series (labels, timestamps, values) with per-series min/max/avg.
+	* Not for discovery: which metrics, dimensions or values exist comes from ` + ToolMetricsSeriesMatch + `, ` + ToolMetricsList + `, ` + ToolMetricsLabelsList + ` and ` + ToolMetricsLabelValues + `.`
 }
 
 func (m SplunkMetricsQueryTool) InputSchema() core.ToolSchema {
@@ -106,25 +107,31 @@ func normaliseSplunkMetricsCommand(input string) string {
 // silently return empty for, with a message that says how to fix them. The api-server
 // still enforces its own guard (read-only commands, index scoping); this only moves the
 // common mistakes ahead of the network call.
+//
+// `| mcatalog` is rejected even though the api-server accepts it: a catalog search
+// returns one multivalue row with no value column, which the metric decoder drops, so it
+// always came back empty and the agent kept rewriting it. The discovery tools answer the
+// same questions from the same catalog and return the values.
 func validateSplunkMetricsSPL(spl string) error {
 	trimmed := strings.TrimSpace(spl)
 	if trimmed == "" {
-		return errors.New("empty SPL: provide an `| mstats` or `| mcatalog` search")
+		return errors.New("empty SPL: provide an `| mstats` search")
 	}
 	if !strings.HasPrefix(trimmed, "|") {
-		return fmt.Errorf("SPL metrics search must start with `| mstats` or `| mcatalog` (got %q). This tool takes SPL, not PromQL", firstWord(trimmed))
+		return fmt.Errorf("SPL metrics search must start with `| mstats` (got %q). This tool takes SPL, not PromQL", firstWord(trimmed))
 	}
 	command := strings.ToLower(firstWord(strings.TrimSpace(strings.TrimPrefix(trimmed, "|"))))
 	switch command {
 	case "mcatalog":
-		return nil
+		return fmt.Errorf("`| mcatalog` is a catalog search, not a time series, and this tool cannot return its rows. Use the discovery tools instead: `%s` (metric families that have series for a named workload), `%s` (metric names by keyword), `%s` (a metric's dimensions), `%s` (a dimension's values)",
+			ToolMetricsSeriesMatch, ToolMetricsList, ToolMetricsLabelsList, ToolMetricsLabelValues)
 	case "mstats":
 		if !splunkMetricsValueAlias.MatchString(trimmed) {
 			return fmt.Errorf("mstats must alias its value `AS %s`, e.g. `| mstats avg(k8s.pod.cpu.usage) AS %s WHERE ...` — rows without that column are dropped", splunkMetricsValueColumn, splunkMetricsValueColumn)
 		}
 		return nil
 	default:
-		return fmt.Errorf("SPL metrics search may only begin with `| mstats` or `| mcatalog`, got `| %s`", command)
+		return fmt.Errorf("SPL metrics search may only begin with `| mstats`, got `| %s`", command)
 	}
 }
 

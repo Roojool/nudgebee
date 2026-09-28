@@ -25,10 +25,6 @@ func TestValidateSplunkMetricsSPL(t *testing.T) {
 			spl:  `| mstats max(k8s.pod.memory.usage) as nb_value WHERE index="otel_metrics" span=5m`,
 		},
 		{
-			name: "mcatalog needs no alias",
-			spl:  `| mcatalog values(metric_name) WHERE index="otel_metrics"`,
-		},
-		{
 			name:    "empty",
 			spl:     "   ",
 			wantErr: "empty",
@@ -64,6 +60,31 @@ func TestValidateSplunkMetricsSPL(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+// A catalog search always came back empty through this tool — the metric decoder drops
+// its one multivalue row — and the agent kept rewriting it instead of moving on. The
+// rejection has to name every tool that answers the question it was asking.
+func TestValidateSplunkMetricsSPL_RejectsMcatalogWithDiscoveryTools(t *testing.T) {
+	for _, spl := range []string{
+		`| mcatalog values(metric_name) WHERE index="otel_metrics"`,
+		`| MCATALOG values(k8s.pod.name) WHERE index="otel_metrics" AND metric_name="k8s.pod.cpu.usage"`,
+	} {
+		err := validateSplunkMetricsSPL(spl)
+		require.Error(t, err, spl)
+		for _, tool := range []string{ToolMetricsSeriesMatch, ToolMetricsList, ToolMetricsLabelsList, ToolMetricsLabelValues} {
+			assert.Contains(t, err.Error(), tool, "the rejection must point at %s", tool)
+		}
+	}
+}
+
+// The description is what the planner reads before choosing a tool; offering mcatalog
+// there is how the dead end was reached in the first place.
+func TestSplunkMetricsQueryTool_DescriptionOffersNoCatalogSearch(t *testing.T) {
+	desc := SplunkMetricsQueryTool{}.Description()
+	assert.NotContains(t, desc, "mcatalog")
+	assert.Contains(t, desc, "| mstats")
+	assert.Contains(t, desc, ToolMetricsSeriesMatch)
 }
 
 // Models sometimes nest the whole tool input inside `command` or wrap the SPL in
