@@ -755,12 +755,27 @@ func execSplunkEnterpriseSearch(
 	count int,
 	timeout time.Duration,
 ) ([]map[string]any, error) {
+	results, _, err := execSplunkEnterpriseSearchWithWarnings(cfg, spl, startTime, endTime, count, timeout)
+	return results, err
+}
+
+// execSplunkEnterpriseSearchWithWarnings is execSplunkEnterpriseSearch plus the text of
+// every WARN message Splunk attached to the results. A WARN does not fail a search -
+// Splunk still returns results - so most callers ignore it. It exists for the caller whose
+// answer a Splunk limit can make silently wrong rather than visibly empty (trace paging).
+func execSplunkEnterpriseSearchWithWarnings(
+	cfg integrations.SplunkEnterpriseConfig,
+	spl string,
+	startTime, endTime string,
+	count int,
+	timeout time.Duration,
+) ([]map[string]any, []string, error) {
 	// Every Splunk source (logs, traces, metrics) ends up here, so this is the one place
 	// an inverted window is caught; Splunk would otherwise reject it with its own FATAL
 	// message, which reads like a query error rather than a bad time range.
 	if s, sErr := strconv.ParseFloat(startTime, 64); sErr == nil {
 		if e, eErr := strconv.ParseFloat(endTime, 64); eErr == nil && s > e {
-			return nil, fmt.Errorf("start_time must be before end_time")
+			return nil, nil, fmt.Errorf("start_time must be before end_time")
 		}
 	}
 
@@ -787,14 +802,14 @@ func execSplunkEnterpriseSearch(
 
 	resp, err := common.HttpPost(cfg.SearchEndpoint(), opts...)
 	if err != nil {
-		return nil, fmt.Errorf("splunk search request failed: %w", err)
+		return nil, nil, fmt.Errorf("splunk search request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		var errorBody map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&errorBody)
-		return nil, fmt.Errorf("splunk search failed with status %d: %v", resp.StatusCode, errorBody)
+		return nil, nil, fmt.Errorf("splunk search failed with status %d: %v", resp.StatusCode, errorBody)
 	}
 
 	// Numbers stay as their literal text. Splunk returns every field as a JSON string
@@ -804,20 +819,23 @@ func execSplunkEnterpriseSearch(
 	dec.UseNumber()
 	var searchResp splunkEnterpriseSearchResponse
 	if err := dec.Decode(&searchResp); err != nil {
-		return nil, fmt.Errorf("failed to decode Splunk response: %w", err)
+		return nil, nil, fmt.Errorf("failed to decode Splunk response: %w", err)
 	}
 
 	// A malformed search is reported inside a 200 response rather than as an HTTP error,
 	// so the envelope has to be inspected or the caller sees "no logs" for what is
 	// actually a broken query.
+	var warnings []string
 	for _, message := range searchResp.Messages {
 		switch strings.ToUpper(message.Type) {
 		case "FATAL", "ERROR":
-			return nil, fmt.Errorf("splunk search error: %s", message.Text)
+			return nil, nil, fmt.Errorf("splunk search error: %s", message.Text)
+		case "WARN":
+			warnings = append(warnings, message.Text)
 		}
 	}
 
-	return searchResp.Results, nil
+	return searchResp.Results, warnings, nil
 }
 
 // formatSplunkValue renders a decoded JSON cell as a plain string.
