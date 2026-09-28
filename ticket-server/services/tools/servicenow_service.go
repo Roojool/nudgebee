@@ -587,15 +587,66 @@ func updateServiceNowIncidentFields(ctx context.Context, config models.TicketCon
 	}
 
 	sysID, _ := getRecordStringValue(results[0], "sys_id")
-	itemBuilder := tableBuilder.ById(sysID)
 
-	record := tableapi.NewTableRecord()
-	for field, value := range fields {
-		_ = record.SetValue(field, value)
+	// Raw PUT, not the SDK's itemBuilder.Put: the SDK's error type prefers the
+	// response's generic top-level "message" over "detail", the actual reason. #39314.
+	host := strings.TrimSuffix(strings.TrimPrefix(config.URL, "https://"), "/")
+	apiURL := fmt.Sprintf("https://%s/api/now/v1/table/incident/%s", host, sysID)
+	jsonBody, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("failed to marshal update fields: %w", err)
 	}
 
-	_, err = itemBuilder.Put(ctx, record, nil)
-	return err
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	req.SetBasicAuth(config.Username, config.Password)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := common.HttpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send update request to ServiceNow: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read ServiceNow response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slog.Error("ServiceNow update rejected", "incident_id", incidentID, "status", resp.StatusCode, "body", string(respBody))
+		return fmt.Errorf("ServiceNow rejected the update: %s", serviceNowErrorDetail(respBody))
+	}
+	return nil
+}
+
+// serviceNowErrorDetail prefers "detail" over the often-generic "message".
+func serviceNowErrorDetail(body []byte) string {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+			Detail  string `json:"detail"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		trimmed := strings.TrimSpace(string(body))
+		// A proxy/gateway in front of ServiceNow can answer with an HTML error page
+		// instead of JSON; dumping that into the error would be noise, not a reason.
+		if strings.HasPrefix(trimmed, "<") {
+			return "ServiceNow returned a non-JSON error page"
+		}
+		return trimmed
+	}
+	if parsed.Error.Detail != "" {
+		return parsed.Error.Detail
+	}
+	if parsed.Error.Message != "" {
+		return parsed.Error.Message
+	}
+	return string(body)
 }
 
 // serviceNowSafeValue allows alphanumeric, spaces, hyphens, underscores, dots, colons, @, and +.
@@ -1073,6 +1124,17 @@ func (s *ServiceNowService) Update(ctx *gin.Context, config models.TicketConfigu
 	// ServiceNow does not have a native labels concept; labels are ignored for this platform.
 	if updateFields.Status != "" {
 		fields["state"] = serviceNowStateCode(updateFields.Status)
+	}
+	// close_code/close_notes must land in the same PUT as "state": ServiceNow validates
+	// a Resolved/Closed transition against the whole write, not field-by-field.
+	if code, ok := updateFields.Raw["resolution_code"].(string); ok && code != "" {
+		fields["close_code"] = code
+	}
+	if notes, ok := updateFields.Raw["resolution_notes"].(string); ok && notes != "" {
+		fields["close_notes"] = markdownToPlainText(notes)
+	}
+	if notes, ok := updateFields.Raw["work_notes"].(string); ok && notes != "" {
+		fields["work_notes"] = markdownToPlainText(notes)
 	}
 	if len(fields) == 0 {
 		if updateFields.Severity != "" {
