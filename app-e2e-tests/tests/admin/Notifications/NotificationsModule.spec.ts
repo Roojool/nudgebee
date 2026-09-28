@@ -43,7 +43,7 @@ test(
 );
 
 test(
-  "Notifications sanity - open the Notifications tab, verify the rules listing renders its columns and the When no rule matches row",
+  "Notifications sanity - open the Notifications tab, verify the rules listing renders its columns and the When no rule matches line",
   { tag: ["@dev", "@sanity", "@functional"] },
   async ({ page }) => {
     test.setTimeout(180000);
@@ -53,7 +53,7 @@ test(
       await expect(noti.rulesTable.locator("th", { hasText: column }).first()).toBeVisible();
     }
     // Shown for every tenant, with or without rules.
-    await expect(noti.fallbackRow).toContainText("When no rule matches");
+    await expect(noti.fallbackLine).toContainText("When no rule matches:");
   }
 );
 
@@ -134,7 +134,7 @@ test(
 );
 
 test(
-  "Notifications - pick the Weekly digest type filter, verify the listing narrows and the When no rule matches row follows the type",
+  "Notifications - pick the Weekly digest type filter, verify the listing narrows and the When no rule matches line follows the type",
   { tag: ["@dev", "@regression", "@functional", "@search"] },
   async ({ page }) => {
     test.setTimeout(180000);
@@ -142,10 +142,13 @@ test(
 
     await noti.weeklyDigestFilterChip.click();
     await expect(noti.weeklyDigestFilterChip).toHaveAttribute("aria-pressed", "true");
-    await expect(noti.fallbackRow).toContainText("Weekly digests no rule covers", { timeout: 30000 });
+    await expect(noti.fallbackLine).toContainText("Weekly digests", { timeout: 30000 });
 
+    // The chip under the pointer shows a tooltip that can cover its neighbours; move away first.
+    await page.mouse.move(0, 0);
+    await expect(page.getByRole("tooltip")).toHaveCount(0, { timeout: 10000 });
     await noti.allFilterChip.click();
-    await expect(noti.fallbackRow).toContainText("Notifications no rule covers", { timeout: 30000 });
+    await expect(noti.fallbackLine).toContainText("Notifications", { timeout: 30000 });
     await waitForRulesListing(noti);
   }
 );

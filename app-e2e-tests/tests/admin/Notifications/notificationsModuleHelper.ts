@@ -21,11 +21,11 @@ export async function openNotificationsTab(page: Page): Promise<NotificationsMod
   return locators;
 }
 
-// index.tsx starts `loading` true so the table renders a skeleton on mount, then its rows.
-// The "When no rule matches" row is always there, even for a tenant with no rules.
+// The "When no rule matches" line appears once the rules and settings have loaded, for
+// every tenant, with or without rules, so it is the signal that the fetch has landed.
 export async function waitForRulesListing(locators: NotificationsModuleLocators): Promise<void> {
   await expect(locators.listingRoot).toBeVisible({ timeout: 60000 });
-  await expect(locators.fallbackRow).toBeVisible({ timeout: 60000 });
+  await expect(locators.fallbackLine).toBeVisible({ timeout: 60000 });
 }
 
 export async function openCreateRuleModal(locators: NotificationsModuleLocators): Promise<void> {
@@ -43,7 +43,8 @@ export async function makeRuleInert(page: Page, locators: NotificationsModuleLoc
   await locators.selectOnlyType(locators.weeklyDigestTab);
   await locators.dontSendAction.click();
   await locators.pauseForSelector.click();
-  await page.getByRole("option", { name: "1 hour" }).click();
+  // ds/Select options carry their text in a child, not an accessible name, so match by text.
+  await page.locator('[role="option"]').filter({ hasText: /^1 hour$/ }).first().click();
 }
 
 // Creates one inert rule and proves it persisted by reading it back out of the listing.
@@ -59,6 +60,7 @@ export async function createSuppressedRule(page: Page, locators: NotificationsMo
 
   // The editor closes only on success, so a form left open means a check refused the input.
   await expect(locators.ruleDialog).toBeHidden({ timeout: 60000 });
+  await findRule(locators, ruleName);
   await expect(locators.rowByName(ruleName)).toHaveCount(1, { timeout: 60000 });
 }
 
@@ -74,9 +76,17 @@ export async function confirmDeleteAndWaitForRelist(page: Page, locators: Notifi
   await waitForRulesListing(locators);
 }
 
+// The list is paged and not in creation order, so a rule is looked up by name with the
+// page's search, the way a person finds it.
+export async function findRule(locators: NotificationsModuleLocators, ruleName: string): Promise<void> {
+  await locators.searchInput.fill(ruleName);
+  await expect(locators.searchInput).toHaveValue(ruleName);
+}
+
 // Removes a rule this suite created. Tolerant of the rule already being gone so it is
 // safe to call from cleanup after a test that failed before creating anything.
 export async function deleteRuleByName(page: Page, locators: NotificationsModuleLocators, ruleName: string): Promise<void> {
+  await findRule(locators, ruleName);
   const row = locators.rowByName(ruleName);
   // A rule that was never created is the normal case in cleanup, so absence is a branch
   // rather than a failure.

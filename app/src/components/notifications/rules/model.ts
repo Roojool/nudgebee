@@ -210,7 +210,11 @@ export const whoText = (
   accountName: (id: string) => string
 ) => {
   const noAccounts = coversNoAccounts(rule.types);
-  let text = noAccounts ? 'every account' : rule.scope === 'some' ? listText(rule.accounts.map(accountName)) || 'no accounts' : 'all accounts';
+  let text = noAccounts
+    ? 'every account'
+    : rule.scope === 'some'
+    ? listText(rule.accounts.map(accountName)) || 'the accounts you pick'
+    : 'all accounts';
   if (!noAccounts && rule.scope === 'all' && rule.except.length) text += ` except ${listText(rule.except.map(accountName))}`;
   const filters: string[] = [];
   if (rule.namespace) filters.push(`namespace ${rule.namespace}`);

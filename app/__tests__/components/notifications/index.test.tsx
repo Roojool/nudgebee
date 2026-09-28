@@ -163,17 +163,20 @@ beforeEach(() => {
 });
 
 describe('Notification rules page', () => {
-  it('reads each rule as a sentence, with "When no rule matches" last', async () => {
+  it('reads each rule as a sentence, with "When no rule matches" above the table', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     const text = rowsText();
     expect(text[0]).toContain('Troubleshooting alerts from all accounts except k8s-prod are never sent');
     expect(text[1]).toContain('Troubleshooting alerts from k8s-dev go to #dev-alerts');
     expect(text[2]).toContain('All notifications from k8s-dev are never sent');
     expect(text[3]).toContain('Off');
-    expect(text[4]).toContain('When no rule matches');
-    expect(text[4]).toContain('Notifications no rule covers go to each app’s default channel');
-    expect(text[4]).toContain('Cloud spend summaries are not sent instead');
+    const fallback = document.getElementById('fallback')!;
+    expect(fallback).toHaveTextContent('When no rule matches: Notifications go to each app’s default channel.');
+    expect(fallback).toHaveTextContent('Cloud spend summaries are not sent instead');
+    // The line comes before the table, not as one of its rows.
+    expect(fallback.compareDocumentPosition(screen.getByTestId('table')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(text.some((t) => t.includes('When no rule matches'))).toBe(false);
     expect(screen.getByTestId('filter-all')).toHaveTextContent('All 4');
     // The all-types rule counts under every type it covers.
     expect(screen.getByTestId('filter-slo')).toHaveTextContent('SLO 1');
@@ -181,26 +184,26 @@ describe('Notification rules page', () => {
 
   it('filters by type and shows that type’s fallback', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     fireEvent.click(screen.getByTestId('filter-cloud'));
     const text = rowsText();
-    expect(text).toHaveLength(2);
+    expect(text).toHaveLength(1);
     expect(text[0]).toContain('Quiet QA');
-    expect(text[1]).toContain('Cloud spend summaries no rule covers are not sent');
+    expect(document.getElementById('fallback')).toHaveTextContent('When no rule matches: Cloud spend summaries are not sent.');
   });
 
   it('searches rule names and sentences', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'dev-alerts' } });
-    expect(rowsText()).toHaveLength(2);
+    expect(rowsText()).toHaveLength(1);
     fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'k8s-dev' } });
     expect(rowsText()[0]).toContain('Dev alerts');
   });
 
   it('flags a Send rule that a Don’t send stops, and lets the account through in one click', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     const devRow = screen.getAllByTestId('row')[1];
     expect(within(devRow).getByTestId('callout')).toHaveTextContent('Never sends: “Silence all troubleshooting” stops everything this rule covers.');
     fireEvent.click(within(devRow).getByTestId('fix-r2'));
@@ -210,7 +213,7 @@ describe('Notification rules page', () => {
 
   it('opens the editor from the Add rule menu with the chosen starting point', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     fireEvent.click(screen.getByTestId('add-rule-pause'));
     expect(screen.getByTestId('editor-new')).toHaveTextContent('true');
     expect(screen.getByTestId('editor-pause')).toHaveTextContent('24h');
@@ -223,7 +226,7 @@ describe('Notification rules page', () => {
 
   it('turns an off rule on from its menu', async () => {
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     fireEvent.click(screen.getByTestId('Old optimize-turn-on'));
     await waitFor(() => expect(mockUpsertRule).toHaveBeenCalled());
     expect(mockUpsertRule.mock.calls[0][0]).toMatchObject({ id: 'r4', is_active: true });
@@ -232,7 +235,7 @@ describe('Notification rules page', () => {
   it('shows no edit controls without write access', async () => {
     mockCanManage.mockReturnValue(false);
     render(<Notifications />);
-    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(5));
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
     expect(screen.queryByTestId('notification-rule')).not.toBeInTheDocument();
     expect(screen.queryByTestId('edit-fallback')).not.toBeInTheDocument();
     expect(screen.queryByTestId('fix-r2')).not.toBeInTheDocument();

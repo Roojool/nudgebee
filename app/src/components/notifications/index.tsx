@@ -6,7 +6,6 @@ import { ListingLayout } from '@ui/ListingLayout';
 import { Button as DsButton } from '@ui/Button';
 import { Chip } from '@ui/Chip';
 import { Input } from '@ui/Input';
-import { Label } from '@ui/Label';
 import { Callout } from '@ui/Callout';
 import { DropdownMenu } from '@ui/DropdownMenu';
 import Tooltip from '@ui/Tooltip';
@@ -25,7 +24,7 @@ import { RULE_TYPE, RULE_TYPES, RuleTypeKey, isRuleTypeKey } from './rules/catal
 import { Rule, RuleIssue, newRule, ruleFromRow, ruleIssues, toUpsertInput, typesOf, whatText, whoText } from './rules/model';
 import { useDestinations } from './rules/destinations';
 import { Fallbacks, fallbacksFromPolicies } from './rules/fallback';
-import { CoversCell, FallbackSentence, RuleSentence, RuleStatusLabel, TypeChip } from './rules/RuleParts';
+import { CoversCell, FallbackSentence, RuleSentence, RuleStatusLabel } from './rules/RuleParts';
 import RuleEditorModal, { EditorRequest, RuleAccount } from './rules/RuleEditorModal';
 import FallbackModal from './rules/FallbackModal';
 import TestNotificationModal from './rules/TestNotificationModal';
@@ -251,38 +250,46 @@ const Notifications = () => {
     return row;
   };
 
-  const fallbackRow: any = [
-    {
-      component: (
-        <Box id='fallback' sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], py: ds.space[1] }}>
-          <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>When no rule matches</Typography>
-          <Box sx={{ fontSize: ds.text.body, color: ds.gray[600], lineHeight: 1.7 }}>
-            <FallbackSentence fallbacks={fallbacks} type={filterType} />
-          </Box>
+  // What happens to notifications no rule covers, above the table so it is seen before the rules.
+  const fallbackLine = (
+    <Box sx={{ px: ds.space[5], pt: ds.space[3] }}>
+      <Box
+        id='fallback'
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: `${ds.space[1]} ${ds.space[2]}`,
+          padding: `${ds.space[1]} ${ds.space[1]} ${ds.space[1]} ${ds.space[3]}`,
+          borderRadius: ds.radius.md,
+          backgroundColor: ds.background[200],
+          fontSize: ds.text.body,
+          color: ds.gray[600],
+        }}
+      >
+        <Typography component='span' sx={{ fontSize: ds.text.body, fontWeight: ds.weight.semibold, color: ds.gray[700], whiteSpace: 'nowrap' }}>
+          When no rule matches:{' '}
+        </Typography>
+        <Box component='span' sx={{ flex: 1, minWidth: 220, lineHeight: 1.7 }}>
+          <FallbackSentence fallbacks={fallbacks} type={filterType} />
         </Box>
-      ),
-    },
-    { component: filterType ? <TypeChip type={filterType} /> : <Label text='Everything else' tone='neutral' size='sm' textTransform='none' /> },
-    { component: <Label text='Fallback' tone='neutral' size='sm' textTransform='none' /> },
-    {
-      component:
-        canWrite && filterType !== 'daily_recap' ? (
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+        {canWrite && filterType !== 'daily_recap' && (
+          <Box>
             <DsButton
-              tone='ghost'
-              composition='icon-only'
-              aria-label='Edit when no rule matches'
               id='edit-fallback'
+              tone='ghost'
+              size='sm'
+              aria-label='Edit when no rule matches'
+              icon={<SafeIcon src={EditIcon} alt='' width={14} height={14} />}
               onClick={() => setFallbackFocus(filterType)}
-              icon={<SafeIcon src={EditIcon} alt='' width={18} height={18} />}
-            />
+            >
+              Edit
+            </DsButton>
           </Box>
-        ) : (
-          <></>
-        ),
-    },
-  ];
-  fallbackRow.sx = { '& td': { backgroundColor: ds.background[200] } };
+        )}
+      </Box>
+    </Box>
+  );
 
   const emptyRow: any = [
     {
@@ -292,7 +299,7 @@ const Notifications = () => {
             {query ? `No rules match “${query}”` : `No rules for ${filterType ? RULE_TYPE[filterType].label : 'anything'} yet`}
           </Typography>
           <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>
-            Notifications without a rule follow “When no rule matches” below.
+            Notifications without a rule follow “When no rule matches” above the table.
           </Typography>
         </Box>
       ),
@@ -311,7 +318,7 @@ const Notifications = () => {
     },
   ];
 
-  const tableData = loading ? [] : [...(pageRules.length ? pageRules.map(ruleRow) : [emptyRow]), fallbackRow];
+  const tableData = loading ? [] : pageRules.length ? pageRules.map(ruleRow) : [emptyRow];
 
   const count = (key: Filter) => (key === 'all' ? rules.length : rules.filter((r) => typesOf(r).includes(key)).length);
   const filterChip = (key: Filter) => (
@@ -388,6 +395,7 @@ const Notifications = () => {
             Approval requests always go out; no rule can stop them.
           </Typography>
         )}
+        {!loading && fallbackLine}
         <ListingLayout.Body>
           <CustomTable
             headers={HEADERS}

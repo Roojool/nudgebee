@@ -17,7 +17,7 @@ export class NotificationsModuleLocators extends NotificationLocators {
   readonly weeklyDigestFilterChip: Locator;
   readonly searchInput: Locator;
   readonly testNotificationBtn: Locator;
-  readonly fallbackRow: Locator;
+  readonly fallbackLine: Locator;
 
   readonly ruleDialog: Locator;
   readonly ruleSubmitBtn: Locator;
@@ -50,8 +50,8 @@ export class NotificationsModuleLocators extends NotificationLocators {
     this.weeklyDigestFilterChip = page.locator("#filter-weekly_digest");
     this.searchInput = page.locator("#search-rules");
     this.testNotificationBtn = page.locator("#test-notification");
-    // "When no rule matches" is the last row on every page of the listing.
-    this.fallbackRow = this.ruleRows.filter({ has: page.locator("#fallback") });
+    // "When no rule matches" is one line above the table.
+    this.fallbackLine = page.locator("#fallback");
 
     this.ruleDialog = page.locator('[role="dialog"]').filter({ has: page.locator("#notificationName") }).first();
     this.ruleSubmitBtn = page.locator("#save-rule");
@@ -80,10 +80,12 @@ export class NotificationsModuleLocators extends NotificationLocators {
     this.auditsTab = page.locator("#audit-log").or(page.getByRole("tab", { name: "Audit Log", exact: true })).first();
   }
 
-  // Rows are matched on the rule name, which this suite generates unique per rule — so
-  // this never straddles two rows and never touches a pre-existing rule.
+  // Rows are matched on the rule's own name cell (index.tsx gives it id `rule-<id>`), not on
+  // any text in the row: another rule's "Never sends" warning can quote this rule's name.
+  // Names are generated unique per rule, so this never touches a pre-existing rule.
   rowByName(name: string): Locator {
-    return this.ruleRows.filter({ hasText: name });
+    const exact = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+    return this.ruleRows.filter({ has: this.page.locator('[id^="rule-"]', { hasText: exact }) });
   }
 
   // Delete sits in each row's ⋮ menu, id `${name}-delete`; the menu opens from `${name}-more`.

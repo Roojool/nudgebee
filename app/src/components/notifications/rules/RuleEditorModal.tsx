@@ -8,6 +8,7 @@ import { Select } from '@ui/Select';
 import { Chip } from '@ui/Chip';
 import { Checkbox } from '@ui/Checkbox';
 import { Callout } from '@ui/Callout';
+import { Card } from '@ui/Card';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import { toast } from '@ui/Toast';
 import CustomDateTimePicker from '@shared/widgets/CustomDateTimePicker';
@@ -346,22 +347,26 @@ const RuleEditorModal: React.FC<Props> = ({ request, rules, accounts, destinatio
       }
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[4], padding: ds.space[1] }}>
-        <Box
-          id='rule-summary'
-          sx={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: ds.space[2],
-            padding: `${ds.space[2]} ${ds.space[3]}`,
-            borderRadius: ds.radius.lg,
-            backgroundColor: ds.background[200],
-            fontSize: ds.text.body,
-            color: ds.gray[700],
-          }}
-        >
-          <RuleStatusLabel rule={preview} />
-          <RuleSentence rule={preview} accountName={accountName} />
-        </Box>
+        <Card id='rule-summary' variant='outlined' size='sm' elevation='flat'>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[1] }}>
+            <Typography
+              sx={{
+                fontFamily: ds.font.display,
+                fontSize: ds.text.caption,
+                fontWeight: ds.weight.semibold,
+                color: ds.gray[600],
+                letterSpacing: '0.04em',
+                textTransform: 'uppercase',
+              }}
+            >
+              What this rule does
+            </Typography>
+            <RuleStatusLabel rule={preview} />
+          </Box>
+          <Box sx={{ fontSize: ds.text.body, lineHeight: 1.6, color: ds.gray[700] }}>
+            <RuleSentence rule={preview} accountName={accountName} />
+          </Box>
+        </Card>
         {issues.map((issue) => (
           <Callout key={issue.text} tone={issue.kind === 'critical' ? 'critical' : 'warning'} message={issue.text} />
         ))}

@@ -170,14 +170,14 @@ const sub = { color: ds.gray[600], fontSize: ds.text.small };
 // What "When no rule matches" does, for every type or for one.
 export const FallbackSentence: React.FC<{ fallbacks: Fallbacks; type: RuleTypeKey | null }> = ({ fallbacks, type }) => {
   if (type === 'daily_recap') {
-    return <span>Without a rule, the daily email goes to your users. It doesn’t follow “When no rule matches”.</span>;
+    return <span>Without a rule, the daily email goes to your users; this setting doesn’t apply to it.</span>;
   }
   if (type) {
     const f = effectiveFallback(fallbacks, type);
     const noun = RULE_TYPE[type].noun;
     return (
       <span>
-        {fallbackPart(`${noun.charAt(0).toUpperCase()}${noun.slice(1)} no rule covers`, f, false, type)}
+        {fallbackPart(`${noun.charAt(0).toUpperCase()}${noun.slice(1)}`, f, false, type)}
         {f.inherited && (
           <Box component='span' sx={sub}>
             (same as all types){' '}
@@ -193,7 +193,7 @@ export const FallbackSentence: React.FC<{ fallbacks: Fallbacks; type: RuleTypeKe
   }
   return (
     <span>
-      {fallbackPart('Notifications no rule covers', fallbacks.all, false, 'all')}
+      {fallbackPart('Notifications', fallbacks.all, false, 'all')}
       {RULE_TYPES.filter((t) => fallbacks[t.key] && fallbacks[t.key].mode !== 'inherit').map((t) =>
         fallbackPart(`${t.noun.charAt(0).toUpperCase()}${t.noun.slice(1)}`, fallbacks[t.key], true, t.key)
       )}
