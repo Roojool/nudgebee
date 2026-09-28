@@ -49,8 +49,14 @@ var openObserveLogLabelMapping = map[string]string{
 	"level":    "severity",
 }
 
+// Kept identical to OpenObserveTraceSource.GetSupportedOperators — both render through
+// buildOpenObserveBinaryClause. Inline literals, not a shared var: the operator-catalog
+// drift test reads string literals out of each GetSupportedOperators body.
 func (s *OpenObserveLogSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_ilike"}
+	return []string{
+		"_eq", "_neq", "_in", "_not_in", "_gt", "_gte", "_lt", "_lte",
+		"_contains", "_like", "_nlike", "_ilike", "_is_null",
+	}
 }
 
 func (s *OpenObserveLogSource) GetLabelMapping() map[string]string {
@@ -184,10 +190,32 @@ func buildOpenObserveBinaryClause(binary query.BinaryWhereClause, mapping map[st
 				parts = append(parts, fmt.Sprintf("%s = '%s'", col, escapeOpenObserveString(strVal)))
 			case query.Nq:
 				parts = append(parts, fmt.Sprintf("%s != '%s'", col, escapeOpenObserveString(strVal)))
+			case query.In, query.NotIn:
+				parts = append(parts, openObserveInClause(col, op == query.NotIn, val))
+			case query.Gt, query.Gte, query.Lt, query.Lte:
+				parts = append(parts, fmt.Sprintf("%s %s %s", col, openObserveComparison[op], openObserveOrderedLiteral(col, val)))
 			case query.Contains:
 				parts = append(parts, fmt.Sprintf("str_match(%s, '%s')", col, escapeOpenObserveString(strVal)))
 			case query.ILike:
-				parts = append(parts, fmt.Sprintf("str_match_ignore_case(%s, '%s')", col, escapeOpenObserveString(strVal)))
+				// A LIKE pattern, like every other provider's _ilike (Loki and ES anchor it
+				// too). This used to be str_match_ignore_case, a substring match that took
+				// the % wildcards literally — so the pattern the UI's "ILIKE" chip and the
+				// logs agent both send, "%error%", matched nothing and read as "no logs".
+				parts = append(parts, fmt.Sprintf("%s ILIKE '%s'", col, escapeOpenObserveString(strVal)))
+			case query.IsNull:
+				// true = the field is absent, false = present (the builder's exists chips).
+				// The value-less "is null" chip arrives as "" and means absent. Any other
+				// value is refused rather than guessed.
+				switch strings.ToLower(strVal) {
+				case "true", "":
+					parts = append(parts, fmt.Sprintf("%s IS NULL", col))
+				case "false":
+					parts = append(parts, fmt.Sprintf("%s IS NOT NULL", col))
+				default:
+					return "", fmt.Errorf("openobserve: _is_null takes true or false, not %q", strVal)
+				}
+			case query.NLike:
+				parts = append(parts, fmt.Sprintf("%s NOT LIKE '%s'", col, escapeOpenObserveString(strVal)))
 			case query.Like:
 				// SQL LIKE, so the caller's % / _ stay wildcards — that is the whole point
 				// of the operator (callers pass patterns like "5%" to select 5xx statuses).
@@ -204,62 +232,129 @@ func buildOpenObserveBinaryClause(binary query.BinaryWhereClause, mapping map[st
 	return strings.Join(parts, " AND "), nil
 }
 
-func buildOpenObserveSQLWhereClause(where query.QueryWhereClause) (string, error) {
+var openObserveComparison = map[query.BinaryWhereClauseType]string{
+	query.Gt: ">", query.Gte: ">=", query.Lt: "<", query.Lte: "<=",
+}
+
+// openObserveInClause renders _in / _not_in. An empty list is answered rather than
+// rendered, because "IN ()" is a syntax error: nothing is IN an empty set, and
+// everything is NOT IN it.
+func openObserveInClause(col string, negate bool, val any) string {
+	var items []any
+	switch list := val.(type) {
+	case nil:
+		// `"_in": null` is the empty set, not the literal string "<nil>".
+	case []any:
+		items = list
+	case []string:
+		for _, s := range list {
+			items = append(items, s)
+		}
+	default:
+		items = []any{val}
+	}
+	if len(items) == 0 {
+		if negate {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
+	quoted := make([]string, 0, len(items))
+	for _, item := range items {
+		quoted = append(quoted, "'"+escapeOpenObserveString(fmt.Sprintf("%v", item))+"'")
+	}
+	keyword := "IN"
+	if negate {
+		keyword = "NOT IN"
+	}
+	return fmt.Sprintf("%s %s (%s)", col, keyword, strings.Join(quoted, ", "))
+}
+
+// openObserveOrderedLiteral renders the right-hand side of a range comparison. A numeric
+// value goes out bare even when it arrives as a string: OpenObserve compares a quoted
+// literal as text, so `duration >= '3000'` also matches 400 and 50000 — measurably
+// different rows from `duration >= 3000`. Equality and IN coerce correctly and stay quoted.
+//
+// _timestamp is epoch microseconds, and the logs agent bounds it with ISO strings
+// ("timestamp >= 2026-09-25T18:18:00Z"). Quoted, that compares as text and matches
+// nothing — a silent zero — so a parseable time is converted to microseconds.
+func openObserveOrderedLiteral(col string, val any) string {
+	s := fmt.Sprintf("%v", val)
+	if _, err := strconv.ParseFloat(s, 64); err == nil {
+		return s
+	}
+	if col == "_timestamp" {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return strconv.FormatInt(t.UnixMicro(), 10)
+		}
+	}
+	return "'" + escapeOpenObserveString(s) + "'"
+}
+
+// buildOpenObserveWhere renders a where clause, handing each _binary group to
+// binaryClause. Every key present on one clause is ANDed: callers routinely send
+// _binary and _or side by side (the workload traces tab does), and returning after the
+// first key silently dropped the rest — an unapplied filter, so a wider result set.
+func buildOpenObserveWhere(where query.QueryWhereClause, binaryClause func(query.BinaryWhereClause) (string, error)) (string, error) {
+	var parts []string
+
 	if len(where.Binary) > 0 {
-		return buildOpenObserveBinaryClause(where.Binary, openObserveLogLabelMapping)
+		part, err := binaryClause(where.Binary)
+		if err != nil {
+			return "", err
+		}
+		if part != "" {
+			parts = append(parts, part)
+		}
 	}
 
-	if len(where.And) > 0 {
-		var parts []string
-		for _, c := range where.And {
-			part, err := buildOpenObserveSQLWhereClause(c)
+	for _, group := range []struct {
+		clauses []query.QueryWhereClause
+		joiner  string
+	}{{where.And, " AND "}, {where.Or, " OR "}} {
+		var sub []string
+		for _, c := range group.clauses {
+			part, err := buildOpenObserveWhere(c, binaryClause)
 			if err != nil {
 				return "", err
 			}
 			if part != "" {
-				parts = append(parts, part)
+				sub = append(sub, part)
 			}
 		}
-		if len(parts) == 0 {
-			return "", nil
+		switch len(sub) {
+		case 0:
+		case 1:
+			parts = append(parts, sub[0])
+		default:
+			parts = append(parts, "("+strings.Join(sub, group.joiner)+")")
 		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " AND ") + ")", nil
-	}
-
-	if len(where.Or) > 0 {
-		var parts []string
-		for _, c := range where.Or {
-			part, err := buildOpenObserveSQLWhereClause(c)
-			if err != nil {
-				return "", err
-			}
-			if part != "" {
-				parts = append(parts, part)
-			}
-		}
-		if len(parts) == 0 {
-			return "", nil
-		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " OR ") + ")", nil
 	}
 
 	if where.Not != nil {
-		notPart, err := buildOpenObserveSQLWhereClause(*where.Not)
+		notPart, err := buildOpenObserveWhere(*where.Not, binaryClause)
 		if err != nil {
 			return "", err
 		}
 		if notPart != "" {
-			return fmt.Sprintf("NOT (%s)", notPart), nil
+			parts = append(parts, fmt.Sprintf("NOT (%s)", notPart))
 		}
 	}
 
-	return "", nil
+	switch len(parts) {
+	case 0:
+		return "", nil
+	case 1:
+		return parts[0], nil
+	default:
+		return "(" + strings.Join(parts, " AND ") + ")", nil
+	}
+}
+
+func buildOpenObserveSQLWhereClause(where query.QueryWhereClause) (string, error) {
+	return buildOpenObserveWhere(where, func(b query.BinaryWhereClause) (string, error) {
+		return buildOpenObserveBinaryClause(b, openObserveLogLabelMapping)
+	})
 }
 
 func (s *OpenObserveLogSource) buildSQL(req FetchLogRequest, stream string) (string, error) {
@@ -297,7 +392,124 @@ func (s *OpenObserveLogSource) GetQuery(ctx *security.RequestContext, req FetchL
 	if err != nil {
 		return "", fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
-	return s.buildSQL(req, cfg.LogStream)
+	return s.buildSQL(withOpenObserveCorrelationIDs(req, cfg), cfg.LogStream)
+}
+
+// openObserveCorrelationFields are the trace-correlation fields the traces screen's Logs tab
+// and the agents filter logs on. A collector that tails container stdout has no such column —
+// the id sits inside the message — so a filter on it matched nothing: the tab showed no logs
+// for a trace whose id was in the log body.
+var openObserveCorrelationFields = map[string]bool{"trace_id": true, "span_id": true}
+
+// withOpenObserveCorrelationIDs rewrites trace_id / span_id equality and set filters into a
+// match on the message body, but only when the stream has no column of that name. A stream
+// fed by OTLP logs with trace context keeps its real column. The schema is fetched only when
+// such a filter is present; if it cannot be read the request is left as it was.
+func withOpenObserveCorrelationIDs(req FetchLogRequest, cfg integrations.OpenObserveConfig) FetchLogRequest {
+	if !whereMentionsField(req.QueryRequest.Where, openObserveCorrelationFields) {
+		return req
+	}
+	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
+	if err != nil {
+		return req
+	}
+	missing := map[string]bool{}
+	for f := range openObserveCorrelationFields {
+		if _, ok := fields[f]; !ok {
+			missing[f] = true
+		}
+	}
+	if len(missing) == 0 {
+		return req
+	}
+	req.QueryRequest.Where = rewriteCorrelationToBody(req.QueryRequest.Where, missing)
+	return req
+}
+
+func whereMentionsField(w query.QueryWhereClause, fields map[string]bool) bool {
+	for f := range w.Binary {
+		if fields[f] {
+			return true
+		}
+	}
+	for _, c := range append(append([]query.QueryWhereClause{}, w.And...), w.Or...) {
+		if whereMentionsField(c, fields) {
+			return true
+		}
+	}
+	return w.Not != nil && whereMentionsField(*w.Not, fields)
+}
+
+// rewriteCorrelationToBody returns a copy of w where each _eq / _in on a missing correlation
+// field becomes a body substring match (ids are unique hex strings, so a substring is exact
+// enough). Other operators on those fields are left alone.
+func rewriteCorrelationToBody(w query.QueryWhereClause, missing map[string]bool) query.QueryWhereClause {
+	out := query.QueryWhereClause{}
+	var extra []query.QueryWhereClause
+	if len(w.Binary) > 0 {
+		out.Binary = query.BinaryWhereClause{}
+		for field, ops := range w.Binary {
+			if !missing[field] {
+				out.Binary[field] = ops
+				continue
+			}
+			kept := map[query.BinaryWhereClauseType]any{}
+			for op, v := range ops {
+				switch op {
+				case query.Eq:
+					extra = append(extra, query.QueryWhereClause{Binary: query.BinaryWhereClause{"body": {query.Contains: v}}})
+				case query.In:
+					var alts []query.QueryWhereClause
+					for _, id := range splitOpenObserveList(v) {
+						alts = append(alts, query.QueryWhereClause{Binary: query.BinaryWhereClause{"body": {query.Contains: id}}})
+					}
+					if len(alts) == 0 {
+						kept[op] = v // empty set: let the builder answer FALSE
+						continue
+					}
+					extra = append(extra, query.QueryWhereClause{Or: alts})
+				default:
+					kept[op] = v
+				}
+			}
+			if len(kept) > 0 {
+				out.Binary[field] = kept
+			}
+		}
+		if len(out.Binary) == 0 {
+			out.Binary = nil
+		}
+	}
+	for _, c := range w.And {
+		out.And = append(out.And, rewriteCorrelationToBody(c, missing))
+	}
+	out.And = append(out.And, extra...)
+	for _, c := range w.Or {
+		out.Or = append(out.Or, rewriteCorrelationToBody(c, missing))
+	}
+	if w.Not != nil {
+		n := rewriteCorrelationToBody(*w.Not, missing)
+		out.Not = &n
+	}
+	return out
+}
+
+// splitOpenObserveList normalises an _in value to its elements.
+func splitOpenObserveList(v any) []any {
+	switch list := v.(type) {
+	case []any:
+		return list
+	case []string:
+		out := make([]any, len(list))
+		for i, s := range list {
+			out[i] = s
+		}
+		return out
+	case nil:
+		return nil
+	default:
+		return []any{v}
+	}
 }
 
 func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req FetchLogRequest) ([]OutputLog, error) {
@@ -306,7 +518,7 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 		return nil, fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
 
-	sql, err := s.buildSQL(req, cfg.LogStream)
+	sql, err := s.buildSQL(withOpenObserveCorrelationIDs(req, cfg), cfg.LogStream)
 	if err != nil {
 		return nil, err
 	}
@@ -391,6 +603,14 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 			default:
 				out.Labels[k] = v
 			}
+		}
+
+		// The log-row detail renders labels.timestamp as epoch nanoseconds. Set it
+		// explicitly, and after the loop: otherwise normalizeOutputLogLabels aliases the
+		// raw microsecond _timestamp into it (every row read January 1970), and a shipper
+		// field that is itself named "timestamp" would win or lose on map order.
+		if micros, ok := openObserveInt64(hit["_timestamp"]); ok {
+			out.Labels["timestamp"] = micros * 1000
 		}
 
 		outputs = append(outputs, out)

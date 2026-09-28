@@ -61,9 +61,14 @@ var openObserveTraceFieldCandidates = struct {
 	HTTPStatusCode []string
 	Destination    []string
 }{
-	Resource:       []string{"http_target", "url_full", "url_path", "http_route", "http_url"},
+	// gRPC spans carry no URL; their method is the resource. Without it 60% of the spans on
+	// a dev OpenObserve rendered "-" in the Resource column.
+	Resource:       []string{"http_target", "url_full", "url_path", "http_route", "http_url", "grpc_method", "rpc_method"},
 	HTTPStatusCode: []string{"http_response_status_code", "http_status_code", "rpc_grpc_status_code"},
-	Destination:    []string{"service_peer_name", "server_address", "net_peer_name", "net_sock_peer_addr", "net_peer_ip", "http_host"},
+	// peer_service / rpc_service name the callee on client spans; upstream_cluster is where
+	// Envoy writes it. Without them more than half the spans rendered an empty destination.
+	Destination: []string{"service_peer_name", "peer_service", "server_address", "net_peer_name", "rpc_service",
+		"upstream_cluster", "net_sock_peer_addr", "net_peer_ip", "http_host"},
 }
 
 // openObserveDurationMicros reads a span duration, in microseconds.
@@ -127,7 +132,10 @@ func (s *OpenObserveTraceSource) GetLabelMapping() map[string]string {
 }
 
 func (s *OpenObserveTraceSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_ilike"}
+	return []string{
+		"_eq", "_neq", "_in", "_not_in", "_gt", "_gte", "_lt", "_lte",
+		"_contains", "_like", "_nlike", "_ilike", "_is_null",
+	}
 }
 
 // openObserveTraceUnsupportedFields are canonical filter fields an OpenObserve span
@@ -176,9 +184,183 @@ func stripOpenObserveUnsupportedFields(binary query.BinaryWhereClause) (query.Bi
 	return kept, dropped
 }
 
+// openObserveSpanStatusCodes maps span-status names to the numeric OTel code OpenObserve
+// stores in status_code. The traces screen's Ok/Error filter sends STATUS_CODE_UNSET /
+// STATUS_CODE_ERROR, which never equal 0 / 2 — on dev "Error" returned 0 spans, not 10.
+var openObserveSpanStatusCodes = map[string]string{
+	"STATUS_CODE_UNSET": "0", "UNSET": "0",
+	"STATUS_CODE_OK": "1", "OK": "1",
+	"STATUS_CODE_ERROR": "2", "ERROR": "2",
+}
+
+func openObserveSpanStatusCode(v any) any {
+	if code, ok := openObserveSpanStatusCodes[strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", v)))]; ok {
+		return code
+	}
+	return v
+}
+
+// rewriteOpenObserveTraceStatus translates status names on the status_code filter into the
+// numeric codes the column holds. Returns a copy; the caller's clause is never mutated.
+func rewriteOpenObserveTraceStatus(binary query.BinaryWhereClause) query.BinaryWhereClause {
+	ops, ok := binary["status_code"]
+	if !ok {
+		return binary
+	}
+	out := make(query.BinaryWhereClause, len(binary))
+	for field, v := range binary {
+		out[field] = v
+	}
+	mapped := make(map[query.BinaryWhereClauseType]any, len(ops))
+	for op, v := range ops {
+		switch list := v.(type) {
+		case []any:
+			items := make([]any, len(list))
+			for i, item := range list {
+				items[i] = openObserveSpanStatusCode(item)
+			}
+			mapped[op] = items
+		case []string:
+			items := make([]any, len(list))
+			for i, item := range list {
+				items[i] = openObserveSpanStatusCode(item)
+			}
+			mapped[op] = items
+		default:
+			mapped[op] = openObserveSpanStatusCode(v)
+		}
+	}
+	out["status_code"] = mapped
+	return out
+}
+
+// rewriteOpenObserveTraceDuration turns the canonical duration_ns filter into OpenObserve's
+// duration column, which holds MICROseconds. There is no column mapping for it because the
+// value has to be rescaled too — a bare rename would make "slower than 5 ms" (5e6 ns) mean
+// "slower than 5 seconds". Returns a copy; the caller's clause is never mutated.
+//
+// Every element of an _in / _not_in list is rescaled too: a list used to pass through
+// untouched, so "duration_ns in [13000]" searched for 13000 µs and silently matched
+// nothing. Pattern operators are refused — "contains 1" on nanoseconds has no meaning
+// against a microsecond column, and rescaling the pattern just produced zero rows.
+func rewriteOpenObserveTraceDuration(binary query.BinaryWhereClause) (query.BinaryWhereClause, error) {
+	ops, ok := binary["duration_ns"]
+	if !ok {
+		return binary, nil
+	}
+	out := make(query.BinaryWhereClause, len(binary))
+	for field, v := range binary {
+		if field != "duration_ns" {
+			out[field] = v
+		}
+	}
+	scaled := make(map[query.BinaryWhereClauseType]any, len(ops))
+	for op, v := range ops {
+		switch op {
+		case query.Eq, query.Nq, query.Gt, query.Gte, query.Lt, query.Lte:
+			scaled[op] = openObserveNanosToMicros(v)
+		case query.In, query.NotIn:
+			switch list := v.(type) {
+			case []any:
+				items := make([]any, len(list))
+				for i, item := range list {
+					items[i] = openObserveNanosToMicros(item)
+				}
+				scaled[op] = items
+			case []string:
+				items := make([]any, len(list))
+				for i, item := range list {
+					items[i] = openObserveNanosToMicros(item)
+				}
+				scaled[op] = items
+			default:
+				scaled[op] = openObserveNanosToMicros(v)
+			}
+		default:
+			return nil, fmt.Errorf("openobserve: duration_ns supports comparison and in/not in operators, not %s", op)
+		}
+	}
+	out["duration"] = scaled
+	return out, nil
+}
+
+// openObserveNanosToMicros rescales one nanosecond value. The fraction is kept, not
+// truncated: against the integer column, ">= 1500 ns" must render ">= 1.5" (i.e. >= 2 µs);
+// truncating to ">= 1" would admit 1 µs spans, and "< 1500 ns" truncated to "< 1" would
+// drop them. Integers parse first so a large value keeps full precision rather than
+// rounding through float64. A non-numeric value passes through for the column check.
+func openObserveNanosToMicros(v any) any {
+	if v == nil {
+		return nil
+	}
+	s := fmt.Sprintf("%v", v)
+	if ns, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if ns%1000 == 0 {
+			return strconv.FormatInt(ns/1000, 10)
+		}
+		return strconv.FormatFloat(float64(ns)/1000, 'f', -1, 64)
+	}
+	if ns, err := strconv.ParseFloat(s, 64); err == nil {
+		return strconv.FormatFloat(ns/1000, 'f', -1, 64)
+	}
+	return v
+}
+
+// openObserveTraceSource is the pipeline every OpenObserve span comes from. The service map
+// and the traces screen's Source Type filter both send trace_source (otel vs ebpf); there is
+// no such column, so every service-map query failed and the map rendered empty.
+const openObserveTraceSource = "otel"
+
+// resolveOpenObserveTraceSource evaluates a trace_source predicate against the constant
+// source instead of sending it to OpenObserve. It returns the rest of the group and whether
+// the trace_source part holds (true when absent).
+func resolveOpenObserveTraceSource(binary query.BinaryWhereClause) (query.BinaryWhereClause, bool, error) {
+	ops, ok := binary["trace_source"]
+	if !ok {
+		return binary, true, nil
+	}
+	rest := make(query.BinaryWhereClause, len(binary))
+	for field, v := range binary {
+		if field != "trace_source" {
+			rest[field] = v
+		}
+	}
+	holds := true
+	is := func(v any) bool {
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", v)), openObserveTraceSource)
+	}
+	for op, v := range ops {
+		switch op {
+		case query.Eq:
+			holds = holds && is(v)
+		case query.Nq:
+			holds = holds && !is(v)
+		case query.In, query.NotIn:
+			found := false
+			for _, item := range splitOpenObserveList(v) {
+				found = found || is(item)
+			}
+			holds = holds && (found == (op == query.In))
+		default:
+			return nil, false, fmt.Errorf("openobserve: trace_source supports =, !=, in and not in, not %s", op)
+		}
+	}
+	return rest, holds, nil
+}
+
 func buildOpenObserveTraceWhereClause(where query.QueryWhereClause) (string, error) {
-	if len(where.Binary) > 0 {
-		binary, dropped := stripOpenObserveUnsupportedFields(where.Binary)
+	return buildOpenObserveWhere(where, func(b query.BinaryWhereClause) (string, error) {
+		b, holds, err := resolveOpenObserveTraceSource(b)
+		if err != nil {
+			return "", err
+		}
+		if !holds {
+			return "FALSE", nil
+		}
+		if len(b) == 0 {
+			return "TRUE", nil
+		}
+		binary, dropped := stripOpenObserveUnsupportedFields(b)
 		if len(binary) == 0 {
 			// Every predicate in this group was inexpressible. Returning "" here would
 			// render the group as no restriction at all: harmless inside an OR (the
@@ -187,60 +369,12 @@ func buildOpenObserveTraceWhereClause(where query.QueryWhereClause) (string, err
 			return "", fmt.Errorf(
 				"openobserve: trace filter group has no field this span schema can express (dropped %d)", dropped)
 		}
-		return buildOpenObserveBinaryClause(binary, openObserveTraceLabelMapping)
-	}
-
-	if len(where.And) > 0 {
-		var parts []string
-		for _, c := range where.And {
-			part, err := buildOpenObserveTraceWhereClause(c)
-			if err != nil {
-				return "", err
-			}
-			if part != "" {
-				parts = append(parts, part)
-			}
-		}
-		if len(parts) == 0 {
-			return "", nil
-		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " AND ") + ")", nil
-	}
-
-	if len(where.Or) > 0 {
-		var parts []string
-		for _, c := range where.Or {
-			part, err := buildOpenObserveTraceWhereClause(c)
-			if err != nil {
-				return "", err
-			}
-			if part != "" {
-				parts = append(parts, part)
-			}
-		}
-		if len(parts) == 0 {
-			return "", nil
-		}
-		if len(parts) == 1 {
-			return parts[0], nil
-		}
-		return "(" + strings.Join(parts, " OR ") + ")", nil
-	}
-
-	if where.Not != nil {
-		notPart, err := buildOpenObserveTraceWhereClause(*where.Not)
+		rewritten, err := rewriteOpenObserveTraceDuration(rewriteOpenObserveTraceStatus(binary))
 		if err != nil {
 			return "", err
 		}
-		if notPart != "" {
-			return fmt.Sprintf("NOT (%s)", notPart), nil
-		}
-	}
-
-	return "", nil
+		return buildOpenObserveBinaryClause(rewritten, openObserveTraceLabelMapping)
+	})
 }
 
 func (s *OpenObserveTraceSource) buildSQL(req TracesV3Request, stream string) (string, error) {
@@ -255,11 +389,11 @@ func (s *OpenObserveTraceSource) buildSQL(req TracesV3Request, stream string) (s
 		return "", err
 	}
 
+	// The UI and the agents always pass a limit; a caller that passes none — the service map
+	// — wants every span in the window. Defaulting to 100 built the map from 100 of ~4000
+	// spans, so most edges were missing.
 	limit := req.QueryRequest.Limit
-	if limit == 0 {
-		limit = 100
-	}
-	if limit > 10000 {
+	if limit <= 0 || limit > 10000 {
 		limit = 10000
 	}
 
@@ -446,6 +580,12 @@ func parseOpenObserveTraceHits(hits []map[string]any) []common.OpenTelemetryTrac
 		if trace.DestinationName == "" {
 			trace.DestinationName = firstOpenObserveValue(hit, openObserveTraceFieldCandidates.Destination)
 		}
+		// The destination workload is read from the same column its filter targets
+		// (destination_workload_name -> net_peer_name), so a value shown here can be clicked
+		// through to a filter that matches it. It was never set, so every row showed "wl:".
+		if trace.DestinationWorkload == "" {
+			trace.DestinationWorkload = firstOpenObserveValue(hit, []string{openObserveTraceLabelMapping["destination_workload_name"]})
+		}
 
 		// Fall back to the ingest timestamp for spans whose stream carries no start_time,
 		// so the waterfall still has an origin to lay the span out from.
@@ -544,21 +684,37 @@ func (s *OpenObserveTraceSource) CountTraces(ctx *security.RequestContext, req T
 // QueryRootSpansByTrace returns one representative root span per trace for the "By Traces"
 // view. OpenObserve exposes spans rather than a native trace-level result, so use the shared
 // reducer that backs the other non-ClickHouse providers.
-func (s *OpenObserveTraceSource) QueryRootSpansByTrace(ctx *security.RequestContext, req TracesV3Request) ([]common.OpenTelemetryTrace, error) {
-	return queryRootSpansViaSpans(ctx, s, req)
+// withOpenObserveRootSpans narrows a request to root spans (no parent) in the query itself.
+// OpenObserve stores a root's parent id as NULL, not "". Selecting roots in SQL is what makes
+// "By Traces" page correctly: the generic helper fetched one page of spans and kept the roots
+// among them, so a 10-row page showed 4 traces out of 906 in the window.
+func withOpenObserveRootSpans(req TracesV3Request) TracesV3Request {
+	root := query.QueryWhereClause{Binary: query.BinaryWhereClause{"parent_id": {query.IsNull: true}}}
+	req.QueryRequest.Where = query.QueryWhereClause{And: []query.QueryWhereClause{req.QueryRequest.Where, root}}
+	return req
 }
 
-// CountTracesByTrace returns an estimate marker for the "By Traces" view. Counting matching
-// spans would over-count traces, while a distinct trace-id count would not match the shared
-// root-span filter semantics. Count = -1 tells the frontend to estimate pagination.
-func (s *OpenObserveTraceSource) CountTracesByTrace(_ *security.RequestContext, _ TracesV3Request) (common.OpenTelemetryTraceCount, error) {
-	return countTracesByTraceEstimate()
+func (s *OpenObserveTraceSource) QueryRootSpansByTrace(ctx *security.RequestContext, req TracesV3Request) ([]common.OpenTelemetryTrace, error) {
+	return s.QueryTraces(ctx, withOpenObserveRootSpans(req))
+}
+
+// CountTracesByTrace counts the root spans the "By Traces" view lists, so its pagination is
+// exact instead of the -1 estimate marker.
+func (s *OpenObserveTraceSource) CountTracesByTrace(ctx *security.RequestContext, req TracesV3Request) (common.OpenTelemetryTraceCount, error) {
+	return s.CountTraces(ctx, withOpenObserveRootSpans(req))
 }
 
 func (s *OpenObserveTraceSource) GetLabelValues(ctx *security.RequestContext, req TracesV3LabelValuesRequest) (common.OpenTelemetryTraceLabelValues, error) {
 	cfg, err := integrations.GetOpenObserveConfigs(ctx, req.AccountId)
 	if err != nil {
 		return common.OpenTelemetryTraceLabelValues{}, fmt.Errorf("failed to get OpenObserve configs: %w", err)
+	}
+
+	// A field the span schema cannot express has no values, which is an answer, not an
+	// error. The traces screen fetches every filter dropdown in one request, and passing
+	// the name through as a column made OpenObserve 400 with "No field named …".
+	if openObserveTraceUnsupportedFields[req.Label] {
+		return common.OpenTelemetryTraceLabelValues{Label: req.Label, Values: []string{}}, nil
 	}
 
 	col := req.Label
@@ -571,8 +727,16 @@ func (s *OpenObserveTraceSource) GetLabelValues(ctx *security.RequestContext, re
 
 	sql := fmt.Sprintf(`SELECT %s FROM "%s" GROUP BY %s LIMIT 100`, col, cfg.TraceStream, col)
 
-	startTimeMicros := req.StartTime * 1000
-	endTimeMicros := req.EndTime * 1000
+	// OpenObserve rejects a search with no time range ("invalid time range"), and the traces
+	// screen asks for status_code values without one — that dropdown failed on every load.
+	// A missing window falls back to the last 24 hours.
+	startMs, endMs := req.StartTime, req.EndTime
+	if startMs <= 0 || endMs <= 0 {
+		endMs = time.Now().UnixMilli()
+		startMs = endMs - (24 * time.Hour).Milliseconds()
+	}
+	startTimeMicros := startMs * 1000
+	endTimeMicros := endMs * 1000
 
 	searchReq := openObserveSearchRequest{}
 	searchReq.Query.SQL = sql

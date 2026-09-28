@@ -81,7 +81,7 @@ func TestOpenObserveLogSource_QueryLogs(t *testing.T) {
 	sql, err := s.buildSQL(req, integrations.OpenObserveDefaultLogStream)
 	require.NoError(t, err)
 
-	expectedSQL := `SELECT * FROM "default" WHERE str_match_ignore_case(body, 'error') ORDER BY _timestamp DESC LIMIT 50`
+	expectedSQL := `SELECT * FROM "default" WHERE body ILIKE 'error' ORDER BY _timestamp DESC LIMIT 50`
 	assert.Equal(t, expectedSQL, sql)
 	assert.Equal(t, "body", s.GetLabelMapping()["message"])
 }
