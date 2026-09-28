@@ -33,9 +33,10 @@ import {
   getCodeLanguage,
   getDropdownOptionsForField,
   getExamplePlaceholder,
-  isTemplateString,
   parseJsonExample,
   resolveFieldType,
+  normalizeStoredObjectValue,
+  resolveObjectFieldValue,
   type SchemaProperty,
 } from './utils/fieldTypeUtils';
 import { getUpstreamSuggestedValues } from './utils/getUpstreamSuggestedValues';
@@ -634,7 +635,9 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
     applyAutoDefault(updated);
   }, [selectedActionType, timeMode, taskDefinitions, applyAutoDefault]);
 
-  // Normalize object-type fields that may have empty string values (e.g., headers: "" → {}).
+  // Normalize object-type fields stored as a string (e.g., headers: "" → {}).
+  // Unparseable text is left alone — it is a JsonEditor edit in progress, and
+  // rewriting it mid-keystroke wiped what the user had typed.
   // Template strings like "{{workflow.secrets.mcp_headers}}" are preserved so the backend
   // can resolve them to a map at runtime via ProcessValue (runbook-server templating.go).
   useEffect(() => {
@@ -649,8 +652,13 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
     for (const [key, fieldSchema] of Object.entries(schema.input_schema)) {
       const fs = fieldSchema as SchemaProperty;
       const isObjectType = fs.type === 'object' || fs.type === 'map[string]string' || fs.type === 'map[string]any';
-      if (isObjectType && key in normalized && typeof normalized[key] === 'string' && !isTemplateString(normalized[key])) {
-        normalized[key] = {};
+      if (!isObjectType || !(key in normalized)) {
+        continue;
+      }
+      // No opts needed: an object-typed field never resolves to resource_dropdown.
+      const normalizedValue = normalizeStoredObjectValue(normalized[key], resolveFieldType(key, fs) === 'json');
+      if (normalizedValue.changed) {
+        normalized[key] = normalizedValue.value;
         needsNormalize = true;
       }
     }
@@ -1981,23 +1989,12 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       const isObjectType = fieldSchema.type === 'object' || fieldSchema.type === 'map[string]string' || fieldSchema.type === 'map[string]any';
       const defaultFallback = isObjectType ? {} : '';
       const rawValue = localData[fieldName] ?? fieldSchema.default ?? defaultFallback;
-      // Coerce string values to empty objects for object-type fields (e.g., headers: "" → {}).
-      // Template strings are passed through as-is so the KeyValueHybridField below can detect
-      // expression mode and render a TemplateTextField instead of an empty KeyValueEditor.
-      let fieldValue = rawValue;
-      if (isObjectType && typeof rawValue === 'string') {
-        if (isTemplateString(rawValue)) {
-          fieldValue = rawValue;
-        } else if (rawValue.trim()) {
-          try {
-            fieldValue = JSON.parse(rawValue);
-          } catch {
-            fieldValue = {};
-          }
-        } else {
-          fieldValue = {};
-        }
-      }
+      // Determine field type based on schema (shared with the foreach sub-task form).
+      // Resolved here because the object-value coercion below depends on it.
+      const fieldType = resolveFieldType(fieldName, fieldSchema, { hasResourceNameField });
+      // Coerce string values to empty objects for object-type fields (e.g., headers: "" → {}),
+      // except where the editor holds raw JSON text. See resolveObjectFieldValue.
+      const fieldValue = isObjectType ? resolveObjectFieldValue(rawValue, fieldType === 'json') : rawValue;
       const isDropTarget = isDraggingOver === fieldName;
 
       // Generic visible_when: hide fields when the condition is not met.
@@ -3042,9 +3039,6 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           </Box>
         );
       }
-
-      // Determine field type based on schema (shared with the foreach sub-task form)
-      const fieldType = resolveFieldType(fieldName, fieldSchema, { hasResourceNameField });
 
       // Resource name dropdown with cascading filters and Select/Expression toggle
       if (fieldType === 'resource_dropdown') {

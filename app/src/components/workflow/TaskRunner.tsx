@@ -286,7 +286,7 @@ const TaskRunner: React.FC = () => {
                 selectedActionType={selectedTaskType}
                 nodes={[]}
                 edges={[]}
-                onTaskDataChange={(data: any) => setTaskData(data)}
+                onTaskDataChange={setTaskData}
                 taskDefinitions={taskDefinitions}
                 taskData={taskData}
                 viewOnlyMode={false}

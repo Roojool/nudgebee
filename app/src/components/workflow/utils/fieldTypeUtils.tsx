@@ -134,6 +134,62 @@ export const parseJsonExample = (value: any): any => {
 // reference the backend resolves at runtime, not a user-entered literal.
 export const isTemplateString = (s: string): boolean => /\{\{|\{%/.test(s);
 
+const isPlainObject = (value: any): boolean => !!value && typeof value === 'object' && !Array.isArray(value);
+
+// Normalize what an object-typed field has *stored*: a blank string becomes {},
+// a string holding a JSON object becomes that object. Anything else is kept when
+// the field renders as raw JSON text — it is the JsonEditor's in-progress edit, and
+// rewriting it mid-keystroke destroyed what the user typed (validateTaskData already
+// flags it). Other editors need an object, so they keep the old fall back to {}.
+export const normalizeStoredObjectValue = (value: any, rendersRawJsonText: boolean): { changed: boolean; value: any } => {
+  if (typeof value !== 'string' || isTemplateString(value)) {
+    return { changed: false, value };
+  }
+  if (value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      // Plain objects only: an array is not a valid value for an object-typed
+      // field, and rejecting primitives keeps this converging after one pass.
+      if (isPlainObject(parsed)) {
+        return { changed: true, value: parsed };
+      }
+    } catch {
+      // Falls through.
+    }
+    if (rendersRawJsonText) {
+      return { changed: false, value };
+    }
+  }
+  return { changed: true, value: {} };
+};
+
+// Value an object-typed field should render with. Key/value-style editors need a
+// real object, so a stored string is parsed (or dropped) for them. Editors that own
+// the user's raw text (JsonEditor) get the string untouched: a half-typed document
+// is not parseable, and coercing it would hand the editor a value it never emitted,
+// reseeding the box mid-keystroke. Callers pass rendersRawJsonText because the two
+// param forms render the same field type with different editors.
+export const resolveObjectFieldValue = (rawValue: any, rendersRawJsonText: boolean): any => {
+  if (typeof rawValue !== 'string' || rendersRawJsonText) {
+    return rawValue;
+  }
+  // Template strings pass through so the hybrid editors can flip to expression mode.
+  if (isTemplateString(rawValue)) {
+    return rawValue;
+  }
+  if (rawValue.trim()) {
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (isPlainObject(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Falls through.
+    }
+  }
+  return {};
+};
+
 // Detect code language from field name or sub_type
 export const getCodeLanguage = (fieldName: string, subType?: string): 'bash' | 'javascript' | 'sql' | 'json' | 'jsonata' => {
   if (subType) {

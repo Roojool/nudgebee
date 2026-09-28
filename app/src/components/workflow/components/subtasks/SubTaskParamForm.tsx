@@ -24,6 +24,7 @@ import {
   isTemplateString,
   parseJsonExample,
   resolveFieldType,
+  resolveObjectFieldValue,
   type SchemaProperty,
 } from '../../utils/fieldTypeUtils';
 import FieldGuidance from '../FieldGuidance';
@@ -184,29 +185,18 @@ const SubTaskParamForm: React.FC<SubTaskParamFormProps> = ({
     const isRequired = isFieldRequired(fieldName, fieldSchema);
     const isObjectType = fieldSchema.type === 'object' || fieldSchema.type === 'map[string]string' || fieldSchema.type === 'map[string]any';
     const rawValue = values[fieldName] ?? fieldSchema.default ?? (isObjectType ? {} : '');
-    // Coerce string values for object-type fields; template strings pass through
-    // so KeyValueHybridField can flip to expression mode (same as the sidebar).
-    let fieldValue = rawValue;
-    if (isObjectType && typeof rawValue === 'string') {
-      if (isTemplateString(rawValue)) {
-        fieldValue = rawValue;
-      } else if (rawValue.trim()) {
-        try {
-          fieldValue = JSON.parse(rawValue);
-        } catch {
-          fieldValue = {};
-        }
-      } else {
-        fieldValue = {};
-      }
-    }
+    // The sub-task form skips the sidebar's resource-name cascade heuristic
+    // (no hasResourceNameField opt-in) — `name` renders as a template field.
+    const fieldType = resolveFieldType(fieldName, fieldSchema);
+    // Coerce string values for object-type fields, except where the editor holds
+    // raw JSON text (same as the sidebar). Unlike the sidebar, nested_schema also
+    // renders in JsonEditor here. See resolveObjectFieldValue.
+    const rendersRawJsonText = fieldType === 'json' || fieldType === 'nested_schema';
+    const fieldValue = isObjectType ? resolveObjectFieldValue(rawValue, rendersRawJsonText) : rawValue;
 
     const error = errors[fieldName] || '';
     const label = fieldSchema.title || formatFieldLabel(fieldName);
     const placeholder = getExamplePlaceholder(fieldName, fieldSchema) || fieldSchema.description || `Enter ${fieldName.replace(/_/g, ' ')}`;
-    // The sub-task form skips the sidebar's resource-name cascade heuristic
-    // (no hasResourceNameField opt-in) — `name` renders as a template field.
-    const fieldType = resolveFieldType(fieldName, fieldSchema);
 
     const labelEl = (
       <Typography sx={LABEL_SX}>
