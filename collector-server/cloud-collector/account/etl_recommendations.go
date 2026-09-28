@@ -337,7 +337,7 @@ func getRecommendationsInternal(ctx *security.RequestContext, accountId string, 
 		ctx.GetLogger().Error("unable to get dbms", "error", err)
 		return providers.ListRecommendationsResponse{}, providers.Account{}, err
 	}
-	query := `select created_at, resourse_id, name, type, status, region, arn, tags::text, meta::text, service_name
+	query := `select resourse_created_on, created_at, resourse_id, name, type, status, region, arn, tags::text, meta::text, service_name
 	from cloud_resourses
 	where account = $1 and lower(status) = 'active'`
 	args := []interface{}{accountId}
@@ -367,10 +367,10 @@ func getRecommendationsInternal(ctx *security.RequestContext, accountId string, 
 
 	existingResources := []providers.Resource{}
 	for rows.Next() {
-		var createdAt *time.Time
+		var cloudCreatedOn, firstStored *time.Time
 		var resourseId, name, resourceType, status, region, arn, tagsStr, serviceName, metaStr *string
 
-		err := rows.Scan(&createdAt, &resourseId, &name, &resourceType, &status, &region, &arn, &tagsStr, &metaStr, &serviceName)
+		err := rows.Scan(&cloudCreatedOn, &firstStored, &resourseId, &name, &resourceType, &status, &region, &arn, &tagsStr, &metaStr, &serviceName)
 		if err != nil {
 			ctx.GetLogger().Error("unable to scan resources", "error", err)
 			return providers.ListRecommendationsResponse{}, providers.Account{}, err
@@ -391,6 +391,7 @@ func getRecommendationsInternal(ctx *security.RequestContext, accountId string, 
 			}
 		}
 
+		createdAt := resourceCreatedAt(cloudCreatedOn, firstStored)
 		if resourseId == nil || name == nil || resourceType == nil || serviceName == nil || status == nil || createdAt == nil {
 			ctx.GetLogger().Warn("skipping resource with missing required fields",
 				"accountId", accountId,
@@ -422,6 +423,22 @@ func getRecommendationsInternal(ctx *security.RequestContext, accountId string, 
 	recommendations, err := cloudProvider.ListRecommendations(ctx, account, filter, existingResources)
 	return recommendations, account, err
 
+}
+
+// resourceCreatedAt is the time rules measure a resource's age from: when it
+// was created in the cloud. created_at only records when this row was first
+// stored, so on an account connected last week every resource would read as a
+// week old. Collectors that cannot read a creation time store the zero time,
+// and those fall back to the first-stored time rather than reading as ancient.
+// A row with no usable time at all returns nil, so the caller skips it like
+// any other row missing a required field instead of dating it to year one.
+func resourceCreatedAt(cloudCreatedOn, firstStored *time.Time) *time.Time {
+	for _, t := range []*time.Time{cloudCreatedOn, firstStored} {
+		if t != nil && t.Year() > 1970 {
+			return t
+		}
+	}
+	return nil
 }
 
 func derefString(s *string) string {
