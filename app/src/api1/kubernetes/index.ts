@@ -2003,7 +2003,11 @@ query list_k8_issues_count {
     },
     groupBy = ['tenant_id', 'account_id', 'created_at'],
     cols: Array<string> = ['tenant_id', 'account_id', 'created_at', 'event_count'],
-    orderBy = { name: '', order: '' }
+    orderBy = { name: '', order: '' },
+    // A grouped datetime column without a transformation comes back truncated to the
+    // day (query engine default); pass e.g. date_unit/second to keep the time.
+    // Applied to the list query only; ignored when onlyGroupingCount is set.
+    columnTransformations: Array<{ name: string; expr: string; args?: string[] }> = []
   ) {
     if (query?.account_id == 'demo') {
       const eventDemoData: any = await getMockData('k8s-events');
@@ -2164,7 +2168,7 @@ query list_k8_issues_count {
 
       let LIST_K8_EVENTS_GROUPINGS = `
 query k8s_event_groupings($limit:Int,$offset:Int){
-  event_groupings: event_groupings_v2(where:__WHERE__, group_by:__GROUP_BY__, limit:$limit,offset:$offset,order_by:__ORDER_BY__){
+  event_groupings: event_groupings_v2(where:__WHERE__, group_by:__GROUP_BY__, limit:$limit,offset:$offset,order_by:__ORDER_BY__ __COLUMN_TRANSFORMATIONS__){
     rows{
       __COLS__
     }
@@ -2191,6 +2195,10 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       let formattedQuery = LIST_K8_EVENTS_GROUPINGS.replaceAll('__WHERE__', gqlStringify(filterParams));
       formattedQuery = formattedQuery.replaceAll('__GROUP_BY__', gqlStringify(groupBy));
       formattedQuery = formattedQuery.replaceAll('__COLS__', cols.join(' '));
+      formattedQuery = formattedQuery.replaceAll(
+        '__COLUMN_TRANSFORMATIONS__',
+        columnTransformations.length ? `, column_transformations:${gqlStringify(columnTransformations)}` : ''
+      );
       if (orderBy.name) {
         formattedQuery = formattedQuery.replaceAll(
           '__ORDER_BY__',
