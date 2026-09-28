@@ -11,6 +11,7 @@ import (
 	"nudgebee/services/cloud"
 	"nudgebee/services/common"
 	"nudgebee/services/eventrule"
+	"nudgebee/services/integrations"
 	"nudgebee/services/integrations/core"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/observability/alertrule"
@@ -2305,6 +2306,15 @@ func readIndexFromIntegration(ctx *security.RequestContext, integrationDto *core
 		configName = "trace_index"
 	default:
 		return ""
+	}
+	// Splunk Enterprise stores its indexes under its own keys, so the generic names above
+	// read as unset and default_index came back empty for every Splunk account.
+	if integrationDto.Type == integrations.IntegrationSplunkEnterprise {
+		configName = map[string]string{
+			"logs":    integrations.SplunkEnterpriseConfigLogIndex,
+			"metrics": integrations.SplunkEnterpriseConfigMetricIndex,
+			"traces":  integrations.SplunkEnterpriseConfigTraceIndex,
+		}[providerType]
 	}
 	// Per-account override (ES Advanced Settings) takes precedence. The value is
 	// absent on non-ES integrations, so this is a no-op there.

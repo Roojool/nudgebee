@@ -114,7 +114,7 @@ func (s *SplunkEnterpriseMetricSource) GenerateQuery(ctx playbooks.PlaybookActio
 				"metric", metric, "error", runErr)
 			continue
 		}
-		if len(convertSplunkMetricRows("probe", spl, rows).Payload) > 0 {
+		if len(convertSplunkMetricRows("probe", spl, rows, endMs/1000).Payload) > 0 {
 			return spl, map[string]any{}, nil
 		}
 	}
