@@ -2451,6 +2451,11 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 	var matchedRuleNames []string
 	var lastMatchedEvent providers.Event
 	var foundMatch bool
+	// The first emitting rule that matches wins; emitting rules that match
+	// after it are skipped before their actions run. aws_runbook.yaml is
+	// ordered specific-first, so the winner is the most specific rule.
+	// ActionsOnly rules take no part in this and always run.
+	var chosenRule string
 
 	for _, rule := range p.ruleSet.Rules {
 		if !p.matches(ebEvent, rule.Triggers, templateData) {
@@ -2462,6 +2467,17 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 		foundMatch = true
 
 		logger.Info("eventprocessor: event matches rule", "ruleName", rule.Name, "eventId", ebEvent.ID, "account_number", account.AccountNumber)
+
+		if !rule.ActionsOnly {
+			if chosenRule != "" {
+				logger.Info("eventprocessor: skipping rule, an earlier rule already matched",
+					"ruleName", rule.Name, "chosenRule", chosenRule, "eventId", ebEvent.ID)
+				continue
+			}
+			// Chosen before the dedup check: a winner suppressed by its own
+			// dedup emits nothing, instead of letting a catch-all below it emit.
+			chosenRule = rule.Name
+		}
 
 		// Render the rule's Fingerprint once: it's the dedup key AND the
 		// downstream eventId for emitting rules. Done before the ActionsOnly
@@ -2704,7 +2720,7 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 			}
 		}
 
-		// Store this event as the last matched event
+		// Store the chosen rule's event
 		lastMatchedEvent = provEvent
 	}
 
