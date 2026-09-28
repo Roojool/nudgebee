@@ -150,7 +150,7 @@ func TestSplunkUtilisationDoesNotSumSamplesLive(t *testing.T) {
 			buckets := map[int64]map[string]*cell{}
 			maxSamples := 0
 			for _, row := range raw {
-				ts := splunkEnterpriseRowTimestampSeconds(row)
+				ts := splunkEnterpriseRowTimestampSeconds(row, end)
 				bucket := ts - ts%step
 				if bucket+step > end {
 					continue // still filling; the query drops it too

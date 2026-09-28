@@ -57,6 +57,9 @@ var splunkEnterpriseMetricTransformCommands = map[string]bool{
 	"sort": true, "rename": true, "table": true, "fields": true,
 	"head": true, "tail": true, "reverse": true, "dedup": true, "fillnull": true,
 	"bin": true, "bucket": true, "top": true, "rare": true, "convert": true,
+	// addinfo only attaches the search's own time bounds (info_min_time/info_max_time);
+	// the utilisation queries use it to drop the still-filling last span.
+	"addinfo": true,
 }
 
 // splunkEnterpriseMetricSearchTimeout bounds one metric search. Shorter than the log
