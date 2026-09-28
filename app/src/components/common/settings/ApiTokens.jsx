@@ -9,16 +9,15 @@ import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import InfoIcon from '@mui/icons-material/Info';
 import apiUser from '@api1/user/';
 import { getAppBaseUrl } from '@lib/externalUrls';
-import CustomTabs from '@shared/navigation/Tabs';
 import TokenList from './TokenList';
 import CreateTokenDialog from './CreateTokenDialog';
 
-// `defaultKind` picks the tab the modal opens on, which is also the kind Create mints.
+// `defaultKind` is the type the Create form starts on. Pass a single-purpose kind, never
+// 'all': a key that opens both the app API and the gateway must only ever be picked on purpose.
 const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
   const { title: baseTitle } = useBrandingConfig();
   const [loading, setLoading] = useState(false);
   const [tokens, setTokens] = useState([]);
-  const [activeTab, setActiveTab] = useState(defaultKind);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [createdToken, setCreatedToken] = useState(null);
   const [createdTokenName, setCreatedTokenName] = useState(null);
@@ -50,10 +49,11 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
     }
   };
 
+  // Resolves true once the key exists, so the create form knows whether to clear itself.
   const createToken = async ({ name, kind, expiresAt, limits, scopes }) => {
     if (!name) {
       snackbar.error('Token name is required');
-      return;
+      return false;
     }
 
     try {
@@ -68,6 +68,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
         setShowCreateDialog(false);
         fetchTokens();
         snackbar.success('API Token created successfully');
+        return true;
       } else {
         snackbar.error('Failed to create API token - Invalid response');
       }
@@ -76,6 +77,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
     } finally {
       setLoading(false);
     }
+    return false;
   };
 
   const revokeToken = (tokenId, tokenName) => {
@@ -122,14 +124,6 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
     onClose();
   };
 
-  // The active tab is the kind Create mints, so 'all' is reachable only by choosing it —
-  // neither single-purpose tab can widen a key's reach by accident.
-  const tabOptions = [
-    { value: 'platform', text: 'Platform keys' },
-    { value: 'gateway', text: 'AI Gateway keys' },
-    { value: 'all', text: 'All-access keys' },
-  ];
-
   return (
     <>
       <Modal
@@ -140,7 +134,8 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
         width='md'
         sx={{
           '& .MuiPaper-root': {
-            maxWidth: ds.space.mul(0, 400),
+            // Wide enough for every kind's columns in one table (it was 800px when each tab held one kind).
+            maxWidth: ds.space.mul(0, 550),
             '& .MuiDialogContent-root': {
               padding: `${ds.space[6]} ${ds.space.mul(0, 20)} 0px ${ds.space.mul(0, 20)}`,
             },
@@ -194,8 +189,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
 
           {/* Tokens List */}
           <Box>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: ds.space[4] }}>
-              <Typography sx={{ fontSize: ds.text.title, fontWeight: ds.weight.semibold, color: ds.gray[700] }}>API Tokens</Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', mb: ds.space[4] }}>
               <Button
                 size='md'
                 onClick={() => {
@@ -208,10 +202,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
               </Button>
             </Box>
 
-            <Box sx={{ mb: ds.space[3] }}>
-              <CustomTabs options={{ tabOptions }} value={activeTab} onChange={setActiveTab} behavior='filter' ariaLabel='API token kinds' />
-            </Box>
-            <TokenList tokens={tokens} kind={activeTab} onRevoke={revokeToken} />
+            <TokenList tokens={tokens} onRevoke={revokeToken} />
           </Box>
 
           {/* Action Buttons */}
@@ -242,7 +233,7 @@ const ApiTokens = ({ open, title, onClose, defaultKind = 'platform' }) => {
         </Box>
       </Modal>
 
-      <CreateTokenDialog open={showCreateDialog} kind={activeTab} onClose={() => setShowCreateDialog(false)} onCreate={createToken} />
+      <CreateTokenDialog open={showCreateDialog} defaultKind={defaultKind} onClose={() => setShowCreateDialog(false)} onCreate={createToken} />
 
       {/* Instructions Modal */}
       <Modal

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Typography } from '@mui/material';
 import { Button } from '@ui/Button';
+import { Chip } from '@ui/Chip';
 import { EmptyState } from '@ui/EmptyState';
 import Tooltip from '@ui/Tooltip';
 import CustomTable from '@shared/tables/CustomTable';
@@ -9,7 +10,14 @@ import { carriesGatewayTraffic, KIND_LABELS } from './keyKinds';
 
 const formatDate = (date) => dayjs(date).format('MMM DD, YYYY HH:mm');
 
-// A platform key with no scopes has its owner's full access; otherwise list what it may call.
+// 'all' takes the warm hue: it is the one kind that opens both the app API and the gateway.
+const KIND_HUES = { platform: 'blue', gateway: 'violet', all: 'amber' };
+
+const limitsText = (limits) => (limits || []).map((l) => `${l.value} ${l.metric}/${l.period}${l.model ? ` (${l.model})` : ''}`).join(', ') || '—';
+
+const usageText = (usage) => (usage ? `$${(usage.cost_usd ?? 0).toFixed(2)} · ${usage.requests ?? 0} reqs` : '—');
+
+// A key with no scopes has its owner's full access; otherwise list what it may call.
 const AccessCell = ({ scopes }) => {
   if (!scopes?.length) return <Typography variant='body2'>Full access</Typography>;
   return (
@@ -21,42 +29,45 @@ const AccessCell = ({ scopes }) => {
   );
 };
 
-// One key kind's rows. Gateway-reaching kinds also show the key's caps and its spend.
-const TokenList = ({ tokens, kind, onRevoke }) => {
-  const rows = tokens.filter((t) => t.kind === kind);
-  const showQuotas = carriesGatewayTraffic(kind);
-
-  if (rows.length === 0) {
-    return <EmptyState title={`No ${KIND_LABELS[kind]} keys yet`} size='section' />;
+// Every key in one table, labelled by kind. A column that applies to some kinds only shows
+// '—' on the rest: a gateway key cannot call the app API, so it has no access to show, and
+// limits and spend meter gateway calls only.
+const TokenList = ({ tokens, onRevoke }) => {
+  if (tokens.length === 0) {
+    return <EmptyState title='No API tokens yet' size='section' />;
   }
 
-  const showAccess = kind === 'platform';
-  const headers = ['Name', 'Created', 'Last used', 'Expires', ...(showAccess ? ['Access'] : []), ...(showQuotas ? ['Limits', 'This month'] : []), ''];
+  const headers = ['Name', 'Type', 'Created', 'Last used', 'Expires', 'Access', 'Limits', 'This month', ''];
 
-  const tableData = rows.map((t) => {
-    const row = [
+  const tableData = tokens.map((t) => {
+    const label = KIND_LABELS[t.kind] ?? t.kind;
+    const reachesGateway = carriesGatewayTraffic(t.kind);
+    return [
       { text: t.name, component: <Typography variant='body2'>{t.name}</Typography> },
+      {
+        text: label,
+        component: (
+          <Chip size='xs' variant='tag' hue={KIND_HUES[t.kind]}>
+            {label}
+          </Chip>
+        ),
+      },
       { text: formatDate(t.created_at) },
       { text: t.accessed_at ? formatDate(t.accessed_at) : '—' },
       { text: t.expires_at ? formatDate(t.expires_at) : 'never' },
+      t.kind === 'gateway'
+        ? { text: '—' }
+        : { text: t.scopes?.length ? t.scopes.join(', ') : 'Full access', component: <AccessCell scopes={t.scopes} /> },
+      { text: reachesGateway ? limitsText(t.limits) : '—' },
+      { text: reachesGateway ? usageText(t.usage) : '—' },
+      {
+        component: (
+          <Button tone='danger' size='sm' onClick={() => onRevoke(t.id, t.name)}>
+            Revoke
+          </Button>
+        ),
+      },
     ];
-    if (showAccess) {
-      row.push({ text: t.scopes?.length ? t.scopes.join(', ') : 'Full access', component: <AccessCell scopes={t.scopes} /> });
-    }
-    if (showQuotas) {
-      row.push({
-        text: (t.limits || []).map((l) => `${l.value} ${l.metric}/${l.period}${l.model ? ` (${l.model})` : ''}`).join(', ') || '—',
-      });
-      row.push({ text: t.usage ? `$${(t.usage.cost_usd ?? 0).toFixed(2)} · ${t.usage.requests ?? 0} reqs this month` : '—' });
-    }
-    row.push({
-      component: (
-        <Button tone='danger' size='sm' onClick={() => onRevoke(t.id, t.name)}>
-          Revoke
-        </Button>
-      ),
-    });
-    return row;
   });
 
   return <CustomTable headers={headers} tableData={tableData} />;

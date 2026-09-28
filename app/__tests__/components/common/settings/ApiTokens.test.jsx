@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import ApiTokens from '@shared/settings/ApiTokens';
@@ -79,21 +79,6 @@ jest.mock('@ui/Banner', () => ({
 jest.mock('@ui/EmptyState', () => ({
   __esModule: true,
   EmptyState: ({ title }) => <div data-testid='empty-state'>{title}</div>,
-}));
-
-jest.mock('@shared/navigation/Tabs', () => ({
-  __esModule: true,
-  default: ({ options, value, onChange }) => (
-    <div role='tablist'>
-      {(options?.tabOptions || [])
-        .filter((o) => !o.hidden)
-        .map((o) => (
-          <button key={o.value} role='tab' aria-selected={o.value === value} onClick={() => onChange(o.value)}>
-            {o.text}
-          </button>
-        ))}
-    </div>
-  ),
 }));
 
 jest.mock('@ui/Toast', () => ({
@@ -180,6 +165,8 @@ describe('ApiTokens', () => {
       expect(screen.getByTestId('modal')).toBeInTheDocument();
     });
     expect(screen.getByRole('heading', { name: 'API Tokens' })).toBeInTheDocument();
+    // The modal header names the screen; the body does not repeat it.
+    expect(screen.getAllByText('API Tokens')).toHaveLength(1);
   });
 
   it('does not render modal when open is false', () => {
@@ -192,7 +179,7 @@ describe('ApiTokens', () => {
     await waitFor(() => {
       expect(screen.getByTestId('empty-state')).toBeInTheDocument();
     });
-    expect(screen.getByText('No platform keys yet')).toBeInTheDocument();
+    expect(screen.getByText('No API tokens yet')).toBeInTheDocument();
   });
 
   it('shows Create Token button initially', async () => {
@@ -202,54 +189,84 @@ describe('ApiTokens', () => {
     });
   });
 
-  it('splits keys into platform, gateway and all-access tabs', async () => {
+  it('lists every key in one table, labelled by its type', async () => {
+    const base = { status: 'active', created_at: '2026-09-01T00:00:00Z', accessed_at: null, expires_at: null, limits: [], scopes: null };
     mockListUserTokens.mockResolvedValue({
       data: [
-        {
-          id: '1',
-          name: 'nbctl',
-          kind: 'platform',
-          status: 'active',
-          created_at: '2026-09-01T00:00:00Z',
-          accessed_at: null,
-          expires_at: null,
-          limits: [],
-        },
-        {
-          id: '2',
-          name: 'claude-code',
-          kind: 'gateway',
-          status: 'active',
-          created_at: '2026-09-02T00:00:00Z',
-          accessed_at: null,
-          expires_at: '2026-12-21T00:00:00Z',
-          limits: [{ metric: 'cost', period: 'month', value: 20, model: '' }],
-        },
-        {
-          id: '3',
-          name: 'old',
-          kind: 'platform',
-          status: 'active',
-          created_at: '2025-01-01T00:00:00Z',
-          accessed_at: null,
-          expires_at: null,
-          limits: [],
-        },
+        { ...base, id: '1', name: 'nbctl', kind: 'platform' },
+        { ...base, id: '2', name: 'claude-code', kind: 'gateway', limits: [{ metric: 'cost', period: 'month', value: 20, model: '' }] },
+        { ...base, id: '3', name: 'shared', kind: 'all' },
       ],
     });
-    render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
-    expect(await screen.findByRole('tab', { name: /platform keys/i })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /ai gateway keys/i })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /all-access keys/i })).toBeInTheDocument();
-    expect(screen.queryByRole('tab', { name: /legacy/i })).not.toBeInTheDocument();
+    render(<ApiTokens {...defaultProps} />);
+    const row = async (name) => (await screen.findByText(name)).closest('tr');
+    expect(within(await row('nbctl')).getByText('Platform')).toBeInTheDocument();
+    expect(within(await row('claude-code')).getByText('AI Gateway')).toBeInTheDocument();
+    expect(within(await row('shared')).getByText('All access')).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+    // Scopes are platform-only and limits meter gateway calls only, so each row shows its own.
+    expect(within(await row('nbctl')).getByText('Full access')).toBeInTheDocument();
+    expect(within(await row('claude-code')).getByText('20 cost/month')).toBeInTheDocument();
+    expect(within(await row('claude-code')).queryByText('Full access')).not.toBeInTheDocument();
+  });
+
+  it('the create form starts on the platform type, never all-access', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /^platform$/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('radio', { name: /all access/i })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('radio', { name: /restricted/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /add limit/i })).not.toBeInTheDocument();
+  });
+
+  it('a cancelled all-access draft does not carry over to the next create', async () => {
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /^platform$/i })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('a failed create keeps the draft, type included, for a retry', async () => {
+    mockCreateUserToken.mockResolvedValue({ errors: [{ message: 'boom' }] });
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'shared');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    await waitFor(() => expect(mockCreateUserToken).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('radio', { name: /all access/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByLabelText(/name/i)).toHaveValue('shared');
+  });
+
+  it('keeps Create disabled while the request is in flight', async () => {
+    let finish;
+    mockCreateUserToken.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(screen.getByRole('button', { name: /^create$/i })).toBeDisabled();
+    finish({ data: { token: 'sk-nb-xyz' } });
+    await waitFor(() => expect(screen.getByText('sk-nb-xyz')).toBeInTheDocument());
+  });
+
+  it('defaultKind picks the type the create form starts on', async () => {
+    render(<ApiTokens {...defaultProps} defaultKind='gateway' />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    expect(screen.getByRole('radio', { name: /ai gateway/i })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('button', { name: /add limit/i })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /restricted/i })).not.toBeInTheDocument();
   });
 
   it('an all-access key create sends kind=all and carries limits', async () => {
     mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'shared', kind: 'all' } });
     render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
-    // The active tab is the kind Create mints, so 'all' is only reachable deliberately.
-    await userEvent.click(await screen.findByRole('tab', { name: /all-access keys/i }));
-    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    // 'all' opens both doors, so it is only ever minted by picking it.
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /all access/i }));
+    expect(screen.getByText(/opens both the app api and the ai gateway/i)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText(/name/i), 'shared');
     await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
     await userEvent.type(screen.getByLabelText(/value/i), '20');
@@ -367,9 +384,8 @@ describe('ApiTokens', () => {
     mockListUserTokens.mockResolvedValue({ data: [] });
     mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-gw-xyz', name: 'claude-code', kind: 'gateway' } });
     render(<ApiTokens open title='API Tokens' onClose={() => {}} />);
-    // Switch to the AI Gateway tab before creating so the dialog opens for kind='gateway'.
-    await userEvent.click(await screen.findByRole('tab', { name: /ai gateway keys/i }));
-    await userEvent.click(screen.getByRole('button', { name: /create token/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
     await userEvent.type(screen.getByLabelText(/name/i), 'claude-code');
     await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
     // Leave the value at '' (invalid, filtered out) and add a second, valid limit.
@@ -386,40 +402,31 @@ describe('ApiTokens', () => {
     );
   });
 
-  it('each tab lists only its own kind', async () => {
-    mockListUserTokens.mockResolvedValue({
-      data: [
-        {
-          id: '1',
-          name: 'nbctl',
-          kind: 'platform',
-          status: 'active',
-          created_at: '2026-09-01T00:00:00Z',
-          accessed_at: null,
-          expires_at: null,
-          limits: [],
-        },
-        {
-          id: '2',
-          name: 'shared',
-          kind: 'all',
-          status: 'active',
-          created_at: '2026-09-02T00:00:00Z',
-          accessed_at: null,
-          expires_at: null,
-          limits: [],
-        },
-      ],
-    });
+  it('switching to platform drops the limits a gateway draft had', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-xyz', name: 'ci', kind: 'platform' } });
     render(<ApiTokens {...defaultProps} />);
-    await waitFor(() => {
-      expect(screen.getByText('nbctl')).toBeInTheDocument();
-    });
-    expect(screen.queryByText('shared')).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
+    await userEvent.click(screen.getByRole('button', { name: /add limit/i }));
+    await userEvent.type(screen.getByLabelText(/value/i), '20');
+    await userEvent.click(screen.getByRole('radio', { name: /^platform$/i }));
+    expect(screen.queryByRole('button', { name: /add limit/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'platform', limits: [], scopes: null }));
+  });
 
-    await userEvent.click(screen.getByRole('tab', { name: /all-access keys/i }));
-    expect(await screen.findByText('shared')).toBeInTheDocument();
-    expect(screen.queryByText('nbctl')).not.toBeInTheDocument();
+  it('switching to AI Gateway drops the scopes a platform draft had', async () => {
+    mockCreateUserToken.mockResolvedValue({ data: { token: 'sk-nb-gw-xyz', name: 'ci', kind: 'gateway' } });
+    render(<ApiTokens {...defaultProps} />);
+    await userEvent.click(await screen.findByRole('button', { name: /create token/i }));
+    await userEvent.type(screen.getByLabelText(/name/i), 'ci');
+    await userEvent.click(screen.getByRole('radio', { name: /restricted/i }));
+    await userEvent.click(await screen.findByRole('checkbox', { name: /tickets — read/i }));
+    await userEvent.click(screen.getByRole('radio', { name: /ai gateway/i }));
+    expect(screen.queryByRole('radio', { name: /restricted/i })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    expect(mockCreateUserToken).toHaveBeenCalledWith(expect.objectContaining({ kind: 'gateway', scopes: null }));
   });
 
   it('revokes a key by id', async () => {

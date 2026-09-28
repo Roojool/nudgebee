@@ -125,9 +125,21 @@ const ScopePicker = ({ selected, onChange }) => {
   );
 };
 
-// Platform keys carry an expiry and optional scopes; the server 400s on limits it cannot
-// meter, so unusable rows are dropped here rather than sent to be rejected.
-const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
+const KIND_OPTIONS = ['platform', 'gateway', 'all'].map((value) => ({ value, label: KIND_LABELS[value] }));
+
+// What a key of each kind can call, shown under the type picker.
+const KIND_HINTS = {
+  platform: 'Calls the app API, with your full access or only the modules you pick.',
+  gateway: 'Calls the AI Gateway only. Can carry its own request, token and cost limits.',
+  all: 'Opens both the app API and the AI Gateway. Limits below meter AI Gateway calls only — app API calls are not metered and pass freely.',
+};
+
+// The type picked first decides the fields that follow: a platform key carries optional
+// scopes, a gateway-reaching key carries limits. The server 400s on limits it cannot meter,
+// so unusable rows are dropped here rather than sent to be rejected. `defaultKind` has a
+// default of its own because the server mints an all-access key when `kind` is omitted.
+const CreateTokenDialog = ({ open, defaultKind = 'platform', onClose, onCreate }) => {
+  const [kind, setKind] = React.useState(defaultKind);
   const [name, setName] = React.useState('');
   const [expiryDays, setExpiryDays] = React.useState('90');
   const [customValue, setCustomValue] = React.useState('');
@@ -135,8 +147,10 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
   const [limits, setLimits] = React.useState([]);
   const [access, setAccess] = React.useState('full');
   const [scopes, setScopes] = React.useState(() => new Set());
+  const [submitting, setSubmitting] = React.useState(false);
 
   const reset = () => {
+    setKind(defaultKind);
     setName('');
     setExpiryDays('90');
     setCustomValue('');
@@ -162,44 +176,60 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
     return new Date(Date.now() + Number(expiryDays) * 86400000).toISOString();
   })();
 
-  const submit = () => {
+  // Cleared only once the key exists: a failed create keeps the draft, type included, for a
+  // retry. `submitting` holds Create disabled meanwhile so a double click cannot mint twice.
+  const submit = async () => {
     // Held as a string while editing so the field can be cleared; coerced here because
     // the API takes a number.
     const usable = limits.filter((l) => Number(l.value) > 0).map((l) => ({ ...l, value: Number(l.value) }));
     // Omitted, not empty, for full access: the server stores no scopes as NULL.
     const restricted = kind === 'platform' && access === 'restricted';
-    onCreate({
+    setSubmitting(true);
+    const created = await onCreate({
       name: name.trim(),
       kind,
       expiresAt,
       limits: carriesGatewayTraffic(kind) ? usable : [],
       scopes: restricted ? [...scopes].sort() : null,
     });
-    reset();
+    setSubmitting(false);
+    if (created) reset();
   };
 
   const restrictedEmpty = kind === 'platform' && access === 'restricted' && scopes.size === 0;
   const createDisabled = !name.trim() || (expiryDays === 'custom' && !customValid) || restrictedEmpty;
-  const title = `New ${KIND_LABELS[kind]} key`;
 
   return (
     <Modal
       open={open}
       onClose={handleClose}
-      title={title}
+      title='New API token'
       width='md'
       actionButtons={
         <Box sx={{ display: 'flex', gap: ds.space[3], justifyContent: 'flex-end' }}>
           <Button tone='secondary' onClick={handleClose}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={createDisabled}>
+          <Button onClick={submit} disabled={createDisabled} loading={submitting}>
             Create
           </Button>
         </Box>
       }
     >
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[4] }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700] }}>Type</Typography>
+          <ToggleGroup
+            selection='single'
+            size='sm'
+            ariaLabel='Token type'
+            value={kind}
+            onChange={setKind}
+            options={KIND_OPTIONS}
+            id='token-kind-toggle'
+          />
+          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{KIND_HINTS[kind]}</Typography>
+        </Box>
         <Input size='sm' label='Name' value={name} placeholder='Enter a descriptive name for your token' onChange={setName} />
         <Select label='Expires' value={expiryDays} onChange={setExpiryDays} options={EXPIRY_OPTIONS} />
         {expiryDays === 'custom' && (
@@ -212,11 +242,6 @@ const CreateTokenDialog = ({ open, kind, onClose, onCreate }) => {
               {customValid ? `expires ${dayjs(customExpiresAt).format('D MMM YYYY, HH:mm')}` : 'Enter a duration greater than zero'}
             </Typography>
           </Box>
-        )}
-        {kind === 'all' && (
-          <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>
-            Opens both the app API and the AI Gateway. Limits below meter AI Gateway calls only — app API calls are not metered and pass freely.
-          </Typography>
         )}
         {carriesGatewayTraffic(kind) && <LimitEditor limits={limits} onChange={setLimits} />}
         {kind === 'platform' && (

@@ -2,4 +2,4 @@
 // filter in llm/gateway/auth/user_auths.go — one place, so the UI and server cannot drift.
 export const carriesGatewayTraffic = (kind) => kind === 'gateway' || kind === 'all';
 
-export const KIND_LABELS = { platform: 'platform', gateway: 'AI Gateway', all: 'all-access' };
+export const KIND_LABELS = { platform: 'Platform', gateway: 'AI Gateway', all: 'All access' };
