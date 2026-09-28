@@ -47,6 +47,13 @@ describe('ruleFromRow', () => {
     expect(ruleFromRow({ source: 'cloud', source_mode: null, sources: '["cloud"]' }).types).toEqual(['cloud']);
   });
 
+  it('reads who added the rule and when', () => {
+    const rule = ruleFromRow({ source: 'slo', created_by_display_name: 'Priya Rao', created_at: '2026-09-01 10:00:00' });
+    expect(rule.createdBy).toBe('Priya Rao');
+    expect(rule.createdAt).toBe('2026-09-01T10:00:00.000Z');
+    expect(ruleFromRow({ source: 'slo' })).toMatchObject({ createdBy: '', createdAt: null });
+  });
+
   it('reads a switched-off rule as off', () => {
     expect(ruleFromRow({ source: 'optimize', is_active: false }).active).toBe(false);
     expect(ruleStatus(ruleFromRow({ source: 'optimize', is_active: false })).text).toBe('Off');

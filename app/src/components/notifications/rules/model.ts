@@ -32,6 +32,9 @@ export interface Rule {
   // Don't send ends then; on a Send rule it is an older snooze that stops it until then.
   until: string | null;
   active: boolean;
+  // Who added the rule and when (read-only; shown in the list).
+  createdBy: string;
+  createdAt: string | null;
 }
 
 export const newRule = (patch: Partial<Rule> = {}): Rule => ({
@@ -52,6 +55,8 @@ export const newRule = (patch: Partial<Rule> = {}): Rule => ({
   batch: false,
   until: null,
   active: true,
+  createdBy: '',
+  createdAt: null,
   ...patch,
 });
 
@@ -105,6 +110,8 @@ export const ruleFromRow = (row: any): Rule => {
     batch: row.delivery_mode === 'batch',
     until: parseUtc(row.expires_at),
     active: row.is_active !== false && row.is_active !== 'false',
+    createdBy: row.created_by_display_name || '',
+    createdAt: parseUtc(row.created_at),
   };
 };
 

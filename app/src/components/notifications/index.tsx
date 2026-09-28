@@ -11,6 +11,8 @@ import { DropdownMenu } from '@ui/DropdownMenu';
 import Tooltip from '@ui/Tooltip';
 import { toast } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
+import Datetime from '@shared/format/Datetime';
+import Text from '@shared/format/Text';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { DeleteIconRed, EditIcon } from '@assets';
 import apiNotifications from '@api1/notification';
@@ -32,10 +34,13 @@ import OnlySomeAccountsModal from './rules/OnlySomeAccountsModal';
 
 const NOTIFICATIONS_TABLE_ID = 'Notifications';
 const HEADERS = [
-  { name: 'Rule', width: '58%' },
-  { name: 'Covers', width: '20%' },
-  { name: 'Status', width: '12%' },
-  { name: '', width: '10%' },
+  // Status and actions are sized to their content, not counting the cells' own padding
+  // (the widest label is "Paused · 1h left"); the rule's sentence takes the rest.
+  { name: 'Rule', width: 'auto' },
+  { name: 'Covers', width: '12%' },
+  { name: 'Created by', width: '12%' },
+  { name: 'Status', width: '92px' },
+  { name: '', width: '64px' },
 ];
 
 type Filter = 'all' | RuleTypeKey;
@@ -134,7 +139,7 @@ const Notifications = () => {
   const visible = rules.filter((r) => {
     if (filter !== 'all' && !typesOf(r).includes(filter)) return false;
     if (!query) return true;
-    return `${r.name} ${whatText(r)} ${whoText(r, accountName)}`.toLowerCase().includes(query.toLowerCase());
+    return `${r.name} ${whatText(r)} ${whoText(r, accountName)} ${r.createdBy}`.toLowerCase().includes(query.toLowerCase());
   });
   const pageRules = visible.slice(page * rowsPerPage, (page + 1) * rowsPerPage);
   const filterType = filter !== 'all' ? filter : null;
@@ -169,7 +174,7 @@ const Notifications = () => {
     const row: any = [
       {
         component: (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], py: ds.space[1] }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
             {rule.description ? (
               <Tooltip title={rule.description}>
                 <span>{name}</span>
@@ -193,6 +198,15 @@ const Notifications = () => {
         data: rule.name,
       },
       { component: <CoversCell rule={rule} /> },
+      {
+        component: (
+          <Box id={`created-by-${rule.id}`} sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[0] }}>
+            <Text value={rule.createdBy || '-'} />
+            {rule.createdAt && <Datetime value={rule.createdAt} baseDate={new Date()} sxSecondary />}
+          </Box>
+        ),
+        data: rule.createdBy,
+      },
       { component: <RuleStatusLabel rule={rule} /> },
       {
         component: canWrite ? (
@@ -274,7 +288,8 @@ const Notifications = () => {
           <FallbackSentence fallbacks={fallbacks} type={filterType} />
         </Box>
         {canWrite && filterType !== 'daily_recap' && (
-          <Box>
+          // Puts the pencil directly above the rows' edit buttons in the actions column.
+          <Box sx={{ mr: '18px' }}>
             <DsButton
               id='edit-fallback'
               tone='ghost'
@@ -304,6 +319,7 @@ const Notifications = () => {
         </Box>
       ),
     },
+    { component: <></> },
     { component: <></> },
     { component: <></> },
     {

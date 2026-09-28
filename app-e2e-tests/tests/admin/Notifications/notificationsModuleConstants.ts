@@ -11,7 +11,7 @@ export const RULES_TABLE = "Notifications";
 
 // Column contract from HEADERS in app/src/components/notifications/index.tsx.
 // The fourth header is the empty actions column, which has no label to assert.
-export const RULE_COLUMNS = ["Rule", "Covers", "Status"];
+export const RULE_COLUMNS = ["Rule", "Covers", "Created by", "Status"];
 
 // Every rule this suite creates is a one-hour weekly-digest Don't send (see
 // makeRuleInert), so its row reads as a paused weekly digest.

@@ -140,7 +140,14 @@ const row = (patch: Record<string, any>) => ({
 });
 
 const RULES = [
-  row({ id: 'r1', name: 'Silence all troubleshooting', is_suppressed: true, exceptions: '[{"account_ids":["a1"]}]' }),
+  row({
+    id: 'r1',
+    name: 'Silence all troubleshooting',
+    is_suppressed: true,
+    exceptions: '[{"account_ids":["a1"]}]',
+    created_by_display_name: 'Priya Rao',
+    created_at: '2026-09-01T10:00:00',
+  }),
   row({
     id: 'r2',
     name: 'Dev alerts',
@@ -230,6 +237,17 @@ describe('Notification rules page', () => {
     fireEvent.click(screen.getByTestId('Old optimize-turn-on'));
     await waitFor(() => expect(mockUpsertRule).toHaveBeenCalled());
     expect(mockUpsertRule.mock.calls[0][0]).toMatchObject({ id: 'r4', is_active: true });
+  });
+
+  it('says who added each rule, and finds rules by who added them', async () => {
+    render(<Notifications />);
+    await waitFor(() => expect(screen.getAllByTestId('row')).toHaveLength(4));
+    expect(document.getElementById('created-by-r1')).toHaveTextContent('Priya Rao');
+    // A rule without a recorded creator shows a dash.
+    expect(document.getElementById('created-by-r2')).toHaveTextContent('-');
+    fireEvent.change(screen.getByTestId('search-rules'), { target: { value: 'priya' } });
+    expect(rowsText()).toHaveLength(1);
+    expect(rowsText()[0]).toContain('Silence all troubleshooting');
   });
 
   it('shows no edit controls without write access', async () => {
