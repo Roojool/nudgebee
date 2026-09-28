@@ -255,16 +255,47 @@ func TestDatadogPerPodFilter_SinglePodAndUnscoped(t *testing.T) {
 	assert.NotContains(t, got, " AND ")
 }
 
-// Without a pod list there is no series count, so there is nothing to size the budget
-// from. Guessing the finest rollup is how a churny workload returns tens of megabytes.
-func TestBuildDatadogPerPodQuery_UnknownPodCountTakesTheCoarsestRollup(t *testing.T) {
+// Without a pod list there is no series count -- but the WINDOW is still known, and it
+// is half the budget calculation. Sizing on a pessimistic pod count keeps the guarantee
+// that made this coarse (a churny workload must not return tens of megabytes) while
+// letting a short window have the resolution it can afford.
+func TestBuildDatadogPerPodQuery_UnknownPodCountStillHonoursTheWindow(t *testing.T) {
 	meta := datadogPerPodMeta(t, "p99", 0)
+
+	// Fourteen days genuinely cannot afford the finest rollup even pessimistically,
+	// so it coarsens -- but to what the budget requires, not to the maximum.
 	got := buildDatadogPerPodQuery(datadogPerPodMetricCPU, meta, "kube_namespace:nudgebee", 1209600)
-	assert.Contains(t, got, ".rollup(avg, 3600)")
+	assert.Contains(t, got, ".rollup(avg, 2700)")
+
+	// Six hours fits the finest rollup with room to spare at any plausible pod count,
+	// and this is where the old code was most wrong: it charged this request the
+	// resolution only a fourteen-day one needs. Measured, that read a CPU p99 at 19%
+	// of the value Prometheus reports for the same pod.
+	got = buildDatadogPerPodQuery(datadogPerPodMetricCPU, meta, "kube_namespace:nudgebee", 21600)
+	assert.Contains(t, got, ".rollup(avg, 300)")
 
 	scoped := datadogPerPodMeta(t, "p99", 6)
 	got = buildDatadogPerPodQuery(datadogPerPodMetricCPU, scoped, "kube_namespace:nudgebee", 1209600)
 	assert.Contains(t, got, ".rollup(avg, 300)", "a known, small pod list buys resolution")
+}
+
+// The rollup is NOT chosen per aggregate, and that is deliberate.
+//
+// `max` looks like it could stay coarse for free -- max of max-buckets is max -- and an
+// earlier version of this change did exactly that to save budget. Measured against
+// Prometheus, one workload's memory then read 39% of its true value where the fine
+// rollup read 100%. Under-reporting memory is the OOM direction, so every aggregate
+// gets the same resolution.
+func TestDatadogPerPodRollup_DoesNotVaryByAggregate(t *testing.T) {
+	var seen []int
+	for _, agg := range []string{"max", "min", "avg", "p99", "count"} {
+		meta := datadogPerPodMeta(t, agg, 0)
+		seen = append(seen, datadogPerPodRollupSeconds(meta, 21600))
+	}
+	for _, got := range seen[1:] {
+		assert.Equal(t, seen[0], got,
+			"every aggregate must get the same rollup; a cheaper one for max under-reports memory")
+	}
 }
 
 // Aggregate promises exactly one point per series. A pod that reported nothing all
@@ -369,22 +400,22 @@ func TestDatadogCollapseOverTime_CountIsStepEquivalent(t *testing.T) {
 		"20 minutes is 16 steps; a gap is not observation")
 }
 
-// Without a pod list the rollup is the coarsest one, and the conversion has to use it
-// too — otherwise a workload-wide count is out by a factor of twelve.
+// Without a pod list the rollup is whatever the window affords, and the conversion has
+// to use the SAME one — otherwise a workload-wide count is out by exactly their ratio.
 func TestDatadogCollapseOverTime_CountFollowsTheCoarseRollup(t *testing.T) {
 	count, err := parseAggregate("count")
 	require.NoError(t, err)
 
 	meta := RequestMetadata{Aggregate: count, RangeWindow: "1209600s", Step: "75s"}
-	require.Equal(t, 3600, datadogPerPodRollupSeconds(meta, 14*24*3600))
+	require.Equal(t, 2700, datadogPerPodRollupSeconds(meta, 14*24*3600))
 
 	results := []QueryResult{{
 		QueryKey: "container_cpu_usage_by_pod",
 		Payload:  []Result{{Timestamps: seq(2), Values: ones(2)}},
 	}}
 	datadogCollapseOverTime(results, meta)
-	assert.InDelta(t, 2*3600/75.0, results[0].Payload[0].Values[0], 0.001,
-		"two hourly buckets are two hours of observation")
+	assert.InDelta(t, 2*2700/75.0, results[0].Payload[0].Values[0], 0.001,
+		"two buckets are two bucket-widths of observation, at whatever width was asked for")
 }
 
 // A metadata built without a step (every direct-constructed one, and any caller that

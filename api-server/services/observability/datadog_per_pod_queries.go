@@ -129,15 +129,44 @@ func datadogRollupFunc(agg ParsedAggregate) string {
 // different rollup from the one the query asked for would misreport coverage by that
 // ratio, silently and only on Datadog.
 func datadogPerPodRollupSeconds(meta RequestMetadata, windowSeconds int64) int {
-	// The budget is a count of points, so it needs a count of series. Without a pod
-	// list the query is workload-wide and the series count is unknown, so take the
-	// coarsest rollup rather than size on a number we do not have — a churny workload
-	// is exactly where the guess would be worst.
+	pods := len(meta.PodNames)
 	if !meta.PodNamesSupplied {
-		return datadogCoarsestRollupSeconds
+		// No pod list means no series count, but "unknown" is not a reason to ignore
+		// the WINDOW too. The old code returned the coarsest rollup outright, which
+		// charged a six-hour request the resolution a fourteen-day one needs: at 6h
+		// even 1000 pods at 300s is 72k points, a third of the budget.
+		//
+		// Measured against Prometheus on the same cluster, that cost real accuracy --
+		// and not only for percentiles, which was the surprise. Workload-scoped, as
+		// a fraction of the true value:
+		//
+		//     CPU p99     17-26%   (a p99 over hour-wide averages is not a p99)
+		//     memory max  39%      on one workload; exact on the other five
+		//     coverage    111-195% (a bucket with one sample is credited its width)
+		//
+		// The memory result is why this does not special-case the aggregate. `max`
+		// reads as exact under coarse buckets on most workloads, so an earlier version
+		// of this change kept `max` coarse to save budget -- which would have
+		// under-reported one workload's memory by 61%, the OOM direction. Every
+		// aggregate gets the finest rollup the budget allows.
+		pods = datadogWorkloadScopedPodEstimate
 	}
-	return datadogRollupSecondsForPods(windowSeconds, len(meta.PodNames))
+	return datadogRollupSecondsForPods(windowSeconds, pods)
 }
+
+// datadogWorkloadScopedPodEstimate stands in for the series count when the caller
+// names no pods.
+//
+// It is an assumption, so it is deliberately pessimistic: 291 is the most pod
+// incarnations one workload has been measured with (a 14-day window on a workload that
+// redeploys constantly), and this rounds that up. Being pessimistic only costs
+// resolution on long windows -- a 14-day request lands on 2700s rather than 300s --
+// while short windows, where the budget has room to spare whatever the pod count, get
+// the finest rollup regardless.
+//
+// A caller that knows its pods should send them: an exact list sizes the budget on the
+// real number and is always at least as good as this.
+const datadogWorkloadScopedPodEstimate = 300
 
 // datadogPerPodFilter scopes the query to the caller's exact pod list.
 //
