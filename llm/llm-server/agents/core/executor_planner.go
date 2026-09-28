@@ -410,6 +410,10 @@ type plannerExecutor struct {
 	summaryToolName     string
 	semaphore           chan struct{}
 	toolCallCache       turnToolCallCache // Normalized cache for tool results, persists across plan regeneration within a turn
+	// configMu guards agentRequest.QueryConfig's ToolConfigs and ToolConfigMetadata
+	// maps. doIterationParallel runs several actions against this one executor, and
+	// every one of them resolves its tool's config through the same maps.
+	configMu sync.Mutex
 }
 
 func (e *plannerExecutor) GetInputKeys() []string {
@@ -2123,6 +2127,16 @@ func subjectOfRequest(toolContext toolcore.NbToolContext) string {
 // ensureToolConfigs returns a non-nil map so a resolved config can always be
 // recorded, including on the paths that previously returned without noting
 // which target they had settled on.
+// resolvedToolConfig reads a tool's already-resolved config name under configMu.
+// Callers on the parallel path must not read the map directly: a plain read racing a
+// write from another action's resolution is the same fatal runtime error as two writes.
+// Never call this while holding configMu — sync.Mutex is not reentrant.
+func (e *plannerExecutor) resolvedToolConfig(toolName string) string {
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
+	return e.agentRequest.QueryConfig.ToolConfigs[toolName]
+}
+
 func ensureToolConfigs(m map[string]string) map[string]string {
 	if m == nil {
 		return map[string]string{}
@@ -3062,6 +3076,24 @@ func (e *plannerExecutor) selectConfigUsingLLM(userQuery string, configs []toolc
 	return ""
 }
 
+// followupForMultipleToolConfigs resolves which configured integration a tool should
+// run against, and is serialised per executor.
+//
+// It reads and writes agentRequest.QueryConfig's maps down every branch while running
+// concurrently for each action in a parallel batch, which killed the process outright:
+// two gcloud_execute actions in one batch both took the single-config branch and wrote
+// the same key, and the Go runtime aborts on a concurrent map write.
+//
+// The resolution body holds the lock rather than each write, because the "already
+// resolved, nothing to do" early return below is only correct if a second caller for the
+// same tool observes the first caller's decision. Serialising also stops two actions
+// paying for the same LLM-based resolution. The cost is that two actions needing LLM
+// resolution for different tools now wait for each other; that path is rare (it needs a
+// tool with several configs and no prior choice) and the duplicate work it avoids is
+// worth more than the overlap.
+//
+// Listing the candidates stays outside the lock: it is read-only, cached, and can hit the
+// database, so serialising it would buy nothing and cost every action the same wait.
 func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, action NBAgentPlannerToolAction) ([]NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
 	// Get available configs for the tool
 	configs, err := toolcore.ListToolConfigs(e.ctx, e.agentRequest.AccountId, tool)
@@ -3085,6 +3117,10 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 			},
 		}, nil, nil
 	}
+
+	// Everything below reads or writes the shared QueryConfig maps.
+	e.configMu.Lock()
+	defer e.configMu.Unlock()
 
 	if shellTarget {
 		hint := e.agentRequest.QueryConfig.ToolConfigs[tool.Name()]
@@ -5012,7 +5048,7 @@ func (e *plannerExecutor) shellWriteTarget(owner toolcore.NBTool, action NBAgent
 	if err != nil {
 		return toolcore.ToolConfig{}, err
 	}
-	saved, savedErr := toolcore.GetToolConfigByName(e.ctx, e.agentRequest.AccountId, owner, e.agentRequest.QueryConfig.ToolConfigs[owner.Name()])
+	saved, savedErr := toolcore.GetToolConfigByName(e.ctx, e.agentRequest.AccountId, owner, e.resolvedToolConfig(owner.Name()))
 	if requested == "" {
 		return saved, savedErr
 	}
@@ -5026,7 +5062,7 @@ func (e *plannerExecutor) perCallWriteTarget(tool toolcore.NBTool, scoped toolco
 	if err != nil || requested == "" {
 		return toolcore.ToolConfig{}, false, err
 	}
-	saved, _ := toolcore.GetToolConfigByName(e.ctx, e.agentRequest.AccountId, tool, e.agentRequest.QueryConfig.ToolConfigs[tool.Name()])
+	saved, _ := toolcore.GetToolConfigByName(e.ctx, e.agentRequest.AccountId, tool, e.resolvedToolConfig(tool.Name()))
 	selected, err := tools.ResolveRequestedTarget(e.ctx, e.agentRequest.AccountId, tool.Name(), saved, requested)
 	return selected, err == nil, err
 }
