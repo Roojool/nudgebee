@@ -24,6 +24,7 @@ import Tooltip from '@ui/Tooltip';
 import QueryModeSwitcher from '@components/k8s/common/QueryModeSwitcher';
 import { Button as DsButton } from '@ui/Button';
 import { ds } from '@utils/colors';
+import { inferPromqlUnit, scaleSeriesToUnit } from '@lib/promqlUnit';
 
 interface KubernetesPrometheusProps {
   accountId: string;
@@ -38,6 +39,8 @@ interface KubernetesPrometheusProps {
     startTime: number;
     endTime: number;
   };
+  /** Read each chart's unit off its PromQL and print it on the axis, tooltip and legend. */
+  inferUnits?: boolean;
 }
 
 interface Header {
@@ -59,6 +62,7 @@ const KubernetesPrometheus: React.FC<KubernetesPrometheusProps> = ({
     startTime: 0,
     endTime: 0,
   },
+  inferUnits = false,
 }) => {
   const router = useRouter();
   const k8sProm = 'k8sProm';
@@ -377,7 +381,16 @@ const KubernetesPrometheus: React.FC<KubernetesPrometheusProps> = ({
       }
     });
 
-    return { tableData, graphData };
+    if (!inferUnits) {
+      return { tableData, graphData };
+    }
+    return {
+      tableData,
+      graphData: graphData.map((entry: any) => {
+        const { datasets, formatValue } = scaleSeriesToUnit(entry.data.data, inferPromqlUnit(entry.query));
+        return { ...entry, data: { ...entry.data, data: datasets }, formatValue };
+      }),
+    };
   };
 
   const handleSubmit = (
@@ -583,6 +596,7 @@ const KubernetesPrometheus: React.FC<KubernetesPrometheusProps> = ({
                   interactionOptions={{
                     enabled: false,
                   }}
+                  formatValue={cd.formatValue}
                 />
               </Box>
             ))

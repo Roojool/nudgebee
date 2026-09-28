@@ -1,6 +1,7 @@
 import Datetime from '@shared/format/Datetime';
 import { PrometheusIcon } from '@assets';
 import KubernetesPrometheus from '@components/k8s/details/KubernetesPrometheus';
+import { formatMetricValue, inferPromqlUnit } from '@lib/promqlUnit';
 
 class PrometheusCard {
   constructor(data, _event) {
@@ -54,6 +55,7 @@ class PrometheusCard {
   renderPrometheusData = () => {
     return this.resultType == 'series' ? (
       <KubernetesPrometheus
+        inferUnits
         showQueryBox={false}
         preparedEvidences={this.prometheusTypeData}
         showDateTime={false}
@@ -70,6 +72,7 @@ class PrometheusCard {
           const { metadata, data } = entry;
           const query = metadata?.query;
           const seriesList = data?.vector_result || [];
+          const unit = inferPromqlUnit(query);
 
           if (seriesList.length === 0) {
             return null;
@@ -81,6 +84,7 @@ class PrometheusCard {
               {seriesList.map((series, i) => {
                 const { value, metric } = series;
                 const [metricValue, timestamp] = [value?.value, value?.timestamp];
+                const numericValue = parseFloat(metricValue);
 
                 return (
                   <div key={i} style={{ marginBottom: 'var(--ds-space-4)' }}>
@@ -88,7 +92,8 @@ class PrometheusCard {
                       <strong>Metric:</strong> {metric.__name__}
                     </div>
                     <div>
-                      <strong>Value:</strong> {metricValue}
+                      {/* The exact value when its unit is unknown; a rounded one only once the unit says what it is. */}
+                      <strong>Value:</strong> {unit && Number.isFinite(numericValue) ? formatMetricValue(numericValue, unit) : metricValue}
                     </div>
 
                     {timestamp ? (

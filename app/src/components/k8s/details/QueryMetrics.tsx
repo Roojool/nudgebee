@@ -90,6 +90,8 @@ interface QueryMetricsProps {
     startTime: number;
     endTime: number;
   };
+  /** Formats the numbers the charts print; the chart default (`toFixed(2)`) when omitted. */
+  formatValue?: (value: number) => string;
 }
 
 interface Header {
@@ -111,6 +113,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     endTime: 0,
   },
   preparedEvidences = [],
+  formatValue,
 }) => {
   const router = useRouter();
   const k8sProm = 'k8sProm';
@@ -1245,6 +1248,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                         interactionOptions={{
                           enabled: false,
                         }}
+                        formatValue={formatValue}
                       />
                     </Box>
                   </Box>
