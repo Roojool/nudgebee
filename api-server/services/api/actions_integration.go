@@ -45,6 +45,16 @@ type ValidationResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// connectionSuccessMessage renders a passing connection test, with any advisory
+// notes appended. The test still succeeded — the notes describe a part of the
+// integration that is not usable, not a connection that failed.
+func connectionSuccessMessage(notes []string) string {
+	if len(notes) == 0 {
+		return "Connection successful"
+	}
+	return "Connection successful. " + strings.Join(notes, " ")
+}
+
 type IntegrationDiagnosisResponse struct {
 	Success           bool      `json:"success"`
 	TestStatus        string    `json:"test_status"`
@@ -485,7 +495,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 				core.IntegrationConfigValue{Name: core.IntegrationConfigName, Value: request.IntegrationConfigName})
 		}
 
-		testErr := core.TestIntegrationConnectionByConfig(
+		notes, testErr := core.TestIntegrationConnectionByConfig(
 			ctx,
 			request.IntegrationName,
 			request.IntegrationConfigValues,
@@ -502,9 +512,13 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 			return
 		}
 
+		// Notes ride in Message, which the client already selects. A new response
+		// field would be dropped silently by the gateway unless the GraphQL type and
+		// every selection set were updated too, and the note is a sentence, not a
+		// structure.
 		c.JSON(200, ValidationResponse{
 			Success: true,
-			Message: "Connection successful",
+			Message: connectionSuccessMessage(notes),
 		})
 		return
 

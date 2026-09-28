@@ -47,6 +47,23 @@ type TestableIntegration interface {
 	TestConnection(ctx *security.RequestContext, values []IntegrationConfigValue, accountId string) error
 }
 
+// ConnectionNoter is an optional capability for an integration whose connection
+// test can pass while something about the connection is still worth reporting.
+//
+// It exists because TestConnection answers one boolean for a service that may
+// have several independent surfaces. CubeAPM is the case in point: queries and
+// alert-rule management answer on different ports with different credentials, so
+// a working query path says nothing about whether alert rules can be managed.
+// Failing the test on the second surface is not an option — the same probe backs
+// the provider-status view, where a failure marks logs, metrics and traces
+// disconnected.
+//
+// Notes are returned only when the connection test itself passed, and must never
+// be used to signal that the integration is unusable. That is what an error is for.
+type ConnectionNoter interface {
+	ConnectionNotes(ctx *security.RequestContext, values []IntegrationConfigValue, accountId string) []string
+}
+
 // TenantScopedIntegration is an optional capability an Integration may implement to
 // declare that it binds to the tenant directly and needs NO cloud-account mapping (no
 // account_id). The generic create + connection-test paths skip the account_id requirement

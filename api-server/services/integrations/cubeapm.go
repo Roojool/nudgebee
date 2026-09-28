@@ -237,6 +237,88 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 	}
 }
 
+// CubeAPMAlertRulesPath is the admin API's rule collection. The alertrule package
+// carries the same path for the calls it makes; it is duplicated rather than shared
+// because importing this package there would add a dependency edge for one string.
+const CubeAPMAlertRulesPath = "/api/alerts/api/v1/rules"
+
+// cubeAPMAdminProbeTimeout is deliberately shorter than the query probe's. The
+// admin port is internal-only by default and is frequently not exposed at all, so
+// this probe is the one most likely to sit waiting on a connect that never
+// completes — and it is advisory, so it must never be what makes Test Connection
+// feel broken.
+const cubeAPMAdminProbeTimeout = 5 * time.Second
+
+// ConnectionNotes implements core.ConnectionNoter. It reports on the ADMIN plane,
+// which TestConnection deliberately does not probe: alert-rule management answers
+// on a different port with a different credential, so a working query path says
+// nothing about it. Every outcome here is a note rather than an error, because a
+// CubeAPM used only for logs, metrics and traces is correctly configured — see the
+// interface doc for what a failure here would do to the provider-status view.
+//
+// Unreachable is reported as "not verified" rather than as a fault: the admin port
+// is internal by default and an operator who has not exposed it has not made a
+// mistake.
+func (m CubeAPM) ConnectionNotes(sc *security.RequestContext, config []core.IntegrationConfigValue, accountId string) []string {
+	var queryURL, adminURL, adminToken string
+	for _, c := range config {
+		switch c.Name {
+		case "cubeapm_url":
+			queryURL = c.Value
+		case "cubeapm_admin_url":
+			adminURL = c.Value
+		case "cubeapm_admin_token":
+			adminToken = c.Value
+		}
+	}
+
+	adminURL = normalizeCubeAPMURL(adminURL, CubeAPMDefaultAdminPort)
+	if adminURL == "" {
+		adminURL = deriveCubeAPMAdminURL(normalizeCubeAPMURL(queryURL, CubeAPMDefaultQueryPort))
+	}
+	if adminURL == "" {
+		return []string{fmt.Sprintf("Alert-rule management not verified: the admin URL could not be derived "+
+			"because cubeapm_url is not on the standard query port (%s). Set cubeapm_admin_url to manage "+
+			"alert rules from Nudgebee.", CubeAPMDefaultQueryPort)}
+	}
+
+	resp, err := common.HttpGet(
+		adminURL+CubeAPMAlertRulesPath,
+		common.HttpWithHeaders(CubeAPMRequestHeaders(adminToken, "")),
+		common.HttpWithTimeout(cubeAPMAdminProbeTimeout),
+	)
+	if err != nil {
+		return []string{fmt.Sprintf("Alert-rule management not verified: the admin API at %s could not be "+
+			"reached. That is expected when the admin port is not exposed; alert rules cannot be managed "+
+			"from Nudgebee until it is.", adminURL)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return []string{"Queries work, but alert-rule management is unauthorised. Set cubeapm_admin_token " +
+			"to match the CubeAPM server's http-token-admin setting, or alert rules will not sync."}
+	case http.StatusNotFound:
+		return []string{fmt.Sprintf("Alert-rule management is unavailable: no admin API at %s. CubeAPM "+
+			"disables its admin server unless http-host-admin is set.", adminURL)}
+	case http.StatusForbidden:
+		return []string{"Queries work, but the CubeAPM admin API refused the request (HTTP 403). " +
+			"Alert rules will not sync."}
+	}
+	// Any other non-2xx is still a plane that cannot manage rules. Falling through
+	// to "no note" here would report a clean connection while a 500 or a 502 from
+	// the admin API quietly kept alert rules from syncing — the exact silent
+	// failure this function exists to end. The status is named rather than
+	// interpreted, because anything beyond the cases above is a server or proxy
+	// fault whose meaning we would only be guessing at.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return []string{fmt.Sprintf("Alert-rule management is not usable: the CubeAPM admin API at %s "+
+			"answered HTTP %d. Alert rules will not sync until it responds normally.",
+			adminURL, resp.StatusCode)}
+	}
+	return nil
+}
+
 // CubeAPMTracesQueryPath is the LogsQL trace query endpoint the trace source reads.
 const CubeAPMTracesQueryPath = "/api/traces/select/logsql/query"
 

@@ -1471,7 +1471,16 @@ const IntegrationDynamicFormModal = ({
       );
       if (result?.success) {
         setConnectionVerified(true);
-        snackbar.success(`${snakeToTitleCase(integrationName)} connection successful`);
+        // A passing test can still carry an advisory note — a part of the
+        // integration that is configured but not usable, such as CubeAPM's
+        // alert-rule API answering with a different credential. The note rides in
+        // `message`; showing only the hardcoded string threw it away.
+        const note = (result.message || '').replace(/^Connection successful\.?\s*/, '');
+        if (note) {
+          snackbar.warning(`${snakeToTitleCase(integrationName)} connection successful. ${note}`);
+        } else {
+          snackbar.success(`${snakeToTitleCase(integrationName)} connection successful`);
+        }
       } else {
         snackbar.error(result?.error || `${snakeToTitleCase(integrationName)} connection test failed`);
       }
