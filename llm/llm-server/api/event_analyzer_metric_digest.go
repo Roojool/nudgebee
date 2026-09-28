@@ -46,48 +46,82 @@ type metricSeries struct {
 // `timestamps` arrays — so the CloudWatch `items[]` shape, the provider-agnostic
 // `metric_groups` / `series_list_result` shape and the Kubernetes pod-metrics shape
 // are all covered without per-provider code.
+//
+// A card that says what it measured (its query, and the unit when the query settles
+// it) gets that stated once, with its series nested under it: rate()/sum() series
+// carry no __name__, so without it the model got numbers with no metric or unit.
 func renderMetricDigest(ev events.InvestigateData) string {
-	var series []metricSeries
-	for _, d := range allEvidenceData(ev) {
-		collectMetricSeries(parseEvidenceData(d), "", 0, &series)
+	type digestCard struct {
+		header string
+		lines  []string
 	}
-	if len(series) == 0 {
-		return ""
-	}
-
 	// The same series is often stored twice (grouped and flat), so dedupe the
 	// rendered lines before counting what did not fit.
-	var lines []string
+	var cards []digestCard
+	total := 0
 	seen := make(map[string]bool)
-	for _, s := range series {
-		line := formatMetricSeries(s)
-		if !seen[line] {
-			seen[line] = true
-			lines = append(lines, line)
+	for _, card := range allEvidenceCards(ev) {
+		var series []metricSeries
+		collectMetricSeries(parseEvidenceData(card.Data), "", 0, &series)
+		c := digestCard{header: metricCardHeader(card)}
+		for _, s := range series {
+			line := formatMetricSeries(s)
+			if !seen[line] {
+				seen[line] = true
+				c.lines = append(c.lines, line)
+			}
+		}
+		if len(c.lines) > 0 {
+			cards = append(cards, c)
+			total += len(c.lines)
 		}
 	}
 
 	var b strings.Builder
-	for i, line := range lines {
-		if i == maxMetricDigestSeries || b.Len()+len(line) > maxMetricDigestBytes {
-			fmt.Fprintf(&b, "- … %d more series in the structured evidence file\n", len(lines)-i)
-			break
+	rendered := 0
+	for _, c := range cards {
+		indent := ""
+		if c.header != "" {
+			indent = "  "
 		}
-		b.WriteString(line)
+		for i, line := range c.lines {
+			header := ""
+			if i == 0 {
+				header = c.header
+			}
+			if rendered == maxMetricDigestSeries || b.Len()+len(header)+len(indent)+len(line) > maxMetricDigestBytes {
+				fmt.Fprintf(&b, "- … %d more series in the structured evidence file\n", total-rendered)
+				return b.String()
+			}
+			b.WriteString(header + indent + line)
+			rendered++
+		}
 	}
 	return b.String()
 }
 
-// allEvidenceData returns the Data of every evidence section.
-func allEvidenceData(ev events.InvestigateData) []any {
-	var out []any
+// metricCardHeader is the line naming what a card's series measure, or "" when
+// the card does not say.
+func metricCardHeader(card events.InvestigateDataInsight) string {
+	if card.Query == "" {
+		return ""
+	}
+	if card.Unit != "" {
+		return fmt.Sprintf("- query `%s` · unit: %s\n", card.Query, card.Unit)
+	}
+	return fmt.Sprintf("- query `%s`\n", card.Query)
+}
+
+// allEvidenceCards returns every evidence section that carries data.
+func allEvidenceCards(ev events.InvestigateData) []events.InvestigateDataInsight {
+	var out []events.InvestigateDataInsight
 	for _, d := range []events.InvestigateDataInsight{
 		ev.PodData, ev.NodeData, ev.Deployment, ev.AlertLabels, ev.JobInformation,
 		ev.JobEvents, ev.JobPodEvents, ev.RelatedEvents, ev.ContainerMetrics,
 		ev.Traces, ev.AlertData, ev.ServiceMap,
 	} {
 		if d.Data != nil {
-			out = append(out, d.Data)
+			out = append(out, d)
 		}
 	}
 	for _, list := range [][]events.InvestigateDataInsight{
@@ -97,7 +131,7 @@ func allEvidenceData(ev events.InvestigateData) []any {
 	} {
 		for _, d := range list {
 			if d.Data != nil {
-				out = append(out, d.Data)
+				out = append(out, d)
 			}
 		}
 	}
@@ -175,7 +209,7 @@ func metricSeriesFrom(m map[string]any, parentKey string) (metricSeries, bool) {
 }
 
 // genericMetricKeys are container keys that never name a series.
-var genericMetricKeys = map[string]bool{"": true, "data": true, "items": true, "series_list_result": true, "metric_groups": true, "result": true}
+var genericMetricKeys = map[string]bool{"": true, "data": true, "items": true, "series_list_result": true, "metric_groups": true, "result": true, "results": true, "payload": true}
 
 // metricSeriesName builds a readable name from the series' own labels, falling back
 // to the key it was found under.

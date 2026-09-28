@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -97,4 +98,81 @@ func TestRenderMetricDigest(t *testing.T) {
 			t.Errorf("expected metric values section, got:\n%s", got)
 		}
 	})
+}
+
+// Cards as the events tool maps them: series from rate()/sum() carry no __name__,
+// so the card's query is the only thing saying what they measure.
+func TestRenderMetricDigest_StatesEachCardsQueryOnce(t *testing.T) {
+	rateQuery := `sum by (pod) ( rate(container_cpu_usage_seconds_total{namespace="shop", container!=""}[5m]) )`
+	ev := events.InvestigateData{
+		MetricsData: []events.InvestigateDataInsight{{
+			// prometheus_enricher: two pods, no __name__.
+			Data: `{"result_type":"matrix","series_list_result":[` +
+				`{"metric":{"namespace":"shop","pod":"web-1"},"values":["0.21","0.93"],"timestamps":[1790473680,1790473740]},` +
+				`{"metric":{"namespace":"shop","pod":"web-2"},"values":["0.18","0.25"],"timestamps":[1790473680,1790473740]}]}`,
+			Query: rateQuery,
+			Unit:  "cores",
+		}},
+		PodMetrics: []events.InvestigateDataInsight{{
+			// pod_metric_enricher: memory, working-set bytes.
+			Data: map[string]any{"name": "pod_metric", "resource_type": "memory", "data": []any{map[string]any{
+				"metric":     map[string]any{"container": "app", "pod": "web-1", "namespace": "shop"},
+				"timestamps": []any{1790473680.0, 1790473740.0}, "values": []any{"30973952", "210489344"},
+			}}},
+			Query: "resource_type=memory",
+			Unit:  "bytes",
+		}},
+		Others: []events.InvestigateDataInsight{{
+			// The workload `metrics` action: one unlabelled series under results[].payload.
+			Data: map[string]any{"data": map[string]any{"results": []any{map[string]any{
+				"query_key": "cpu_usage",
+				"payload":   []any{map[string]any{"metric": map[string]any{}, "timestamps": []any{1790473680.0, 1790473740.0}, "values": []any{0.39, 1.18}}},
+				"query":     `sum(rate(container_cpu_usage_seconds_total{namespace="shop", pod=~"web-.*"}[5m]))`,
+			}}}},
+			Query: "metrics=cpu_usage",
+			Unit:  "cores",
+		}},
+	}
+	got := renderMetricDigest(ev)
+
+	for _, want := range []string{
+		"- query `" + rateQuery + "` · unit: cores\n  - shop web-1: 2 points",
+		"  - shop web-2: 2 points",
+		"- query `resource_type=memory` · unit: bytes\n  - shop web-1 app: 2 points",
+		"- query `metrics=cpu_usage` · unit: cores\n  - series: 2 points",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("digest missing %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "container_cpu_usage_seconds_total"); n != 1 {
+		t.Errorf("expected the rate() query stated once for its two series, got %d:\n%s", n, got)
+	}
+	if n := strings.Count(got, "unit:"); n != 3 {
+		t.Errorf("expected one unit per card, stated once, got %d:\n%s", n, got)
+	}
+	if strings.Contains(got, "payload") {
+		t.Errorf("container key named a series:\n%s", got)
+	}
+}
+
+func TestRenderMetricDigest_QueryHeadersStayInsideTheBudget(t *testing.T) {
+	var cards []events.InvestigateDataInsight
+	for i := 0; i < 10; i++ {
+		cards = append(cards, events.InvestigateDataInsight{
+			Data: map[string]any{"series_list_result": []any{
+				map[string]any{"metric": map[string]any{"pod": fmt.Sprintf("web-%d", i)}, "values": []any{"1", "2"}, "timestamps": []any{1790473680.0, 1790473740.0}},
+				map[string]any{"metric": map[string]any{"pod": fmt.Sprintf("api-%d", i)}, "values": []any{"1", "2"}, "timestamps": []any{1790473680.0, 1790473740.0}},
+			}},
+			Query: strings.Repeat("q", 300),
+		})
+	}
+	got := renderMetricDigest(events.InvestigateData{MetricsData: cards})
+	overflow := strings.LastIndex(got, "- … ")
+	if overflow < 0 || overflow > maxMetricDigestBytes {
+		t.Errorf("expected the overflow note after at most %d bytes, got it at %d:\n%s", maxMetricDigestBytes, overflow, got)
+	}
+	if !strings.HasSuffix(got, "more series in the structured evidence file\n") {
+		t.Errorf("expected an overflow note, got:\n%s", got)
+	}
 }

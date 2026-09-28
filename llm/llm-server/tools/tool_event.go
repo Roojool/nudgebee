@@ -572,11 +572,14 @@ func (m EventsExecuteTool) processRowWithMessages(data map[string]any, i, c int,
 						Title:          evidence.Type,
 					})
 				} else if evidenceDataJson["name"] == "pod_metric" {
+					query, _ := metricCardQuery(evidence.Metadata)
 					investigateData.PodMetrics = append(investigateData.PodMetrics, events.InvestigateDataInsight{
 						Data:           evidenceDataJson,
 						Insight:        evidence.Insights,
 						AdditionalInfo: evidence.AdditionalInfo,
 						Title:          evidence.Type,
+						Query:          query,
+						Unit:           utilisationUnit(evidence.Metadata),
 					})
 				} else if evidenceDataJson["name"] == "container_metric" {
 					investigateData.ContainerMetrics.Data = evidenceDataJson
@@ -616,20 +619,29 @@ func (m EventsExecuteTool) processRowWithMessages(data map[string]any, i, c int,
 						Title:          evidence.Type,
 					}
 				} else {
-					investigateData.Others = append(investigateData.Others, events.InvestigateDataInsight{
+					other := events.InvestigateDataInsight{
 						Data:           evidenceDataJson,
 						Insight:        evidence.Insights,
 						Type:           evidence.Type,
 						AdditionalInfo: evidence.AdditionalInfo,
 						Title:          evidence.Type,
-					})
+					}
+					// The workload `metrics` action's card has no section of its own.
+					if additionalInfo["action_name"] == "metrics" {
+						other.Query, _ = metricCardQuery(evidence.Metadata)
+						other.Unit = utilisationUnit(evidence.Metadata)
+					}
+					investigateData.Others = append(investigateData.Others, other)
 				}
 			} else if evidence.Type == "prometheus" {
+				query, unit := metricCardQuery(evidence.Metadata)
 				investigateData.MetricsData = append(investigateData.MetricsData, events.InvestigateDataInsight{
 					Data:           evidence.Data,
 					Insight:        evidence.Insights,
 					AdditionalInfo: evidence.AdditionalInfo,
 					Title:          evidence.Type,
+					Query:          query,
+					Unit:           unit,
 				})
 			} else if evidence.Type == "service_map" {
 				investigateData.ServiceMap = events.InvestigateDataInsight{
