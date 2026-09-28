@@ -166,6 +166,7 @@ type AgenticAnalyzeRequest struct {
 	// skills DB); injected verbatim into the internal agent prompts.
 	Skills         string                   `json:"skills,omitempty"`
 	KnowledgeFiles []KnowledgeFileReference `json:"knowledge_files,omitempty"`
+	OriginalQuery  string                   `json:"original_query,omitempty"`
 
 	// PR followup fields — used to address CI failures and review comments on existing PRs
 	Followup bool   `json:"followup,omitempty"`
@@ -906,6 +907,7 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 		EventId:               req.EventId,
 		RecommendationId:      req.RecommendationId,
 		Skills:                req.Skills,
+		OriginalQuery:         req.OriginalQuery,
 	}
 
 	// Determine which agent to use based on request content

@@ -426,6 +426,10 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		"message_id":         agentRequest.MessageId,
 	}
 
+	if orig := resolveOriginalQueryForAnalysis(request.Query, agentRequest.OriginalQuery); orig != "" {
+		analyzeRequest["original_query"] = orig
+	}
+
 	if request.Agent != "" {
 		analyzeRequest["agent_id"] = request.Agent
 	}
@@ -611,6 +615,18 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		}
 		// status == "running" → keep polling
 	}
+}
+
+// The code-agent tool argument may summarize away a user's original request or
+// intent. When the original query is non-empty and differs from the delegated
+// task, resolveOriginalQueryForAnalysis extracts it to forward as a first-class
+// field in the JSON request.
+func resolveOriginalQueryForAnalysis(task, originalQuery string) string {
+	originalQuery = strings.TrimSpace(originalQuery)
+	if originalQuery == "" || strings.EqualFold(strings.TrimSpace(task), originalQuery) {
+		return ""
+	}
+	return originalQuery
 }
 
 // cancelWorkspaceAnalysis is best-effort and deliberately uses a detached

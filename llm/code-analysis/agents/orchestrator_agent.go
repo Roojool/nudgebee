@@ -59,7 +59,8 @@ type NBAgentRequest struct {
 	// Skills carries operator-authored skills mapped to the code agent, already
 	// rendered as a <skills> block by llm-server. code-analysis has no DB of its
 	// own, so skills are resolved upstream and forwarded here for prompt injection.
-	Skills string `json:"skills,omitempty"`
+	Skills        string `json:"skills,omitempty"`
+	OriginalQuery string `json:"original_query,omitempty"`
 }
 
 // shouldFailIncompleteFixRequest decides whether the orchestrator must reject a
@@ -1066,9 +1067,16 @@ func (a *OrchestratorAgent) createSessionContext(request NBAgentRequest) (*sessi
 		}
 	}
 
+	originalQuery := strings.TrimSpace(request.OriginalQuery)
+	task := strings.TrimSpace(request.Query)
+	if originalQuery == "" {
+		originalQuery = task
+	}
+
 	return &session.SessionContext{
 		AnalysisID:       request.ConversationId, // Or generate a new one
-		OriginalQuery:    request.Query,
+		OriginalQuery:    originalQuery,
+		Task:             task,
 		InitialLogs:      initialLogs,
 		RepoContext:      repoCtx,
 		Credentials:      sessionCredentials, // Pass secure credentials to tools
