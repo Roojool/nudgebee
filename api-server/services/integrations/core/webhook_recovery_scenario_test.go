@@ -112,13 +112,31 @@ func TestScenarioReaperRecoversStuckRows(t *testing.T) {
 	require.NoError(t, db.Get(&rowID, `
 		INSERT INTO event_incoming_webhooks(tenant_id, integration_id, integration_type, webhook_id, event_type, event_id, event_created_at, event_title, raw, processing_status, request_url)
 		VALUES ('890cad87-c452-4aa7-b84a-742cee0454a1','0e75a0cc-a55c-4187-afc1-8acf5aead026','workflow_webhook','','','',$1,'','{"ref":"refs/heads/main"}','pending','/api/webhooks/workflow?token=`+scenarioToken+`')
-		RETURNING id::text`, time.Now().UTC().Add(-2*time.Hour)))
+		RETURNING id::text`, time.Now().UTC().Add(-45*time.Minute)))
 
 	require.NoError(t, core.RecoverStuckWebhooks(sc))
 
 	var status string
 	require.NoError(t, db.Get(&status, `SELECT processing_status FROM event_incoming_webhooks WHERE id = $1`, rowID))
 	assert.Equal(t, "processed", status, "the reaper must re-drive a stuck pending row")
+}
+
+// TestScenarioReaperSkipsStaleRows covers the 09-22 dev flood: months-old
+// pending rows must not be replayed into today's analysis pipeline.
+func TestScenarioReaperSkipsStaleRows(t *testing.T) {
+	db, sc := scenarioSetup(t)
+
+	var rowID string
+	require.NoError(t, db.Get(&rowID, `
+		INSERT INTO event_incoming_webhooks(tenant_id, integration_id, integration_type, webhook_id, event_type, event_id, event_created_at, event_title, raw, processing_status, request_url)
+		VALUES ('890cad87-c452-4aa7-b84a-742cee0454a1','0e75a0cc-a55c-4187-afc1-8acf5aead026','workflow_webhook','','','',$1,'','{"ref":"refs/heads/main"}','pending','/api/webhooks/workflow?token=`+scenarioToken+`')
+		RETURNING id::text`, time.Now().UTC().Add(-48*time.Hour)))
+
+	require.NoError(t, core.RecoverStuckWebhooks(sc))
+
+	var status string
+	require.NoError(t, db.Get(&status, `SELECT processing_status FROM event_incoming_webhooks WHERE id = $1`, rowID))
+	assert.Equal(t, "skipped", status, "a row older than the max age must not be re-driven")
 }
 
 // TestScenarioReaperResetsStalledProcessing covers a pod that died mid-flight.
@@ -129,7 +147,7 @@ func TestScenarioReaperResetsStalledProcessing(t *testing.T) {
 	require.NoError(t, db.Get(&rowID, `
 		INSERT INTO event_incoming_webhooks(tenant_id, integration_id, integration_type, webhook_id, event_type, event_id, event_created_at, event_title, raw, processing_status, request_url)
 		VALUES ('890cad87-c452-4aa7-b84a-742cee0454a1','0e75a0cc-a55c-4187-afc1-8acf5aead026','workflow_webhook','','','',$1,'','{"ref":"refs/heads/main"}','processing','/api/webhooks/workflow?token=`+scenarioToken+`')
-		RETURNING id::text`, time.Now().UTC().Add(-2*time.Hour)))
+		RETURNING id::text`, time.Now().UTC().Add(-45*time.Minute)))
 
 	require.NoError(t, core.RecoverStuckWebhooks(sc))
 

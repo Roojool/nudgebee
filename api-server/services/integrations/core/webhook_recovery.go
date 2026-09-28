@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 )
@@ -26,7 +27,15 @@ const (
 	stuckWebhookProcessingAge = 30 * time.Minute
 	// Bounds one run. Recovery is per-row and re-runs on the next tick.
 	stuckWebhookBatchSize = 200
+	// Recorded on rows too old to re-drive, so the Activity Log says why.
+	stuckWebhookExpiredError = "not recovered: older than stuck_webhook_recovery_max_age_minutes"
 )
+
+// stuckWebhookMaxAge is the oldest delivery recovery will re-drive. Below the
+// pending age (10m) nothing is re-driven; 0 turns re-driving off entirely.
+func stuckWebhookMaxAge() time.Duration {
+	return time.Duration(config.Config.StuckWebhookRecoveryMaxAgeMinutes) * time.Minute
+}
 
 // RecoverStuckWebhooks re-drives webhook deliveries that the async path never
 // completed. Called by the "Stuck Webhook Recovery" cron job.
@@ -53,6 +62,20 @@ func RecoverStuckWebhooks(sc *security.RequestContext) error {
 	}
 	if reset, rowsErr := res.RowsAffected(); rowsErr == nil && reset > 0 {
 		sc.GetLogger().Warn("webhook recovery: reset webhooks stalled in processing", "count", reset)
+	}
+
+	// A stale alert replayed now is analysed against today's data, so it is
+	// skipped instead; that also lets the retention cleanup delete it.
+	res, err = dbms.Db.Exec(
+		`UPDATE event_incoming_webhooks SET processing_status = 'skipped', processing_error = $2
+		 WHERE processing_status = 'pending'
+		   AND event_created_at < (now() AT TIME ZONE 'utc') - make_interval(secs => $1)`,
+		stuckWebhookMaxAge().Seconds(), stuckWebhookExpiredError)
+	if err != nil {
+		return fmt.Errorf("integrations: failed to expire stale webhooks: %w", err)
+	}
+	if expired, rowsErr := res.RowsAffected(); rowsErr == nil && expired > 0 {
+		sc.GetLogger().Warn("webhook recovery: skipped webhooks too old to re-drive", "count", expired)
 	}
 
 	var rowIDs []string

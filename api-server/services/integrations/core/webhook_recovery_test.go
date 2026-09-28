@@ -2,7 +2,9 @@ package core
 
 import (
 	"testing"
+	"time"
 
+	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 
@@ -47,6 +49,9 @@ func TestRecoverStuckWebhooksResetsStalledRowsBeforeClaiming(t *testing.T) {
 	mock.ExpectExec("UPDATE event_incoming_webhooks SET processing_status = 'pending'").
 		WithArgs(stuckWebhookProcessingAge.Seconds()).
 		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec("UPDATE event_incoming_webhooks SET processing_status = 'skipped'").
+		WithArgs(stuckWebhookMaxAge().Seconds(), stuckWebhookExpiredError).
+		WillReturnResult(sqlmock.NewResult(0, 3))
 	mock.ExpectQuery("SELECT id::text FROM event_incoming_webhooks").
 		WithArgs(stuckWebhookPendingAge.Seconds(), stuckWebhookBatchSize).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -54,12 +59,13 @@ func TestRecoverStuckWebhooksResetsStalledRowsBeforeClaiming(t *testing.T) {
 	err := RecoverStuckWebhooks(security.NewRequestContextForSuperAdmin(nil, nil, nil))
 
 	assert.NoError(t, err)
-	assert.NoError(t, mock.ExpectationsWereMet(), "reset must run before the pending scan")
+	assert.NoError(t, mock.ExpectationsWereMet(), "reset and expiry must run before the pending scan")
 }
 
 func TestRecoverStuckWebhooksStopsWhenNothingIsStuck(t *testing.T) {
 	mock := mockMetastoreForRecovery(t)
 
+	mock.ExpectExec("UPDATE event_incoming_webhooks").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE event_incoming_webhooks").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SELECT id::text FROM event_incoming_webhooks").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
@@ -75,6 +81,7 @@ func TestRecoverStuckWebhooksClaimsEachStuckRow(t *testing.T) {
 	mock := mockMetastoreForRecovery(t)
 
 	mock.ExpectExec("UPDATE event_incoming_webhooks").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE event_incoming_webhooks").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SELECT id::text FROM event_incoming_webhooks").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("row-1").AddRow("row-2"))
 	// ProcessStoredWebhook claims pending → processing per row; 0 rows affected
@@ -88,4 +95,16 @@ func TestRecoverStuckWebhooksClaimsEachStuckRow(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStuckWebhookMaxAgeDefaultsToOneHour(t *testing.T) {
+	assert.Equal(t, time.Hour, stuckWebhookMaxAge())
+}
+
+func TestStuckWebhookMaxAgeZeroSkipsEveryPendingRow(t *testing.T) {
+	previous := config.Config.StuckWebhookRecoveryMaxAgeMinutes
+	t.Cleanup(func() { config.Config.StuckWebhookRecoveryMaxAgeMinutes = previous })
+
+	config.Config.StuckWebhookRecoveryMaxAgeMinutes = 0
+	assert.Equal(t, time.Duration(0), stuckWebhookMaxAge())
 }
