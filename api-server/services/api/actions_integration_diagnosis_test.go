@@ -176,3 +176,55 @@ func TestClassifyIntegrationDiagnosisError(t *testing.T) {
 		})
 	}
 }
+
+// A probe that has pinned the failure on a specific field prefixes its message with
+// "configuration:", and that verdict must win over the substring branches. The Splunk
+// index check quotes the customer's own index name, so an index called dns_logs or
+// tls_events would otherwise be reported to nubi as a DNS or TLS failure. The port hint
+// is the other way round: it names the URL, but a hung connection is still a
+// connectivity failure.
+func TestClassifyIntegrationDiagnosisError_ConfigurationPrefixWins(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    string
+		stage  string
+		reason string
+	}{
+		{
+			"event index configured as the metric index",
+			`configuration: splunk_metric_index "otel_logs" is an event index — metrics need an index created with datatype=metric`,
+			"configuration", "CONFIGURATION_INVALID",
+		},
+		{
+			"index name containing dns",
+			`configuration: splunk_log_index "dns_logs" is a metrics index — logs need an event index`,
+			"configuration", "CONFIGURATION_INVALID",
+		},
+		{
+			"index name containing tls",
+			`configuration: splunk_trace_index "tls_events" is disabled in Splunk — enable it, or point splunk_trace_index at an enabled index`,
+			"configuration", "CONFIGURATION_INVALID",
+		},
+		{
+			"missing port on a timeout",
+			`failed to connect to Splunk at https://splunk.example.com: Get "https://splunk.example.com/services/server/info?output_mode=json": ` +
+				`context deadline exceeded (Client.Timeout exceeded while awaiting headers) - the URL has no port, so port 443 was used; ` +
+				`Splunk's management API normally listens on 8089 — if yours does, use https://splunk.example.com:8089`,
+			"connectivity", "CONNECTION_TIMEOUT",
+		},
+		{
+			"missing port on a refused connection",
+			`failed to connect to Splunk at http://splunk.example.com - the server may be down, or a tunnel/port-forward may have died: ` +
+				`Get "http://splunk.example.com/services/server/info?output_mode=json": dial tcp 10.0.0.1:80: connect: connection refused - ` +
+				`the URL has no port, so port 80 was used; Splunk's management API normally listens on 8089 — if yours does, use http://splunk.example.com:8089`,
+			"connectivity", "ENDPOINT_UNREACHABLE",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stage, reason, _, _ := classifyIntegrationDiagnosisError(errors.New(test.err))
+			assert.Equal(t, test.stage, stage)
+			assert.Equal(t, test.reason, reason)
+		})
+	}
+}

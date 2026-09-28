@@ -2,9 +2,11 @@ package integrations
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"nudgebee/services/common"
@@ -76,6 +78,23 @@ const SplunkEnterpriseDefaultApp = "search"
 // reachability and credentials. It exists on every Splunk version and needs no
 // capability beyond a valid session.
 const SplunkEnterpriseServerInfoPath = "/services/server/info"
+
+// SplunkEnterpriseIndexesPath lists index metadata, including each index's datatype
+// (event or metric). TestConnection reads it to catch an index field pointed at an index
+// of the wrong kind, which server/info cannot see.
+const SplunkEnterpriseIndexesPath = "/services/data/indexes"
+
+// splunkEnterpriseIndexCheckTimeout bounds the index-metadata request. It is a fixed
+// budget of its own rather than whatever is left of the server/info timeout, so the
+// verdict cannot depend on how slowly server/info happened to answer. A var so tests
+// can shorten it.
+var splunkEnterpriseIndexCheckTimeout = 5 * time.Second
+
+// splunkEnterpriseIndexListingLimit caps how much of the index listing is read. Each
+// entry is ~5KB and the search filter is substring-based, so a short index name like
+// "main" can match many siblings; a listing past this cap fails to decode, which the
+// check treats as "could not tell" and passes.
+const splunkEnterpriseIndexListingLimit = 4 << 20
 
 type SplunkEnterprise struct{}
 
@@ -293,31 +312,26 @@ func (m SplunkEnterprise) TestConnection(sc *security.RequestContext, config []c
 		return err
 	}
 
-	opts := []common.HttpOption{
-		common.HttpWithHeaders(cfg.AuthHeaders()),
-		common.HttpWithQueryParams(map[string]string{"output_mode": "json"}),
-		common.HttpWithTimeout(15 * time.Second),
-	}
-	if cfg.InsecureSkipVerify {
-		opts = append(opts, common.HttpWithInsecureSkipVerify())
-	}
-
-	resp, err := common.HttpGet(cfg.URL+SplunkEnterpriseServerInfoPath, opts...)
+	resp, err := common.HttpGet(cfg.URL+SplunkEnterpriseServerInfoPath,
+		splunkEnterpriseHTTPOptions(cfg, map[string]string{"output_mode": "json"}, 15*time.Second)...)
 	if err != nil {
+		connErr := fmt.Errorf("failed to connect to Splunk at %s: %w", cfg.URL, err)
 		if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "connection refused") {
-			return fmt.Errorf("failed to connect to Splunk at %s - the server may be down, or a tunnel/port-forward may have died: %w", cfg.URL, err)
-		}
-		if strings.Contains(err.Error(), "x509") || strings.Contains(err.Error(), "certificate") {
+			connErr = fmt.Errorf("failed to connect to Splunk at %s - the server may be down, or a tunnel/port-forward may have died: %w", cfg.URL, err)
+		} else if strings.Contains(err.Error(), "x509") || strings.Contains(err.Error(), "certificate") {
 			return fmt.Errorf("TLS verification failed for Splunk at %s - the Splunk Operator issues a self-signed certificate by default; enable %s if that is expected: %w",
 				cfg.URL, SplunkEnterpriseConfigInsecure, err)
 		}
-		return fmt.Errorf("failed to connect to Splunk at %s: %w", cfg.URL, err)
+		if hint := splunkEnterpriseMissingPortHint(cfg.URL, err); hint != "" {
+			return fmt.Errorf("%w - %s", connErr, hint)
+		}
+		return connErr
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil
+		return checkSplunkEnterpriseIndexes(cfg)
 	case http.StatusUnauthorized:
 		if cfg.AuthType == SplunkEnterpriseAuthToken {
 			return fmt.Errorf("splunk rejected the token (HTTP 401) - check %s, and that token authentication is enabled on this instance", SplunkEnterpriseConfigToken)
@@ -331,6 +345,161 @@ func (m SplunkEnterprise) TestConnection(sc *security.RequestContext, config []c
 	default:
 		return fmt.Errorf("splunk API returned unexpected status: HTTP %d", resp.StatusCode)
 	}
+}
+
+// splunkEnterpriseHTTPOptions returns the auth, TLS and timeout options every
+// TestConnection request shares, so the index check authenticates exactly as the
+// server/info call it follows does.
+func splunkEnterpriseHTTPOptions(cfg SplunkEnterpriseConfig, params map[string]string, timeout time.Duration) []common.HttpOption {
+	opts := []common.HttpOption{
+		common.HttpWithHeaders(cfg.AuthHeaders()),
+		common.HttpWithQueryParams(params),
+		common.HttpWithTimeout(timeout),
+	}
+	if cfg.InsecureSkipVerify {
+		opts = append(opts, common.HttpWithInsecureSkipVerify())
+	}
+	return opts
+}
+
+// splunkEnterpriseMissingPortHint explains a failed connection that is most likely a
+// missing port. With no port in the URL the client dials the scheme default (443 or
+// 80), but Splunk's management API listens on 8089, so the symptom is a refused or
+// hung connection that reads like an outage. The hint is limited to exactly those two
+// symptoms: an EOF or TLS failure on the default port is a different listener
+// answering, and naming the port there would send the user after the wrong fix.
+//
+// This hints rather than defaulting the port the way normalizeCubeAPMURL does for
+// CubeAPM: 8089 is not the scheme default for either scheme, and a Splunk published
+// behind an ingress on 443 is a legitimate setup that a default would break.
+func splunkEnterpriseMissingPortHint(rawURL string, err error) string {
+	parsed, parseErr := neturl.Parse(rawURL)
+	if parseErr != nil || parsed.Host == "" || parsed.Port() != "" {
+		return ""
+	}
+	msg := err.Error()
+	refused := strings.Contains(msg, "connection refused")
+	timedOut := strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "Client.Timeout") ||
+		strings.Contains(msg, "i/o timeout")
+	if !refused && !timedOut {
+		return ""
+	}
+	defaultPort := "443"
+	if parsed.Scheme == "http" {
+		defaultPort = "80"
+	}
+	return fmt.Sprintf("the URL has no port, so port %s was used; Splunk's management API normally listens on 8089 — if yours does, use %s://%s:8089",
+		defaultPort, parsed.Scheme, parsed.Host)
+}
+
+// splunkEnterpriseIndexListing is the subset of a /services/data/indexes response the
+// index check reads.
+type splunkEnterpriseIndexListing struct {
+	Entry []struct {
+		Name    string `json:"name"`
+		Content struct {
+			Datatype string `json:"datatype"`
+			Disabled bool   `json:"disabled"`
+		} `json:"content"`
+	} `json:"entry"`
+}
+
+// checkSplunkEnterpriseIndexes fails the connection test when a configured index is
+// the wrong kind for its field: a metric index that is an event index (every mstats
+// search against it fails), a log or trace index that is a metrics index (every event
+// search returns nothing), or any configured index that is disabled. server/info proves
+// reachability and credentials but says nothing about indexes, so without this a
+// mistyped index passed the test and only failed later on the tab that used it.
+//
+// It fails only on a definite contradiction: the listing answered 200 and names the
+// configured index with the wrong datatype or as disabled. Anything else passes -
+// a non-200, a timeout, an unreadable body, or the index simply being absent. That is
+// deliberate: data/indexes reports the answering node's own indexes.conf, so on a
+// distributed Splunk the custom indexes often exist only on the indexers while searches
+// dispatched from the search head work fine, and a search-only role may not be allowed
+// to read index metadata at all. For those installs the check is inert rather than
+// wrong.
+func checkSplunkEnterpriseIndexes(cfg SplunkEnterpriseConfig) error {
+	type indexSetting struct {
+		key    string
+		name   string
+		signal string
+		metric bool
+	}
+	// LogIndex is always populated (it defaults to "main"); the other two are opt-in.
+	settings := []indexSetting{{SplunkEnterpriseConfigLogIndex, cfg.LogIndex, "logs", false}}
+	if cfg.MetricIndex != "" {
+		settings = append(settings, indexSetting{SplunkEnterpriseConfigMetricIndex, cfg.MetricIndex, "metrics", true})
+	}
+	if cfg.TraceIndex != "" {
+		settings = append(settings, indexSetting{SplunkEnterpriseConfigTraceIndex, cfg.TraceIndex, "traces", false})
+	}
+
+	// One request for all of them. Index names were validated by
+	// splunkEnterpriseConfigFromValues, so they are safe as bare filter terms.
+	var clauses []string
+	seen := map[string]bool{}
+	for _, s := range settings {
+		if !seen[s.name] {
+			seen[s.name] = true
+			clauses = append(clauses, "name="+s.name)
+		}
+	}
+	// datatype=all is required: without it the endpoint lists only event indexes, and
+	// a metric index would look absent rather than correct.
+	params := map[string]string{
+		"output_mode": "json",
+		"count":       "0",
+		"datatype":    "all",
+		"search":      strings.Join(clauses, " OR "),
+	}
+
+	resp, err := common.HttpGet(cfg.URL+SplunkEnterpriseIndexesPath,
+		splunkEnterpriseHTTPOptions(cfg, params, splunkEnterpriseIndexCheckTimeout)...)
+	if err != nil {
+		slog.Debug("splunk_enterprise: index check skipped, listing request failed", "url", cfg.URL, "error", err)
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		slog.Debug("splunk_enterprise: index check skipped, listing not readable", "url", cfg.URL, "status", resp.StatusCode)
+		return nil
+	}
+	var listing splunkEnterpriseIndexListing
+	if err := json.NewDecoder(io.LimitReader(resp.Body, splunkEnterpriseIndexListingLimit)).Decode(&listing); err != nil {
+		slog.Debug("splunk_enterprise: index check skipped, listing not decodable", "url", cfg.URL, "error", err)
+		return nil
+	}
+
+	for _, s := range settings {
+		found := false
+		for _, entry := range listing.Entry {
+			// The search filter matches substrings (name=otel also returns
+			// otel_metrics), so only an exact name is this setting's index.
+			if entry.Name != s.name {
+				continue
+			}
+			found = true
+			datatype := strings.ToLower(entry.Content.Datatype)
+			// An empty datatype is a Splunk that predates metric indexes; it
+			// contradicts nothing.
+			switch {
+			case s.metric && datatype != "" && datatype != "metric":
+				return fmt.Errorf("configuration: %s %q is an %s index — metrics need an index created with datatype=metric",
+					s.key, s.name, datatype)
+			case !s.metric && datatype == "metric":
+				return fmt.Errorf("configuration: %s %q is a metrics index — %s need an event index", s.key, s.name, s.signal)
+			case entry.Content.Disabled:
+				return fmt.Errorf("configuration: %s %q is disabled in Splunk — enable it, or point %s at an enabled index",
+					s.key, s.name, s.key)
+			}
+		}
+		if !found {
+			slog.Debug("splunk_enterprise: index not in listing, not failing", "key", s.key, "index", s.name)
+		}
+	}
+	return nil
 }
 
 // NormalizeSplunkEnterpriseURL trims whitespace and strips any path/query/fragment so a

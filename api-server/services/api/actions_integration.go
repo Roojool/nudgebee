@@ -753,6 +753,12 @@ func diagnoseIntegrationConnection(ctx *security.RequestContext, integrationID s
 func classifyIntegrationDiagnosisError(err error) (stage, reasonCode, summary, recommendedAction string) {
 	message := strings.ToLower(err.Error())
 	switch {
+	// A probe that names the misconfigured field says so with a "configuration:" prefix.
+	// Checked first because such a message quotes a customer-chosen value (an index
+	// called dns_logs or tls_events) that the substring branches below would otherwise
+	// route to the wrong stage.
+	case strings.HasPrefix(message, "configuration:"):
+		return "configuration", "CONFIGURATION_INVALID", "The integration configuration is incomplete or invalid.", "Review the integration settings and linked accounts, then retry the connection test."
 	case strings.Contains(message, "no such host"), strings.Contains(message, "dns"):
 		return "dns", "DNS_RESOLUTION_FAILED", "The integration host could not be resolved.", "Verify the configured hostname and DNS resolution from the Nudgebee connection path."
 	case strings.Contains(message, "x509"), strings.Contains(message, "certificate"), strings.Contains(message, "tls"):
