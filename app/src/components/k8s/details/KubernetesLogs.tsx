@@ -22,7 +22,7 @@ import { RefreshSubmitButton } from '@components/k8s/common/RefreshSubmitButton'
 import UserHistoryButton from '@shared/widgets/UserHistory';
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import QueryModeSwitcher from '@components/k8s/common/QueryModeSwitcher';
-import { OperatorDescriptor } from '@components/k8s/common/operatorCatalog';
+import { OperatorDescriptor, splitSetMembership } from '@components/k8s/common/operatorCatalog';
 import { LogDate } from '@components/k8s/common/LogDate';
 import { Card } from '@ui/Card';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
@@ -112,12 +112,20 @@ const buildStructuredQueryFromItems = (items: any[]): any[] =>
       value = true;
     }
 
-    // Set membership arrives as a comma-separated string from the chip input.
-    if (item.operator === 'is_one_of' || item.operator === 'is_not_one_of') {
-      value = String(item.value)
-        .split(',')
-        .map((v: string) => v.trim())
-        .filter((v: string) => v !== '');
+    // The value-less "is null" chip carries '' — _is_null means absent unless the chip says
+    // "false". The backend requires a boolean here.
+    if (backendOp === '_is_null' && typeof value !== 'boolean') {
+      value =
+        String(value ?? '')
+          .trim()
+          .toLowerCase() !== 'false';
+    }
+
+    // Set membership arrives as a comma-separated string from the chip input. Keyed on the
+    // backend operator: catalog chips store '_in' / '_not_in' directly, and keying on the
+    // legacy names sent "a,b" as one value that matched nothing.
+    if (backendOp === '_in' || backendOp === '_not_in') {
+      value = splitSetMembership(item.value);
     }
 
     return {
@@ -719,12 +727,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
                 value = true;
               }
 
-              // is_one_of/is_not_one_of → split comma-separated string into array
-              if (item.operator === 'is_one_of' || item.operator === 'is_not_one_of') {
-                value = String(item.value)
-                  .split(',')
-                  .map((v: string) => v.trim())
-                  .filter((v: string) => v !== '');
+              // in / not in → split comma-separated string into array (legacy names map here)
+              if (backendOp === '_in' || backendOp === '_not_in') {
+                value = splitSetMembership(item.value);
               }
 
               structuredQuery.push({

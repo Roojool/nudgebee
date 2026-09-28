@@ -1,4 +1,4 @@
-import { getOperatorsForKind, getOperatorsForLabel, operatorAppliesToType, OperatorDescriptor } from '../operatorCatalog';
+import { getOperatorsForKind, getOperatorsForLabel, operatorAppliesToType, OperatorDescriptor, splitSetMembership } from '../operatorCatalog';
 
 // Mirrors what the backend sends as capabilities.supported_operator_descriptors for a
 // schema-backed provider (Pinot/Hive advertise exactly this operator set), including
@@ -111,5 +111,25 @@ describe('operatorAppliesToType', () => {
 
   it('fails open on unknown', () => {
     expect(operatorAppliesToType(regex, 'unknown')).toBe(true);
+  });
+});
+
+// Catalog chips store '_in' / '_not_in' directly; the builder only split lists for the legacy
+// is_one_of names, so "in relay-server,llm-server" went out as one string and matched nothing.
+describe('splitSetMembership', () => {
+  it('splits a comma-separated chip value into trimmed entries', () => {
+    expect(splitSetMembership('relay-server, llm-server ,')).toEqual(['relay-server', 'llm-server']);
+  });
+  it('passes an array through', () => {
+    expect(splitSetMembership(['a', ' b '])).toEqual(['a', 'b']);
+  });
+  it('treats an empty or missing value as an empty set', () => {
+    expect(splitSetMembership('')).toEqual([]);
+    expect(splitSetMembership(undefined)).toEqual([]);
+  });
+  it('keeps numeric entries and drops null / undefined ones', () => {
+    expect(splitSetMembership([200, ' 500 ', null, undefined, ''])).toEqual(['200', '500']);
+    expect(splitSetMembership(200)).toEqual(['200']);
+    expect(splitSetMembership(null)).toEqual([]);
   });
 });

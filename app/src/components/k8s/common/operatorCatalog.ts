@@ -105,3 +105,13 @@ export const getOperatorDisplayLabel = (op: string, descriptors: OperatorDescrip
   const entry = descriptors.find((d) => d.token === token);
   return entry?.chip_label ?? op;
 };
+
+// A set-membership (_in / _not_in) chip value as the list the backend expects: an array
+// passes through, a string splits on commas. Blank entries are dropped.
+// Numbers are kept as their string form (an "in" on a numeric field such as a status code
+// arrives as [200, 500]); null / undefined entries are dropped rather than sent as "null".
+export const splitSetMembership = (raw: unknown): string[] =>
+  (Array.isArray(raw) ? raw : String(raw ?? '').split(','))
+    .filter((v) => v !== null && v !== undefined)
+    .map((v) => String(v).trim())
+    .filter((v) => v !== '');
