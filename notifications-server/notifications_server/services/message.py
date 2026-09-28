@@ -175,7 +175,18 @@ def resolve_outcome(matched_rules, source=None, event_type=None, honour_batch=Tr
     if not non_suppressible:
         suppressing = next((entry for entry in matched_rules if entry["suppressed"]), None)
         if suppressing is not None:
-            response = system_response("suppressed", "Notification suppressed by notification rule configuration")
+            rule_name = suppressing.get("name")
+            reason = (
+                f'Suppressed by notification rule "{rule_name}"'
+                if rule_name
+                else "Notification suppressed by notification rule configuration"
+            )
+            extra = (
+                {"rule_management_url": f"{settings.base_url}/user-management#notification-rules"}
+                if settings.base_url
+                else {}
+            )
+            response = system_response("suppressed", reason, **extra)
             return RuleOutcome([response], [], False, suppressing["rule_id"])
         snoozing = next((entry for entry in matched_rules if snoozed(entry)), None)
         if snoozing is not None:
@@ -451,6 +462,7 @@ class NotificationRuleMatcher:
                 matched_rules.extend(
                     {
                         "rule_id": rule.id,
+                        "name": rule.name,
                         "suppressed": rule.is_suppressed,
                         "platform": mapping.platform,
                         "channels": mapping.channels,
@@ -468,6 +480,7 @@ class NotificationRuleMatcher:
                 matched_rules.append(
                     {
                         "rule_id": rule.id,
+                        "name": rule.name,
                         "suppressed": rule.is_suppressed,
                         "platform": None,
                         "channels": None,

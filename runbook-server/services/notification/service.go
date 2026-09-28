@@ -61,12 +61,13 @@ type SendImNotificationRequest struct {
 }
 
 type SendImNotificationResponse struct {
-	Platform  string `json:"platform"`
-	TeamId    string `json:"team_id"`
-	ChannelId string `json:"channel_id"`
-	MessageTs string `json:"message_ts"`
-	Status    string `json:"status"`
-	Reason    string `json:"reason"`
+	Platform          string `json:"platform"`
+	TeamId            string `json:"team_id"`
+	ChannelId         string `json:"channel_id"`
+	MessageTs         string `json:"message_ts"`
+	Status            string `json:"status"`
+	Reason            string `json:"reason"`
+	RuleManagementURL string `json:"rule_management_url"`
 }
 
 func SendNotification(ctx *security.RequestContext, request SendImNotificationRequest) (SendImNotificationResponse, error) {
