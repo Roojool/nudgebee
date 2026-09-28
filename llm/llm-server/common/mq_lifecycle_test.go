@@ -736,3 +736,55 @@ func TestMqConnWatcher_StopsAfterMqClose(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	assert.LessOrEqual(t, polls.Load(), after+1, "watcher must stop once its connection generation is closed")
 }
+
+// Invariant 6: after a reconnect go-rabbitmq restarts a consumer in place, and when
+// that restart fails its Run never returns — the fake's Run likewise blocks until closed.
+// The supervisor must rebuild the consumer instead of waiting on it.
+func TestMqConsume_RebuiltAfterBrokerReconnect(t *testing.T) {
+	fleet := useFakeMq(t, nil)
+	require.NoError(t, MqConsume("ex", "rk", "q_reconnect", noopProcessor))
+	first := waitConsumer(t, fleet)
+	waitState(t, "q_reconnect", MqConsumerRunning)
+
+	fleet.connDown.Store(true)
+	waitState(t, "q_reconnect", MqConsumerReconnecting)
+	fleet.connDown.Store(false)
+
+	second := waitConsumer(t, fleet)
+	assert.EqualValues(t, 1, first.closeCalls.Load(), "the consumer from before the outage is closed")
+	waitState(t, "q_reconnect", MqConsumerRunning)
+	assert.Equal(t, rabbitmq.Ack, deliver(t, second))
+	assert.EqualValues(t, 0, second.closeCalls.Load(), "a consumer built after the outage is left alone")
+	assert.EqualValues(t, 2, fleet.count())
+	assert.LessOrEqual(t, fleet.maxActive.Load(), int32(1), "never two live consumers for one queue")
+}
+
+// A connection closed for mqConnResetAfter is closed (stopping its own redial loop, so it
+// cannot bring back a second consumer) and a new one is dialed.
+func TestMqConnWatcher_ReDialsAConnectionClosedTooLong(t *testing.T) {
+	var dials atomic.Int32
+	fleet := useFakeMq(t, func(string) (*rabbitmq.Conn, error) {
+		dials.Add(1)
+		return &rabbitmq.Conn{}, nil
+	})
+	var closedConns atomic.Int32
+	mqCloseConn = func(*rabbitmq.Conn) error { closedConns.Add(1); return nil }
+	savedResetAfter := mqConnResetAfter
+	mqConnResetAfter = 50 * time.Millisecond
+	t.Cleanup(func() { mqConnResetAfter = savedResetAfter })
+
+	require.NoError(t, MqConsume("ex", "rk", "q_reset", noopProcessor))
+	first := waitConsumer(t, fleet)
+	waitState(t, "q_reset", MqConsumerRunning)
+
+	fleet.connDown.Store(true)
+	require.Eventually(t, func() bool { return closedConns.Load() >= 1 }, 2*time.Second, 5*time.Millisecond,
+		"the connection stuck closed is closed")
+	fleet.connDown.Store(false)
+
+	waitConsumer(t, fleet)
+	waitState(t, "q_reset", MqConsumerRunning)
+	assert.GreaterOrEqual(t, dials.Load(), int32(2), "a new connection is dialed")
+	assert.EqualValues(t, 1, first.closeCalls.Load())
+	assert.LessOrEqual(t, fleet.maxActive.Load(), int32(1), "never two live consumers for one queue")
+}
