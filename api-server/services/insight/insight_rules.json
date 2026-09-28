@@ -1168,5 +1168,41 @@
     "cloud_providers": [
       "k8s"
     ]
+  },
+  {
+    "unique_id": "131",
+    "insight_format": "{} Critical severity CVEs open on your VM fleet",
+    "type": "Addition",
+    "source": "Recommendation",
+    "category": "Security",
+    "range": -1,
+    "filters": [
+      { "column": "rule_name", "value": "vm_package_vulnerability", "operator": "=" },
+      { "column": "status", "value": ["Open", "InProgress"], "operator": "in" },
+      { "column": "severity", "value": "Critical", "operator": "=" }
+    ],
+    "account_column": "cloud_account_id",
+    "threshold": 0,
+    "severity": "Critical",
+    "cloud_providers": ["selfhosted"],
+    "applications_query": "SELECT DISTINCT COALESCE(v.vuln_id, r.recommendation ->> 'vuln_id') AS name FROM recommendation r LEFT JOIN vulnerabilities v ON v.id = r.vulnerability_id WHERE r.cloud_account_id = ? AND r.rule_name = 'vm_package_vulnerability' AND r.status IN ('Open', 'InProgress') AND r.severity = 'Critical' ORDER BY name LIMIT 5"
+  },
+  {
+    "unique_id": "132",
+    "insight_format": "{} High severity CVEs open on your VM fleet",
+    "type": "Addition",
+    "source": "Recommendation",
+    "category": "Security",
+    "range": -1,
+    "filters": [
+      { "column": "rule_name", "value": "vm_package_vulnerability", "operator": "=" },
+      { "column": "status", "value": ["Open", "InProgress"], "operator": "in" },
+      { "column": "severity", "value": "High", "operator": "=" }
+    ],
+    "account_column": "cloud_account_id",
+    "threshold": 0,
+    "severity": "High",
+    "cloud_providers": ["selfhosted"],
+    "applications_query": "SELECT DISTINCT COALESCE(v.vuln_id, r.recommendation ->> 'vuln_id') AS name FROM recommendation r LEFT JOIN vulnerabilities v ON v.id = r.vulnerability_id WHERE r.cloud_account_id = ? AND r.rule_name = 'vm_package_vulnerability' AND r.status IN ('Open', 'InProgress') AND r.severity = 'High' ORDER BY name LIMIT 5"
   }
 ]

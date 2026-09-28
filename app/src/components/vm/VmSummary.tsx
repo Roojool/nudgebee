@@ -7,7 +7,7 @@ import SeverityIcon from '@ui/SeverityIcon';
 import Datetime from '@shared/format/Datetime';
 import { toSeverityLevel } from '@utils/common';
 import apiVm, { SEVERITY_ORDER, VmVulnerabilityGroup } from '@api1/vm';
-import { sumSeverities, useLatestRequest } from './common';
+import { severityFromWeight, sumSeverities, useLatestRequest } from './common';
 import { ds } from '@utils/colors';
 
 interface VmSummaryState {
@@ -40,15 +40,6 @@ const EMPTY: VmSummaryState = {
 
 /** How many rows each of the "top N" cards shows. */
 const TOP_N = 5;
-
-/** Reverse of the severity_weight ranking the grouping query aggregates with. */
-const WEIGHT_SEVERITY: Array<[number, string]> = [
-  [10, 'Critical'],
-  [8, 'High'],
-  [5, 'Medium'],
-  [2, 'Low'],
-];
-const severityFromWeight = (weight: number) => WEIGHT_SEVERITY.find(([threshold]) => weight >= threshold)?.[1] || 'Info';
 
 /**
  * One ranked row — optional severity badge, label, count.

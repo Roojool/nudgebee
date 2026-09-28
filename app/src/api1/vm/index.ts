@@ -468,8 +468,22 @@ const apiVm = {
     return Array.isArray(accounts) ? accounts : [];
   },
 
-  async listVms({ accountId, search, limit = 10, offset = 0 }: { accountId: string; search?: string; limit?: number; offset?: number }) {
+  async listVms({
+    accountId,
+    search,
+    resourceIds,
+    limit = 10,
+    offset = 0,
+  }: {
+    accountId: string;
+    search?: string;
+    /** Narrow to exactly these VMs (e.g. the ones a specific CVE was scoped to) instead of paging the full fleet. */
+    resourceIds?: string[];
+    limit?: number;
+    offset?: number;
+  }) {
     const where: any = { account: { _eq: accountId } };
+    if (resourceIds?.length) where.id = { _in: resourceIds };
     if (search) {
       where._and = [{ _or: [{ name: { _ilike: `%${search}%` } }, { resourse_id: { _ilike: `%${search}%` } }] }];
     }
