@@ -227,3 +227,72 @@ func TestOpenObserveFetchMetricListEmptyKeywordReturnsCatalog(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, out, 2)
 }
+
+// openObserveFetchForTest points the source at a stub server and asks one key, with or
+// without Instant. Shared so the two endpoint tests differ only in the flag.
+func openObserveFetchForTest(t *testing.T, serverURL string, instant bool) OutputMetricQuery {
+	t.Helper()
+	patches := gomonkey.NewPatches()
+	t.Cleanup(patches.Reset)
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: serverURL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+	out, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{
+		AccountId: "test",
+		Queries:   map[string]string{"container_cpu_usage_by_pod": `max_over_time(container_cpu_usage[1d:75s])`},
+		StartTime: 1700000000000,
+		EndTime:   1700086400000,
+		Instant:   instant,
+	})
+	require.NoError(t, err)
+	return out
+}
+
+// An Aggregate promises ONE point per series, and for OpenObserve that means a
+// different endpoint -- not a parameter.
+//
+// The builders wrap an aggregated key in max_over_time(...[range:step]) and the layer
+// sets Instant. Sent to query_range, that wrapper is evaluated once per step and comes
+// back as a whole series: measured at 101 points on a 1-day window where the contract
+// promises 1. Roughly thirty UI call sites read payload[0], so the result is an
+// arbitrary sample plotted as the workload, with no error anywhere.
+func TestOpenObserveInstantUsesTheInstantEndpoint(t *testing.T) {
+	var gotPath, gotForm string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotPath, gotForm = r.URL.Path, r.Form.Encode()
+		w.WriteHeader(http.StatusOK)
+		// The instant shape: `value`, not `values`.
+		_, _ = w.Write([]byte(`{"data":{"result":[{"metric":{"pod":"web-1"},"value":[1700000000,"0.25"]}]}}`))
+	}))
+	defer srv.Close()
+
+	res := openObserveFetchForTest(t, srv.URL, true)
+	assert.Contains(t, gotPath, "/prometheus/api/v1/query")
+	assert.NotContains(t, gotPath, "query_range", "an aggregate must not be a range query")
+	assert.Contains(t, gotForm, "time=", "an instant query is pinned to one instant")
+	assert.NotContains(t, gotForm, "step=")
+
+	require.Len(t, res.Results, 1)
+	require.Len(t, res.Results[0].Payload, 1, "one series")
+	assert.Equal(t, []float64{0.25}, res.Results[0].Payload[0].Values,
+		"the instant `value` shape must decode, not be dropped for lacking `values`")
+}
+
+// Without an aggregate nothing changes: a chart still wants the series.
+func TestOpenObserveRangeStillUsesQueryRange(t *testing.T) {
+	var gotPath, gotForm string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotPath, gotForm = r.URL.Path, r.Form.Encode()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"result":[{"metric":{"pod":"web-1"},"values":[[1700000000,"0.25"],[1700000075,"0.30"]]}]}}`))
+	}))
+	defer srv.Close()
+
+	res := openObserveFetchForTest(t, srv.URL, false)
+	assert.Contains(t, gotPath, "query_range")
+	assert.Contains(t, gotForm, "step=")
+	require.Len(t, res.Results, 1)
+	assert.Equal(t, []float64{0.25, 0.30}, res.Results[0].Payload[0].Values)
+}

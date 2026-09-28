@@ -112,13 +112,28 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 			}
 		}
 
+		// An instant query is a different endpoint, not a parameter. `Instant` is set
+		// whenever the caller asked for an Aggregate (service.go: "a collapse answers
+		// with one point per series"), and the builders have already wrapped the
+		// expression in max_over_time(...[range:step]). Running that through
+		// query_range evaluates the wrapper once per step and answers with a whole
+		// series -- 101 points where the contract promises one, which ~30 UI call
+		// sites read as payload[0] and plot as the workload.
+		//
+		// Prometheus's own source has always branched here; this one did not, so every
+		// aggregated key on an OpenObserve account came back uncollapsed.
 		endpoint := fmt.Sprintf("%s/api/%s/prometheus/api/v1/query_range", cfg.URL, cfg.OrgID)
 
 		form := neturl.Values{}
 		form.Add("query", query)
-		form.Add("start", start)
-		form.Add("end", end)
-		form.Add("step", strconv.Itoa(step))
+		if req.Instant {
+			endpoint = fmt.Sprintf("%s/api/%s/prometheus/api/v1/query", cfg.URL, cfg.OrgID)
+			form.Add("time", end)
+		} else {
+			form.Add("start", start)
+			form.Add("end", end)
+			form.Add("step", strconv.Itoa(step))
+		}
 
 		authHeader := openObserveAuthHeader(cfg.Username, cfg.Password)
 
@@ -150,7 +165,11 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 			Data struct {
 				Result []struct {
 					Metric map[string]string `json:"metric"`
-					Values [][]any           `json:"values"`
+					// A range query answers with `values` (a matrix); an instant query
+					// answers with `value` -- one [ts, "n"] pair. Both are read here so
+					// the two endpoints share one decode path.
+					Values [][]any `json:"values"`
+					Value  []any   `json:"value"`
 				} `json:"result"`
 			} `json:"data"`
 		}
@@ -163,9 +182,16 @@ func (s *OpenObserveMetricSource) FetchMetricsQuery(ctx *security.RequestContext
 
 		var payloadResults []Result
 		for _, r := range payload.Data.Result {
-			timestamps := make([]int64, 0, len(r.Values))
-			values := make([]float64, 0, len(r.Values))
-			for _, v := range r.Values {
+			// Normalise the instant shape onto the range one so everything below reads
+			// the same. A pair with no timestamp is not a point, and is dropped by the
+			// length check in the loop rather than silently becoming a zero.
+			pairs := r.Values
+			if len(pairs) == 0 && len(r.Value) > 0 {
+				pairs = [][]any{r.Value}
+			}
+			timestamps := make([]int64, 0, len(pairs))
+			values := make([]float64, 0, len(pairs))
+			for _, v := range pairs {
 				if len(v) != 2 {
 					continue
 				}
