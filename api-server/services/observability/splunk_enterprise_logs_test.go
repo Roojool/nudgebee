@@ -526,7 +526,9 @@ func TestSplunkEnterpriseLogSource_QueryLabels(t *testing.T) {
 		names = append(names, l.Label)
 	}
 	// Sorted union of the keys across the sample.
-	assert.Equal(t, []string{"_raw", "_time", "k8s.namespace.name", "k8s.pod.name"}, names)
+	// Splunk's own _-prefixed fields build filters that match nothing, so they are not
+	// offered.
+	assert.Equal(t, []string{"k8s.namespace.name", "k8s.pod.name"}, names)
 }
 
 // ----- interface conformance -------------------------------------------------

@@ -1,8 +1,10 @@
 package observability
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,13 +81,11 @@ func TestBuildSplunkEnterpriseLogGroupSPL(t *testing.T) {
 		assert.Contains(t, spl, `nb_lg_namespace="nudgebee"`)
 	})
 
-	t.Run("workload filter matches the pod prefix or the workload field", func(t *testing.T) {
+	t.Run("workload filter prefers the workload field and falls back to a suffixed pod name", func(t *testing.T) {
 		spl, err := buildSplunkEnterpriseLogGroupSPL("otel_logs", "", "checkout", 0)
 		require.NoError(t, err)
-		// like() takes SQL wildcards, so the '%' is the wildcard and escapeSplunkString's
-		// '*' escaping cannot interfere with it.
-		assert.Contains(t, spl, `like(nb_lg_pod, "checkout-%")`)
-		assert.Contains(t, spl, `nb_lg_workload="checkout"`)
+		assert.Contains(t, spl,
+			`(nb_lg_workload="checkout" OR (nb_lg_workload="" AND match(nb_lg_pod, "^checkout-(([a-z0-9]{6,10}-)?[a-z0-9]{5}|[0-9]+)$")))`)
 	})
 
 	t.Run("filter values are escaped", func(t *testing.T) {
@@ -222,4 +222,32 @@ func TestSplunkEnterpriseCoalesce(t *testing.T) {
 
 	_, err = splunkEnterpriseNumericCoalesce([]string{`bad" name`}, "-1")
 	assert.Error(t, err, "an unsafe field name must not reach the query")
+}
+
+// A workload name must not match another workload that merely starts with it: "api" used
+// to match every "api-server" event through a pod-name prefix.
+func TestSplunkEnterpriseLogGroupWorkloadCondition(t *testing.T) {
+	pattern := regexp.MustCompile(`^api-(([a-z0-9]{6,10}-)?[a-z0-9]{5}|[0-9]+)$`)
+	for pod, want := range map[string]bool{
+		"api-7d4b9c8f6-x2k9q":       true,  // Deployment
+		"api-x2k9q":                 true,  // DaemonSet / Job
+		"api-0":                     true,  // StatefulSet
+		"api-server-f8756006-k91ps": false, // a different Deployment
+		"api-server-0":              false, // a different StatefulSet
+	} {
+		assert.Equal(t, want, pattern.MatchString(pod), pod)
+	}
+
+	cond := splunkEnterpriseLogGroupWorkloadCondition("web.v2")
+	assert.Contains(t, cond, `match(nb_lg_pod, "^web\\.v2-`, "the dot is regex-escaped inside the SPL literal")
+
+	// A value that is not a Kubernetes name never reaches the regex.
+	cond = splunkEnterpriseLogGroupWorkloadCondition(`x") OR 1=1 OR ("`)
+	assert.Equal(t, `nb_lg_workload="x\") OR 1=1 OR (\""`, cond)
+}
+
+func TestSplunkEnterpriseLogGroupTimeoutFitsTheActionDeadline(t *testing.T) {
+	// The friendly timeout message only reaches the caller if this fires before the
+	// action's own 30s deadline.
+	assert.Less(t, splunkEnterpriseLogGroupTimeout, 30*time.Second)
 }

@@ -31,10 +31,18 @@ type SplunkEnterpriseLogSource struct{}
 // A deployment using Splunk Connect for Kubernetes or a hand-rolled HEC pipeline lands
 // different names; those can be remapped per-account through the label-mapping override
 // rather than by editing this table.
+//
+// body/message name the OTel `body` field, which is what the collector writes and what the
+// Message column displays. They are not mapped to _raw: on a structured event _raw is the
+// whole JSON line, so an exact or prefix match on it can never hit and a substring match
+// also hits the event's own metadata (a "checkout" search matched every event whose pod
+// was named checkout). A filter on the message field is expanded by the builder to the
+// same precedence display uses (splunkEnterpriseMessageFields), so unstructured
+// sourcetypes, where only _raw exists, still match.
 var splunkEnterpriseLogLabelMapping = map[string]string{
 	"timestamp": "_time",
-	"body":      "_raw",
-	"message":   "_raw",
+	"body":      "body",
+	"message":   "body",
 	"namespace": "k8s.namespace.name",
 	"pod":       "k8s.pod.name",
 	"container": "k8s.container.name",
@@ -42,11 +50,13 @@ var splunkEnterpriseLogLabelMapping = map[string]string{
 	"workload":  "k8s.deployment.name",
 	"app":       "k8s.deployment.name",
 	"cluster":   "k8s.cluster.name",
-	"host":      "host.name",
-	"hostname":  "host.name",
-	"service":   "service.name",
-	"severity":  "severity_text",
-	"level":     "severity_text",
+	// Splunk's own indexed `host` field, which the HEC exporter populates from the node.
+	// OTel's host.name attribute is not written as a field on HEC log events.
+	"host":     "host",
+	"hostname": "host",
+	"service":  "service.name",
+	"severity": "severity_text",
+	"level":    "severity_text",
 }
 
 // splunkEnterpriseSeverityFields are the field names checked, in order, for a log level.
@@ -266,9 +276,26 @@ type splunkEnterpriseFilterSchema struct {
 	// schema cannot express them. A predicate removed because it is always true (not
 	// counted) leaves an empty group that means "no restriction".
 	prepare func(query.BinaryWhereClause) (query.BinaryWhereClause, int, error)
+	// messageKeys are field names that mean "the log line"; a predicate on one is rendered
+	// against messageFields in display precedence (renderSplunkEnterpriseMessagePredicate)
+	// rather than against a single field.
+	messageKeys   map[string]bool
+	messageFields []string
 }
 
-var splunkEnterpriseLogFilterSchema = splunkEnterpriseFilterSchema{mapping: splunkEnterpriseLogLabelMapping}
+var splunkEnterpriseLogFilterSchema = splunkEnterpriseFilterSchema{
+	mapping:       splunkEnterpriseLogLabelMapping,
+	messageKeys:   splunkEnterpriseLogMessageKeys,
+	messageFields: splunkEnterpriseMessageFields,
+}
+
+// splunkEnterpriseLogMessageKeys are the field names, as they reach the builder after
+// label mapping, that mean "the log line": `body` (canonical body/message map to it) and
+// `_body`, the token the v1 logs tool documents for free-text search. An account-level
+// label-mapping override that points body/message at another field is honoured as
+// written - the admin has named the one field the message lives in - so the expansion
+// applies only to the provider-default mapping.
+var splunkEnterpriseLogMessageKeys = map[string]bool{"body": true, "message": true, "_body": true}
 
 // splunkEnterpriseLikePattern renders a LIKE value as the body of a quoted SPL term.
 //
@@ -378,11 +405,50 @@ func renderSplunkEnterprisePredicate(col string, op query.BinaryWhereClauseType,
 	}
 }
 
+// splunkEnterprisePositiveOperator pairs each negated operator with the operator it negates.
+var splunkEnterprisePositiveOperator = map[query.BinaryWhereClauseType]query.BinaryWhereClauseType{
+	query.Nq: query.Eq, query.NIContains: query.IContains, query.NLike: query.Like, query.NotIn: query.In,
+}
+
+// renderSplunkEnterpriseMessagePredicate renders a predicate on the log line against the
+// first message field the event actually carries, in the order display resolves the
+// Message column - so a filter matches exactly the text the user sees:
+//
+//	(body=V OR (NOT body=* AND message=V) OR ... OR (NOT body=* AND ... AND _raw=V))
+//
+// _raw is reached only by events with none of the named fields, i.e. unstructured
+// sourcetypes, where _raw IS the log line. A negated operator negates the whole
+// expression, so "does not contain X" means the displayed line does not contain X.
+func renderSplunkEnterpriseMessagePredicate(fields []string, op query.BinaryWhereClauseType, v any) (string, error) {
+	positive, negated := splunkEnterprisePositiveOperator[op]
+	if !negated {
+		positive = op
+	}
+	branches := make([]string, 0, len(fields))
+	for i, field := range fields {
+		term, err := renderSplunkEnterprisePredicate(field, positive, v)
+		if err != nil {
+			return "", err
+		}
+		guards := make([]string, 0, i+1)
+		for _, earlier := range fields[:i] {
+			guards = append(guards, "NOT "+earlier+"=*")
+		}
+		guards = append(guards, term)
+		branches = append(branches, joinSplunkEnterpriseParts(guards, " AND "))
+	}
+	expr := "(" + strings.Join(branches, " OR ") + ")"
+	if negated {
+		return "NOT " + expr, nil
+	}
+	return expr, nil
+}
+
 // buildSplunkEnterpriseBinaryClause renders one binary group's predicates, joined by AND
 // and parenthesised whenever there is more than one. The parentheses are load-bearing:
 // SPL binds OR tighter than AND, so an unwrapped `a AND b` inside an OR would regroup as
 // a AND (b OR ...) and change what matches.
-func buildSplunkEnterpriseBinaryClause(binary query.BinaryWhereClause, mapping map[string]string) (string, error) {
+func buildSplunkEnterpriseBinaryClause(binary query.BinaryWhereClause, schema splunkEnterpriseFilterSchema) (string, error) {
 	// Field iteration order over a map is random; sorting keeps the generated SPL stable
 	// so it is diffable in logs and assertable in tests.
 	fields := make([]string, 0, len(binary))
@@ -394,8 +460,24 @@ func buildSplunkEnterpriseBinaryClause(binary query.BinaryWhereClause, mapping m
 	var parts []string
 	for _, field := range fields {
 		col := field
-		if mapped, ok := mapping[col]; ok {
+		if mapped, ok := schema.mapping[col]; ok {
 			col = mapped
+		}
+		if schema.messageKeys[col] && len(schema.messageFields) > 0 {
+			ops := binary[field]
+			opNames := make([]string, 0, len(ops))
+			for op := range ops {
+				opNames = append(opNames, string(op))
+			}
+			sort.Strings(opNames)
+			for _, opName := range opNames {
+				part, err := renderSplunkEnterpriseMessagePredicate(schema.messageFields, query.BinaryWhereClauseType(opName), ops[query.BinaryWhereClauseType(opName)])
+				if err != nil {
+					return "", err
+				}
+				parts = append(parts, part)
+			}
+			continue
 		}
 		if !isSafeSplunkFieldName(col) {
 			return "", fmt.Errorf("invalid or unsafe field name: %q", col)
@@ -464,7 +546,7 @@ func buildSplunkEnterpriseFilter(where query.QueryWhereClause, schema splunkEnte
 			return "", errSplunkEnterpriseGroupInexpressible
 		}
 		if len(binary) > 0 {
-			part, err := buildSplunkEnterpriseBinaryClause(binary, schema.mapping)
+			part, err := buildSplunkEnterpriseBinaryClause(binary, schema)
 			if err != nil {
 				return "", err
 			}
@@ -543,6 +625,26 @@ func splunkEnterpriseLimit(requested int) int {
 	return requested
 }
 
+// splunkEnterpriseLogRowCol numbers a page's rows so an offset can drop the earlier ones.
+const splunkEnterpriseLogRowCol = "nb_log_row"
+
+// checkSplunkEnterpriseLogSort accepts only the order Splunk returns events in: newest
+// first. Oldest-first would need `tail`, which cannot emit until the whole window is on
+// the search head and, past limits.conf max_count, silently returns the tail of the
+// capped set rather than the oldest events. Rejecting it beats a slow, sometimes-wrong
+// page; no caller sends a sort today.
+func checkSplunkEnterpriseLogSort(sortFields []SortField) error {
+	for _, f := range sortFields {
+		col := strings.ToLower(strings.TrimSpace(f.ColumnName))
+		order := strings.ToLower(strings.TrimSpace(f.Order))
+		if (col == "_time" || col == "timestamp") && (order == "" || order == "desc") {
+			continue
+		}
+		return fmt.Errorf("splunk enterprise: sorting logs by %s %s is not supported - events are returned newest first", f.ColumnName, f.Order)
+	}
+	return nil
+}
+
 func (s *SplunkEnterpriseLogSource) buildSPL(req FetchLogRequest, index string) (string, error) {
 	// Callers pass a config-resolved index, which GetSplunkEnterpriseConfig has already
 	// validated. Re-checked here so the function is safe for any caller, not just that one.
@@ -557,11 +659,29 @@ func (s *SplunkEnterpriseLogSource) buildSPL(req FetchLogRequest, index string) 
 
 	// Splunk returns events newest-first, so `head` yields the most recent N - the same
 	// result as the ORDER BY _timestamp DESC LIMIT n the SQL-backed sources emit.
+	if err := checkSplunkEnterpriseLogSort(req.SortFields); err != nil {
+		return "", err
+	}
+
 	spl := fmt.Sprintf(`search index="%s"`, index)
 	if whereClause != "" {
 		spl += " " + whereClause
 	}
-	spl += fmt.Sprintf(" | head %d", splunkEnterpriseLimit(req.Limit))
+	limit := splunkEnterpriseLimit(req.Limit)
+	if req.Offset > 0 {
+		// A page is the newest offset+limit events with the first offset dropped, by row
+		// number. (`tail limit` looks equivalent but is wrong on a short last page: with
+		// 25 events, offset 20 and limit 10 it returns rows 16-25, repeating the previous
+		// page, where 21-25 are due.)
+		// Compared by subtraction so an offset near MaxInt cannot wrap the sum negative.
+		if req.Offset > splunkEnterpriseMaxLimit-limit {
+			return "", fmt.Errorf("splunk enterprise: offset + limit may not exceed %d", splunkEnterpriseMaxLimit)
+		}
+		spl += fmt.Sprintf(" | head %d | streamstats count AS %s | where %s>%d | fields - %s",
+			req.Offset+limit, splunkEnterpriseLogRowCol, splunkEnterpriseLogRowCol, req.Offset, splunkEnterpriseLogRowCol)
+	} else {
+		spl += fmt.Sprintf(" | head %d", limit)
+	}
 	// Splunk only returns a field if the search REFERENCES it. Without this, a search
 	// that filters on nothing comes back with just the default fields (_time, host,
 	// index, linecount, source, sourcetype, splunk_server) and every mapped label is
@@ -635,6 +755,15 @@ func execSplunkEnterpriseSearch(
 	count int,
 	timeout time.Duration,
 ) ([]map[string]any, error) {
+	// Every Splunk source (logs, traces, metrics) ends up here, so this is the one place
+	// an inverted window is caught; Splunk would otherwise reject it with its own FATAL
+	// message, which reads like a query error rather than a bad time range.
+	if s, sErr := strconv.ParseFloat(startTime, 64); sErr == nil {
+		if e, eErr := strconv.ParseFloat(endTime, 64); eErr == nil && s > e {
+			return nil, fmt.Errorf("start_time must be before end_time")
+		}
+	}
+
 	form := map[string]string{
 		"search":        spl,
 		"exec_mode":     "oneshot",
@@ -721,18 +850,101 @@ func formatSplunkValue(v any) string {
 // (2026-08-26T10:11:12.000+00:00); anything unparseable is passed through so a custom
 // time format still reaches the UI rather than becoming an empty cell.
 func splunkEnterpriseTimestamp(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999-0700"} {
-		if parsed, err := time.Parse(layout, raw); err == nil {
-			return parsed.UTC().Format(time.RFC3339Nano)
-		}
+	if parsed, ok := parseSplunkEnterpriseTime(raw); ok {
+		return parsed.UTC().Format(time.RFC3339Nano)
 	}
 	return raw
 }
 
+// parseSplunkEnterpriseTime parses a Splunk _time value in the layouts Splunk emits.
+func parseSplunkEnterpriseTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999-0700"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func (s *SplunkEnterpriseLogSource) QueryLogs(ctx *security.RequestContext, req FetchLogRequest) ([]OutputLog, error) {
+	results, err := s.queryLogRows(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	outputs := make([]OutputLog, 0, len(results))
+	for _, result := range results {
+		out := OutputLog{Labels: make(map[string]any, len(result))}
+
+		for k, v := range result {
+			out.Labels[k] = v
+		}
+
+		rawTime := formatSplunkValue(result["_time"])
+		parsedTime, timeOK := parseSplunkEnterpriseTime(rawTime)
+		out.Timestamp = rawTime
+		if timeOK {
+			out.Timestamp = parsedTime.UTC().Format(time.RFC3339Nano)
+		}
+		out.Message = firstSplunkValue(result, splunkEnterpriseMessageFields)
+
+		for _, field := range splunkEnterpriseSeverityFields {
+			if severity := formatSplunkValue(result[field]); severity != "" {
+				out.Severity = severity
+				break
+			}
+		}
+
+		setSplunkEnterpriseCanonicalLabels(&out, parsedTime, timeOK)
+		outputs = append(outputs, out)
+	}
+
+	return outputs, nil
+}
+
+// setSplunkEnterpriseCanonicalLabels fills the canonical label names the UI and the logs
+// agent read, deterministically and only where the event has no field of that name.
+//
+// The shared normaliser keeps ONE canonical name per provider field, picked by map
+// iteration order, and this mapping points several canonical names at one field
+// (severity/level, workload/app, body/message, host/hostname) - so which alias appeared
+// changed from call to call, and `message` was sometimes the whole _raw JSON. Filling
+// them all here leaves the normaliser nothing to choose. `timestamp` is epoch
+// nanoseconds, the unit the log table divides by 1e6 to render; an ISO string there
+// renders as Invalid Date.
+func setSplunkEnterpriseCanonicalLabels(out *OutputLog, eventTime time.Time, hasTime bool) {
+	if out.Labels == nil {
+		out.Labels = make(map[string]any)
+	}
+	fill := func(key string, value any) {
+		if _, exists := out.Labels[key]; !exists && value != nil && value != "" {
+			out.Labels[key] = value
+		}
+	}
+	if hasTime {
+		out.Labels["timestamp"] = eventTime.UnixNano()
+	}
+	for canonical, field := range splunkEnterpriseLogLabelMapping {
+		switch canonical {
+		case "timestamp":
+			continue
+		case "body", "message":
+			fill(canonical, out.Message)
+		case "severity", "level":
+			fill(canonical, out.Severity)
+		default:
+			fill(canonical, out.Labels[field])
+		}
+	}
+}
+
+// queryLogRows runs the log search and returns Splunk's rows as-is. QueryLabels reads
+// these rather than QueryLogs' decorated output, so the label list offers the fields the
+// events really carry, not the canonical aliases QueryLogs adds.
+func (s *SplunkEnterpriseLogSource) queryLogRows(ctx *security.RequestContext, req FetchLogRequest) ([]map[string]any, error) {
 	cfg, err := integrations.GetSplunkEnterpriseConfig(ctx, req.AccountId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Splunk Enterprise config: %w", err)
@@ -746,44 +958,29 @@ func (s *SplunkEnterpriseLogSource) QueryLogs(ctx *security.RequestContext, req 
 	// filters, which are applied to the where clause rather than to the rendered query -
 	// the same tradeoff those sources make.
 	spl := strings.TrimSpace(req.Query)
-	if spl == "" {
-		spl, err = s.buildSPL(req, cfg.LogIndex)
-		if err != nil {
-			return nil, err
+	if spl == "" || req.Offset > 0 {
+		generated, genErr := s.buildSPL(req, cfg.LogIndex)
+		if genErr != nil {
+			return nil, genErr
+		}
+		switch {
+		case spl == "":
+			spl = generated
+		case spl != generated:
+			// Paging lives in the SPL buildSPL renders (head + row number). A hand-written
+			// query has no such slice, so an offset on it would silently return page one;
+			// the caller can page its own SPL instead.
+			return nil, fmt.Errorf("splunk enterprise: offset is not supported with a hand-written query - add head/tail to the SPL instead")
 		}
 	}
 
 	startTime, endTime := splunkEnterpriseTimeRangeSeconds(req.StartTime, req.EndTime, time.Now())
 
-	results, err := runSplunkEnterpriseSearch(
+	// The rendered SPL already slices the page, so Splunk never needs to return more
+	// than one page of rows.
+	return runSplunkEnterpriseSearch(
 		cfg, spl, startTime, endTime, splunkEnterpriseLimit(req.Limit), splunkEnterpriseSearchTimeout,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	outputs := make([]OutputLog, 0, len(results))
-	for _, result := range results {
-		out := OutputLog{Labels: make(map[string]any, len(result))}
-
-		for k, v := range result {
-			out.Labels[k] = v
-		}
-
-		out.Timestamp = splunkEnterpriseTimestamp(formatSplunkValue(result["_time"]))
-		out.Message = firstSplunkValue(result, splunkEnterpriseMessageFields)
-
-		for _, field := range splunkEnterpriseSeverityFields {
-			if severity := formatSplunkValue(result[field]); severity != "" {
-				out.Severity = severity
-				break
-			}
-		}
-
-		outputs = append(outputs, out)
-	}
-
-	return outputs, nil
 }
 
 func buildSplunkEnterpriseLabelSampleRequest(req FetchLogLabelRequest, now time.Time) FetchLogRequest {
@@ -803,10 +1000,26 @@ func buildSplunkEnterpriseLabelSampleRequest(req FetchLogLabelRequest, now time.
 	}
 }
 
-func collectSplunkEnterpriseLogLabels(logs []OutputLog) []OutputLogLabel {
+// splunkEnterpriseLogInternalFields are fields Splunk adds to every event that no filter
+// can usefully target. host, source, sourcetype and index are deliberately NOT here: they
+// are Splunk's primary log-selection fields, and host is what the canonical host label
+// maps to. Every _-prefixed field is internal too (see isSplunkEnterpriseLogInternalField).
+var splunkEnterpriseLogInternalFields = map[string]bool{
+	"punct": true, "linecount": true, "splunk_server": true, "splunk_server_group": true,
+	"eventtype": true, "tag": true, "tag::eventtype": true,
+}
+
+func isSplunkEnterpriseLogInternalField(name string) bool {
+	return strings.HasPrefix(name, "_") || splunkEnterpriseLogInternalFields[name]
+}
+
+func collectSplunkEnterpriseLogLabels(rows []map[string]any) []OutputLogLabel {
 	labelSet := make(map[string]struct{})
-	for _, log := range logs {
-		for name := range log.Labels {
+	for _, row := range rows {
+		for name := range row {
+			if isSplunkEnterpriseLogInternalField(name) {
+				continue
+			}
 			labelSet[name] = struct{}{}
 		}
 	}
@@ -834,16 +1047,56 @@ func collectSplunkEnterpriseLogLabels(logs []OutputLog) []OutputLogLabel {
 func (s *SplunkEnterpriseLogSource) QueryLabels(ctx *security.RequestContext, req FetchLogLabelRequest) ([]OutputLogLabel, error) {
 	fetchReq := buildSplunkEnterpriseLabelSampleRequest(req, time.Now())
 
-	logs, err := s.QueryLogs(ctx, fetchReq)
+	rows, err := s.queryLogRows(ctx, fetchReq)
 	if err != nil {
 		return nil, err
 	}
 
-	return collectSplunkEnterpriseLogLabels(logs), nil
+	return collectSplunkEnterpriseLogLabels(rows), nil
 }
 
 // splunkEnterpriseLabelValueLimit caps how many distinct values the dropdown offers.
 const splunkEnterpriseLabelValueLimit = 100
+
+// splunkEnterpriseLabelValueMessageCol holds the resolved log line when the requested
+// label is the message field.
+const splunkEnterpriseLabelValueMessageCol = "nb_lv_message"
+
+// buildSplunkEnterpriseLabelValuesSPL renders the value lookup for one label, narrowed by
+// the filters already applied in the UI so a cascading dropdown offers only values that
+// still match (pods of the selected namespace, not of every namespace). Returns the SPL
+// and the result column holding the value.
+//
+// `top` ranks by frequency and caps server-side, so the most useful values surface first
+// even when the field has a long tail. The trailing `fields` drops top's count and
+// percent columns. The message field resolves the displayed line (coalesce, in display
+// order) rather than one field, which on structured events would be the whole _raw JSON.
+func buildSplunkEnterpriseLabelValuesSPL(index, col string, currentFilters map[string]string) (string, string, error) {
+	filters := query.BinaryWhereClause{}
+	for label, value := range currentFilters {
+		if strings.TrimSpace(label) == "" || value == "" {
+			continue
+		}
+		filters[label] = map[query.BinaryWhereClauseType]any{query.Eq: value}
+	}
+	filterClause, err := buildSplunkEnterpriseWhereClause(query.QueryWhereClause{Binary: filters})
+	if err != nil {
+		return "", "", err
+	}
+	search := fmt.Sprintf(`search index="%s"`, index)
+	if filterClause != "" {
+		search += " " + filterClause
+	}
+
+	if splunkEnterpriseLogMessageKeys[col] {
+		valueCol := splunkEnterpriseLabelValueMessageCol
+		return fmt.Sprintf(`%s | eval %s=coalesce(%s) | top limit=%d %s | fields %s`,
+			search, valueCol, strings.Join(splunkEnterpriseMessageFields, ", "),
+			splunkEnterpriseLabelValueLimit, valueCol, valueCol), valueCol, nil
+	}
+	return fmt.Sprintf(`%s %s=* | top limit=%d %s | fields %s`,
+		search, col, splunkEnterpriseLabelValueLimit, col, col), col, nil
+}
 
 func (s *SplunkEnterpriseLogSource) QueryLabelValues(ctx *security.RequestContext, req FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
 	cfg, err := integrations.GetSplunkEnterpriseConfig(ctx, req.AccountId)
@@ -862,11 +1115,10 @@ func (s *SplunkEnterpriseLogSource) QueryLabelValues(ctx *security.RequestContex
 		return nil, fmt.Errorf("invalid or unsafe index name: %q", cfg.LogIndex)
 	}
 
-	// `top` ranks by frequency and caps server-side, so the most useful values surface
-	// first even when the field has a long tail. The trailing `fields` drops top's count
-	// and percent columns, which this caller has no use for.
-	spl := fmt.Sprintf(`search index="%s" %s=* | top limit=%d %s | fields %s`,
-		cfg.LogIndex, col, splunkEnterpriseLabelValueLimit, col, col)
+	spl, valueCol, err := buildSplunkEnterpriseLabelValuesSPL(cfg.LogIndex, col, req.CurrentFilters)
+	if err != nil {
+		return nil, err
+	}
 
 	startTime, endTime := splunkEnterpriseTimeRangeSeconds(req.StartTime, req.EndTime, time.Now())
 
@@ -879,7 +1131,7 @@ func (s *SplunkEnterpriseLogSource) QueryLabelValues(ctx *security.RequestContex
 
 	values := make([]OutputLogLabelValue, 0, len(results))
 	for _, result := range results {
-		strVal := formatSplunkValue(result[col])
+		strVal := formatSplunkValue(result[valueCol])
 		if strVal == "" {
 			continue
 		}

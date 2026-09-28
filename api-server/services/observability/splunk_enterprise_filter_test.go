@@ -42,16 +42,16 @@ func TestBuildSplunkEnterpriseFilter_Logs(t *testing.T) {
 		{"two operators on one field", `{"_binary":{"namespace":{"_eq":"demo","_neq":"nudgebee"}}}`,
 			`(k8s.namespace.name="demo" AND NOT k8s.namespace.name="nudgebee")`},
 		// SQL LIKE patterns: '%' is a wildcard and the match is anchored.
-		{"ilike substring pattern", `{"_binary":{"body":{"_ilike":"%postgres%"}}}`, `_raw="*postgres*"`},
-		{"ilike prefix pattern", `{"_binary":{"body":{"_ilike":"panic%"}}}`, `_raw="panic*"`},
-		{"like suffix pattern", `{"_binary":{"body":{"_like":"%exceeded"}}}`, `_raw="*exceeded"`},
+		{"ilike substring pattern", `{"_binary":{"pod":{"_ilike":"%postgres%"}}}`, `k8s.pod.name="*postgres*"`},
+		{"ilike prefix pattern", `{"_binary":{"pod":{"_ilike":"panic%"}}}`, `k8s.pod.name="panic*"`},
+		{"like suffix pattern", `{"_binary":{"pod":{"_like":"%exceeded"}}}`, `k8s.pod.name="*exceeded"`},
 		// A bare word keeps the substring match callers have always had.
-		{"ilike bare word", `{"_binary":{"body":{"_ilike":"POSTGRES"}}}`, `_raw="*POSTGRES*"`},
-		{"like bare word", `{"_binary":{"body":{"_like":"postgres"}}}`, `_raw="*postgres*"`},
-		{"nlike", `{"_binary":{"body":{"_nlike":"%postgres%"}}}`, `NOT _raw="*postgres*"`},
+		{"ilike bare word", `{"_binary":{"pod":{"_ilike":"POSTGRES"}}}`, `k8s.pod.name="*POSTGRES*"`},
+		{"like bare word", `{"_binary":{"pod":{"_like":"postgres"}}}`, `k8s.pod.name="*postgres*"`},
+		{"nlike", `{"_binary":{"pod":{"_nlike":"%postgres%"}}}`, `NOT k8s.pod.name="*postgres*"`},
 		{"like keeps underscore literal", `{"_binary":{"pod":{"_like":"api_%"}}}`, `k8s.pod.name="api_*"`},
-		{"icontains", `{"_binary":{"body":{"_icontains":"Postgres"}}}`, `_raw="*Postgres*"`},
-		{"nicontains", `{"_binary":{"body":{"_nicontains":"postgres"}}}`, `NOT _raw="*postgres*"`},
+		{"icontains", `{"_binary":{"pod":{"_icontains":"Postgres"}}}`, `k8s.pod.name="*Postgres*"`},
+		{"nicontains", `{"_binary":{"pod":{"_nicontains":"postgres"}}}`, `NOT k8s.pod.name="*postgres*"`},
 		{"in", `{"_binary":{"container":{"_in":["app","ledger"]}}}`, `(k8s.container.name="app" OR k8s.container.name="ledger")`},
 		{"not in", `{"_binary":{"container":{"_not_in":["app","ledger"]}}}`, `NOT (k8s.container.name="app" OR k8s.container.name="ledger")`},
 		{"gt number", `{"_binary":{"severity_number":{"_gt":13}}}`, `severity_number>13`},
@@ -187,5 +187,47 @@ func TestSplunkEnterpriseTraceSource_AdvertisedOperatorsBuild(t *testing.T) {
 			Binary: query.BinaryWhereClause{"workload_name": {query.BinaryWhereClauseType(op): splunkOperandFor(op)}},
 		})
 		assert.NoError(t, err, "advertised operator %q must be supported by the builder", op)
+	}
+}
+
+// A filter on the log line resolves the displayed message field, in display order, and
+// reaches _raw only for events with none of the named fields (unstructured sourcetypes).
+func TestBuildSplunkEnterpriseFilter_MessageField(t *testing.T) {
+	msg := func(term func(string) string) string {
+		return "(" + term("body") +
+			" OR (NOT body=* AND " + term("message") + ")" +
+			" OR (NOT body=* AND NOT message=* AND " + term("log") + ")" +
+			" OR (NOT body=* AND NOT message=* AND NOT log=* AND " + term("_raw") + "))"
+	}
+	cases := []struct {
+		name, where, want string
+	}{
+		{"canonical body, exact", `{"_binary":{"body":{"_eq":"upstream returned 503"}}}`,
+			msg(func(f string) string { return f + `="upstream returned 503"` })},
+		{"canonical message, prefix pattern", `{"_binary":{"message":{"_ilike":"panic%"}}}`,
+			msg(func(f string) string { return f + `="panic*"` })},
+		{"v1 tool token _body, substring", `{"_binary":{"_body":{"_contains":"postgres"}}}`,
+			msg(func(f string) string { return f + `="*postgres*"` })},
+		{"negation negates the whole expression", `{"_binary":{"body":{"_nicontains":"postgres"}}}`,
+			"NOT " + msg(func(f string) string { return f + `="*postgres*"` })},
+		{"not in", `{"_binary":{"body":{"_not_in":["a","b"]}}}`,
+			"NOT " + msg(func(f string) string { return `(` + f + `="a" OR ` + f + `="b")` })},
+		// An explicit _raw filter is left alone: the caller asked for the raw event.
+		{"explicit _raw is literal", `{"_binary":{"_raw":{"_contains":"x"}}}`, `_raw="*x*"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildSplunkEnterpriseWhereClause(whereFromJSON(t, tc.where))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestBuildSplunkEnterpriseFilter_HostIsSplunksHostField(t *testing.T) {
+	for _, label := range []string{"host", "hostname"} {
+		got, err := buildSplunkEnterpriseWhereClause(whereFromJSON(t, `{"_binary":{"`+label+`":{"_eq":"gke-node-1"}}}`))
+		require.NoError(t, err)
+		assert.Equal(t, `host="gke-node-1"`, got, label)
 	}
 }
