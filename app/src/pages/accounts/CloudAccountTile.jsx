@@ -28,6 +28,13 @@ import apiUser from '@api1/user';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import CfUpdateModal from './CfUpdateModal';
 import EnableGcpWebhookModal from './EnableGcpWebhookModal';
+import EventAnalysisSettingsFields from '@components/accounts/EventAnalysisSettingsFields';
+import {
+  DEFAULT_EVENT_ANALYSIS_FORM,
+  buildEventAnalysisValue,
+  getEventAnalysisForm,
+  saveEventAnalysisValue,
+} from '@api1/account/eventAnalysisSettings';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
 import AccountEnvText from '@shared/format/AccountEnvText';
 import { getIntegrationDescription } from '@lib/integrationDescriptions';
@@ -123,6 +130,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
   const [cfUpdateAccountId, setCfUpdateAccountId] = useState(null);
   const [webhookModalOpen, setWebhookModalOpen] = useState(false);
   const [webhookModalAccount, setWebhookModalAccount] = useState(null);
+  // AI event analysis settings modal: the account it's open for, or null.
+  const [eventAnalysisAccount, setEventAnalysisAccount] = useState(null);
+  const [eventAnalysisForm, setEventAnalysisForm] = useState(DEFAULT_EVENT_ANALYSIS_FORM);
+  const [eventAnalysisLoading, setEventAnalysisLoading] = useState(false);
   const [webhookAccountIds, setWebhookAccountIds] = useState(new Set());
   const [existedIntegrations, setExistedIntegrations] = useState({});
   const [enabledWebhookIntegrations, setEnabledWebhookIntegrations] = useState([]);
@@ -299,6 +310,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         label: 'Change Environment',
         id: 7,
       },
+      {
+        label: 'AI Event Analysis Settings',
+        id: 'event-analysis-settings',
+      },
     ];
     if (cloudProvider === 'Azure') {
       items.push({
@@ -382,6 +397,8 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
     } else if (menuItem.id === 'real-time-alerts') {
       setWebhookModalAccount(data);
       setWebhookModalOpen(true);
+    } else if (menuItem.id === 'event-analysis-settings') {
+      openEventAnalysisModal(data);
     } else if (menuItem.id === 'update-permissions') {
       handleUpdatePermissions(data);
     } else if (menuItem.id === 7) {
@@ -409,6 +426,40 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
   const handleUpdatePermissions = (account) => {
     setCfUpdateAccountId(account.id);
     setCfUpdateModalOpen(true);
+  };
+
+  const openEventAnalysisModal = async (account) => {
+    setEventAnalysisAccount(account);
+    setEventAnalysisForm(DEFAULT_EVENT_ANALYSIS_FORM);
+    setEventAnalysisLoading(true);
+    try {
+      setEventAnalysisForm(await getEventAnalysisForm(account.id));
+    } catch (error) {
+      snackbar.error(error.message);
+      setEventAnalysisAccount(null);
+    } finally {
+      setEventAnalysisLoading(false);
+    }
+  };
+
+  const closeEventAnalysisModal = () => setEventAnalysisAccount(null);
+
+  const handleEventAnalysisSave = async () => {
+    const built = buildEventAnalysisValue(eventAnalysisForm);
+    if (built.error) {
+      snackbar.error(built.error);
+      return;
+    }
+    setEventAnalysisLoading(true);
+    try {
+      await saveEventAnalysisValue(eventAnalysisAccount.id, built.value);
+      snackbar.success('AI event analysis settings saved');
+      closeEventAnalysisModal();
+    } catch (error) {
+      snackbar.error(error.message);
+    } finally {
+      setEventAnalysisLoading(false);
+    }
   };
 
   const handleOpenEventGridModal = (account) => {
@@ -862,6 +913,35 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
   return (
     <>
       <AddAccountModalComponent open={openAddModal} onClose={handleCloseAddModal} />
+      <Modal
+        width='sm'
+        open={!!eventAnalysisAccount}
+        handleClose={eventAnalysisLoading ? () => {} : closeEventAnalysisModal}
+        title={`AI Event Analysis Settings (${eventAnalysisAccount?.account_name || ''})`}
+        loader={eventAnalysisLoading}
+      >
+        <Box p={ds.space[4]}>
+          <EventAnalysisSettingsFields form={eventAnalysisForm} onChange={setEventAnalysisForm} disabled={eventAnalysisLoading} />
+        </Box>
+        <Box
+          sx={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: ds.space[4],
+            mt: ds.space[2],
+            mb: ds.space[4],
+            pr: ds.space[4],
+            '& button': { minWidth: ds.space.mul(1, 35) },
+          }}
+        >
+          <DsButton tone='secondary' size='md' onClick={closeEventAnalysisModal} disabled={eventAnalysisLoading}>
+            Cancel
+          </DsButton>
+          <DsButton tone='primary' size='md' onClick={handleEventAnalysisSave} disabled={eventAnalysisLoading} data-testid='event-analysis-save'>
+            Save
+          </DsButton>
+        </Box>
+      </Modal>
       {AddOrgModalComponent && <AddOrgModalComponent open={openOrgModal} onClose={handleCloseOrgModal} />}
       <Modal
         width='sm'

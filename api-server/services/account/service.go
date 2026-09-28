@@ -2618,6 +2618,9 @@ func UpsertAccountAttrs(context *security.RequestContext, request AccountAttrUps
 		if err := validateKnowledgePolicyAttribute(context.GetSecurityContext(), attr); err != nil {
 			return AccountAttrUpsertResponse{}, err
 		}
+		if err := validateEventAnalysisAttribute(context.GetSecurityContext(), attr); err != nil {
+			return AccountAttrUpsertResponse{}, err
+		}
 	}
 
 	dbms, err := database.GetDatabaseManager(database.Metastore)

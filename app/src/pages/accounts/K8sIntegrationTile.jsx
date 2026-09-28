@@ -35,6 +35,13 @@ import { action } from 'src/utils/actionStyles';
 import { ds } from 'src/utils/colors';
 import { getFeatures, updateFeatureFlagForAccount } from '@lib/UserService';
 import { Checkbox } from '@ui/Checkbox';
+import EventAnalysisSettingsFields from '@components/accounts/EventAnalysisSettingsFields';
+import {
+  DEFAULT_EVENT_ANALYSIS_FORM,
+  EVENT_ANALYSIS_ATTR,
+  buildEventAnalysisValue,
+  parseEventAnalysisForm,
+} from '@api1/account/eventAnalysisSettings';
 import { parseHttpResponseBodyMessage, safeJSONParse } from 'src/utils/common';
 import apiUser from '@api1/user';
 import CopyButton from '@shared/buttons/CopyButton';
@@ -83,6 +90,7 @@ const K8sIntegrationTile = () => {
   // Image scanning is on for every account until someone turns it off here.
   const [imageScanEnabled, setImageScanEnabled] = useState(true);
   const [imageScanExcludedNamespaces, setImageScanExcludedNamespaces] = useState('');
+  const [eventAnalysisForm, setEventAnalysisForm] = useState(DEFAULT_EVENT_ANALYSIS_FORM);
   const [updateAccountStatus, setUpdateAccountStatus] = useState({});
   const [isStatusUpdating, setIsStatusUpdating] = useState(false);
   const [k8sCurlCommand, setK8sCurlCommand] = useState('');
@@ -348,6 +356,7 @@ const K8sIntegrationTile = () => {
       const imageScan = safeJSONParse(accountAttrs.find((l) => l.name === 'image_scan')?.value) || {};
       setImageScanEnabled(imageScan.enabled !== false);
       setImageScanExcludedNamespaces((imageScan.excluded_namespaces || []).join(', '));
+      setEventAnalysisForm(parseEventAnalysisForm(accountAttrs.find((l) => l.name === EVENT_ANALYSIS_ATTR)?.value));
       if (
         selectedAccountId in cloudAccountAttributes &&
         cloudAccountAttributes[selectedAccountId] &&
@@ -481,6 +490,11 @@ const K8sIntegrationTile = () => {
   };
 
   const handleSubmitAccountSetting = async () => {
+    const eventAnalysisValue = buildEventAnalysisValue(eventAnalysisForm);
+    if (eventAnalysisValue.error) {
+      snackbar.error(eventAnalysisValue.error);
+      return;
+    }
     setUpdating(true);
     const data = [
       {
@@ -511,6 +525,13 @@ const K8sIntegrationTile = () => {
             .map((ns) => ns.trim())
             .filter(Boolean),
         }),
+        cloud_account_id: selectedAccountId,
+      },
+      // Unconditional, like image_scan: turning reuse back on or clearing a list
+      // has to overwrite the stored value.
+      {
+        name: EVENT_ANALYSIS_ATTR,
+        value: eventAnalysisValue.value,
         cloud_account_id: selectedAccountId,
       },
     ];
@@ -840,6 +861,13 @@ const K8sIntegrationTile = () => {
                 disabled={!imageScanEnabled || !hasWriteAccess()}
               />
             </Box>
+          </Box>
+
+          <Divider color={ds.background[200]} sx={{ marginTop: ds.space[5], marginBottom: ds.space[5] }} />
+
+          <Heading value='AI Event Analysis' borderWidth='md' />
+          <Box sx={{ mt: ds.space[3] }}>
+            <EventAnalysisSettingsFields form={eventAnalysisForm} onChange={setEventAnalysisForm} showNamespaces disabled={!hasWriteAccess()} />
           </Box>
 
           <Divider color={ds.background[200]} sx={{ marginTop: ds.space[5], marginBottom: ds.space[5] }} />

@@ -577,18 +577,58 @@ func isLiveFailure(repo *events.EventAnalysisRepository, analysis *events.EventA
 		!repo.IsAnalysisStale(analysis.UpdatedAt)
 }
 
+// shouldForceFreshAnalysis reports whether this request must run as a
+// regenerate — what the UI's "Refresh investigation" button sends — so the
+// event gets its own live run instead of a related event's analysis. That
+// applies when the account turned off reuse_related, or the event is in one of
+// its always_fresh_namespaces, and the event has never been analysed. Only the
+// first request forces: once the claim binds the event to its own run, later
+// requests (UI polling, MQ re-fires) reuse it. Lookup errors fall back to
+// normal reuse rather than failing the request.
+func shouldForceFreshAnalysis(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, accountId string) bool {
+	settings := repo.Settings()
+	if settings.ReusesRelated() && len(settings.AlwaysFreshNamespaces) == 0 {
+		return false
+	}
+	if settings.ReusesRelated() {
+		namespace, err := repo.GetEventNamespace(ctx, eventId, accountId)
+		if err != nil || !settings.IsAlwaysFresh(namespace) {
+			return false
+		}
+	}
+	analysed, err := repo.HasAnalysisMapping(ctx, eventId)
+	if err != nil || analysed {
+		return false
+	}
+	ctx.GetLogger().Info("analyzer: forcing fresh analysis per account settings", "event_id", eventId, "account_id", accountId)
+	return true
+}
+
+// bindStagesToEvent gives each non-log stage of a forced-fresh event its own
+// in-progress row and mapping. Without them, a stage the run never reached
+// (e.g. it failed after the log stage) has no mapping, and a later non-forced
+// request would read the related event's completed result for it through
+// GetEventAnalysis's fingerprint fallback. Errors are logged, not returned: the
+// run itself is already claimed and proceeds either way.
+func bindStagesToEvent(ctx *security.RequestContext, repo *events.EventAnalysisRepository, eventId, fingerprint, accountId, aggKey string) {
+	for _, aType := range []events.EventAnalysisType{events.AnalysisTypeSummary, events.AnalysisTypeInvestigation, events.AnalysisTypeDetailedResponse} {
+		if err := repo.UpsertEventAnalysisInProgress(ctx, eventId, fingerprint, accountId, aggKey, aType); err != nil {
+			ctx.GetLogger().Warn("analyzer: failed to bind stage to forced-fresh event", "error", err, "event_id", eventId, "analysis_type", aType)
+		}
+	}
+}
+
 func executeEventInvestigation(ctx *security.RequestContext, request EventAnalysisRequest, c *gin.Context) {
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
 		c.JSON(500, buildApiResponse(nil, []error{common.Error{Message: err.Error()}}))
 		return
 	}
-	eventAnalysisRepo := events.NewEventAnalysisRepository(dbManager)
-
 	if request.UserId == "" || request.AccountId == "" || request.EventId == "" {
 		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "userId, accountId and eventId are required"}}))
 		return
 	}
+	eventAnalysisRepo := events.NewEventAnalysisRepositoryForAccount(ctx, dbManager, request.AccountId)
 
 	ctx.GetLogger().Info("analyzer: fetching event info from database", "event_id", request.EventId)
 	eventInfo, err := eventAnalysisRepo.GetEventInfo(ctx, request.EventId, request.AccountId)
@@ -604,6 +644,11 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 	if eventInfo.Fingerprint == "" {
 		ctx.GetLogger().Warn("analyzer: event fingerprint is empty, using event_id as fingerprint", "event_id", request.EventId)
 		eventInfo.Fingerprint = request.EventId
+	}
+
+	forcedFresh := !request.Regenerate && shouldForceFreshAnalysis(ctx, eventAnalysisRepo, request.EventId, request.AccountId)
+	if forcedFresh {
+		request.Regenerate = true
 	}
 
 	analysisTypes := []events.EventAnalysisType{events.AnalysisTypeSummary, events.AnalysisTypeInvestigation, events.AnalysisTypeLog, events.AnalysisTypeDetailedResponse}
@@ -746,9 +791,11 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 		finalResponse.GeneratedAt = &generatedAt
 	}
 
-	// One post-loop check on the newest stage (not per-stage in the loop) so it
-	// stays identical to the events-list "View Analysis" test in
-	// services/query is_investigated: completion_ts >= event.created_at - window.
+	// One post-loop check on the newest stage (not per-stage in the loop),
+	// mirroring the events-list "View Analysis" test in services/query
+	// is_investigated: completion_ts >= event.created_at - window. That test
+	// hardcodes 24h, so the two diverge for an account with its own
+	// reuse_window_hours (event_analysis setting) or a non-default global window.
 	if allCompleted && eventAnalysisRepo.IsAnalysisStaleForEvent(latestAnalysisAt, eventInfo.CreatedAt) {
 		allCompleted = false
 	}
@@ -840,7 +887,11 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 			}
 			continue
 		}
-		if logCompleted {
+		// A forced-fresh event still marks every stage, even when the related
+		// event's log is complete: that gives each stage its own mapping row, so a
+		// retry after a partial failure can't fall back to the related event's
+		// results. The MQ path does the same through bindStagesToEvent.
+		if logCompleted && !forcedFresh {
 			continue
 		}
 		if err := eventAnalysisRepo.UpsertEventAnalysisInProgress(ctx, request.EventId, eventInfo.Fingerprint, request.AccountId, eventInfo.AggregationKey, aType); err != nil {
@@ -887,7 +938,7 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 }
 
 func getOrCreateEventAnalysisStatus(ctx *security.RequestContext, request EventAnalysisRequest, dbManager *common.DatabaseManager, createAnalysis bool) (EventAnalysisResponse, error) {
-	eventAnalysisRepo := events.NewEventAnalysisRepository(dbManager)
+	eventAnalysisRepo := events.NewEventAnalysisRepositoryForAccount(ctx, dbManager, request.AccountId)
 	if request.EventId == "" || request.AccountId == "" {
 		ctx.GetLogger().Warn("analyzer: event_id/account_id is required", "event_id", request.EventId, "account_id", request.AccountId)
 		return EventAnalysisResponse{}, common.Error{
@@ -1127,7 +1178,7 @@ func getConfirmedTerminalAnalysis(ctx *security.RequestContext, request EventAna
 	if request.EventId == "" || request.AccountId == "" || dbManager == nil {
 		return EventAnalysisResponse{}, false
 	}
-	repo := events.NewEventAnalysisRepository(dbManager)
+	repo := events.NewEventAnalysisRepositoryForAccount(ctx, dbManager, request.AccountId)
 	eventInfo, err := repo.GetEventInfo(ctx, request.EventId, request.AccountId)
 	if err != nil {
 		return EventAnalysisResponse{}, false
@@ -1375,7 +1426,7 @@ func analyzeEventRCAUsingAgentsAndUpdateDb(ctx *security.RequestContext, request
 		ctx.GetLogger().Error("unable to get db manager for rca analysis", "error", dbErr, "event_id", request.EventId)
 		return EventAnalysisResponse{}, dbErr
 	}
-	eventAnalysisRepo := events.NewEventAnalysisRepository(dbManager)
+	eventAnalysisRepo := events.NewEventAnalysisRepositoryForAccount(ctx, dbManager, request.AccountId)
 	defer func() {
 		if request.AttemptID != "" && resultErr != nil {
 			if err := eventAnalysisRepo.UpdateRCAAttemptStatus(ctx, request.AttemptID, request.EventId, request.AccountId, string(events.AnalysisStatusFailed), "RCA could not complete. Please retry."); err != nil {
@@ -2448,7 +2499,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		ctx.GetLogger().Error("unable to get db", "error", err)
 		return EventAnalysisResponse{}, err
 	}
-	eventAnalysisRepo := events.NewEventAnalysisRepository(dbManager)
+	eventAnalysisRepo := events.NewEventAnalysisRepositoryForAccount(ctx, dbManager, request.AccountId)
 
 	// Gate before getEventData (which `select *`s the event, materialising its
 	// potentially multi-MB evidences column) and before any agent runs. For
