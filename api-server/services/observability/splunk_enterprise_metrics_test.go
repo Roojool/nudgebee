@@ -458,7 +458,9 @@ func TestSplunkMetricLikeAndRegexMatchers(t *testing.T) {
 		{"suffix pattern", "%out", `k8s.deployment.name="*out"`},
 		{"bare word keeps the substring match", "check", `k8s.deployment.name="*check*"`},
 		{"underscore stays literal", "api_%", `k8s.deployment.name="api_*"`},
-		{"a literal star is still escaped", "a*%", `k8s.deployment.name="a\**"`},
+		// '*' is a Splunk wildcard with no escape inside a quoted term (#39334), so a '*' in
+		// the value passes through as one.
+		{"a star in the value stays a wildcard", "a*%", `k8s.deployment.name="a**"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
