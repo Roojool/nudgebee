@@ -100,6 +100,28 @@ they are opt-in. Extension-registered entropy detectors should cap candidate
 token length (current extension uses 512 chars) so multi-KB base64 blobs
 don't burn O(n) Shannon-entropy compute per call.
 
+### False-positive controls (EE)
+
+Tuned against the historical LLM-payload corpus rather than by example. Each
+check suppresses a shape that is data, not a credential, and is paired with
+a test proving the credential version of that shape still fires
+(`ee/egressfilter/fp_regression_test.go`):
+
+- **Entropy gate** — base64 is judged as a whole block (joined across `/`,
+  `%2F`, and fixed-width wrapped lines): labelled digests, SOPS ciphertext,
+  certificate/public-key/signature PEM bodies, blocks that decode to readable
+  text with nothing secret in it (decoded text is rescanned), and >512-char
+  blocks that decode to binary are skipped; key material (PEM `PRIVATE KEY`,
+  DER private keys, PKCS#12/JKS keystores, PGP secret keys) never is.
+  Word-built names (branches, migrations, test names) and values of `*_id` /
+  pagination-cursor fields are identifiers. Hits wholly inside another
+  rule's hit are dropped as duplicates.
+- **generic-kv-secret** — the value must be a literal: comparisons, code
+  (`cfg.get(`, `self.x`), references and bind parameters (`${X}`, `$1`,
+  `%s`), placeholders, masks, paths and public keys are skipped.
+- **credit-card** — card grouping and issuer prefix/length (IIN) are checked
+  on top of Luhn; values of id fields are skipped.
+
 ## 5. Extending the rule set
 
 Every detector is a `Filter`:
