@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 
 	"github.com/nudgebee/logparser"
@@ -876,11 +877,16 @@ func (s *LokiSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest Fet
 		NoSinks: true,
 	}
 
-	resp, err := relay.Execute(relay.RelayExecuteRequest{
+	relayRequest := relay.RelayExecuteRequest{
 		NoSinks: true,
 		Cache:   false,
 		Body:    lokiRequest,
-	})
+	}
+	if fetchLogRequest.Timeout > 0 {
+		relayRequest.TimeoutSeconds = int(math.Ceil(fetchLogRequest.Timeout.Seconds()))
+		relayRequest.MaxAttempts = 1
+	}
+	resp, err := relay.Execute(relayRequest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute loki query: %w", err)
 	}
@@ -1086,6 +1092,21 @@ func (s *LokiSource) GenerateQuery(ctx playbooks.PlaybookActionContext) (string,
 
 	logql := fmt.Sprintf(`{%s, namespace="%s"}`, podMatcher, namespace)
 	return logql, map[string]any{}, nil
+}
+
+// withLineFilter narrows a LogQL query to the lines matching pattern (RE2). Only a log
+// query — a stream selector and its pipeline — can take a line filter; a metric query,
+// or a query already encoded as API parameters, cannot, and is reported as such.
+//
+// The level a line comes back with is logparser.GuessLevel's reading of the line itself
+// (extractSeverity), never a default, which is what lineFilterSource requires.
+func (s *LokiSource) withLineFilter(query, pattern string) (string, bool) {
+	query = strings.TrimSpace(query)
+	if !strings.HasPrefix(query, "{") || strings.Contains(pattern, "`") {
+		return "", false
+	}
+	// A raw string, so the pattern needs no escaping.
+	return query + " |~ `" + pattern + "`", true
 }
 
 // escapeLokiLabelValue escapes special characters in LogQL label values.

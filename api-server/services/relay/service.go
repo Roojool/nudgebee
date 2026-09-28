@@ -423,6 +423,9 @@ func Execute(relayRequest RelayExecuteRequest) (map[string]any, error) {
 	data := make(map[string]any)
 
 	maxRetries := 3
+	if relayRequest.MaxAttempts > 0 {
+		maxRetries = relayRequest.MaxAttempts
+	}
 	baseRetryInterval := 2 * time.Second
 
 	// Extract Account ID for better logging
