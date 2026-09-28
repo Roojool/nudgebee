@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,32 @@ func replaceAllMatches(s string, tableName string, makeReplacement func(idx int)
 		idx++
 		return r
 	})
+}
+
+// numericColumnNames lists the NUMERIC columns of a result set, computed once
+// per query so the per-row decode does no type lookups. common.Metastore is
+// PostgreSQL through lib/pq (common/rdbms.go opens it with the "postgres"
+// driver), which reports the type as "NUMERIC"; the comparison is
+// case-insensitive so a driver or mock that reports "numeric" still matches.
+func numericColumnNames(cols []*sql.ColumnType) []string {
+	var names []string
+	for _, c := range cols {
+		if strings.EqualFold(c.DatabaseTypeName(), "NUMERIC") {
+			names = append(names, c.Name())
+		}
+	}
+	return names
+}
+
+// keepNumericText replaces the raw []byte lib/pq returns for NUMERIC cells (Go
+// has no decimal type) with their decimal text, so JSON does not base64 them
+// ("MA==" for "0"). Only the listed columns are touched; bytea stays bytes.
+func keepNumericText(row map[string]any, numericCols []string) {
+	for _, name := range numericCols {
+		if b, ok := row[name].([]byte); ok {
+			row[name] = string(b)
+		}
+	}
 }
 
 func sqlToolCall(nbRequestContext core.NbToolContext, query string, tableName string, eventsView string, limit int, processRow func(r map[string]any, i int, c int) map[string]any) (core.NBToolResponse, []map[string]any, error) {
@@ -244,12 +271,18 @@ func sqlExecuteQuery(ctx *security.RequestContext, query string, accountId strin
 		}
 	}()
 
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, err
+	}
+	numericCols := numericColumnNames(colTypes)
 	data := []map[string]any{}
 	for rows.Next() {
 		row := map[string]any{}
 		if err := rows.MapScan(row); err != nil {
 			return nil, err
 		}
+		keepNumericText(row, numericCols)
 		data = append(data, row)
 	}
 	ctx.GetLogger().Info("sql: executed tool query", "account", accountId, "query", finalQuery, "time", time.Since(t0).String(), "rows", len(data))
