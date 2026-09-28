@@ -115,7 +115,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// the account capability filter — the same authority delegate_agent would grant,
 		// just invoked directly. Scoped to the discovered set, so a tool name the model
 		// merely guessed (never discovered) is NOT accepted.
-		if canonical, discovered := DiscoveredToolCanonicalName(request.ConversationId, toolName); discovered {
+		canonical, discovered := DiscoveredToolCanonicalName(request.ConversationId, toolName)
+		if !discovered {
+			canonical, discovered = QueryConfigDiscoveredToolCanonicalName(request.QueryConfig, toolName)
+		}
+		if discovered {
 			// Resolve with the canonical (registered) name — the discovery match is
 			// case-insensitive but GetNBTool/GetNBAgent are case-sensitive. On success,
 			// adopt the canonical name so downstream logging and request-type inference

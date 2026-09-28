@@ -135,7 +135,11 @@ func FollowupRequestForMultipleToolConfigs(ctx *security.RequestContext, query N
 		if !found {
 			// action.Tool may be a search_tools discovery (auth_agent.go's
 			// DiscoveredToolCanonicalName) not in GetSupportedTools — else it never gets asked.
-			if canonical, discovered := DiscoveredToolCanonicalName(query.ConversationId, action.Tool); discovered {
+			canonical, discovered := DiscoveredToolCanonicalName(query.ConversationId, action.Tool)
+			if !discovered {
+				canonical, discovered = QueryConfigDiscoveredToolCanonicalName(query.QueryConfig, action.Tool)
+			}
+			if discovered {
 				if t, ok := toolcore.GetNBTool(query.AccountId, canonical); ok && t != nil {
 					if _, hasConfig := t.(toolcore.NBToolConfig); hasConfig {
 						toolsInCompleteFlow[t.Name()] = t

@@ -145,6 +145,9 @@ func (t *searchToolsTool) Call(ctx toolcore.NbToolContext, input toolcore.NBTool
 		Status: toolcore.NBToolResponseStatusSuccess,
 		Data:   renderSearchToolsOutput(matched),
 		Type:   toolcore.NBToolResponseTypeText,
+		AdditionalDetails: map[string]any{
+			"discovered_tools": discovered,
+		},
 	}, nil
 }
 

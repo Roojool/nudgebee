@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/samber/lo"
 	"github.com/tmc/langchaingo/agents"
 	"github.com/tmc/langchaingo/callbacks"
 	"github.com/tmc/langchaingo/chains"
@@ -364,6 +365,12 @@ func newPlannerExecutor(ctx *security.RequestContext, agentPlanner NBAgentPlanne
 	// The first executor (top-level) sets it; sub-agents inherit via QueryConfig propagation.
 	if request.QueryConfig.OriginalUserQuery == "" {
 		request.QueryConfig.OriginalUserQuery = request.Query
+	}
+
+	// Seed the in-memory discovered tools registry from QueryConfig so discoveries
+	// survive multi-turn followups and multi-pod dispatch.
+	if request.ConversationId != "" && len(request.QueryConfig.DiscoveredTools) > 0 {
+		RecordDiscoveredTools(request.ConversationId, request.QueryConfig.DiscoveredTools)
 	}
 
 	return &plannerExecutor{
@@ -2597,6 +2604,22 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		}
 	} else {
 		observation, err = callNbTool(actionCtx, e.agentRequest, e.agent.GetName(), tool, action.ToolInput, nil, queryContext, action.ToolID)
+	}
+	var dt []string
+	if val, ok := observation.AdditionalDetails["discovered_tools"]; ok && val != nil {
+		switch v := val.(type) {
+		case []string:
+			dt = v
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+					dt = append(dt, strings.TrimSpace(s))
+				}
+			}
+		}
+	}
+	if len(dt) > 0 {
+		e.agentRequest.QueryConfig.DiscoveredTools = lo.Uniq(append(e.agentRequest.QueryConfig.DiscoveredTools, dt...))
 	}
 
 	toolExecDur := time.Since(toolExecStart)

@@ -181,3 +181,22 @@ func TestIsEmpty_SkipHistoryOnlyConfigIsNotEmpty(t *testing.T) {
 		t.Fatal("a skip-history-only config must not read as empty")
 	}
 }
+
+func TestNBQueryConfig_DiscoveredTools(t *testing.T) {
+	// IsEmpty checks DiscoveredTools
+	if (NBQueryConfig{DiscoveredTools: []string{"postgres_query_execute"}}).IsEmpty() {
+		t.Fatal("IsEmpty: config with DiscoveredTools should not be empty")
+	}
+
+	// MergeFrom accumulates and deduplicates DiscoveredTools
+	dst := NBQueryConfig{DiscoveredTools: []string{"tool_a"}}
+	src := NBQueryConfig{DiscoveredTools: []string{"tool_b", "tool_a"}}
+	dst.MergeFrom(src)
+
+	if len(dst.DiscoveredTools) != 2 {
+		t.Fatalf("expected 2 unique tools, got %d: %v", len(dst.DiscoveredTools), dst.DiscoveredTools)
+	}
+	if dst.DiscoveredTools[0] != "tool_a" || dst.DiscoveredTools[1] != "tool_b" {
+		t.Fatalf("unexpected DiscoveredTools contents: %v", dst.DiscoveredTools)
+	}
+}

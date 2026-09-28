@@ -180,3 +180,69 @@ func TestIsAgentToolAuthorizedToProcessRequest_DeterministicMutationAuthoritativ
 	require.NotNil(t, reqType2)
 	require.Equal(t, toolcore.ToolRequestTypeRead, *reqType2)
 }
+
+func TestIsAgentToolAuthorizedToProcessRequest_QueryConfigDiscovery(t *testing.T) {
+	const toolName = "mock_qc_tool"
+	toolcore.RegisterNBToolFactory(toolName, func(_ string) (toolcore.NBTool, error) {
+		return mockTool{name: toolName}, nil
+	})
+
+	const toolConfigName = "mock_configured_tool"
+	toolcore.RegisterNBToolFactory(toolConfigName, func(_ string) (toolcore.NBTool, error) {
+		return mockTool{name: toolConfigName}, nil
+	})
+
+	// Agent does NOT preload either tool
+	agent := mockAgentWithTools{
+		mockPlainAgent: mockPlainAgent{name: "k8s_orchestrator"},
+		tools:          []toolcore.NBTool{},
+	}
+	ctx := security.NewRequestContextForSuperAdmin()
+
+	// Case 1: Tool discovered via QueryConfig.DiscoveredTools (in-memory empty)
+	reqDiscovered := NBAgentRequest{
+		AccountId:      "test-account",
+		ConversationId: "conv-qc-test-1",
+		QueryConfig: toolcore.NBQueryConfig{
+			DiscoveredTools: []string{toolName},
+		},
+	}
+	finish, reqType, err := IsAgentToolAuthorizedToProcessRequest(
+		ctx, agent, reqDiscovered,
+		NBAgentPlannerToolAction{Tool: toolName, ToolInput: "{}"},
+	)
+	require.NoError(t, err)
+	require.Nil(t, finish)
+	require.NotNil(t, reqType)
+
+	// Case 2: Tool configured via QueryConfig.ToolConfigs (e.g. from user followup response)
+	reqConfigured := NBAgentRequest{
+		AccountId:      "test-account",
+		ConversationId: "conv-qc-test-2",
+		QueryConfig: toolcore.NBQueryConfig{
+			ToolConfigs: map[string]string{
+				toolConfigName: "dev-config",
+			},
+		},
+	}
+	finish, reqType, err = IsAgentToolAuthorizedToProcessRequest(
+		ctx, agent, reqConfigured,
+		NBAgentPlannerToolAction{Tool: toolConfigName, ToolInput: "{}"},
+	)
+	require.NoError(t, err)
+	require.Nil(t, finish)
+	require.NotNil(t, reqType)
+
+	// Case 3: Tool neither supported, in-memory, nor in QueryConfig must be rejected
+	reqUnauthorized := NBAgentRequest{
+		AccountId:      "test-account",
+		ConversationId: "conv-qc-test-3",
+		QueryConfig:    toolcore.NBQueryConfig{},
+	}
+	_, _, err = IsAgentToolAuthorizedToProcessRequest(
+		ctx, agent, reqUnauthorized,
+		NBAgentPlannerToolAction{Tool: "never_heard_of_tool", ToolInput: "{}"},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not in your authorized tool set")
+}

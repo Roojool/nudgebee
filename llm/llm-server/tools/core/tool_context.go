@@ -119,6 +119,7 @@ type NBQueryConfig struct {
 	Capabilities       AgentCapabilities `json:"capabilities,omitzero"`
 	ToolConfirmations  map[string]string `json:"tool_confirmations,omitempty"`
 	ToolConfigMetadata map[string]any    `json:"tool_config_metadata,omitempty"`
+	DiscoveredTools    []string          `json:"discovered_tools,omitempty"`
 }
 
 // IsEmpty returns true when the config has no meaningful values set.
@@ -129,7 +130,8 @@ func (q NBQueryConfig) IsEmpty() bool {
 		q.CurrentCluster == "" && q.CurrentClusterId == "" && q.K8sOrchestratorMode == "" &&
 		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && q.LlmConfigSource == "" && !q.LlmConfigReset && len(q.ToolConfigs) == 0 &&
 		len(q.ClientTools) == 0 && q.Capabilities.IsEmpty() && len(q.ToolConfirmations) == 0 &&
-		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == "" && !q.SkipConversationHistory
+		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == "" && !q.SkipConversationHistory &&
+		len(q.DiscoveredTools) == 0
 }
 
 // MergeFrom copies fields from src into q only when q's field is the zero value.
@@ -231,6 +233,9 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 	}
 	if src.ToolConfigMetadata != nil {
 		q.ToolConfigMetadata = lo.Assign(src.ToolConfigMetadata, q.ToolConfigMetadata)
+	}
+	if len(src.DiscoveredTools) > 0 {
+		q.DiscoveredTools = lo.Uniq(append(q.DiscoveredTools, src.DiscoveredTools...))
 	}
 }
 
