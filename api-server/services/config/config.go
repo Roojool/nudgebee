@@ -496,7 +496,7 @@ func init() {
 	viper.SetDefault("relay_server_endpoint", "http://localhost:52832")
 	viper.SetDefault("relay_server_secret_key", "")
 
-	viper.SetDefault("vuln_matcher_server_endpoint", "http://vuln-matcher-server:8080")
+	viper.SetDefault("vuln_matcher_server_endpoint", "http://vulnerability-server:8080")
 
 	viper.SetDefault("git_commit_nudgebee_user", "Nudgebee Bot")
 	viper.SetDefault("git_commit_nudgebee_user_email", "")
