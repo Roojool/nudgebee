@@ -18,6 +18,20 @@ jobs:
   notifications-build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # Real broker for tests/test_consumer_reconnect.py (consumer count stays one
+    # across broker reconnects). Same RabbitMQ version as the chart.
+    services:
+      rabbitmq:
+        image: public.ecr.aws/docker/library/rabbitmq:3.13.7
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,4 +84,8 @@ jobs:
 
       - name: Run tests
         working-directory: ./notifications-server
+        # The broker tests skip when RABBIT_MQ_TEST_HOST is unset; here it is set,
+        # so a missing broker fails them.
+        env:
+          RABBIT_MQ_TEST_HOST: 127.0.0.1
         run: poetry run pytest -q
