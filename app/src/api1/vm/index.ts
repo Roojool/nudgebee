@@ -385,7 +385,7 @@ const GROUPING_DIMENSIONS: Record<VmVulnerabilityGrouping, { groupBy: string[]; 
 const resolveVmNames = async (accountId: string | string[], ids: string[]): Promise<Record<string, string>> => {
   if (!ids.length) return {};
   const where = { account: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId }, id: { _in: ids } };
-  const response = await queryGraphQL(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit: ids.length, offset: 0 });
+  const response = await queryGraphQLCached(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit: ids.length, offset: 0 });
   const rows = response?.data?.data?.vms?.rows || [];
   const nameById: Record<string, string> = {};
   for (const row of rows) {
