@@ -1438,20 +1438,32 @@ var table_metadata = map[string]TableDefinition{
 				// joins so grouped counts can filter/aggregate on the same
 				// incident columns the list filters on (children folded by
 				// default must fold in the counts too).
-				from += ` LEFT JOIN (SELECT DISTINCT ON (event_id, cloud_account_id) event_id, cloud_account_id, related_event_id
-					FROM event_correlations WHERE correlation_type = 'same_incident'
-					ORDER BY event_id, cloud_account_id, related_event_id) ecl
-					ON ecl.event_id = events.id AND ecl.cloud_account_id = events.cloud_account_id`
+				//
+				// LATERAL, keyed per outer row, rather than a whole-table grouped
+				// subquery — bounds cost to the outer result size instead of
+				// event_correlations' total size. Mirrors the events_v2 `eia`
+				// join below.
+				from += ` LEFT JOIN LATERAL (
+					SELECT related_event_id
+					FROM event_correlations
+					WHERE correlation_type = 'same_incident'
+						AND event_id = events.id
+						AND cloud_account_id = events.cloud_account_id
+					ORDER BY related_event_id
+					LIMIT 1
+				) ecl ON true`
 				// Distinct ALERTS, not links. Group links join firings, so one alert firing repeatedly inside an incident contributes several rows
 				// counting them would report an incident with two alerts in it
 				// as having six members.
-				from += ` LEFT JOIN (SELECT ec.related_event_id, ec.cloud_account_id,
-					       count(DISTINCT me.fingerprint) AS incident_member_count
+				from += ` LEFT JOIN LATERAL (
+					SELECT count(DISTINCT me.fingerprint) AS incident_member_count
 					FROM event_correlations ec
 					JOIN events me ON me.id = ec.event_id AND me.cloud_account_id = ec.cloud_account_id
 					WHERE ec.correlation_type = 'same_incident'
-					GROUP BY ec.related_event_id, ec.cloud_account_id) ecc
-					ON ecc.related_event_id = events.id AND ecc.cloud_account_id = events.cloud_account_id`
+						AND ec.related_event_id = events.id
+						AND ec.cloud_account_id = events.cloud_account_id
+					HAVING count(*) > 0
+				) ecc ON true`
 			}
 			// One row per analysed event, not per analysis stage. event_log_analysis
 			// carries a row per analysis_type (summary / log_analysis /
@@ -1471,27 +1483,26 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY event_id, cloud_account_id
 				) ela ON ela.event_id = events.id AND ela.cloud_account_id = events.cloud_account_id`
 			}
-			// One row per triple (not per analysis stage), so it can't fan out
-			// event rows. The inner DISTINCT ON picks the newest row per stage —
-			// V850 keeps history rows. completion_ts is that newest stage's
-			// timestamp; the is_investigated column compares it to created_at.
+			// LATERAL rather than a whole-table grouped subquery — mirrors the
+			// events_v2 `eia` join. The inner DISTINCT ON picks the newest row
+			// per stage — V850 keeps history rows. completion_ts is that
+			// newest stage's timestamp; is_investigated compares it to created_at.
 			if requestReferencesColumns(request, investigationStatusDependentColumns) {
-				from += ` LEFT JOIN (
-					SELECT event_fingerprint, cloud_account_id, event_aggregation_key,
-					       count(*) FILTER (WHERE status = 'COMPLETED') = 4 AS is_complete,
-					       max(ts) FILTER (WHERE status = 'COMPLETED') AS completion_ts
+				from += ` LEFT JOIN LATERAL (
+					SELECT count(*) FILTER (WHERE latest.status = 'COMPLETED') = 4 AS is_complete,
+					       max(latest.ts) FILTER (WHERE latest.status = 'COMPLETED') AS completion_ts
 					FROM (
-						SELECT DISTINCT ON (event_fingerprint, cloud_account_id, event_aggregation_key, analysis_type)
-						       event_fingerprint, cloud_account_id, event_aggregation_key,
+						SELECT DISTINCT ON (analysis_type)
 						       status, coalesce(updated_at, recorded_at) AS ts
 						FROM event_log_analysis
-						WHERE analysis_type IN ('summary', 'investigation', 'log_analysis', 'detailed_response')
-						ORDER BY event_fingerprint, cloud_account_id, event_aggregation_key, analysis_type, coalesce(updated_at, recorded_at) DESC
+						WHERE event_fingerprint = events.fingerprint
+							AND cloud_account_id = events.cloud_account_id
+							AND event_aggregation_key = events.aggregation_key
+							AND analysis_type IN ('summary', 'investigation', 'log_analysis', 'detailed_response')
+						ORDER BY analysis_type, coalesce(updated_at, recorded_at) DESC
 					) latest
-					GROUP BY event_fingerprint, cloud_account_id, event_aggregation_key
-				) eia ON eia.event_fingerprint = events.fingerprint
-					AND eia.cloud_account_id = events.cloud_account_id
-					AND eia.event_aggregation_key = events.aggregation_key`
+					HAVING count(*) > 0
+				) eia ON true`
 			}
 			return from, request, nil
 		},
