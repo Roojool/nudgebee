@@ -77,11 +77,23 @@ func validateUserRegex(pattern string) error {
 	return nil
 }
 
+// LogsFilterMap is the canonical → Loki field mapping. "log" is not a Loki stream
+// label; buildWhere/buildLabelSelector special-case it into a line filter (`|=` / `|~`).
+//
+// `_body` is llm-server's canonical log-text token: QueryLabels (llm/llm-server/tools/
+// tool_logs.go) appends it to EVERY provider's advertised field list, so the canonical
+// query generator emits it even on backends that never reported such a field — measured
+// on dev Loki over the 7 days to 2026-09-29, `_body` outnumbered `content` 48 to 9.
+// Without this entry it survives convertWhereClauseWithMApping unmapped and
+// BuildLokiQuery renders it as a STREAM LABEL matcher (`{_body=~"..."}`), which matches
+// no stream and returns zero rows with HTTP 200 — the same silent-empty failure the
+// Elasticsearch source fixed via esCanonicalBodyField.
 var LogsFilterMap = map[string]string{
 	"content": "log",
+	"_body":   "log",
 	// The canonical spelling every producer is moving to (#39573). `log` is not a
 	// Loki stream label — buildWhere/buildLabelSelector special-case it into a line
-	// filter — so every spelling converges on the same `|=` / `|~` clause.
+	// filter — so all three spellings converge on the same `|=` / `|~` clause.
 	"message": "log",
 }
 
