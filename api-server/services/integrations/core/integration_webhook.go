@@ -810,6 +810,19 @@ func convertSliceAnyToSliceInterface(evidences []eventtypes.EventEvidence) []any
 	return s
 }
 
+// resolveKey is the id a resolve delivery closes events by; eventtypes.ResolveEventQuery matches
+// it against both fingerprint and finding_id.
+//
+// GCP resolves by its incident id (EventId, stored as finding_id): it names exactly
+// the incident that closed, and still matches rows stored before the fingerprint
+// format changed to follow polling (#34377).
+func resolveKey(source string, event EventIncomingWebhook) string {
+	if source == "datadog_webhook" {
+		return event.Investigation.Fingerprint
+	}
+	return event.EventId
+}
+
 func resolveEvent(sc *security.RequestContext, tenantId, accountId string, source string, event EventIncomingWebhook) error {
 	if accountId == "" || accountId == uuid.Nil.String() {
 		sc.GetLogger().Info("integrations: skipping event resolution — no cloud account linked", "source", source, "event_id", event.EventId)
@@ -820,10 +833,7 @@ func resolveEvent(sc *security.RequestContext, tenantId, accountId string, sourc
 		sc.GetLogger().Error("integrations: unable to process request", "error", err)
 		return err
 	}
-	fingerPrint := event.EventId
-	if source == "datadog_webhook" || source == "gcp_monitoring_webhook" {
-		fingerPrint = event.Investigation.Fingerprint
-	}
+	fingerPrint := resolveKey(source, event)
 	// The status guard in eventtypes.ResolveEventQuery makes repeated resolve webhooks no-ops,
 	// so only a genuine open→closed transition publishes the resolved notification.
 	rows, err := dbms.Query(eventtypes.ResolveEventQuery, tenantId, accountId, fingerPrint, string(eventtypes.EventStatusClosed), eventtypes.ResolveEndsAt(event.EventEndsAt))
