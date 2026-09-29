@@ -5,9 +5,67 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"nudgebee/llm/common"
 )
+
+// enforcedUsageCacheNS holds the cost totals CheckBudgetLimits enforces against.
+// That check runs before every chat message and investigation, with a cost
+// query per enabled limit (0.1-0.5s warm, over 10s cold on dev), and on dev
+// about 60% of checks repeat a total fetched within the last minute.
+// Enforcement can therefore trail real spend by up to enforcedUsageTTL; the
+// budget status reads stay live.
+const enforcedUsageCacheNS = "llm_budget_enforced_usage"
+
+const enforcedUsageTTL = 60 * time.Second
+
+// cachedUsage stamps its own expiry: the default in_memory backend (bigcache)
+// ignores per-entry expiration, so the store's TTL alone can't be relied on.
+type cachedUsage struct {
+	Cost      float64   `json:"cost"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func init() {
+	common.CacheCreateNamespace(enforcedUsageCacheNS, common.CacheNamespaceWithExpiration(enforcedUsageTTL))
+}
+
+// enforcedUsageKey includes the current UTC day or month, so a total cached
+// just before a period rolls over is not reused after it (DATE_TRUNC runs in
+// the database's UTC session timezone).
+func enforcedUsageKey(entityType, entityId, module, period string, now time.Time) string {
+	bucket := now.UTC().Format("2006-01")
+	if period == "day" {
+		bucket = now.UTC().Format("2006-01-02")
+	}
+	return entityType + ":" + entityId + ":" + module + ":" + period + ":" + bucket
+}
+
+// cachedEntityTokenUsage is getEntityTokenUsage memoised for enforcedUsageTTL.
+// Only a successful result is cached, so a failed query is retried next time.
+func cachedEntityTokenUsage(dbManager *common.DatabaseManager, entityType, entityId, module, period string) (float64, error) {
+	key := enforcedUsageKey(entityType, entityId, module, period, time.Now())
+	if data, ok := common.CacheGet(enforcedUsageCacheNS, key); ok {
+		var cached cachedUsage
+		if err := common.UnmarshalJson(data, &cached); err == nil && time.Now().Before(cached.ExpiresAt) {
+			return cached.Cost, nil
+		}
+	}
+	cost, err := getEntityTokenUsage(dbManager, entityType, entityId, module, period)
+	if err != nil {
+		return 0, err
+	}
+	data, err := common.MarshalJson(cachedUsage{Cost: cost, ExpiresAt: time.Now().Add(enforcedUsageTTL)})
+	if err != nil {
+		slog.Debug("budget: unable to serialize usage for cache", "error", err, "key", key)
+		return cost, nil
+	}
+	if err := common.CacheSet(enforcedUsageCacheNS, key, data, common.CacheSetWithExpiration(enforcedUsageTTL)); err != nil {
+		slog.Debug("budget: unable to cache usage", "error", err, "key", key)
+	}
+	return cost, nil
+}
 
 // --- Monthly usage (existing, refactored) ---
 
