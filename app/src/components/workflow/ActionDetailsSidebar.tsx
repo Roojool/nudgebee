@@ -43,6 +43,7 @@ import { getUpstreamSuggestedValues } from './utils/getUpstreamSuggestedValues';
 import { parseDurationToSeconds, sanitizeTaskId } from './utils/taskUtils';
 import { EVENT_ACCOUNT_TEMPLATE, listensToSeveralAccounts } from './utils/listenAccounts';
 import { triggerInputFields } from './utils/triggerPayloadMock';
+import { describeScriptRunLocation, executorSupportsAccount, scriptLogin, ScriptAccountProvider } from './utils/scriptRunLocation';
 import apiWorkflow from '@api1/workflow';
 import apiAccount from '@api1/account';
 import { isTenantAdmin } from '@lib/auth';
@@ -3389,7 +3390,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
       }
 
       if (fieldType === 'dropdown') {
-        const options = getDropdownOptionsForField(fieldName, fieldSchema, {
+        const allOptions = getDropdownOptionsForField(fieldName, fieldSchema, {
           cloudAccounts,
           integrations,
           notifications,
@@ -3399,6 +3400,26 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           workloadKinds,
           dbmsOptions: DBMS_OPTIONS,
         });
+        // Run Script: offer only executors the step's account can run on. The
+        // current value stays listed so a pair saved before this check is
+        // visible next to its warning rather than silently blank.
+        const isScriptExecutorField = fieldName === 'executor_type' && selectedActionType === 'scripting.run_script';
+        const scriptAccountId = localData?.account_id || accountId;
+        const scriptProvider = isScriptExecutorField ? (resolveAccountProviderType(scriptAccountId) as ScriptAccountProvider) : '';
+        const options = scriptProvider
+          ? (allOptions as any[]).filter((o) => o?.value === localData?.executor_type || executorSupportsAccount(o?.value, scriptProvider))
+          : allOptions;
+        const scriptRunLocation = isScriptExecutorField
+          ? describeScriptRunLocation(
+              localData?.executor_type,
+              scriptProvider,
+              cloudAccounts.find((a: any) => a.value === scriptAccountId)?.label || 'this account',
+              brandTitle
+            )
+          : null;
+        // Same rule validation flags: the step already runs as its account, so a
+        // script that signs itself in either fails or swaps identity.
+        const scriptLoginWarning = isScriptExecutorField ? scriptLogin(localData?.script, localData?.env) : '';
 
         // Use HybridField for dropdowns that could also accept template expressions
         const fieldNameLower = fieldName.toLowerCase();
@@ -3603,6 +3624,27 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                       label: <>Manage AWS Integrations &rarr;</>,
                       onClick: () => window.open('/accounts/account-form?cloudProvider=AWS', '_blank', 'noopener,noreferrer'),
                     }}
+                  />
+                </Box>
+              </Box>
+            )}
+            {/* Where a Run Script step runs and as whom — or why it cannot run */}
+            {scriptRunLocation && (
+              <Box sx={{ display: 'flex', gap: ds.space[4], mb: ds.space[4] }}>
+                <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
+                <Box sx={{ flex: 1 }}>
+                  <Callout tone={scriptRunLocation.tone} data-testid='script-run-location-hint' message={scriptRunLocation.message} />
+                </Box>
+              </Box>
+            )}
+            {scriptLoginWarning && (
+              <Box sx={{ display: 'flex', gap: ds.space[4], mb: ds.space[4] }}>
+                <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
+                <Box sx={{ flex: 1 }}>
+                  <Callout
+                    tone='warning'
+                    data-testid='script-login-code-hint'
+                    message={`This script signs itself in (${scriptLoginWarning}). The step already runs as the account it names — remove the login, or use a built-in action such as AWS CLI or Kubectl.`}
                   />
                 </Box>
               </Box>
