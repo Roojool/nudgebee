@@ -179,8 +179,49 @@ func TestConvertOpenObserveLogGroups_PrefersRecordedWorkloadOverPodDerivation(t 
 
 	require.Len(t, out.Groups, 2)
 	assert.Equal(t, "llm-gateway", out.Groups[0].Workload)
-	assert.Equal(t, "/k8s/nudgebee/llm-gateway/llm-gateway", out.Groups[0].ContainerID)
-	assert.Equal(t, "postgres-0", out.Groups[1].Workload)
+	assert.Equal(t, "/k8s/nudgebee/llm-gateway", out.Groups[0].ContainerID)
+	assert.Equal(t, "postgres", out.Groups[1].Workload)
+}
+
+// A pod with no recorded workload is named after the workload that owns it. Reporting the
+// pod name instead made every run of a Job its own "application", and its drill-down could
+// never match the workload filter.
+func TestOpenObserveWorkloadFromPod(t *testing.T) {
+	for pod, want := range map[string]string{
+		"services-server-9c576f5cd-8xs5v":                           "services-server", // Deployment
+		"nudgebee-doc-docs-6dc8c795f8-m4vrr":                        "nudgebee-doc-docs",
+		"trivy-scan-cleanup-29844520-jmk7h":                         "trivy-scan-cleanup",                                  // CronJob
+		"runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t": "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", // Job
+		"node-exporter-x7k2p":                                       "node-exporter",                                       // DaemonSet
+		"db-backup-nightly-x7k2p":                                   "db-backup-nightly",
+		"nudgebee-qdrant-server-0":                                  "nudgebee-qdrant-server", // StatefulSet
+		"postgres-12":                                               "postgres",
+		"workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd":            "workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd", // bare pod
+		"nginx-proxy":                                               "nginx-proxy",
+		"nginx":                                                     "nginx",
+		"":                                                          "",
+	} {
+		assert.Equal(t, want, openObserveWorkloadFromPod(pod), pod)
+	}
+}
+
+// OpenObserve reports the workload itself, so container_id must be the three-segment
+// /k8s/<namespace>/<workload> the other providers emit. A fourth segment makes the UI read
+// the third as a pod name and trim two more segments off it.
+func TestConvertOpenObserveLogGroups_ReportsOwningWorkloadOfJobPod(t *testing.T) {
+	out := convertOpenObserveLogGroups([]map[string]any{{
+		"group_sample":    "boom",
+		"group_namespace": "nudgebee",
+		"group_pod":       "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t",
+		"group_container": "script",
+		"group_count":     float64(1),
+	}}, 1699999000)
+
+	require.Len(t, out.Groups, 1)
+	g := out.Groups[0]
+	assert.Equal(t, "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", g.Workload)
+	assert.Equal(t, "script", g.Container)
+	assert.Equal(t, "/k8s/nudgebee/runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", g.ContainerID)
 }
 
 // Label values are round-tripped straight back into a filter (`col = '<value>'`), so the
@@ -541,7 +582,7 @@ func TestConvertOpenObserveLogGroups(t *testing.T) {
 	assert.Equal(t, "checkout", g.Container)
 	assert.Equal(t, "ERROR", g.Level)
 	assert.Equal(t, int64(42), g.Count)
-	assert.Equal(t, "/k8s/prod/checkout-service/checkout", g.ContainerID)
+	assert.Equal(t, "/k8s/prod/checkout-service", g.ContainerID)
 	// _timestamp is microseconds; the LogGroup contract is epoch seconds.
 	assert.Equal(t, []int64{1700000000}, g.Timestamps)
 	assert.Equal(t, []float64{42}, g.Values)
@@ -659,7 +700,7 @@ func TestOpenObserveLogSource_QueryLogGroup_EndToEnd(t *testing.T) {
 				{
 					"group_sample":    "panic: nil map write",
 					"group_namespace": "prod",
-					"group_pod":       "checkout-worker-5c7d9f8b6c-a1b2c",
+					"group_pod":       "checkout-worker-5c7d9f8b6c-x2k9p",
 					"group_container": "worker",
 					"group_level":     "FATAL",
 					"group_count":     float64(3),
@@ -716,7 +757,7 @@ func TestOpenObserveLogSource_QueryLogGroup_EndToEnd(t *testing.T) {
 	assert.Equal(t, "prod", first.Namespace)
 	assert.Equal(t, "checkout-service", first.Workload)
 	assert.Equal(t, "checkout", first.Container)
-	assert.Equal(t, "/k8s/prod/checkout-service/checkout", first.ContainerID)
+	assert.Equal(t, "/k8s/prod/checkout-service", first.ContainerID)
 	assert.Equal(t, "ERROR", first.Level)
 	assert.Equal(t, int64(128), first.Count)
 	assert.Equal(t, []int64{1700000000}, first.Timestamps)
@@ -765,7 +806,7 @@ func TestOpenObserveLogSource_QueryLogGroup_NumericSeverityStream(t *testing.T) 
 				{
 					"group_sample":    "db connection pool exhausted",
 					"group_namespace": "prod",
-					"group_pod":       "orders-api-6b8d7c9f4d-k3m2n",
+					"group_pod":       "orders-api-6b8d7c9f4d-k8m2n",
 					"group_container": "orders",
 					"group_level_num": float64(21), // OTel FATAL
 					"group_count":     float64(9),

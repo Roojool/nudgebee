@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"nudgebee/services/integrations"
@@ -396,6 +398,83 @@ func TestOpenObserveLogs_CorrelationRewriteUsesTheStreamSchema(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sqls, 1)
 	assert.Contains(t, sqls[0], "str_match(body, '6b257ff5')")
+}
+
+// The Log Groups drill-down filters by the workload a group reports, which maps to the
+// deployment column — empty on every pod not owned by a Deployment. Those records fall back
+// to a pod-name match; records that do carry a deployment still have to match it.
+func TestOpenObserveLogs_WorkloadFilterFallsBackToPodName(t *testing.T) {
+	where := query.QueryWhereClause{And: []query.QueryWhereClause{
+		{Binary: query.BinaryWhereClause{"k8s_namespace_name": {query.Eq: "nudgebee"}}},
+		{Binary: query.BinaryWhereClause{"k8s_deployment_name": {query.Eq: "runbook-script-5c3e"}}},
+	}}
+	got := rewriteWorkloadWithPodFallback(where, "k8s_deployment_name", "k8s_pod_name", true)
+	sql, err := buildOpenObserveSQLWhereClause(got)
+	require.NoError(t, err)
+	assert.Equal(t, "(k8s_namespace_name = 'nudgebee' AND (k8s_deployment_name = 'runbook-script-5c3e' OR "+
+		"((k8s_deployment_name IS NULL OR k8s_deployment_name = '') AND "+
+		"(k8s_pod_name = 'runbook-script-5c3e' OR k8s_pod_name LIKE 'runbook-script-5c3e-%'))))", sql)
+	assert.Contains(t, where.And[1].Binary, "k8s_deployment_name", "the caller's clause is not mutated")
+
+	// No deployment column on the stream: referencing it would fail the query.
+	got = rewriteWorkloadWithPodFallback(openObserveBinary("k8s_deployment_name", query.In, []any{"a", "b"}), "k8s_deployment_name", "k8s_pod_name", false)
+	sql, err = buildOpenObserveSQLWhereClause(got)
+	require.NoError(t, err)
+	assert.Equal(t, "((k8s_pod_name = 'a' OR k8s_pod_name LIKE 'a-%') OR (k8s_pod_name = 'b' OR k8s_pod_name LIKE 'b-%'))", sql)
+
+	// Only positive matches are widened.
+	got = rewriteWorkloadWithPodFallback(openObserveBinary("k8s_deployment_name", query.Nq, "a"), "k8s_deployment_name", "k8s_pod_name", true)
+	sql, err = buildOpenObserveSQLWhereClause(got)
+	require.NoError(t, err)
+	assert.Equal(t, "k8s_deployment_name != 'a'", sql)
+}
+
+// The where clause reaches the source already rewritten through the account's effective
+// label mapping, so the fallback has to find the workload and pod columns through that same
+// mapping — an account that remaps them for a Fluent Bit shipper must get it too.
+func TestOpenObserveLogs_WorkloadFallbackUsesTheStreamSchema(t *testing.T) {
+	otel := map[string]string{"app": "k8s_deployment_name", "pod": "k8s_pod_name"}
+	fluentBit := map[string]string{"app": "kubernetes_deployment_name", "pod": "kubernetes_pod_name"}
+	for name, tc := range map[string]struct {
+		mapping map[string]string
+		schema  string
+		want    string
+	}{
+		"pod column present": {otel, `{"name":"k8s_pod_name","type":"Utf8"},{"name":"k8s_deployment_name","type":"Utf8"}`, "k8s_pod_name LIKE 'relay-%'"},
+		"no pod column":      {otel, `{"name":"k8s_deployment_name","type":"Utf8"}`, "WHERE k8s_deployment_name = 'relay' ORDER BY"},
+		"remapped columns":   {fluentBit, `{"name":"kubernetes_pod_name","type":"Utf8"},{"name":"kubernetes_deployment_name","type":"Utf8"}`, "kubernetes_pod_name LIKE 'relay-%'"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var sqls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "/schema") {
+					_, _ = w.Write([]byte(`{"schema":[{"name":"body","type":"Utf8"},` + tc.schema + `]}`))
+					return
+				}
+				var req openObserveSearchRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				sqls = append(sqls, req.Query.SQL)
+				_ = json.NewEncoder(w).Encode(openObserveSearchResponse{})
+			}))
+			defer server.Close()
+			patches := gomonkey.ApplyFunc(integrations.GetOpenObserveConfigs,
+				func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+					return integrations.OpenObserveConfig{URL: server.URL, OrgID: "o", LogStream: "default"}, nil
+				})
+			defer patches.Reset()
+			patches.ApplyFunc(resolveLogLabelMapping, func(_ *security.RequestContext, _ string, _ LogSource, _ *labelMappingOverride) ResolvedLabelMapping {
+				return ResolvedLabelMapping{Effective: tc.mapping}
+			})
+
+			ctx := security.NewRequestContext(context.Background(), security.NewSecurityContextForSuperAdmin(), slog.Default(), nil, nil)
+			_, err := (&OpenObserveLogSource{}).QueryLogs(ctx, FetchLogRequest{AccountId: "a", StartTime: 1, EndTime: 2,
+				QueryRequest: LogsQueryBuilderRequest{Where: openObserveBinary(tc.mapping["app"], query.Eq, "relay")}})
+			require.NoError(t, err)
+			require.Len(t, sqls, 1)
+			assert.Contains(t, sqls[0], tc.want)
+		})
+	}
 }
 
 // The service map filters every query on trace_source = otel; OpenObserve has no such column,

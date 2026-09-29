@@ -392,7 +392,22 @@ func (s *OpenObserveLogSource) GetQuery(ctx *security.RequestContext, req FetchL
 	if err != nil {
 		return "", fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
-	return s.buildSQL(withOpenObserveCorrelationIDs(req, cfg), cfg.LogStream)
+	return s.buildSQL(s.withSchemaFallbacks(ctx, req, cfg), cfg.LogStream)
+}
+
+// withSchemaFallbacks applies every filter rewrite that depends on which columns the
+// stream actually carries. The where clause arrives already rewritten through the
+// account's effective label mapping, so the workload and pod columns are read from that
+// same mapping — an account that remaps them (a Fluent Bit shipper's kubernetes_* names)
+// would otherwise never get the fallback. Resolving it needs the tenant, so a caller
+// without a security context gets the provider defaults.
+func (s *OpenObserveLogSource) withSchemaFallbacks(ctx *security.RequestContext, req FetchLogRequest, cfg integrations.OpenObserveConfig) FetchLogRequest {
+	req = withOpenObserveCorrelationIDs(req, cfg)
+	mapping := openObserveLogLabelMapping
+	if ctx != nil && ctx.GetSecurityContext() != nil {
+		mapping = getMergedLabelMapping(ctx, req.AccountId, s)
+	}
+	return withOpenObserveWorkloadPodFallback(req, cfg, mapping["app"], mapping["pod"])
 }
 
 // openObserveCorrelationFields are the trace-correlation fields the traces screen's Logs tab
@@ -494,6 +509,106 @@ func rewriteCorrelationToBody(w query.QueryWhereClause, missing map[string]bool)
 	return out
 }
 
+// withOpenObserveWorkloadPodFallback lets a workload filter match the pods of workloads the
+// shipper records no name for. The canonical app / workload labels map to the deployment
+// column, which the OTel collector fills only for a Deployment's pods — so filtering by a
+// Job, CronJob, StatefulSet or DaemonSet matched nothing, and the Log Groups drill-down
+// (which filters by the workload the group reports) showed no logs for them. The schema is
+// fetched only when such a filter is present; if it cannot be read, or the stream has no
+// pod column to fall back on, the request is left as it was.
+func withOpenObserveWorkloadPodFallback(req FetchLogRequest, cfg integrations.OpenObserveConfig, workloadCol, podCol string) FetchLogRequest {
+	if workloadCol == "" || podCol == "" || workloadCol == podCol ||
+		!whereMentionsField(req.QueryRequest.Where, map[string]bool{workloadCol: true}) {
+		return req
+	}
+	fields, err := fetchOpenObserveStreamFields(cfg.URL, cfg.OrgID, cfg.Username, cfg.Password, cfg.LogStream, "logs")
+	if err != nil {
+		return req
+	}
+	if _, ok := fields[podCol]; !ok {
+		return req
+	}
+	_, hasWorkloadCol := fields[workloadCol]
+	req.QueryRequest.Where = rewriteWorkloadWithPodFallback(req.QueryRequest.Where, workloadCol, podCol, hasWorkloadCol)
+	return req
+}
+
+// rewriteWorkloadWithPodFallback returns a copy of w where each _eq / _in on workloadCol
+// also accepts records that carry no workload name but whose pod belongs to that workload:
+// the pod is named <workload>-<suffix>, or is the workload itself (a bare pod). A record
+// that does carry a workload name still has to match it exactly. When the stream has no
+// workload column at all, the pod match is the whole filter — referencing the missing
+// column would make OpenObserve reject the query. Other operators are left alone.
+func rewriteWorkloadWithPodFallback(w query.QueryWhereClause, workloadCol, podCol string, hasWorkloadCol bool) query.QueryWhereClause {
+	matchOne := func(v any) query.QueryWhereClause {
+		name := fmt.Sprintf("%v", v)
+		podMatch := query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{podCol: {query.Eq: name}}},
+			{Binary: query.BinaryWhereClause{podCol: {query.Like: name + "-%"}}},
+		}}
+		if !hasWorkloadCol {
+			return podMatch
+		}
+		unrecorded := query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{workloadCol: {query.IsNull: true}}},
+			{Binary: query.BinaryWhereClause{workloadCol: {query.Eq: ""}}},
+		}}
+		return query.QueryWhereClause{Or: []query.QueryWhereClause{
+			{Binary: query.BinaryWhereClause{workloadCol: {query.Eq: name}}},
+			{And: []query.QueryWhereClause{unrecorded, podMatch}},
+		}}
+	}
+
+	out := query.QueryWhereClause{}
+	var extra []query.QueryWhereClause
+	if len(w.Binary) > 0 {
+		out.Binary = query.BinaryWhereClause{}
+		for field, ops := range w.Binary {
+			if field != workloadCol {
+				out.Binary[field] = ops
+				continue
+			}
+			kept := map[query.BinaryWhereClauseType]any{}
+			for op, v := range ops {
+				switch op {
+				case query.Eq:
+					extra = append(extra, matchOne(v))
+				case query.In:
+					var alts []query.QueryWhereClause
+					for _, name := range splitOpenObserveList(v) {
+						alts = append(alts, matchOne(name))
+					}
+					if len(alts) == 0 {
+						kept[op] = v // empty set: let the builder answer FALSE
+						continue
+					}
+					extra = append(extra, query.QueryWhereClause{Or: alts})
+				default:
+					kept[op] = v
+				}
+			}
+			if len(kept) > 0 {
+				out.Binary[field] = kept
+			}
+		}
+		if len(out.Binary) == 0 {
+			out.Binary = nil
+		}
+	}
+	for _, c := range w.And {
+		out.And = append(out.And, rewriteWorkloadWithPodFallback(c, workloadCol, podCol, hasWorkloadCol))
+	}
+	out.And = append(out.And, extra...)
+	for _, c := range w.Or {
+		out.Or = append(out.Or, rewriteWorkloadWithPodFallback(c, workloadCol, podCol, hasWorkloadCol))
+	}
+	if w.Not != nil {
+		n := rewriteWorkloadWithPodFallback(*w.Not, workloadCol, podCol, hasWorkloadCol)
+		out.Not = &n
+	}
+	return out
+}
+
 // splitOpenObserveList normalises an _in value to its elements.
 func splitOpenObserveList(v any) []any {
 	switch list := v.(type) {
@@ -518,7 +633,7 @@ func (s *OpenObserveLogSource) QueryLogs(ctx *security.RequestContext, req Fetch
 		return nil, fmt.Errorf("failed to get OpenObserve configs: %w", err)
 	}
 
-	sql, err := s.buildSQL(withOpenObserveCorrelationIDs(req, cfg), cfg.LogStream)
+	sql, err := s.buildSQL(s.withSchemaFallbacks(ctx, req, cfg), cfg.LogStream)
 	if err != nil {
 		return nil, err
 	}
@@ -1094,6 +1209,71 @@ func openObserveLevelFromSeverityNumber(v any) string {
 	return "error"
 }
 
+// openObserveK8sNameAlphabet is the alphabet Kubernetes draws generated name parts from
+// (k8s.io/apimachinery/pkg/util/rand): no vowels and no 0, 1 or 3, so a generated part
+// never spells a word. Both the pod-template hash and the random suffix use it, and
+// requiring it is what keeps a real name segment — the "nightly" of a Job named
+// db-backup-nightly — from being stripped as if it were generated.
+const openObserveK8sNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
+
+// openObserveWorkloadFromPod names the workload that owns a pod the shipper recorded no
+// workload for. On an OTel collector stream that is every pod not owned by a Deployment:
+// the Job pod runbook-script-<uuid>-x9gvn used to be reported under its full pod name,
+// making every run its own "application". Recognised shapes:
+//
+//	Deployment   <name>-<pod-template-hash>-<suffix>
+//	CronJob      <name>-<scheduled minute>-<suffix>
+//	Job          <name>-<suffix>   (DaemonSet pods look the same)
+//	StatefulSet  <name>-<ordinal>
+//
+// Anything else, a bare pod included, is its own workload.
+func openObserveWorkloadFromPod(pod string) string {
+	parts := strings.Split(pod, "-")
+	n := len(parts)
+	switch {
+	case n >= 3 && isGeneratedK8sName(parts[n-1], 5, 5) &&
+		(isGeneratedK8sName(parts[n-2], 5, 10) || isCronJobScheduledMinute(parts[n-2])):
+		return strings.Join(parts[:n-2], "-")
+	case n >= 2 && (isGeneratedK8sName(parts[n-1], 5, 5) || isStatefulSetOrdinal(parts[n-1])):
+		return strings.Join(parts[:n-1], "-")
+	}
+	return pod
+}
+
+// isGeneratedK8sName reports whether s is a generated name part of the given length range.
+func isGeneratedK8sName(s string, minLen, maxLen int) bool {
+	if len(s) < minLen || len(s) > maxLen {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune(openObserveK8sNameAlphabet, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCronJobScheduledMinute reports whether s is the scheduled time, in minutes since the
+// epoch, that the CronJob controller puts in a Job's name — eight digits until 2160.
+func isCronJobScheduledMinute(s string) bool {
+	return len(s) >= 8 && len(s) <= 10 && isAllDigits(s)
+}
+
+// isStatefulSetOrdinal reports whether s is a StatefulSet pod ordinal. Capped at five
+// digits so an all-digit tail on some other name is not taken for one.
+func isStatefulSetOrdinal(s string) bool {
+	return s != "" && len(s) <= 5 && isAllDigits(s)
+}
+
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // convertOpenObserveLogGroups maps aggregated rows onto the LogGroup contract shared by
 // every provider. Timestamps are emitted in epoch seconds — the frontend multiplies by 1000.
 func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int64) LogGroupOutput {
@@ -1131,7 +1311,7 @@ func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int
 		// a stream that only records k8s_deployment_name.
 		workload, _ := hit["group_workload"].(string)
 		if workload == "" {
-			workload = extractWorkloadFromPodName(pod)
+			workload = openObserveWorkloadFromPod(pod)
 		}
 
 		group := LogGroup{
@@ -1146,14 +1326,13 @@ func convertOpenObserveLogGroups(hits []map[string]any, fallbackTimestampSec int
 			PatternHash: generatePatternHash(sample),
 		}
 
-		// container_id mirrors the Prometheus format so the UI can parse namespace and
-		// workload back out of a single field.
+		// /k8s/<namespace>/<workload>, the shape Loki, Elasticsearch, Datadog and the other
+		// log-group providers emit. Not Prometheus's /k8s/<namespace>/<pod>/<container>: the
+		// UI reads a four-segment id as that format and trims the pod suffix off the third
+		// segment, which here is already the workload — so "nudgebee-doc-docs" displayed,
+		// and was drilled down into, as "nudgebee-doc".
 		if group.Namespace != "" && group.Workload != "" {
-			if group.Container != "" {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s/%s", group.Namespace, group.Workload, group.Container)
-			} else {
-				group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
-			}
+			group.ContainerID = fmt.Sprintf("/k8s/%s/%s", group.Namespace, group.Workload)
 		}
 
 		groups = append(groups, group)
