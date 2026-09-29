@@ -33,6 +33,21 @@ import (
 // esCanonicalBodyField is the canonical log-body name llm-server advertises.
 const esCanonicalBodyField = "_body"
 
+// esLogBodyCandidates are the field names a shipper may write the log line to, in the
+// same index. Shared by every canonical spelling of the log-text field.
+//
+// esCandidateFields copies this into a fresh slice before returning, so sharing one
+// backing array between keys is safe.
+var esLogBodyCandidates = []string{
+	"log",
+	"message",
+	// JSON-structured loggers (zap, logrus, bunyan, winston) write the line to
+	// `msg`, which a shipper with a JSON parse filter lands as its own field.
+	"msg",
+	"body",
+	"content",
+}
+
 var esCanonicalK8sFields = map[string][]string{
 	"namespace": {
 		"namespace",
@@ -67,15 +82,14 @@ var esCanonicalK8sFields = map[string][]string{
 	//
 	// Verified on the dev cluster: logs-kubernetes.container_logs-* maps `log`
 	// (keyword) and has no `_body` field at all.
-	esCanonicalBodyField: {
-		"log",
-		"message",
-		// JSON-structured loggers (zap, logrus, bunyan, winston) write the line to
-		// `msg`, which a shipper with a JSON parse filter lands as its own field.
-		"msg",
-		"body",
-		"content",
-	},
+	esCanonicalBodyField: esLogBodyCandidates,
+	// `message` is the canonical spelling every producer is moving to (#39573).
+	// esCandidateFields returns nil for an unknown key and the caller then renders the
+	// name verbatim, so without an entry `message` would reach ES as a literal field
+	// rather than through the per-shipper expansion. It shares one slice with the
+	// legacy `_body` token rather than repeating the list — two copies of the same
+	// shipper spellings is the drift this change exists to remove.
+	"message": esLogBodyCandidates,
 	"app": {
 		"app",
 		"kubernetes.labels.app",

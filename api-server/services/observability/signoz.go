@@ -16,8 +16,24 @@ import (
 // SignozSource is a LogSource implementation for Signoz.
 type SignozSource struct{}
 
+// signozLogLabelMapping maps the canonical log vocabulary onto SigNoz's own
+// attribute names.
+//
+// Only the log line's text needs remapping. Every other canonical name SigNoz
+// consumes verbatim — FlattenSignozQuery passes the field straight through as an
+// attribute key — so the rest are deliberately absent rather than mapped to
+// themselves.
+//
+// `message` is the spelling every producer is moving to (#39573); SigNoz calls the
+// log line `body`. Without this entry a `message` filter reaches SigNoz as an
+// attribute that does not exist and matches nothing, with a success status and no
+// error — the same silent-empty failure Loki had with `_body`.
+var signozLogLabelMapping = map[string]string{
+	"message": "body",
+}
+
 func (s *SignozSource) GetLabelMapping() map[string]string {
-	return map[string]string{}
+	return signozLogLabelMapping
 }
 
 func (s *SignozSource) GetSupportedOperators() []string {

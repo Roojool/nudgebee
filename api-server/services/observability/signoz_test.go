@@ -982,15 +982,25 @@ func TestConvertSigNozLogLabelValues(t *testing.T) {
 	}
 }
 
-// Test SignozSource.GetLabelMapping
+// TestSignozSource_GetLabelMapping pins the one entry SigNoz needs, and that it needs
+// only one.
+//
+// FlattenSignozQuery passes a field straight through as an attribute key, and every
+// canonical name except the log line's text is already spelled the way SigNoz spells
+// it. `message` is the exception: SigNoz calls the log line `body`, so without this
+// entry a `message` filter reaches it as an attribute that does not exist, matches
+// nothing, and returns HTTP 200 with zero rows (#39573).
+//
+// This asserted an empty map before that change — a characterization of what the code
+// did, not of what it should do.
 func TestSignozSource_GetLabelMapping(t *testing.T) {
 	s := &SignozSource{}
 	mapping := s.GetLabelMapping()
 
-	// SignozSource returns an empty map
-	assert.NotNil(t, mapping)
-	assert.Equal(t, 0, len(mapping))
-	assert.Equal(t, map[string]string{}, mapping)
+	assert.Equal(t, map[string]string{"message": "body"}, mapping)
+
+	// Both sources share one table: SigNoz Cloud speaks the same attribute names.
+	assert.Equal(t, mapping, (&SignozSaasSource{}).GetLabelMapping())
 }
 
 // Test FlattenSignozQuery with multiple fields (order-independent)

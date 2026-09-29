@@ -28,6 +28,11 @@ type SolarWindsLogSource struct{}
 // normalizeOutputLogLabels(), which inverts this map, produces deterministic output aliases.
 // Fields not listed here (e.g. "hostname", "program", "severity") are passed through
 // unchanged by convertWhereClauseWithMApping.
+// No `message` entry, deliberately: SolarWinds' own schema is
+// `id, time, message, hostname, severity, program`, and buildSWBinaryClause renders
+// the field verbatim — so the canonical `message` (#39573) already reaches the right
+// column. Mapping it to itself would be a no-op. `body` is mapped because OTel
+// callers spell it that way and SolarWinds does not.
 var solarWindsLogLabelMapping = map[string]string{
 	"timestamp": "time",     // OTEL canonical → SW time
 	"body":      "message",  // OTEL canonical → SW message

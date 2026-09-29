@@ -150,8 +150,11 @@ func (s *SignozSaasSource) getCloudJwtToken(ctx *security.RequestContext, signoz
 	}
 	return loginParsed.Data.AccessToken, nil
 }
+
+// Same vocabulary as the agent-mode source: SigNoz Cloud speaks the same attribute
+// names, so both resolve `message` onto `body` from one table.
 func (s *SignozSaasSource) GetLabelMapping() map[string]string {
-	return map[string]string{}
+	return signozLogLabelMapping
 }
 
 func (s *SignozSaasSource) GetSupportedOperators() []string {

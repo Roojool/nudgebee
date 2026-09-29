@@ -272,6 +272,14 @@ func (m *ObserveSource) ToOpal(q query.QueryWhereClause) (string, error) {
 	return filters, nil
 }
 
+// GetLabelMapping is intentionally empty: ToOpal renders the field name verbatim and
+// Observe's own columns already use the canonical spellings, so the canonical
+// `message` (#39573) reaches the right column with no rewrite.
+//
+// Known limit, not addressed here: Observe populates BOTH `body` and `message` as
+// independent columns and prefers `message` at read time (see convertObserveLog). A
+// dataset whose text lives only in `body` therefore needs a per-account mapping; a
+// single rename cannot express "whichever of the two is populated".
 func (s *ObserveSource) GetLabelMapping() map[string]string {
 	return map[string]string{}
 }
