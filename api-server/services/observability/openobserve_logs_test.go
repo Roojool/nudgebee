@@ -190,13 +190,15 @@ func TestOpenObserveWorkloadFromPod(t *testing.T) {
 	for pod, want := range map[string]string{
 		"services-server-9c576f5cd-8xs5v":                           "services-server", // Deployment
 		"nudgebee-doc-docs-6dc8c795f8-m4vrr":                        "nudgebee-doc-docs",
-		"trivy-scan-cleanup-29844520-jmk7h":                         "trivy-scan-cleanup",                                  // CronJob
-		"runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t": "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", // Job
-		"node-exporter-x7k2p":                                       "node-exporter",                                       // DaemonSet
+		"trivy-scan-cleanup-29844520-jmk7h":                         "trivy-scan-cleanup", // CronJob
+		"runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t": "runbook-script",     // Job named after its run
+		"node-exporter-x7k2p":                                       "node-exporter",      // DaemonSet
 		"db-backup-nightly-x7k2p":                                   "db-backup-nightly",
 		"nudgebee-qdrant-server-0":                                  "nudgebee-qdrant-server", // StatefulSet
 		"postgres-12":                                               "postgres",
-		"workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd":            "workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd", // bare pod
+		"workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd":            "workspace-ff87fbfd-5729-4474-b9d6-96beb693e3fd", // bare pod: one per account, not per run
+		"ff87fbfd-5729-4474-b9d6-96beb693e3fd":                      "ff87fbfd-5729-4474-b9d6-96beb693e3fd",           // nothing but a run id: kept
+		"sync-job-x7k2p":                                            "sync-job",
 		"nginx-proxy":                                               "nginx-proxy",
 		"nginx":                                                     "nginx",
 		"":                                                          "",
@@ -219,9 +221,26 @@ func TestConvertOpenObserveLogGroups_ReportsOwningWorkloadOfJobPod(t *testing.T)
 
 	require.Len(t, out.Groups, 1)
 	g := out.Groups[0]
-	assert.Equal(t, "runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", g.Workload)
+	assert.Equal(t, "runbook-script", g.Workload)
 	assert.Equal(t, "script", g.Container)
-	assert.Equal(t, "/k8s/nudgebee/runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64", g.ContainerID)
+	assert.Equal(t, "/k8s/nudgebee/runbook-script", g.ContainerID)
+}
+
+// Each runbook execution is its own Job, so the same error from two runs must land on one
+// row rather than one row per run.
+func TestOpenObserveLogGroups_RunsOfOneJobShareARow(t *testing.T) {
+	hit := func(pod string, count float64) map[string]any {
+		return map[string]any{"group_sample": "boom", "group_namespace": "nudgebee", "group_pod": pod,
+			"group_container": "script", "group_count": count}
+	}
+	out := mergeLogGroupsByPattern(convertOpenObserveLogGroups([]map[string]any{
+		hit("runbook-script-5c3e0895-c2e0-405b-aa50-84f24541dc64-45c8t", 2),
+		hit("runbook-script-21650ce2-2988-4228-9153-3ad216da784c-x9gvn", 3),
+	}, 1699999000))
+
+	require.Len(t, out.Groups, 1)
+	assert.Equal(t, "runbook-script", out.Groups[0].Workload)
+	assert.Equal(t, int64(5), out.Groups[0].Count)
 }
 
 // Label values are round-tripped straight back into a filter (`col = '<value>'`), so the

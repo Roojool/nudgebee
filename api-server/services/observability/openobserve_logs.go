@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1226,8 +1227,20 @@ const openObserveK8sNameAlphabet = "bcdfghjklmnpqrstvwxz2456789"
 //	Job          <name>-<suffix>   (DaemonSet pods look the same)
 //	StatefulSet  <name>-<ordinal>
 //
-// Anything else, a bare pod included, is its own workload.
+// Anything else, a bare pod included, is its own workload. When a controller's name ends
+// in a UUID, that UUID is dropped: it is a per-run id, and leaving it in splits one
+// application into a row per run. A bare pod keeps its UUID — it is not per-run:
+// llm-server names each account's long-lived code-agent pod workspace-<account id>, and
+// stripping would merge every account's workspace into one row.
 func openObserveWorkloadFromPod(pod string) string {
+	owner := openObserveOwnerFromPod(pod)
+	if owner == pod {
+		return pod
+	}
+	return stripOpenObserveRunID(owner)
+}
+
+func openObserveOwnerFromPod(pod string) string {
 	parts := strings.Split(pod, "-")
 	n := len(parts)
 	switch {
@@ -1238,6 +1251,21 @@ func openObserveWorkloadFromPod(pod string) string {
 		return strings.Join(parts[:n-1], "-")
 	}
 	return pod
+}
+
+// openObserveRunIDSuffix matches a trailing -<uuid>. Workloads created once per run name
+// themselves after the run — the runbook runner creates a Job runbook-script-<execution id>
+// for every execution, with no controller above it — and OpenObserve records nothing else
+// (no job name, no labels) that would group those runs. The drill-down still finds each
+// run's pods: the workload filter falls back to a <name>-% match on the pod name.
+var openObserveRunIDSuffix = regexp.MustCompile(`-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// stripOpenObserveRunID drops a trailing run id, unless the name is nothing but one.
+func stripOpenObserveRunID(name string) string {
+	if loc := openObserveRunIDSuffix.FindStringIndex(name); loc != nil && loc[0] > 0 {
+		return name[:loc[0]]
+	}
+	return name
 }
 
 // isGeneratedK8sName reports whether s is a generated name part of the given length range.
