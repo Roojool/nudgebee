@@ -127,6 +127,32 @@ func isAsync(async *bool) bool {
 	return *async
 }
 
+// acceptTimer records how long each step before a chat turn is accepted takes, so
+// the accept path's latency can be broken down from one log line per request.
+type acceptTimer struct {
+	start, last time.Time
+	steps       []any
+}
+
+func newAcceptTimer() *acceptTimer {
+	now := time.Now()
+	return &acceptTimer{start: now, last: now}
+}
+
+// mark attributes the time since the previous mark to step.
+func (t *acceptTimer) mark(step string) {
+	now := time.Now()
+	t.steps = append(t.steps, step+"_ms", now.Sub(t.last).Milliseconds())
+	t.last = now
+}
+
+// log reports every marked step and the total, including time spent after the
+// last mark (submitting the turn, or an early exit such as queueing a message).
+func (t *acceptTimer) log(logger *slog.Logger, endpoint string) {
+	args := append([]any{"endpoint", endpoint, "total_ms", time.Since(t.start).Milliseconds()}, t.steps...)
+	logger.Info("api: chat accept timing", args...)
+}
+
 func handleRequestExecution(
 	c *gin.Context,
 	agentContext *security.RequestContext,
@@ -514,6 +540,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 
 	groupV2.POST("/chat", func(c *gin.Context) {
 		common.MetricsApiRequestsTotal("chains_chat")
+		timer := newAcceptTimer()
 		requestMap := make(map[string]any)
 		err := c.ShouldBindJSON(&requestMap)
 		if err != nil {
@@ -657,11 +684,15 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		if request.ConversationId != "" {
 			logger = logger.With("conversation_id", request.ConversationId)
 		}
+		timer.mark("prepare")
+		// A closure, so the log uses logger as it is when the handler returns.
+		defer func() { timer.log(logger, "/v1/completions/chat") }()
 		ctx := context.WithoutCancel(c.Request.Context())
 		// Optimization: Add a thread-safe resolution cache to the context to prevent redundant DB calls for LLM config
 		ctx = context.WithValue(ctx, core.ContextKeyLLMResolution, core.NewLLMResolutionCache())
 
 		agentContext, err := buildContextFromPayload(ctx, c, &actionRequest, tracer, meter, logger)
+		timer.mark("security_context")
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, buildApiResponse(nil, []error{
 				common.Error{
@@ -759,7 +790,10 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			module = budget.ModuleInvestigation
 		}
 
-		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, module, logger) {
+		timer.mark("session_and_access")
+		budgetExceeded := budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, module, logger)
+		timer.mark("budget")
+		if budgetExceeded {
 			return
 		}
 
@@ -873,6 +907,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 		if request.Source != "" {
 			source = request.Source
 		}
+		timer.mark("queue_check")
 		// Handle user conversation question to add context to the original question
 		if agent == nil {
 			agent, err = agents.InferAgentOrHelp(agentContext, request.UserId, request.AccountId, request.ConversationId, request.Query, core.ConversationSessionRequestWithSource(source), core.ConversationSessionRequestWithIsNewConversation(isNewConversation), core.ConversationSessionRequestWithConfig(request.Config))
@@ -950,6 +985,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			}
 		}
 
+		timer.mark("routing")
 		// Execute the agent
 		handleRequestExecution(c, agentContext, request.Async, request.UserId, "chains_chat", logger, func(ctx *security.RequestContext) (core.NBAgentResponse, error) {
 			return core.HandleConversationSessionRequest(ctx, agent, request.UserId, request.AccountId, request.SessionId, request.Query, core.ConversationSessionRequestWithSource(source), core.ConversationSessionRequestWithConversationId(conversationId), core.ConversationSessionRequestWithMessageId(messageId), core.ConversationSessionRequestWithAgentId(agentId), core.ConversationSessionRequestWithConfig(request.Config), core.ConversationSessionRequestWithClientTools(request.ClientTools), core.ConversationSessionRequestWithCapabilities(request.Capabilities), core.ConversationSessionRequestWithIsNewConversation(isNewConversation), core.ConversationSessionRequestWithImages(request.Images), core.ConversationSessionRequestWithChannelContext(request.ChannelContext), core.ConversationSessionRequestWithChannelContextRefs(request.ChannelContextRefs), core.ConversationSessionRequestWithReplyRef(request.ReplyRef))
