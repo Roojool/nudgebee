@@ -191,6 +191,19 @@ func validateContainerResources(containers []any) error {
 				return fmt.Errorf("container %q: %s %q exceeds %.0f cores — likely a unit error", name, field, raw, maxCPUCores)
 			}
 		}
+		// Kubernetes refuses a request above its limit, so the agent's patch would
+		// fail after the recommendation is already marked in progress. Checked only
+		// when both are in the payload: the bounds above have already parsed them.
+		memRequest, _ := parseMemoryQuantityToBytes(asString(cm["memory_request"]))
+		memLimit, _ := parseMemoryQuantityToBytes(asString(cm["memory_limit"]))
+		if memRequest > 0 && memLimit > 0 && memRequest > memLimit {
+			return fmt.Errorf("container %q: memory_request %q is above memory_limit %q", name, asString(cm["memory_request"]), asString(cm["memory_limit"]))
+		}
+		cpuRequest, _ := cpuQuantityToCores(asString(cm["cpu_request"]))
+		cpuLimit, _ := cpuQuantityToCores(asString(cm["cpu_limit"]))
+		if cpuRequest > 0 && cpuLimit > 0 && cpuRequest > cpuLimit {
+			return fmt.Errorf("container %q: cpu_request %q is above cpu_limit %q", name, asString(cm["cpu_request"]), asString(cm["cpu_limit"]))
+		}
 	}
 	return nil
 }

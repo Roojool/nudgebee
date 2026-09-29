@@ -79,6 +79,11 @@ const TuneResourceForm = ({ card, open, onClose }) => {
   );
 };
 
+// Kubernetes admits no request above its limit, so a current request above the
+// current limit means the evidence counted it wrong (a second exporter publishing
+// the same series doubled it). Propose from the limit rather than from that.
+const requestWithinLimit = (request, limit) => (request > 0 && limit > 0 ? Math.min(request, limit) : request);
+
 class MemoryAllocationCard {
   constructor() {
     this.id = 'MemoryAllocationCard';
@@ -450,7 +455,10 @@ class MemoryAllocationCard {
           },
         },
         memory: {
-          request: formatMemory(containerItem?.request?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
+          request: formatMemory(requestWithinLimit(containerItem?.request?.memory, containerItem?.limits?.memory) * 1.1, 'bytes', 'mb')?.replace(
+            ',',
+            ''
+          ),
           limit: formatMemory(containerItem?.limits?.memory * 1.1, 'bytes', 'mb')?.replace(',', ''),
           oldRequest: formatMemory(containerItem?.request?.memory, 'bytes', 'mb')?.replace(',', ''),
           oldLimit: formatMemory(containerItem?.limits?.memory, 'bytes', 'mb')?.replace(',', ''),
@@ -492,8 +500,12 @@ class MemoryAllocationCard {
       if (!bytes) return 0;
       return formatMemory(bytes, 'bytes', 'mb')?.replace(',', '');
     };
-    const reqBase = memoryObject?.request > 0 ? memoryObject.request : memPeak;
-    const limitBase = memoryObject?.limits > 0 ? memoryObject.limits : memPeak;
+    // Only a recorded request can be a miscount; a peak stands in for a request that
+    // was never set and is real usage, so it is left as measured.
+    const reqBase = memoryObject?.request > 0 ? requestWithinLimit(memoryObject.request, memoryObject?.limits) : memPeak;
+    // Never propose a limit below the request: with no limit set, the peak can sit
+    // under a generous request, and Kubernetes refuses that pair.
+    const limitBase = Math.max(memoryObject?.limits > 0 ? memoryObject.limits : memPeak, reqBase);
     // Always present, so the memory section renders for a container the metrics
     // missed; the form then takes current values from the workload spec.
     // nbalgoBase is the unbuffered MB base the popup's algo/buffer toggles
