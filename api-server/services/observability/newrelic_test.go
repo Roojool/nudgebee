@@ -2777,7 +2777,7 @@ func TestConvertToLogGroupOutput_FacetParsing(t *testing.T) {
 		assert.Equal(t, "namespace1", group.Namespace)
 		assert.Equal(t, "pod1", group.Workload)
 		assert.Equal(t, "container1", group.Container)
-		assert.Equal(t, "/k8s/namespace1/pod1/container1", group.ContainerID)
+		assert.Equal(t, "/k8s/namespace1/pod1", group.ContainerID)
 		assert.Equal(t, []int64{timestamp}, group.Timestamps)
 		assert.Equal(t, []float64{100}, group.Values)
 		assert.Equal(t, int64(100), group.Count)
@@ -2802,7 +2802,7 @@ func TestConvertToLogGroupOutput_FacetParsing(t *testing.T) {
 		assert.Equal(t, "my-namespace", group.Namespace)
 		assert.Equal(t, "my-workload", group.Workload)
 		assert.Equal(t, "my-container", group.Container)
-		assert.Equal(t, "/k8s/my-namespace/my-workload/my-container", group.ContainerID)
+		assert.Equal(t, "/k8s/my-namespace/my-workload", group.ContainerID)
 	})
 
 	t.Run("No count value skips result", func(t *testing.T) {
@@ -3053,7 +3053,7 @@ func TestConvertToLogGroupOutput_LogGroup(t *testing.T) {
 		assert.Equal(t, "production", group.Namespace)
 		assert.Equal(t, "api-server", group.Workload)
 		assert.Equal(t, "api-container", group.Container)
-		assert.Equal(t, "/k8s/production/api-server/api-container", group.ContainerID)
+		assert.Equal(t, "/k8s/production/api-server", group.ContainerID)
 		assert.NotEmpty(t, group.PatternHash)
 		assert.Equal(t, []int64{timestamp}, group.Timestamps)
 		assert.Equal(t, []float64{100}, group.Values)

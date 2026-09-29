@@ -744,7 +744,7 @@ func TestConvertCubeAPMLogGroups(t *testing.T) {
 	if g.Workload != "checkout-api" {
 		t.Errorf("Workload = %q", g.Workload)
 	}
-	if g.ContainerID != "/k8s/payments/checkout-api/app" {
+	if g.ContainerID != "/k8s/payments/checkout-api" {
 		t.Errorf("ContainerID = %q; the UI parses namespace and workload back out of this field", g.ContainerID)
 	}
 	if g.PatternHash == "" {

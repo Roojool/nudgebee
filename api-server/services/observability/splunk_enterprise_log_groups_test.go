@@ -150,7 +150,7 @@ func TestConvertSplunkEnterpriseLogGroups(t *testing.T) {
 		// max(_time) is epoch seconds inside stats; the frontend multiplies by 1000, so
 		// emitting milliseconds here would place every group ~55,000 years in the future.
 		assert.Equal(t, []int64{1787806840}, g.Timestamps)
-		assert.Equal(t, "/k8s/nudgebee/checkout/app", g.ContainerID)
+		assert.Equal(t, "/k8s/nudgebee/checkout", g.ContainerID)
 		assert.NotEmpty(t, g.PatternHash)
 	})
 
