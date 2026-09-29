@@ -198,7 +198,7 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		// target apply to shell commands without rewriting their argv.
 		env[workspace.ENV_NB_TOOL_CONFIG_NAME] = selected
 	}
-	if requested := RequestedCloudAccount(input.Arguments); requested != "" && (commandOwner == ToolExecuteGcpCliCommand || commandOwner == ToolExecuteAzureCliCommand) {
+	if requested := requestedCloudAccountFromCall(input); requested != "" && (commandOwner == ToolExecuteGcpCliCommand || commandOwner == ToolExecuteAzureCliCommand || commandOwner == ToolExecuteAwsCliCommand) {
 		saved, _ := ResolveShellTarget(nbRequestContext, commandOwner)
 		target, err := ResolveRequestedTarget(nbRequestContext.Ctx, nbRequestContext.AccountId, commandOwner, saved, requested)
 		if err != nil {

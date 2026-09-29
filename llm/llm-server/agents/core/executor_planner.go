@@ -3076,6 +3076,20 @@ func (e *plannerExecutor) selectConfigUsingLLM(userQuery string, configs []toolc
 	return ""
 }
 
+func actionRequestedTarget(tool toolcore.NBTool, action NBAgentPlannerToolAction) (string, error) {
+	if strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand) {
+		_, requested, err := tools.RequestedShellTargetFromInput(action.ToolInput)
+		return requested, err
+	}
+	if tool == nil {
+		return "", nil
+	}
+	if scoped, ok := tool.(toolcore.PerCallTargetTool); ok {
+		return scoped.RequestedTarget(action.ToolInput)
+	}
+	return "", nil
+}
+
 // followupForMultipleToolConfigs resolves which configured integration a tool should
 // run against, and is serialised per executor.
 //
@@ -3095,6 +3109,32 @@ func (e *plannerExecutor) selectConfigUsingLLM(userQuery string, configs []toolc
 // Listing the candidates stays outside the lock: it is read-only, cached, and can hit the
 // database, so serialising it would buy nothing and cost every action the same wait.
 func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, action NBAgentPlannerToolAction) ([]NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
+	if tool == nil {
+		return nil, nil, fmt.Errorf("tool is nil")
+	}
+	// If the action explicitly named a target, resolve it with the tenant list
+	// filtered by read access. An explicit target must never fall back to an account picker.
+	if requested, reqErr := actionRequestedTarget(tool, action); reqErr != nil {
+		return []NBAgentPlannerToolActionStep{
+			{
+				Action:      action,
+				Observation: reqErr.Error(),
+				Status:      ToolStatusFailure,
+			},
+		}, nil, nil
+	} else if requested != "" {
+		if _, resolveErr := tools.ResolveRequestedTarget(e.ctx, e.agentRequest.AccountId, tool.Name(), toolcore.ToolConfig{}, requested); resolveErr != nil {
+			return []NBAgentPlannerToolActionStep{
+				{
+					Action:      action,
+					Observation: resolveErr.Error(),
+					Status:      ToolStatusFailure,
+				},
+			}, nil, nil
+		}
+		return nil, nil, nil
+	}
+
 	// Get available configs for the tool
 	configs, err := toolcore.ListToolConfigs(e.ctx, e.agentRequest.AccountId, tool)
 	shellTarget := strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand)
@@ -3108,6 +3148,49 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 
 	// If there are no configs, return an error step so the agent can inform the user
 	if len(configs) == 0 {
+		if shellTarget {
+			tenantTargets, err := tools.ListAccountTargets(e.ctx, e.agentRequest.AccountId, tool.Name())
+			if err != nil {
+				e.ctx.GetLogger().Error("plannerexecutor: unable to list tenant account targets", "tool", tool.Name(), "error", err)
+				return []NBAgentPlannerToolActionStep{
+					{
+						Action:      action,
+						Observation: fmt.Sprintf("Failed to list available accounts: %v", err),
+						Status:      ToolStatusFailure,
+					},
+				}, nil, nil
+			}
+			if len(tenantTargets) > 0 {
+				hint := e.resolvedToolConfig(tool.Name())
+				if hint != "" {
+					for _, t := range tenantTargets {
+						if strings.EqualFold(t.Name, hint) {
+							return nil, nil, nil
+						}
+					}
+					return []NBAgentPlannerToolActionStep{
+						{
+							Action:      action,
+							Observation: fmt.Sprintf("shell: selected %s configuration is unavailable or unauthorized", tool.Name()),
+							Status:      ToolStatusFailure,
+						},
+					}, nil, nil
+				}
+				targetNames := make([]string, 0, len(tenantTargets))
+				for _, t := range tenantTargets {
+					targetNames = append(targetNames, t.Name)
+				}
+				slices.Sort(targetNames)
+				errMsg := fmt.Sprintf("Tool %s is not reachable from this conversation's account. Specify an account to target; available accounts: %s.", tool.Name(), strings.Join(targetNames, ", "))
+				return []NBAgentPlannerToolActionStep{
+					{
+						Action:      action,
+						Observation: errMsg,
+						Status:      ToolStatusFailure,
+					},
+				}, nil, nil
+			}
+		}
 		errMsg := fmt.Sprintf("Tool %s requires configuration (e.g., an integration) but none has been set up for this account. Please configure the integration first.", tool.Name())
 		return []NBAgentPlannerToolActionStep{
 			{

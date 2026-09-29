@@ -279,6 +279,12 @@ func RequestedShellTarget(owner, command string) (string, error) {
 	if owner == ToolExecuteKubectlCommand {
 		return RequestedKubernetesCluster(command, nil)
 	}
+	if owner == ToolExecuteAwsCliCommand {
+		values, _ := scanValueFlags(command, "--profile")
+		if len(values) > 0 {
+			return values[len(values)-1], nil
+		}
+	}
 	return "", nil
 }
 
@@ -287,8 +293,9 @@ func RequestedShellTarget(owner, command string) (string, error) {
 func RequestedShellTargetFromInput(toolInput string) (string, string, error) {
 	req := core.ParseNBToolCallRequestFromInput(toolInput)
 	owner := ShellConfigToolName(req.Command)
-	if owner == ToolExecuteGcpCliCommand || owner == ToolExecuteAzureCliCommand {
-		return owner, RequestedCloudAccount(req.Arguments), nil
+	if requested := RequestedCloudAccount(req.Arguments); requested != "" &&
+		(owner == ToolExecuteGcpCliCommand || owner == ToolExecuteAzureCliCommand || owner == ToolExecuteAwsCliCommand) {
+		return owner, requested, nil
 	}
 	requested, err := RequestedShellTarget(owner, req.Command)
 	return owner, requested, err

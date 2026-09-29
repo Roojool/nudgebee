@@ -119,7 +119,43 @@ func TestShellAwsUsesShimWithoutWorkspaceCredentials(t *testing.T) {
 	require.NotContains(t, capture.env, "AWS_ACCESS_KEY_ID")
 	require.Equal(t, "aws-prod", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME], "the shim receives the per-call default; an explicit profile can still override it")
 	require.Equal(t, "aws --profile aws-demo sts get-caller-identity", capture.command)
-	require.Equal(t, "", ShellTool{}.ConfirmationKey(`{"command":"aws --profile aws-demo s3 rm s3://b/k"}`))
+	require.Equal(t, "shell_execute@aws-demo", ShellTool{}.ConfirmationKey(`{"command":"aws --profile aws-demo s3 rm s3://b/k"}`))
+
+	t.Run("explicit account argument sets target environment", func(t *testing.T) {
+		capture := &targetWorkspaceCapture{}
+		tool := ShellTool{AccountId: account, workspaceManager: capture}
+		_, err := tool.Call(awsCtx(t, account, tool), core.NBToolCallRequest{
+			Command:   "aws sts get-caller-identity",
+			Arguments: map[string]any{"account": "aws-demo"},
+		})
+		require.NoError(t, err)
+		require.Equal(t, "aws-demo", capture.env[workspace.ENV_NB_TOOL_CONFIG_NAME])
+		require.Equal(t, "demo-id", capture.env[workspace.ENV_NB_TARGET_ACCOUNT_ID])
+	})
+
+	t.Run("RequestedShellTarget extracts profile flag and account arg", func(t *testing.T) {
+		owner, requested, err := RequestedShellTargetFromInput(`{"command":"aws --profile aws-demo s3 ls"}`)
+		require.NoError(t, err)
+		require.Equal(t, ToolExecuteAwsCliCommand, owner)
+		require.Equal(t, "aws-demo", requested)
+
+		owner, requested, err = RequestedShellTargetFromInput(`{"command":"aws s3 ls","account":"aws-demo"}`)
+		require.NoError(t, err)
+		require.Equal(t, ToolExecuteAwsCliCommand, owner)
+		require.Equal(t, "aws-demo", requested)
+
+		// Verify non-cloud tools (e.g. kubectl) do not mistake an "account" arg as their target
+		owner, requested, err = RequestedShellTargetFromInput(`{"command":"kubectl --context my-cluster get pods","account":"aws-demo"}`)
+		require.NoError(t, err)
+		require.Equal(t, ToolExecuteKubectlCommand, owner)
+		require.Equal(t, "my-cluster", requested)
+
+		// Verify multiple --profile flags take the last occurrence
+		owner, requested, err = RequestedShellTargetFromInput(`{"command":"aws --profile first-profile --profile second-profile s3 ls"}`)
+		require.NoError(t, err)
+		require.Equal(t, ToolExecuteAwsCliCommand, owner)
+		require.Equal(t, "second-profile", requested)
+	})
 }
 
 func TestAwsPermanentCredentialFailureClassification(t *testing.T) {
