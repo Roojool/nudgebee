@@ -274,13 +274,18 @@ const parseConversationMessages = (conversationMessages, accountId) => {
     }
 
     if (conversationMessage.status === 'QUEUED') {
+      const author = conversationMessage?.user?.display_name || conversationMessage?.user_display_name;
+      // Messages carry only a display name and the session has no user id, so two members
+      // with the same name both read as "You". This only affects the label; the server
+      // enforces who may edit or delete.
+      const isOwn = Boolean(author) && author === getUserSession()?.user?.name;
       queuedMessages.push({
         id: conversationMessage.id,
         text: conversationMessage.message,
         images: conversationMessage.attachments || [],
         config: conversationMessage.message_config,
         createdAt: new Date(conversationMessage.created_at).getTime(),
-        user: conversationMessage?.user?.display_name || conversationMessage?.user_display_name || 'Workspace member',
+        user: isOwn ? 'You' : author || 'Workspace member',
         userId: conversationMessage.user_id,
         isServer: true,
       });

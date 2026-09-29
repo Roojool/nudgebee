@@ -48,6 +48,7 @@ import TroubleshootList from './TroubleshootList';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { useQueuedMessages } from '@hooks/useQueuedMessages';
 import QueuedMessagesBanner from './common/QueuedMessagesBanner';
+import { Callout } from '@ui/Callout';
 
 // --- Component-level state reducer ---
 
@@ -581,8 +582,9 @@ const KubernetesLLMResponseGenerator = ({
       }
 
       // Add optimistic question message immediately so user sees their question right away.
+      // Pending submissions show it too: their queue row stays hidden unless the save fails.
       const optimisticMessageId = `optimistic-${Date.now()}`;
-      if (apiMode !== 'workflow' && !pendingSubmission) {
+      if (apiMode !== 'workflow') {
         const optimisticQuestionMessage = {
           id: optimisticMessageId,
           text: processedText,
@@ -598,7 +600,7 @@ const KubernetesLLMResponseGenerator = ({
       }
 
       // Call Hook with both IDs (one or both might be empty)
-      return await startInvestigation({
+      const started = await startInvestigation({
         text: processedText,
         optimisticMessageId,
         queryPrefix,
@@ -638,6 +640,12 @@ const KubernetesLLMResponseGenerator = ({
           }
         },
       });
+      // An unconfirmed pending send reappears in the waiting list for recovery; a
+      // superseded request skips onFailure, so retire its bubble here too.
+      if (pendingSubmission && started === false) {
+        setMessages((previous) => previous.filter((message) => message.id !== optimisticMessageId));
+      }
+      return started;
     },
     [
       accountId,
@@ -699,11 +707,21 @@ const KubernetesLLMResponseGenerator = ({
   const queueScope = `${accountId}:${conversationIdAtDb}:${selectedSessionId}`;
   const queueScopeRef = useRef(queueScope);
   queueScopeRef.current = queueScope;
+  // The server admits a queued message only once the running turn is recorded,
+  // and a send is recorded only after agent routing (several seconds). Queued
+  // submissions wait behind the pending send, and behind each other to keep order.
+  const queueSubmitGateRef = useRef(Promise.resolve());
   useEffect(() => {
     setQueueImageDraft(undefined);
     setPendingQueueEdit(null);
     setQueueSubmitError(null);
+    queueSubmitGateRef.current = Promise.resolve();
   }, [queueScope]);
+  const afterQueueGate = useCallback((submit) => {
+    const run = queueSubmitGateRef.current.then(submit);
+    queueSubmitGateRef.current = run.catch(() => {});
+    return run;
+  }, []);
 
   const handleEditQueuedMessage = useCallback(
     async (id) => {
@@ -728,7 +746,9 @@ const KubernetesLLMResponseGenerator = ({
   const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled && Boolean(conversationIdAtDb);
 
   const optimisticQueue = useOptimisticQueue(queueScope, maxQueuedMessages, queuedMessages.length);
-  const displayedQueue = [...queuedMessages, ...optimisticQueue.entries];
+  // A foreground send already shows as a question bubble; it only joins the waiting
+  // list when its save can't be confirmed, so the user can recover the text.
+  const displayedQueue = [...queuedMessages, ...optimisticQueue.entries.filter((entry) => !(entry.isForeground && entry.saving))];
 
   const isMaxQueueReached =
     isServerMaxQueueReached ||
@@ -746,10 +766,14 @@ const KubernetesLLMResponseGenerator = ({
           return false;
         }
         const scope = queueScopeRef.current;
-        const accepted = optimisticQueue.submit(text, images, async () => {
-          await queueInvestigationMessage({ text, images });
-          if (scope === queueScopeRef.current) setQueueSubmitError(null);
-        });
+        const accepted = optimisticQueue.submit(text, images, () =>
+          afterQueueGate(async () => {
+            // Switching conversations drops this pending row; never send it to the new one.
+            if (scope !== queueScopeRef.current) return;
+            await queueInvestigationMessage({ text, images });
+            if (scope === queueScopeRef.current) setQueueSubmitError(null);
+          })
+        );
         if (accepted) setGenerateQuestionText('');
         return accepted;
       }
@@ -762,12 +786,19 @@ const KubernetesLLMResponseGenerator = ({
           snackbar.error('You do not have permission to perform this action');
           return false;
         }
-        return optimisticQueue.submit(text, images, () => executeInvestigation(text, images, true, true), true);
+        const scope = queueScopeRef.current;
+        return optimisticQueue.submit(
+          text,
+          images,
+          () => afterQueueGate(() => (scope === queueScopeRef.current ? executeInvestigation(text, images, true, true) : undefined)),
+          true
+        );
       }
       return await executeInvestigation(text, images, true);
     },
     [
       optimisticQueue.submit,
+      afterQueueGate,
       accountId,
       isConversationInProgress,
       isMaxQueueReached,
@@ -2260,9 +2291,9 @@ const KubernetesLLMResponseGenerator = ({
                 </Box>
               )}
               {(queueSubmitError || queueActionError) && (
-                <Typography role='alert' color='error'>
-                  {queueSubmitError || queueActionError}
-                </Typography>
+                <Box sx={{ mb: ds.space[2] }}>
+                  <Callout tone='critical' message={queueSubmitError || queueActionError} />
+                </Box>
               )}
               <QueuedMessagesBanner
                 queuedMessages={displayedQueue}
@@ -2281,6 +2312,7 @@ const KubernetesLLMResponseGenerator = ({
                 editingMessageId={pendingQueueEdit?.scope === queueScope ? pendingQueueEdit.id : undefined}
                 isExpanded={isQueueExpanded}
                 maxQueuedMessages={maxQueuedMessages}
+                isPaused={!isConversationInProgress && ['FAILED', 'KILLED', 'TERMINATED'].includes(conversationStatus)}
                 onToggleExpanded={toggleQueueExpanded}
                 onSendNow={sendNowQueuedMessage}
                 onEdit={handleEditQueuedMessage}

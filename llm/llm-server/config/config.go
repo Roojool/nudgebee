@@ -1556,7 +1556,7 @@ func init() {
 	viper.SetDefault("llm_max_monthly_count_limit", 5000)
 	viper.SetDefault("llm_max_daily_count_limit", 500)
 	viper.SetDefault("max_memory_facts_per_conversation", 30)
-	viper.SetDefault("llm_server_queued_messages_enabled", false)
+	viper.SetDefault("llm_server_queued_messages_enabled", true)
 	viper.SetDefault("llm_server_max_queued_messages_per_conversation", 5)
 	viper.SetDefault("llm_memory_ttl_never_used_days", 90)
 	viper.SetDefault("llm_memory_ttl_stale_days", 180)

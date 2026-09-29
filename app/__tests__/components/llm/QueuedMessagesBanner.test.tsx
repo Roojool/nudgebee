@@ -99,7 +99,7 @@ describe('QueuedMessagesBanner', () => {
       />
     );
 
-    expect(screen.getByText('2 waiting')).toBeInTheDocument();
+    expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByTestId('queued-messages-count')).toHaveTextContent('2');
     expect(screen.getByText('Runs after the current response')).toBeInTheDocument();
   });
@@ -152,7 +152,7 @@ describe('QueuedMessagesBanner', () => {
     expect(screen.queryByText('close open PR 803 and 804')).not.toBeInTheDocument();
   });
 
-  it('triggers onSendNow, onEdit, and onDelete with message id', () => {
+  it('triggers onSendNow, onEdit, and onDelete with message id', async () => {
     const onSendNow = jest.fn();
     const onEdit = jest.fn();
     const onDelete = jest.fn();
@@ -168,7 +168,9 @@ describe('QueuedMessagesBanner', () => {
       />
     );
 
-    fireEvent.click(screen.getByTestId('queued-message-send-now-qm-1'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('queued-message-send-now-qm-1'));
+    });
     expect(onSendNow).toHaveBeenCalledWith('qm-1');
 
     fireEvent.click(screen.getByTestId('queued-message-edit-qm-1'));
@@ -216,6 +218,67 @@ describe('QueuedMessagesBanner', () => {
 
     expect(screen.getByTestId('queued-messages-count')).toHaveTextContent('2/5');
     expect(screen.getByText('Runs after the current response')).toBeInTheDocument();
+  });
+
+  it('shows saving and unconfirmed rows without queue actions', () => {
+    const onRefresh = jest.fn();
+    render(
+      <QueuedMessagesBanner
+        queuedMessages={[
+          { id: 'qm-saving', text: 'still saving', createdAt: 1, saving: true },
+          { id: 'qm-failed', text: 'not confirmed', createdAt: 2, saveError: 'Couldn’t confirm saving—refresh to check.' },
+        ]}
+        isExpanded
+        onRefresh={onRefresh}
+        onToggleExpanded={jest.fn()}
+        onSendNow={jest.fn()}
+        onEdit={jest.fn()}
+        onDelete={jest.fn()}
+      />
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Saving…');
+    expect(screen.getByRole('alert')).toHaveTextContent('Couldn’t confirm saving');
+    expect(screen.getByText('1 needs attention')).toBeInTheDocument();
+    expect(screen.queryByTestId('queued-message-send-now-qm-saving')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('queued-message-edit-qm-failed')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Refresh history'));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks other queue actions while Send now is in flight', async () => {
+    let finish!: () => void;
+    const onSendNow = jest.fn(() => new Promise<void>((resolve) => (finish = resolve)));
+    render(
+      <QueuedMessagesBanner
+        queuedMessages={defaultMessages}
+        isExpanded
+        onToggleExpanded={jest.fn()}
+        onSendNow={onSendNow}
+        onEdit={jest.fn()}
+        onDelete={jest.fn()}
+      />
+    );
+    fireEvent.click(screen.getByTestId('queued-message-send-now-qm-1'));
+    for (const action of ['edit', 'delete', 'send-now']) expect(screen.getByTestId(`queued-message-${action}-qm-2`)).toBeDisabled();
+    fireEvent.click(screen.getByTestId('queued-message-send-now-qm-1'));
+    expect(onSendNow).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
+    expect(screen.getByTestId('queued-message-send-now-qm-2')).toBeEnabled();
+  });
+
+  it('says the queue is paused when the conversation ended without completing', () => {
+    render(
+      <QueuedMessagesBanner
+        queuedMessages={defaultMessages}
+        isExpanded
+        isPaused
+        onToggleExpanded={jest.fn()}
+        onSendNow={jest.fn()}
+        onEdit={jest.fn()}
+        onDelete={jest.fn()}
+      />
+    );
+    expect(screen.getByText(/Paused: nothing is running/)).toBeInTheDocument();
   });
 
   it('renders full capacity warning when queue is at or above limit', () => {
