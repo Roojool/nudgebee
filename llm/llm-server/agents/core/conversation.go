@@ -1732,8 +1732,11 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			ScoreAnswerConfidenceAsync(ctx, request, agentResponseContent)
 		}
 
-		if status == ConversationStatusCompleted && queuedMessageDispatcher != nil {
-			if nextMsg, claimErr := GetConversationDao().ClaimNextQueuedMessage(ctx.GetContext(), request.ConversationId); claimErr == nil && nextMsg != nil {
+		if (status == ConversationStatusCompleted || status == ConversationStatusFailed) && queuedMessageDispatcher != nil {
+			claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), 10*time.Second)
+			nextMsg, claimErr := GetConversationDao().ClaimNextQueuedMessage(claimCtx, request.ConversationId)
+			cancelClaim()
+			if claimErr == nil && nextMsg != nil {
 				ctx.GetLogger().Info("conversation: auto-dispatching next queued message", "conversation_id", request.ConversationId, "message_id", nextMsg.ID.String())
 				queuedMessageDispatcher(ctx, agent, conversation, *nextMsg)
 			} else if claimErr != nil {

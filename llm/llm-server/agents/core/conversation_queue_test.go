@@ -79,6 +79,34 @@ func TestQueuedClaimDoesNotStartDuringAnotherTurn(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestQueuedClaimAdvancesAfterFailedTurn(t *testing.T) {
+	dao, mock := setupConversationDAOMock(t)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT status FROM llm_conversations.*FOR UPDATE`).WithArgs("conv").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("FAILED"))
+	// Reaching the claim query proves a FAILED turn no longer strands the queue.
+	mock.ExpectQuery(`UPDATE llm_conversation_messages SET status = 'IN_PROGRESS'`).WithArgs("conv", sqlmock.AnyArg()).WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+	msg, err := dao.ClaimNextQueuedMessage(context.Background(), "conv")
+	require.NoError(t, err)
+	require.Nil(t, msg)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestQueuedClaimStaysPausedAfterStop(t *testing.T) {
+	for _, status := range []string{"KILLED", "TERMINATED"} {
+		t.Run(status, func(t *testing.T) {
+			dao, mock := setupConversationDAOMock(t)
+			mock.ExpectBegin()
+			mock.ExpectQuery(`SELECT status FROM llm_conversations.*FOR UPDATE`).WithArgs("conv").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(status))
+			mock.ExpectRollback()
+			msg, err := dao.ClaimNextQueuedMessage(context.Background(), "conv")
+			require.NoError(t, err)
+			require.Nil(t, msg)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestQueuedHistoryIsExcludedBeforeLimit(t *testing.T) {
 	dao, mock := setupConversationDAOMock(t)
 	id := uuid.NewString()

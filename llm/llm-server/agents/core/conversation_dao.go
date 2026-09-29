@@ -1972,7 +1972,9 @@ func (chat *ConversationDao) ClaimNextQueuedMessage(ctx context.Context, convers
 	if err := tx.GetContext(ctx, &status, `SELECT status FROM llm_conversations WHERE id = $1 FOR UPDATE`, conversationID); err != nil {
 		return nil, err
 	}
-	if status != ConversationStatusCompleted {
+	// A failed turn still advances the queue; a stopped or swept one (KILLED,
+	// TERMINATED) pauses it until the user sends a queued message explicitly.
+	if status != ConversationStatusCompleted && status != ConversationStatusFailed {
 		return nil, nil
 	}
 	var msg ConversationMessage

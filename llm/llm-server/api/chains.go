@@ -18,6 +18,7 @@ import (
 	"nudgebee/llm/security"
 	"nudgebee/llm/security/egressfilter"
 	toolcore "nudgebee/llm/tools/core"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -377,11 +378,46 @@ func tryQueueConversationMessage(
 // dispatchQueuedMessage is shared by FIFO completion and explicit Send Now.
 // Persist failures as terminal messages so a live worker never strands a claim.
 func dispatchQueuedMessage(parent *security.RequestContext, conversation core.Conversation, msg core.ConversationMessage) error {
+	// Callers may hand over a request-scoped context; queued work outlives the
+	// request, so detach it once here. The turn itself runs on a fresh context below.
+	parent = security.NewRequestContext(context.WithoutCancel(parent.GetContext()), parent.GetSecurityContext(), parent.GetLogger(), parent.GetTracer(), parent.GetMeter())
 	fail := func(err error) {
 		parent.GetLogger().Error("chains: queued execution failed", "error", err, "message_id", msg.ID)
-		if _, saveErr := core.GetConversationDao().FinalizeConversationMessage(msg.ConversationID.String(), msg.ID.String(), "Queued message could not be executed. Please retry this message.", core.ConversationStatusFailed); saveErr != nil {
+		applied, saveErr := core.GetConversationDao().FinalizeConversationMessage(msg.ConversationID.String(), msg.ID.String(), "Queued message could not be executed. Please retry this message.", core.ConversationStatusFailed)
+		if saveErr != nil {
 			parent.GetLogger().Error("chains: failed to persist queue failure", "error", saveErr)
+			return
 		}
+		if !applied {
+			return
+		}
+		// A failed dispatch may never reach the turn-completion path that claims the
+		// next message, so claim here too or the rest of the queue is stranded. If that
+		// path already claimed, this claim finds a turn in progress and returns nil.
+		// Each failure consumes one queued message, bounded by the queue capacity.
+		claimCtx, cancelClaim := context.WithTimeout(parent.GetContext(), 10*time.Second)
+		defer cancelClaim()
+		next, claimErr := core.GetConversationDao().ClaimNextQueuedMessage(claimCtx, msg.ConversationID.String())
+		if claimErr != nil {
+			parent.GetLogger().Error("chains: failed to claim next queued message", "error", claimErr, "conversation_id", msg.ConversationID)
+			return
+		}
+		if next == nil {
+			return
+		}
+		// Dispatch on its own goroutine so a run of failures neither nests calls nor
+		// holds this worker while the next submission waits for a pool slot.
+		logger := parent.GetLogger()
+		go func(next core.ConversationMessage) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("chains: panic dispatching next queued message", "panic", recovered, "message_id", next.ID, "stack", string(debug.Stack()))
+				}
+			}()
+			if dispatchErr := dispatchQueuedMessage(parent, conversation, next); dispatchErr != nil {
+				logger.Error("chains: failed to dispatch next queued message", "error", dispatchErr, "message_id", next.ID)
+			}
+		}(*next)
 	}
 	submissionCtx, cancel := context.WithTimeout(context.Background(), time.Duration(config.Config.AsyncApiTimeoutSeconds)*time.Second)
 	defer cancel()
