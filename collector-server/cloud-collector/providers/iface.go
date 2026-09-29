@@ -22,9 +22,26 @@ import (
 //     BigQuery error) is a fault worth retrying and worth a DLQ entry, and must
 //     NOT be wrapped in this sentinel.
 //
+// Access to cost data that the account's credential was never granted, or that
+// the billing setup blocks, is also a steady state and may be wrapped here — as
+// long as the credential itself still works. AWS wraps a denied CUR read; Azure
+// wraps a cost query refused while the subscription stays readable (no cost
+// role, Enterprise Agreement "view charges" off, unsupported offer type).
+//
 // Compare with errors.ErrUnsupported, which means the provider has no billing
 // concept at all. Both are benign for the queue; this one is fixable by the user.
 var ErrCostNotConfigured = errors.New("cost reporting is not configured for this account")
+
+// ErrCostFetchFailedCredentialOK reports a spend fetch that failed — throttled,
+// an upstream fault, or a reason the provider did not recognise — while the
+// account's credential still works: either the provider checked, or the failure
+// itself came after authentication succeeded (a throttled or failed request).
+//
+// It is NOT benign for the queue: the job still fails and is dead-lettered, and
+// "Sync now" still reports the error. It only stops the failure from marking
+// the whole account disconnected, since resources, events and recommendations
+// keep syncing with the same credential.
+var ErrCostFetchFailedCredentialOK = errors.New("cost data could not be fetched this run")
 
 type CloudProviderContext interface {
 	GetContext() context.Context

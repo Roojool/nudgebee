@@ -6538,6 +6538,7 @@ type AzureBulkOnboardAccountResultOutput {
   account_id: String!
   status: String!
   error: String
+  warning: String
 }
 
 type AzureBulkOnboardOutput {

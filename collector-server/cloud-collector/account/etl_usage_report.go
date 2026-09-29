@@ -320,9 +320,18 @@ func runHistoricalBackfill(ctx *security.RequestContext, accountId, tenantId str
 // Neither can be fixed by retrying, so the queue must ACK rather than
 // dead-letter, and the agent must not be reported disconnected for it.
 //
-// This is the single definition of "benign" — both decisions call it. Keeping
-// two copies is how the sts:ExternalId drift happened (#37513): one caller was
-// updated and the other silently kept the old behaviour.
+// A spend sync answers two different questions, and this function and
+// agentStatusForUsageSync below are the only places that answer them:
+//
+//   - isBenignCostOutcome: is this a steady state the queue should ACK without
+//     a dead-letter entry?
+//   - agentStatusForUsageSync: does the account's credential still work?
+//
+// Every benign outcome also keeps the account connected. The reverse is not
+// true: ErrCostFetchFailedCredentialOK is a real failure for the queue, but the
+// credential was confirmed to work, so the account stays connected. Keep both
+// answers here, side by side — two copies of the same answer is how the
+// sts:ExternalId drift happened (#37513).
 func isBenignCostOutcome(err error) bool {
 	return errors.Is(err, errors.ErrUnsupported) || errors.Is(err, providers.ErrCostNotConfigured)
 }
@@ -337,10 +346,14 @@ func isBenignCostOutcome(err error) bool {
 // row reads Connected, and trips agent-health alerting for a supported
 // configuration.
 //
+// A failure after which the provider confirmed the credential still works
+// (ErrCostFetchFailedCredentialOK) does not disconnect either: the account's
+// other syncs keep working, and only its spend is missing this run.
+//
 // The error is still recorded either way, so the reason reaches the Spends
 // error column.
 func agentStatusForUsageSync(err error) AgentStatus {
-	if err != nil && !isBenignCostOutcome(err) {
+	if err != nil && !isBenignCostOutcome(err) && !errors.Is(err, providers.ErrCostFetchFailedCredentialOK) {
 		return AgentStatusDisconnected
 	}
 	return AgentStatusConnected

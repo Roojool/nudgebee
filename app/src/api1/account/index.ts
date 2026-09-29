@@ -257,6 +257,7 @@ mutation AzureBulkOnboard($object: AzureBulkOnboardInput!) {
       account_id
       status
       error
+      warning
     }
     parent_id
   }
@@ -824,6 +825,11 @@ const apiAccount = {
       const response = await queryGraphQL(AZURE_LIST_SUBSCRIPTIONS, 'AzureListSubscriptions', {
         object: { tenant_id: tenantId, client_id: clientId, client_secret: clientSecret },
       });
+      // The gateway answers most backend failures with HTTP 200 and an errors
+      // array; surface it instead of reporting "no subscriptions".
+      if (response?.data?.errors?.length) {
+        throw new Error(response.data.errors[0]?.message || 'Failed to list Azure subscriptions');
+      }
       return response?.data?.data?.azure_list_subscriptions?.subscriptions || [];
     } catch (err) {
       console.error('listAzureSubscriptions error:', err);
