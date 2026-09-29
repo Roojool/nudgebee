@@ -673,7 +673,7 @@ const KubernetesLLMResponseGenerator = ({
     isExpanded: isQueueExpanded,
     toggleExpanded: toggleQueueExpanded,
     remove: removeQueuedMessage,
-    edit: editQueuedMessage,
+    update: updateQueuedMessage,
     sendNow: sendNowQueuedMessage,
     clear: clearQueuedMessages,
     maxQueuedMessages,
@@ -701,7 +701,6 @@ const KubernetesLLMResponseGenerator = ({
     composerHasDraftRef.current = hasDraft;
   }, []);
   const [queueImageDraft, setQueueImageDraft] = useState(undefined);
-  const [pendingQueueEdit, setPendingQueueEdit] = useState(null);
   const [queueSubmitError, setQueueSubmitError] = useState(null);
 
   const queueScope = `${accountId}:${conversationIdAtDb}:${selectedSessionId}`;
@@ -713,7 +712,6 @@ const KubernetesLLMResponseGenerator = ({
   const queueSubmitGateRef = useRef(Promise.resolve());
   useEffect(() => {
     setQueueImageDraft(undefined);
-    setPendingQueueEdit(null);
     setQueueSubmitError(null);
     queueSubmitGateRef.current = Promise.resolve();
   }, [queueScope]);
@@ -722,26 +720,6 @@ const KubernetesLLMResponseGenerator = ({
     queueSubmitGateRef.current = run.catch(() => {});
     return run;
   }, []);
-
-  const handleEditQueuedMessage = useCallback(
-    async (id) => {
-      const scope = queueScopeRef.current;
-      setPendingQueueEdit({ scope, id });
-      try {
-        const msg = await editQueuedMessage(id);
-        if (msg && scope === queueScopeRef.current) {
-          setGenerateQuestionText(msg.text);
-          setQueueImageDraft({ id: msg.id, text: msg.text, images: (msg.images || []).filter((image) => image.data && image.mime_type) });
-          setTimeout(() => {
-            textareaRef.current?.focus();
-          }, 0);
-        }
-      } finally {
-        if (scope === queueScopeRef.current) setPendingQueueEdit(null);
-      }
-    },
-    [editQueuedMessage]
-  );
 
   const canQueueMessages = apiMode === 'investigate' && queueSupport.enabled && Boolean(conversationIdAtDb);
 
@@ -2309,13 +2287,13 @@ const KubernetesLLMResponseGenerator = ({
                     setQueueImageDraft({ id: msg.id, text: msg.text, images: msg.images || [] });
                   }
                 }}
-                editingMessageId={pendingQueueEdit?.scope === queueScope ? pendingQueueEdit.id : undefined}
                 isExpanded={isQueueExpanded}
                 maxQueuedMessages={maxQueuedMessages}
-                isPaused={!isConversationInProgress && ['FAILED', 'KILLED', 'TERMINATED'].includes(conversationStatus)}
+                // A failed turn advances the queue on the server; only a stop leaves it waiting.
+                isPaused={!isConversationInProgress && ['KILLED', 'TERMINATED'].includes(conversationStatus)}
                 onToggleExpanded={toggleQueueExpanded}
                 onSendNow={sendNowQueuedMessage}
-                onEdit={handleEditQueuedMessage}
+                onUpdate={updateQueuedMessage}
                 onDelete={removeQueuedMessage}
               />
               {!showFollowupSheet && (

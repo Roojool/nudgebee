@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Typography, CircularProgress } from '@mui/material';
 import ArrowForwardRoundedIcon from '@mui/icons-material/ArrowForwardRounded';
 import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded';
@@ -9,12 +9,12 @@ import SafeIcon from '@shared/icons/SafeIcon';
 import { DeleteIconRed, EditIcon } from '@assets';
 import Tooltip from '@ui/Tooltip';
 import { Button } from '@ui/Button';
+import { Input } from '@ui/Input';
 import { ds } from '@utils/colors';
 import { QueuedMessage } from '@hooks/useQueuedMessages';
 
 export interface QueuedMessagesBannerProps {
   queuedMessages: QueuedMessage[];
-  editingMessageId?: string;
   onRefresh?: () => void;
   onRestore?: (id: string) => void;
   isExpanded: boolean;
@@ -23,7 +23,8 @@ export interface QueuedMessagesBannerProps {
   isPaused?: boolean;
   onToggleExpanded: () => void;
   onSendNow: (id: string) => Promise<void> | void;
-  onEdit: (id: string) => void;
+  /** Saves new text for a queued message in place; rejects with a user-facing error. */
+  onUpdate: (id: string, text: string) => Promise<void>;
   onDelete: (id: string) => Promise<void> | void;
 }
 
@@ -33,7 +34,6 @@ const ACTIONS_CLASS = 'queued-message-actions';
 // another card in the transcript.
 export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
   queuedMessages,
-  editingMessageId,
   onRefresh,
   onRestore,
   isExpanded,
@@ -41,13 +41,45 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
   isPaused = false,
   onToggleExpanded,
   onSendNow,
-  onEdit,
+  onUpdate,
   onDelete,
 }) => {
   const [deletingMessageId, setDeletingMessageId] = useState<string>();
   const [sendingMessageId, setSendingMessageId] = useState<string>();
+  // In-place edit: the message keeps its queue position and attachments.
+  const [editingId, setEditingId] = useState<string>();
+  const [draft, setDraft] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string>();
+  const editorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (editingId) editorRef.current?.querySelector<HTMLElement>('textarea, input')?.focus();
+  }, [editingId]);
   const isDeleting = queuedMessages?.some((message) => message.id === deletingMessageId);
   const isSending = queuedMessages?.some((message) => message.id === sendingMessageId);
+  const isEditingAny = queuedMessages?.some((message) => message.id === editingId);
+
+  const cancelEdit = () => {
+    setEditingId(undefined);
+    setEditError(undefined);
+  };
+  const saveEdit = async (id: string) => {
+    if (!draft.trim() || savingEdit) return;
+    if (draft.trim() === queuedMessages.find((m) => m.id === id)?.text) {
+      cancelEdit();
+      return;
+    }
+    setSavingEdit(true);
+    setEditError(undefined);
+    try {
+      await onUpdate(id, draft);
+      setEditingId(undefined);
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : 'Couldn’t save the edit.');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   if (!queuedMessages || queuedMessages.length === 0) {
     return null;
@@ -158,11 +190,11 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
             // Run order counts only confirmed rows; pending and failed rows get a status icon instead.
             const position = queuedMessages.slice(0, index + 1).filter((m) => !m.saving && !m.saveError).length;
             const hasImages = Boolean(msg.images && msg.images.length > 0);
-            const isEditing = editingMessageId === msg.id;
+            const isEditing = editingId === msg.id;
             const isRowDeleting = deletingMessageId === msg.id;
             const isRowSending = sendingMessageId === msg.id;
-            const busy = Boolean(editingMessageId) || isDeleting || isSending || msg.saving || Boolean(msg.saveError);
-            const showActions = !msg.saving && !msg.saveError;
+            const busy = isEditingAny || isDeleting || isSending || msg.saving || Boolean(msg.saveError);
+            const showActions = !msg.saving && !msg.saveError && !isEditing;
             return (
               <Box
                 component='li'
@@ -179,7 +211,7 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   borderTop: `1px solid ${ds.gray[200]}`,
                   opacity: msg.saving ? 0.7 : 1,
                   [`& .${ACTIONS_CLASS}`]: {
-                    opacity: isEditing || isRowDeleting || isRowSending ? 1 : 0,
+                    opacity: isRowDeleting || isRowSending ? 1 : 0,
                     transition: `opacity ${ds.motion.micro} ${ds.motion.ease}`,
                   },
                   [`&:hover .${ACTIONS_CLASS}, &:focus-within .${ACTIONS_CLASS}`]: { opacity: 1 },
@@ -209,44 +241,98 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                   )}
                 </Box>
 
-                <Tooltip title={msg.text} placement='top-start' enterDelay={600} enterNextDelay={600}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1], flex: 1, minWidth: 0 }}>
-                    {msg.user && msg.user !== 'You' && (
+                {isEditing ? (
+                  <Box
+                    ref={editorRef}
+                    sx={{
+                      '& textarea': { fontFamily: 'inherit' },
+                      flex: 1,
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: ds.space[1],
+                      py: ds.space[1],
+                    }}
+                  >
+                    <Input
+                      type='textarea'
+                      size='sm'
+                      minRows={1}
+                      maxRows={4}
+                      value={draft}
+                      onChange={setDraft}
+                      disabled={savingEdit}
+                      error={editError}
+                      data-testid={`queued-message-editor-${msg.id}`}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          void saveEdit(msg.id);
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (!savingEdit) cancelEdit();
+                        }
+                      }}
+                    />
+                    <Box sx={{ display: 'flex', gap: ds.space[1], justifyContent: 'flex-end' }}>
+                      <Button tone='ghost' size='xs' onClick={cancelEdit} disabled={savingEdit} data-testid={`queued-message-edit-cancel-${msg.id}`}>
+                        Cancel
+                      </Button>
+                      <Button
+                        tone='primary'
+                        size='xs'
+                        onClick={() => void saveEdit(msg.id)}
+                        loading={savingEdit}
+                        disabled={!draft.trim()}
+                        data-testid={`queued-message-edit-save-${msg.id}`}
+                      >
+                        Save
+                      </Button>
+                    </Box>
+                  </Box>
+                ) : (
+                  <Tooltip title={msg.text} placement='top-start' enterDelay={600} enterNextDelay={600}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1], flex: 1, minWidth: 0 }}>
+                      {msg.user && msg.user !== 'You' && (
+                        <Typography
+                          component='span'
+                          sx={{
+                            flexShrink: 0,
+                            px: ds.space[1],
+                            borderRadius: ds.radius.sm,
+                            backgroundColor: ds.gray.alpha[200],
+                            color: ds.gray[700],
+                            fontSize: ds.text.caption,
+                            fontWeight: ds.weight.medium,
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          {msg.user}
+                        </Typography>
+                      )}
+                      {hasImages && (
+                        <ImageOutlinedIcon titleAccess='Has image attachment' sx={{ fontSize: 14, color: ds.gray[500], flexShrink: 0 }} />
+                      )}
                       <Typography
-                        component='span'
                         sx={{
-                          flexShrink: 0,
-                          px: ds.space[1],
-                          borderRadius: ds.radius.sm,
-                          backgroundColor: ds.gray.alpha[200],
+                          fontSize: ds.text.body,
                           color: ds.gray[700],
-                          fontSize: ds.text.caption,
-                          fontWeight: ds.weight.medium,
-                          lineHeight: 1.6,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          lineHeight: 1.5,
                         }}
                       >
-                        {msg.user}
+                        {msg.text || (hasImages ? 'Attached image' : `Message ${index + 1}`)}
                       </Typography>
-                    )}
-                    {hasImages && <ImageOutlinedIcon titleAccess='Has image attachment' sx={{ fontSize: 14, color: ds.gray[500], flexShrink: 0 }} />}
-                    <Typography
-                      sx={{
-                        fontSize: ds.text.body,
-                        color: ds.gray[700],
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        lineHeight: 1.5,
-                      }}
-                    >
-                      {msg.text || (hasImages ? 'Attached image' : `Message ${index + 1}`)}
-                    </Typography>
-                  </Box>
-                </Tooltip>
+                    </Box>
+                  </Tooltip>
+                )}
 
-                {(isEditing || isRowDeleting) && (
+                {isRowDeleting && (
                   <Typography role='status' sx={{ flexShrink: 0, fontSize: ds.text.caption, color: ds.gray[500] }}>
-                    {isRowDeleting ? 'Deleting…' : 'Moving to composer…'}
+                    Deleting…
                   </Typography>
                 )}
                 {msg.saving && (
@@ -288,14 +374,15 @@ export const QueuedMessagesBanner: React.FC<QueuedMessagesBannerProps> = ({
                       size='xs'
                       composition='icon-only'
                       icon={<SafeIcon src={EditIcon} alt='' width={14} height={14} />}
-                      tooltip='Edit (moves it back to the composer)'
+                      tooltip='Edit'
                       aria-label='Edit message'
                       data-testid={`queued-message-edit-${msg.id}`}
                       disabled={busy}
-                      loading={isEditing}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onEdit(msg.id);
+                        setDraft(msg.text);
+                        setEditError(undefined);
+                        setEditingId(msg.id);
                       }}
                     />
                     <Button
