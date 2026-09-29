@@ -232,6 +232,8 @@ export default function AddAccountForm() {
             return <ListIntegrations integrationName={'splunk_observability_platform'} />;
           case 'splunk_enterprise':
             return <ListIntegrations integrationName={'splunk_enterprise'} />;
+          case 'grafana_tempo':
+            return <ListIntegrations integrationName={'grafana_tempo'} />;
           case 'splunk_webhook':
             return <ListIntegrations integrationName={'splunk_webhook'} />;
           case 'solarwinds':

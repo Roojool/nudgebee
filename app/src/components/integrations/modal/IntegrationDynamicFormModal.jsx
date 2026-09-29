@@ -96,6 +96,7 @@ const TRACE_INTEGRATIONS = new Set([
   'ES',
   'elasticsearch',
   'openobserve',
+  'grafana_tempo',
   'newrelic',
   'splunk_observability_platform',
   'solarwinds',

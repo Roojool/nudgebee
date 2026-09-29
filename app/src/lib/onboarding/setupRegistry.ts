@@ -89,6 +89,7 @@ export const TRACES_PROVIDERS: OnboardingProviderDef[] = [
   { route: 'NEWRELIC', label: 'New Relic', types: ['newrelic'] },
   { route: 'SPLUNK_ENTERPRISE', label: 'Splunk Enterprise', types: ['splunk_enterprise'] },
   { route: 'CUBEAPM', label: 'CubeAPM', types: ['cubeapm'] },
+  { route: 'GRAFANA_TEMPO', label: 'Grafana Tempo', types: ['grafana_tempo'] },
   { route: 'ES', label: 'Elasticsearch', types: ['es'], cloudCapable: true },
   { route: 'SOLARWINDS', label: 'SolarWinds', types: ['solarwinds'], cloudCapable: true },
 ];

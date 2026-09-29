@@ -494,6 +494,7 @@ const apiAccount = {
         'oracle',
         'splunk_observability_platform',
         'splunk_enterprise',
+        'grafana_tempo',
         'splunk_webhook',
         'cubeapm',
         'cubeapm_webhook',

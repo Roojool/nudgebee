@@ -184,7 +184,7 @@ const CloudProviderIcon = ({ cloud_provider, width, height, sx = {} }) => {
     Icon = BitBucketIcon;
   } else if (cloud_provider.toUpperCase() === 'GITLAB') {
     Icon = GitLabIcon;
-  } else if (cloud_provider.toUpperCase() === 'GRAFANA-TEMPO') {
+  } else if (cloud_provider.toUpperCase() === 'GRAFANA_TEMPO') {
     Icon = GrafanaTempoIcon;
   } else if (cloud_provider.toUpperCase() === 'ES' || cloud_provider.toUpperCase() === 'ELASTICSEARCH_WEBHOOK') {
     Icon = ElasticSearchIcon;

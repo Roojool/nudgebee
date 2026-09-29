@@ -86,6 +86,7 @@ const integrationConnectionKey = {
   newrelic: 'region',
   splunk_observability_platform: 'realm',
   splunk_enterprise: 'splunk_url',
+  grafana_tempo: 'tempo_url',
   chronosphere: 'chronosphere_url',
   signoz: 'signoz_url',
   loki: 'loki_url',

@@ -318,7 +318,7 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
     case 'GITLAB':
       label = 'Gitlab';
       break;
-    case 'GRAFANA-TEMPO':
+    case 'GRAFANA_TEMPO':
       label = 'Grafana Tempo';
       break;
     case 'ES':

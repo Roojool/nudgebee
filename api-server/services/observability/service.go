@@ -435,6 +435,8 @@ func getTraceSource(provider, integrationSource string) (TraceSource, error) {
 		return &SplunkTraceSource{}, nil
 	case provider == "splunk_enterprise" && integrationSource == "user":
 		return &SplunkEnterpriseTraceSource{}, nil
+	case provider == "grafana_tempo" && integrationSource == "user":
+		return &GrafanaTempoTraceSource{}, nil
 	case provider == "cubeapm" && integrationSource == "user":
 		return &CubeAPMTraceSource{}, nil
 	case provider == "ES" && integrationSource == "user":
@@ -2152,6 +2154,15 @@ var allProviderCaps = map[string]providerStaticCaps{
 	// GCP Cloud Trace: no other capability is declared for it.
 	"gcp": {
 		TraceSourcePassthrough: true,
+	},
+	// Traces only. Grouping is computed by Tempo itself (TraceQL metrics, ≤24h); the
+	// waterfall is trace-by-id. ServiceMap stays false for v1: edges would need a TraceQL
+	// structural query, deferred (spec §1).
+	"grafana_tempo": {
+		SupportsServiceMap:    false,
+		SupportsTraceGrouping: true,
+		SupportsHeatmap:       true,
+		SupportsRawQuery:      true,
 	},
 }
 

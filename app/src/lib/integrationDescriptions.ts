@@ -104,7 +104,7 @@ export const INTEGRATION_DESCRIPTIONS: Record<string, string> = {
   JAEGER: 'Query Jaeger for distributed traces during investigations.',
   PINOT: 'Query an Apache Pinot table as a log source.',
   HIVE: 'Query an Apache Hive table as a log source.',
-  'GRAFANA-TEMPO': 'Query Grafana Tempo for distributed traces.',
+  GRAFANA_TEMPO: 'Query Grafana Tempo for distributed traces.',
 
   // ── LLM ─────────────────────────────────────────────────────────
   LLM: 'Choose the LLM provider and models used for AI analysis.',
