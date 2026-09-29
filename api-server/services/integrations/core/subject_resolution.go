@@ -908,6 +908,9 @@ func enrichEventsWithSubjectResolution(sc *security.RequestContext, events []Eve
 		if ResolveSubjectFromTitlePodName(sc, &events[i], accountId) {
 			continue
 		}
+		if ResolveSubjectFromTitleNodeName(sc, &events[i], accountId) {
+			continue
+		}
 		if llmEnabled {
 			ResolveSubjectViaLLM(sc, &events[i], accountId)
 		} else {

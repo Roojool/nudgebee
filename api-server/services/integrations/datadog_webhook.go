@@ -2127,6 +2127,31 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		}
 	}
 
+	// Host-scoped titles ("CPU usage is high for host <node>") name a Kubernetes
+	// node directly. Match it against the node inventory before the LLM, which would
+	// only echo the hostname back and, being a node, never validate as a workload.
+	if subjectName == "" && cleanTitle != "" {
+		candidateAccountIds, lookupErr := core.GetLinkedCloudAccountIds(sc, accountId, IntegrationDatadogWebhook)
+		if lookupErr != nil {
+			sc.GetLogger().Warn("failed to expand linked cloud accounts for title node match, falling back to single account",
+				"error", lookupErr, "account_id", accountId)
+		}
+		if len(candidateAccountIds) == 0 {
+			candidateAccountIds = []string{accountId}
+		}
+		if node, nodeAccountId := core.ResolveNodeNameFromTitle(sc, cleanTitle, candidateAccountIds); node != "" {
+			subjectName = node
+			subjectKind = "node"
+			labels["nb_subject_resolution"] = "title_node_name"
+			common.MetricsSubjectResolution(sc.GetContext(), IntegrationDatadogWebhook, "live", "matched_title_node", sc.GetSecurityContext().GetTenantId())
+			if nodeAccountId != "" && nodeAccountId != accountId {
+				sc.GetLogger().Info("rebinding webhook accountId to title-matched node's cloud account",
+					"original_account_id", accountId, "matched_account_id", nodeAccountId, "node", node)
+				accountId = nodeAccountId
+			}
+		}
+	}
+
 	resolvedByLLM := false
 	if subjectName == "" && tenant.IsFeatureEnabled(sc, sc.GetSecurityContext().GetTenantId(), tenant.FEATURE_WEBHOOK_LLM_RESOLUTION) {
 		databaseManager, err := database.GetDatabaseManager(database.Metastore)
