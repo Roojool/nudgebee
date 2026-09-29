@@ -178,7 +178,7 @@ func ListSessions(ctx context.Context, db *common.DatabaseManager, req ListSessi
 	if metering.BodyLoggingEnabled() {
 		args = append(args, req.CallerUserID)
 		firstMsgSelect = fmt.Sprintf(
-			`CASE WHEN (%t OR max(g.user_id) = $%d) THEN max(fb.first_user_message) ELSE '' END AS first_message`,
+			`CASE WHEN (%t OR max(g.user_id) = $%d) THEN COALESCE(max(fb.first_user_message),'') ELSE '' END AS first_message`,
 			req.CallerIsAdmin, len(args))
 		firstMsgJoin = `LEFT JOIN LATERAL (
 			SELECT rl.first_user_message
