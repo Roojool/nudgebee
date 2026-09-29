@@ -522,7 +522,7 @@ func TestBuildSystemPromptConflictSection(t *testing.T) {
 		conflictFiles: []string{"api/server.go", "pkg/util/helper.go"},
 	}
 
-	prompt := a.buildSystemPrompt("o/r", "12", "", "", "", "", nil, "main", sync)
+	prompt := a.buildSystemPrompt("o/r", "12", "", "", "", "", nil, "main", sync, "")
 
 	for _, want := range []string{
 		"Merge conflicts with main",
@@ -537,7 +537,7 @@ func TestBuildSystemPromptConflictSection(t *testing.T) {
 	}
 
 	// And no conflict section at all when the merge was clean.
-	clean := a.buildSystemPrompt("o/r", "12", "", "", "", "", nil, "main", baseSyncResult{merged: true})
+	clean := a.buildSystemPrompt("o/r", "12", "", "", "", "", nil, "main", baseSyncResult{merged: true}, "")
 	if strings.Contains(clean, "Merge conflicts with") {
 		t.Error("clean merge must not emit a conflict section")
 	}

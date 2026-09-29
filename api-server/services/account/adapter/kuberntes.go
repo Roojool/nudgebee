@@ -64,6 +64,11 @@ func parseMemoryQuantityToBytes(s string) (float64, bool) {
 	return n, true
 }
 
+// FormatMemoryQuantity renders one memory value the way a rightsizing pull
+// request writes it (see applyMemoryUnit), so text shown to the code agent uses
+// the same units as the values file it edits.
+func FormatMemoryQuantity(v any) any { return applyMemoryUnit(v) }
+
 // applyMemoryUnit renders a memory value as a compact Kubernetes quantity string
 // (e.g. "331Mi", "1.5Gi"). It accepts a raw byte count (float64/int, as carried
 // by the recommendation pipeline and the UI "Create PR" path) or an already

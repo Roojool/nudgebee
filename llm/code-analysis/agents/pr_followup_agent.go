@@ -72,6 +72,11 @@ type PRFollowupRequest struct {
 	// stays authoritative. Empty for a PR with no followup history, or when an
 	// older api-server does not send it.
 	AddressedComments []AddressedComment
+	// Instruction, when set, is one specific change the caller wants made on the
+	// branch (e.g. rightsizing values that moved after the PR was raised). The
+	// run then makes that change and nothing else: review comments and CI
+	// failures are left to the regular followup.
+	Instruction string
 }
 
 // PRFollowupResult is the structured output from a followup execution.
@@ -206,12 +211,26 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 		})
 	}
 
+	instruction := strings.TrimSpace(req.Instruction)
+
 	prDetails := a.gatherPRDetails(ctx, repoInfo, prNumber)
-	inlineComments, inlineText := a.gatherInlineComments(ctx, repoInfo, prNumber, dbAddressed)
-	issueComments, issueText, answeredComments := a.gatherIssueComments(ctx, repoInfo, prNumber, dbAddressed)
-	reviewBodyComments, reviewBodyText := a.gatherReviewBodyComments(ctx, repoInfo, prNumber, answeredComments)
 	prDiff := a.gatherDiff(ctx, repoInfo, prNumber)
-	ciFailureLogs := a.gatherCIFailureLogs(ctx, repoInfo, prNumber, req.Branch)
+
+	// An instruction run makes the one change it was asked for and nothing else.
+	// Review comments and CI failures stay with the regular followup: mixed in,
+	// a run that only answered an old comment reads as having carried out the
+	// instruction, and the caller would record a change the branch never got.
+	var (
+		inlineComments, issueComments, reviewBodyComments    []reviewComment
+		inlineText, issueText, reviewBodyText, ciFailureLogs string
+	)
+	if instruction == "" {
+		var answeredComments map[string]bool
+		inlineComments, inlineText = a.gatherInlineComments(ctx, repoInfo, prNumber, dbAddressed)
+		issueComments, issueText, answeredComments = a.gatherIssueComments(ctx, repoInfo, prNumber, dbAddressed)
+		reviewBodyComments, reviewBodyText = a.gatherReviewBodyComments(ctx, repoInfo, prNumber, answeredComments)
+		ciFailureLogs = a.gatherCIFailureLogs(ctx, repoInfo, prNumber, req.Branch)
+	}
 
 	// Merge all pending comments into one slice
 	pendingComments := append(inlineComments, issueComments...)
@@ -233,11 +252,8 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 		commentsText = combined.String()
 	}
 
-	// Nothing for the planner to do. A conflicted base merge is the exception:
-	// it is actionable work even with no comments and no CI failures, and it is
-	// already open in the workspace, so it must fall through to the planner
-	// rather than short-circuit (which would strand a half-merged tree).
-	if len(pendingComments) == 0 && ciFailureLogs == "" && !sync.conflicted {
+	// Nothing for the planner to do — see nothingForPlanner.
+	if nothingForPlanner(instruction, len(pendingComments), ciFailureLogs, sync) {
 		if sync.merged {
 			// The branch was behind and the merge landed cleanly. That is a real
 			// change to the PR, so this is a success rather than a no_op — but it
@@ -267,10 +283,11 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 		"issue_comments":       len(issueComments),
 		"review_body_comments": len(reviewBodyComments),
 		"has_ci_failures":      ciFailureLogs != "",
+		"has_instruction":      instruction != "",
 	})
 
 	// --- Step 2: Build system prompt ---
-	systemPrompt := a.buildSystemPrompt(repoInfo.FullPath, prNumber, prDetails, prDiff, commentsText, ciFailureLogs, pendingComments, baseBranch, sync)
+	systemPrompt := a.buildSystemPrompt(repoInfo.FullPath, prNumber, prDetails, prDiff, commentsText, ciFailureLogs, pendingComments, baseBranch, sync, instruction)
 
 	// --- Step 3: Create tools and ReAct planner ---
 	replaceTool := tools.NewReplaceToolWithWorkspace(a.workspaceDir)
@@ -319,6 +336,13 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 			"After making changes, use submit_analysis to report what you fixed.",
 		mrTerm, prNumber, repoInfo.FullPath,
 	)
+	if instruction != "" {
+		userPrompt = fmt.Sprintf(
+			"Make the requested change on %s #%s in %s, then commit and push it. "+
+				"After making the change, use submit_analysis to report what you changed.",
+			mrTerm, prNumber, repoInfo.FullPath,
+		)
+	}
 
 	// Snapshot state before the planner runs so we can detect whether the
 	// agent actually changed anything. The agent owns its own git/metadata
@@ -617,10 +641,21 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 		// really a non-convergence. Observability-only — the cron still treats
 		// it as a counter-neutral no_op, so the PR stays eligible for a retry
 		// once the conflict is easier or a human resolves it.
-		result.Unresolved = len(pendingComments) > 0 || ciFailureLogs != "" || mergeAbandoned
+		result.Unresolved = len(pendingComments) > 0 || ciFailureLogs != "" || mergeAbandoned || instruction != ""
 	}
 
 	return result, nil
+}
+
+// nothingForPlanner reports whether a followup run has no work for the planner,
+// so Execute can finish without an LLM call. A conflicted base merge is the
+// exception: it is actionable work even with no comments and no CI failures,
+// and it is already open in the workspace, so it must fall through to the
+// planner rather than short-circuit (which would strand a half-merged tree). So
+// is an instruction — it is the work itself, and a clean base sync does not
+// carry it out.
+func nothingForPlanner(instruction string, pendingComments int, ciFailureLogs string, sync baseSyncResult) bool {
+	return instruction == "" && pendingComments == 0 && ciFailureLogs == "" && !sync.conflicted
 }
 
 func (a *PRFollowupAgent) failResult(msg string) *PRFollowupResult {
@@ -1909,13 +1944,26 @@ func (a *PRFollowupAgent) gatherCIFailureLogs(_ context.Context, repoInfo *gitpr
 	return sb.String()
 }
 
-func (a *PRFollowupAgent) buildSystemPrompt(repo, prNumber, prDetails, diff, comments, ciLogs string, pendingComments []reviewComment, baseBranch string, sync baseSyncResult) string {
+func (a *PRFollowupAgent) buildSystemPrompt(repo, prNumber, prDetails, diff, comments, ciLogs string, pendingComments []reviewComment, baseBranch string, sync baseSyncResult, instruction string) string {
 	mrTerm := gitprovider.GetMergeRequestTerminology(a.provider)
 	mrFullTerm := gitprovider.GetMergeRequestFullTerminology(a.provider)
 	cliTool := gitprovider.GetCLIToolName(a.provider)
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, `You are an expert software engineer tasked with addressing issues on %s #%s in repository %s.
+	if instruction != "" {
+		fmt.Fprintf(&sb, `You are an expert software engineer tasked with making one requested change on %s #%s in repository %s.
+
+You have access to the repository workspace and can read, modify, and create files.
+
+## %s Details
+%s
+
+## Requested change
+%s
+
+`, mrFullTerm, prNumber, repo, strings.ToUpper(mrTerm), prDetails, instruction)
+	} else {
+		fmt.Fprintf(&sb, `You are an expert software engineer tasked with addressing issues on %s #%s in repository %s.
 
 Your goal is to:
 1. Fix any CI/CD failures
@@ -1928,6 +1976,7 @@ You have access to the repository workspace and can read, modify, and create fil
 %s
 
 `, mrFullTerm, prNumber, repo, strings.ToUpper(mrTerm), prDetails)
+	}
 
 	if diff != "" {
 		fmt.Fprintf(&sb, "## Current %s Diff\n%s\n\n", mrTerm, truncateIfNeeded(diff, 10000))
@@ -1958,10 +2007,21 @@ If you cannot resolve a file honestly, leave it conflicted and say so in submit_
 `, baseBranch, sync.behindBy, formatConflictFileList(sync.conflictFiles))
 	}
 
-	fmt.Fprintf(&sb, `## Your job
+	if instruction != "" {
+		fmt.Fprintf(&sb, `## Your job
 
-Drive %[2]s #%[3]s in `+"`%[4]s`"+` to a mergeable state. The CI failures and review comments above are everything you need to address. The repo workspace is the cwd of every tool call.
+Make the requested change above on %[1]s #%[2]s in `+"`%[3]s`"+`. It is the whole task for this run: change only what it asks for, and leave review comments and CI failures alone — a separate followup handles those. The repo workspace is the cwd of every tool call.
 
+Do not post comments on the %[1]s yourself. Your submit_analysis summary is posted on the %[1]s for you, so make it say what changed and why.
+`, mrTerm, prNumber, repo)
+	} else {
+		fmt.Fprintf(&sb, `## Your job
+
+Drive %[1]s #%[2]s in `+"`%[3]s`"+` to a mergeable state. The CI failures and review comments above are everything you need to address. The repo workspace is the cwd of every tool call.
+`, mrTerm, prNumber, repo)
+	}
+
+	fmt.Fprintf(&sb, `
 You own the full flow: code edits, PR metadata, git history, commit, push. The framework only posts comment replies (after you call submit_analysis). It will not commit or push for you.
 
 ## Triaging CI failures

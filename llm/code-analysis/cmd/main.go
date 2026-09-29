@@ -82,6 +82,7 @@ func main() {
 		mode             = flag.String("mode", "", "Analysis mode: 'explore' (read-only) or 'fix'. When set it overrides raisepr; use mode=fix with raisepr=false for propose mode (generate a diff without opening a PR).")
 		followup         = flag.Bool("followup", false, "Follow up on an existing PR (address CI failures and review comments)")
 		prURL            = flag.String("pr-url", "", "PR URL to follow up on")
+		followupInstr    = flag.String("followup-instruction", "", "With -followup: a specific change to make on the PR branch; the run makes only that change")
 	)
 
 	// Custom boolean flag for raisepr that handles both --raisepr and --raisepr=false syntax
@@ -150,7 +151,7 @@ func main() {
 
 	// Check if PR followup mode
 	if *followup {
-		runFollowup(cfg, *repoURL, *prURL, *branch, *token, *gitProvider)
+		runFollowup(cfg, *repoURL, *prURL, *branch, *token, *gitProvider, *followupInstr)
 		return
 	}
 
@@ -619,7 +620,7 @@ func runCLIAnalysis(cfg *config.Config, repoURL, logs, branch, commit, token, pr
 	})
 }
 
-func runFollowup(cfg *config.Config, repoURL, prURL, branch, token, gitProvider string) {
+func runFollowup(cfg *config.Config, repoURL, prURL, branch, token, gitProvider, instruction string) {
 	if prURL == "" {
 		log.Fatal("PR URL is required (--pr-url)")
 	}
@@ -723,11 +724,12 @@ func runFollowup(cfg *config.Config, repoURL, prURL, branch, token, gitProvider 
 	agent := agents.NewPRFollowupAgent(cfg, llmClient, logger, workspaceDir, token, gitProvider)
 
 	req := agents.PRFollowupRequest{
-		RepoURL:  repoURL,
-		Branch:   branch,
-		PRNumber: prNumber,
-		PRURL:    prURL,
-		Provider: gitProvider,
+		RepoURL:     repoURL,
+		Branch:      branch,
+		PRNumber:    prNumber,
+		PRURL:       prURL,
+		Provider:    gitProvider,
+		Instruction: instruction,
 	}
 
 	result, err := agent.Execute(context.Background(), req)

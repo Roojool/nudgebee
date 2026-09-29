@@ -1329,6 +1329,11 @@ type CodeAgent2Request struct {
 	// hop only forwards it — llm-server never inspects the entries. Absent for an
 	// older api-server, which simply means no fallback skip set.
 	AddressedComments json.RawMessage `json:"addressed_comments,omitempty"`
+	// Instruction is one specific change api-server wants made on the PR branch
+	// (a value refresh). Forwarded to code-analysis as followup_instruction,
+	// where it becomes the run's whole task; the regular review followup never
+	// sets it. Query cannot carry this: every followup sends generic text there.
+	Instruction string `json:"instruction,omitempty"`
 }
 
 // repoFromQueryConfig returns the repo a conversation has already settled on: one
@@ -3135,6 +3140,25 @@ func (l CodeAgent2) GetSourceCodeAnnotations(ctx *security.RequestContext, reque
 
 // executeFollowup handles PR followup mode — calls workspace /analyze with followup fields
 // to address CI failures and review comments on agent-created PRs.
+// addFollowupPassThrough copies the followup fields llm-server only forwards
+// onto the code-analysis /analyze request. Each is omitted when empty so the
+// payload is unchanged for a caller that does not send it.
+func addFollowupPassThrough(analyzeRequest map[string]any, request CodeAgent2Request) {
+	// Forward the already-addressed comment set (#36865) so code-analysis can use
+	// it as a fallback skip source. Trimmed before comparing: the value is always
+	// compact JSON from encoding/json in practice, but the comparison itself
+	// costs nothing extra and shouldn't depend on that.
+	trimmedComments := strings.TrimSpace(string(request.AddressedComments))
+	if trimmedComments != "" && trimmedComments != "[]" && trimmedComments != "null" {
+		analyzeRequest["addressed_comments"] = request.AddressedComments
+	}
+	// A value refresh's instruction. Without it code-analysis finds no comments
+	// or CI failures on a quiet PR and reports nothing to do.
+	if instruction := strings.TrimSpace(request.Instruction); instruction != "" {
+		analyzeRequest["followup_instruction"] = instruction
+	}
+}
+
 func (l CodeAgent2) executeFollowup(ctx *security.RequestContext, query core.NBAgentRequest, request CodeAgent2Request) (core.NBAgentResponse, error) {
 	logger := ctx.GetLogger()
 
@@ -3188,15 +3212,7 @@ func (l CodeAgent2) executeFollowup(ctx *security.RequestContext, query core.NBA
 		"pr_branch": request.PRBranch,
 	}
 
-	// Forward the already-addressed comment set (#36865) so code-analysis can use
-	// it as a fallback skip source. Omitted when empty so the payload is
-	// unchanged for a PR with no followup history. Trimmed before comparing:
-	// the value is always compact JSON from encoding/json in practice, but the
-	// comparison itself costs nothing extra and shouldn't depend on that.
-	trimmedComments := strings.TrimSpace(string(request.AddressedComments))
-	if trimmedComments != "" && trimmedComments != "[]" && trimmedComments != "null" {
-		analyzeRequest["addressed_comments"] = request.AddressedComments
-	}
+	addFollowupPassThrough(analyzeRequest, request)
 
 	if gitToken != "" {
 		analyzeRequest["git_credentials"] = map[string]any{

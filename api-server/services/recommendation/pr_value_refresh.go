@@ -121,7 +121,7 @@ func storedResolutionValues(res *models.RecommendationResolution) map[string]any
 // refresh right now, or "" when a refresh may proceed.
 func valueRefreshBlocked(res *models.RecommendationResolution) string {
 	if res.ValueRefreshCount >= valueRefreshCap {
-		return fmt.Sprintf("pull request has already been updated %d times; leaving it for review", res.ValueRefreshCount)
+		return fmt.Sprintf("the code agent has already been asked to update this pull request %d times; leaving it for review", res.ValueRefreshCount)
 	}
 	if res.LastValueRefreshAt != nil && time.Since(*res.LastValueRefreshAt) < valueRefreshCooldown {
 		return fmt.Sprintf("pull request was updated less than %s ago", valueRefreshCooldown)
@@ -132,9 +132,11 @@ func valueRefreshBlocked(res *models.RecommendationResolution) string {
 // dispatchValueRefresh re-runs the code agent against the open pull request with
 // the changed values, and records the outcome.
 //
-// The recorded values are only advanced once the agent reports success. Writing
-// them optimistically would leave the database claiming numbers the pull request
-// does not contain — the same class of problem as #34924.
+// The recorded values are only advanced once the pull request's own diff shows
+// them (valuesOnBranch). Writing them on the agent's word left the database
+// claiming numbers the pull request did not contain — the same class of problem
+// as #34924 — and, because later drift is measured from the recorded values, it
+// also hid the real drift from every run after.
 func dispatchValueRefresh(
 	ctx adapter.AccountAdapterContext,
 	existingPR *models.RecommendationResolution,
@@ -142,22 +144,21 @@ func dispatchValueRefresh(
 	drifts []valueDrift,
 ) {
 	summary := describeDrifts(drifts)
-	prompt := buildValueRefreshPrompt(existingPR.TypeReferenceId, newValues, drifts)
+	// The agent is shown memory the way the values file writes it ("278Mi"), not
+	// as the byte count the recommendation carries, and the check looks for either.
+	rendered := adapter.FormatRequestedValuesForPrompt(newValues)
+	prompt := buildValueRefreshPrompt(existingPR.TypeReferenceId, rendered, renderDrifts(drifts))
+	verify := func(addedLines []string) (bool, string) {
+		return valuesOnBranch(drifts, rendered, addedLines)
+	}
 
-	adapter.DispatchPRValueRefresh(ctx, existingPR, prompt, valueRefreshCap, valueRefreshCooldown, func(outcome adapter.ValueRefreshOutcome, message string) {
+	adapter.DispatchPRValueRefresh(ctx, existingPR, prompt, valueRefreshCap, valueRefreshCooldown, verify, func(outcome adapter.ValueRefreshOutcome, message string) {
 		switch outcome {
 		case adapter.ValueRefreshUpdated:
 			if err := recordValueRefresh(ctx, existingPR, newValues, summary); err != nil {
 				ctx.GetLogger().Error("pr_value_refresh: pull request updated but recording it failed",
 					"resolution_id", existingPR.Id, "error", err)
 			}
-		case adapter.ValueRefreshUnnecessary:
-			// Not a problem, so not an error: the branch already says what we would
-			// have written. The values are still not recorded — we asked the agent to
-			// change the branch and it did not, so claiming they are on it would be
-			// the #34924 mistake.
-			ctx.GetLogger().Info("pr_value_refresh: pull request needed no update",
-				"resolution_id", existingPR.Id, "pr_url", existingPR.TypeReferenceId, "detail", message)
 		default:
 			// The dispatcher has already handed the claim back and recorded the
 			// reason on the row, so the next run can retry rather than finding it
@@ -180,9 +181,9 @@ func buildValueRefreshPrompt(prURL string, newValues map[string]any, drifts []va
 			"Update the existing branch so it applies these values instead: %s\n\n"+
 			"What changed: %s\n\n"+
 			"Change only the resource values already covered by this pull request — do not alter "+
-			"anything else, and do not open a new pull request. Leave a short comment on the pull "+
-			"request explaining that the recommendation moved and what the new numbers are, so a "+
-			"reviewer is not surprised by the update.",
+			"anything else, and do not open a new pull request. Write the values exactly as given. "+
+			"In your summary, say that the recommendation moved and what the new numbers are; it is "+
+			"posted on the pull request so a reviewer is not surprised by the update.",
 		prURL, string(valuesJSON), summaryOrNone(drifts))
 }
 
@@ -196,12 +197,11 @@ func summaryOrNone(drifts []valueDrift) string {
 // recordValueRefresh advances the stored values and the rewrite budget after a
 // refresh has actually landed on the branch.
 //
-// value_refresh_count counts rewrites that LANDED, deliberately: an attempt that
-// failed on infrastructure — an expired git token, a gateway 5xx, an empty agent
-// response — must not consume a pull request's rewrite budget, or five transient
-// failures retire it for its entire life while valueRefreshBlocked reports it was
-// "already updated 5 times". The failing-refresh loop is bounded by the cadence
-// stamp instead (see recordValueRefreshFailure).
+// value_refresh_count counts agent runs that finished — this one, and runs that
+// ended without the values on the branch — but never an attempt that failed on
+// infrastructure (an expired git token, a gateway 5xx, an empty agent response):
+// five transient failures must not retire a pull request for its entire life.
+// Those are bounded by the cadence stamp instead (see recordValueRefreshFailure).
 //
 // pr_iteration_count is reset because the pull request's contents changed: review
 // comments raised against the previous numbers may no longer apply, so the review

@@ -1839,7 +1839,7 @@ func extractNumberFromURL(link string) (string, error) {
 	return matches[1], nil
 }
 
-// formatRequestedValuesForPrompt returns a copy of the per-container requested
+// FormatRequestedValuesForPrompt returns a copy of the per-container requested
 // values with memory request/limit rendered as Kubernetes quantity strings
 // (e.g. 341725388 -> "326Mi") instead of raw bytes. The recommendation pipeline
 // carries memory as a byte count, but the Helm values file (and therefore the
@@ -1847,7 +1847,7 @@ func extractNumberFromURL(link string) (string, error) {
 // bytes made the agent write a value like "341725388" next to an existing
 // "500Mi", producing inconsistent units in both the file and the PR table. CPU
 // is left untouched — it is already a valid core quantity (e.g. 0.101).
-func formatRequestedValuesForPrompt(data map[string]any) map[string]any {
+func FormatRequestedValuesForPrompt(data map[string]any) map[string]any {
 	out := make(map[string]any, len(data))
 	for key, value := range data {
 		container, ok := value.(map[string]any)
@@ -1914,7 +1914,7 @@ func ApplyRightsizingRecommendationUsingCodeAgent(ctx AccountAdapterContext, req
 		// Build structured prompt with clear instructions
 		// Using @agent_code_2 to invoke the code agent
 		recommendationJSON, _ := common.MarshalJson(request.Recommendation)
-		requestDataJSON, _ := common.MarshalJson(formatRequestedValuesForPrompt(request.Data))
+		requestDataJSON, _ := common.MarshalJson(FormatRequestedValuesForPrompt(request.Data))
 		// Only instruct the agent to add resizePolicy when the cluster is >= 1.35
 		// (where in-place resize / the field take effect); otherwise it is a
 		// no-op or rejected manifest field. The UI (Create PR) / rule can pass an

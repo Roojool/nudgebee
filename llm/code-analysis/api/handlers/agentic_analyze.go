@@ -172,6 +172,19 @@ type AgenticAnalyzeRequest struct {
 	Followup bool   `json:"followup,omitempty"`
 	PRURL    string `json:"pr_url,omitempty"`
 	PRBranch string `json:"pr_branch,omitempty"`
+	// AddressedComments is the set of comments a previous followup already
+	// answered, read from pr_followup.addressed_comments by api-server (#36865).
+	// Used as a FALLBACK skip source in the gatherers: GitHub's own
+	// resolved-thread and reply-marker state is consulted first and remains
+	// authoritative, so a human who un-resolves a thread still gets the comment
+	// re-raised. This covers what GitHub cannot answer — a PR whose markers have
+	// scrolled past the per_page=100 window, and a marker lookup that failed open.
+	AddressedComments []agents.AddressedComment `json:"addressed_comments,omitempty"`
+	// FollowupInstruction is a specific change the caller wants made on the PR
+	// branch (e.g. new rightsizing values after the recommendation moved). When
+	// set, the followup run makes that change and nothing else. Distinct from
+	// Prompt, which every followup carries as generic text.
+	FollowupInstruction string `json:"followup_instruction,omitempty"`
 
 	// LLMConfig, when present, carries the tenant-resolved LLM provider config
 	// forwarded by llm-server so this stateless service honors the tenant's own
@@ -329,15 +342,33 @@ type AnalysisResult struct {
 	// (non-convergence), vs a genuine "nothing to do". Additive & backward-compatible:
 	// the services-server cron reads it only for the outcome metric; an older cron
 	// ignores it. Only set on the PR-followup path.
-	FollowupUnresolved bool           `json:"followup_unresolved,omitempty"`
-	FilesModified      any            `json:"files_modified,omitempty"`      // List of files the fixer changed
-	VerificationPassed any            `json:"verification_passed,omitempty"` // Whether lint/build passed
-	PRCreationStatus   string         `json:"pr_creation_status,omitempty"`  // success, skipped, failed
-	PRCreationReason   string         `json:"pr_creation_reason,omitempty"`  // Why PR was skipped/failed
-	Review             map[string]any `json:"review,omitempty"`              // Review agent feedback, issues, syntax errors
-	BuildVerification  map[string]any `json:"build_verification,omitempty"`  // Lint/build command results
-	Verification       map[string]any `json:"verification,omitempty"`        // Harness-run tri-state verdict (verified|unverified|failed) with verbatim evidence
-	FailureSummary     string         `json:"failure_summary,omitempty"`     // Human-readable summary when pipeline fails
+	FollowupUnresolved bool `json:"followup_unresolved,omitempty"`
+	// FollowupBaseSynced reports that the run merged the PR's base branch into
+	// the PR branch and pushed it (#36864). Additive & backward-compatible in the
+	// same way as FollowupUnresolved: the services-server cron reads it only to
+	// tag the outcome metric, so base syncs are separable from real fixes; an
+	// older cron ignores it. Only set on the PR-followup path.
+	FollowupBaseSynced bool `json:"followup_base_synced,omitempty"`
+	// FollowupInstructionHandled tells the caller this agent acted on
+	// followup_instruction. An older agent drops the field on the floor and
+	// reports its usual "nothing to do"; the flag lets api-server tell that
+	// apart from a run that tried the change and did not land it. Only set on
+	// the PR-followup path.
+	FollowupInstructionHandled bool `json:"followup_instruction_handled,omitempty"`
+	// AddressedComments is what this followup run actually answered on the PR,
+	// for api-server to merge into pr_followup.addressed_comments (#36865).
+	// Additive & backward-compatible in the same way as FollowupUnresolved: an
+	// older cron ignores it, and an older agent that never emits it makes the
+	// merge a no-op. Only set on the PR-followup path.
+	AddressedComments  []agents.AddressedComment `json:"addressed_comments,omitempty"`
+	FilesModified      any                       `json:"files_modified,omitempty"`      // List of files the fixer changed
+	VerificationPassed any                       `json:"verification_passed,omitempty"` // Whether lint/build passed
+	PRCreationStatus   string                    `json:"pr_creation_status,omitempty"`  // success, skipped, failed
+	PRCreationReason   string                    `json:"pr_creation_reason,omitempty"`  // Why PR was skipped/failed
+	Review             map[string]any            `json:"review,omitempty"`              // Review agent feedback, issues, syntax errors
+	BuildVerification  map[string]any            `json:"build_verification,omitempty"`  // Lint/build command results
+	Verification       map[string]any            `json:"verification,omitempty"`        // Harness-run tri-state verdict (verified|unverified|failed) with verbatim evidence
+	FailureSummary     string                    `json:"failure_summary,omitempty"`     // Human-readable summary when pipeline fails
 }
 
 type AgenticAnalyzeResponse struct {
@@ -2144,11 +2175,13 @@ func (ah *AgenticAnalyzeHandler) performFollowupAnalysis(ctx context.Context, cf
 	followupAgent := agents.NewPRFollowupAgent(cfg, client, logger, workspaceDir, gitToken, provider)
 
 	followupReq := agents.PRFollowupRequest{
-		RepoURL:  req.GitRepository.URL,
-		Branch:   branch,
-		PRNumber: prNumber,
-		PRURL:    req.PRURL,
-		Provider: provider,
+		RepoURL:           req.GitRepository.URL,
+		Branch:            branch,
+		PRNumber:          prNumber,
+		PRURL:             req.PRURL,
+		Provider:          provider,
+		AddressedComments: req.AddressedComments,
+		Instruction:       req.FollowupInstruction,
 	}
 
 	result, err := followupAgent.Execute(ctx, followupReq)
@@ -2179,6 +2212,15 @@ func (ah *AgenticAnalyzeHandler) performFollowupAnalysis(ctx context.Context, cf
 		// from a genuine "nothing to do". Purely observability — still a no_op.
 		agentResponse.FollowupUnresolved = result.Unresolved
 	}
+	// Set independently of the status branches above: a base sync can be the
+	// run's only work (a "success" that never ran the planner) or can ride along
+	// with a normal comment/CI fix.
+	agentResponse.FollowupBaseSynced = result.BaseSynced
+	agentResponse.FollowupInstructionHandled = strings.TrimSpace(req.FollowupInstruction) != ""
+	// Likewise independent: a run can answer comments and still finish as a
+	// no_op (every reply skipped as unverified), and that record is worth
+	// keeping either way.
+	agentResponse.AddressedComments = result.AddressedComments
 	if result.CommitHash != "" {
 		agentResponse.ExecutionSummary = fmt.Sprintf("Committed and pushed: %s", result.CommitHash)
 	}
