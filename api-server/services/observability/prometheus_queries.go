@@ -146,13 +146,13 @@ func buildPrometheusNodeQueries(meta RequestMetadata, metrics []string) map[stri
 				`sum(node_memory_Active_bytes{%s}%s) or sum(node_resources_memory_total_bytes{%s} - node_resources_memory_available_bytes{%s})`,
 				sel, join, agent, agent)
 		case "cpu_request":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{resource="cpu", node=~"%s.*"})`, meta.NodeName)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_requests", fmt.Sprintf(`resource="cpu", node=~"%s.*"`, meta.NodeName))
 		case "memory_request":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{resource="memory", node=~"%s.*"})`, meta.NodeName)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_requests", fmt.Sprintf(`resource="memory", node=~"%s.*"`, meta.NodeName))
 		case "cpu_limit":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_limits{resource="cpu", node=~"%s.*"})`, meta.NodeName)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_limits", fmt.Sprintf(`resource="cpu", node=~"%s.*"`, meta.NodeName))
 		case "memory_limit":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_limits{resource="memory", node=~"%s.*"})`, meta.NodeName)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_limits", fmt.Sprintf(`resource="memory", node=~"%s.*"`, meta.NodeName))
 		case "disk_total":
 			queries[metricKey] = fmt.Sprintf(`sum(node_filesystem_size_bytes{mountpoint="/", instance=~"%s.*"}) or sum(kubelet_volume_stats_capacity_bytes{instance=~"%s.*"}) or sum(kubelet_volume_stats_capacity_bytes{instance=~"%s.*"})`, meta.InternalIP, meta.NodeName, meta.NodeIP)
 		case "disk_used":
@@ -618,15 +618,15 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "cpu_throttling":
 			queries[metricKey] = fmt.Sprintf(`sum by (container_id) (rate(container_resources_cpu_throttled_seconds_total{__CLUSTER__ container_id=~".*%s/%s.*"}[5m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{__CLUSTER__ %sresource="cpu"})`, containerFilter)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_requests", fmt.Sprintf(`__CLUSTER__ %sresource="cpu"`, containerFilter))
 		case "cpu_limit":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_limits{__CLUSTER__ %sresource="cpu"})`, containerFilter)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_limits", fmt.Sprintf(`__CLUSTER__ %sresource="cpu"`, containerFilter))
 		case "memory_usage":
 			queries[metricKey] = fmt.Sprintf(`sum(container_memory_working_set_bytes{__CLUSTER__ %s})`, containerFilter)
 		case "memory_request":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_requests{__CLUSTER__ %sresource="memory"})`, containerFilter)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_requests", fmt.Sprintf(`__CLUSTER__ %sresource="memory"`, containerFilter))
 		case "memory_limit":
-			queries[metricKey] = fmt.Sprintf(`sum(kube_pod_container_resource_limits{__CLUSTER__ %sresource="memory"})`, containerFilter)
+			queries[metricKey] = promSpecTotal("kube_pod_container_resource_limits", fmt.Sprintf(`__CLUSTER__ %sresource="memory"`, containerFilter))
 		// Per-pod companions to the summed resource metrics: the running pod count
 		// turns a workload total into an average per pod, and the busiest pod shows
 		// what the average hides. Same filter as the totals so they divide cleanly.
@@ -754,9 +754,9 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case "cpu_usage_pod":
 			queries[metricKey] = fmt.Sprintf(`sum(irate(container_cpu_usage_seconds_total{namespace="%s", pod=~"%s"}[1m]))`, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_request_pod":
-			queries[metricKey] = fmt.Sprintf(`kube_pod_container_resource_requests{resource = "cpu", namespace="%s", pod=~"%s"}`, safeMeta.Namespace, safeMeta.Name)
+			queries[metricKey] = fmt.Sprintf(`%s (kube_pod_container_resource_requests{resource = "cpu", namespace="%s", pod=~"%s"})`, promSpecPerContainer, safeMeta.Namespace, safeMeta.Name)
 		case "cpu_limit_pod":
-			queries[metricKey] = fmt.Sprintf(`kube_pod_container_resource_limits{resource = "cpu", namespace="%s", pod=~"%s"}`, safeMeta.Namespace, safeMeta.Name)
+			queries[metricKey] = fmt.Sprintf(`%s (kube_pod_container_resource_limits{resource = "cpu", namespace="%s", pod=~"%s"})`, promSpecPerContainer, safeMeta.Namespace, safeMeta.Name)
 		case "container_top_http_requests":
 			queries[metricKey] = fmt.Sprintf(`topk(5, sum by (destination_workload_name, destination_workload_namespace) (rate(container_http_requests_total{ __CLUSTER__ %s}[1h])))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case "container_top_cpu_usage":
@@ -877,10 +877,26 @@ func promNodeAllocatable(nodeName, resource string) string {
 		promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
 }
 
+// promSpecPerContainer collapses request/limit series to one per container.
+//
+// kube-state-metrics is not the only exporter of these series: OpenCost re-exports
+// kube_pod_container_resource_requests (but not _limits) and kube_node_status_allocatable,
+// and a cluster may run more than one kube-state-metrics. Each copy carries its own
+// job/instance labels, so anything that adds series up must collapse them first — on
+// the dev cluster a bare sum reported every request at twice its real value, and the
+// resize screen then proposed a request above the container's own limit.
+const promSpecPerContainer = `max by (namespace, pod, container)`
+
 // promSpecOnNode is the kube-state-metrics request/limit series for one node.
 func promSpecOnNode(metric, nodeName, resource string) string {
-	return fmt.Sprintf(`max by (namespace, pod, container) (%s{__CLUSTER__ %s})`,
-		metric, promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
+	return fmt.Sprintf(`%s (%s{__CLUSTER__ %s})`,
+		promSpecPerContainer, metric, promSelector("", fmt.Sprintf(`resource="%s"`, resource), fmt.Sprintf(`node="%s"`, nodeName)))
+}
+
+// promSpecTotal is a request/limit metric summed over the containers the selector
+// matches, each container counted once whichever exporters publish it.
+func promSpecTotal(metric, selector string) string {
+	return fmt.Sprintf(`sum(%s (%s{%s}))`, promSpecPerContainer, metric, selector)
 }
 
 // promContainerIDPath matches the eBPF metrics' container_id, which is a PATH and not a
