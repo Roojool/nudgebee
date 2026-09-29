@@ -1733,7 +1733,7 @@ func (k *githubAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterCont
 
 	_, authType, _, password, err := getGitCredentials(ctx, providerConfigMap["name"].(string))
 	if err != nil {
-		return GetRecommendationResolutionStatusResponse{}, err
+		return unverifiedPRStatus("GitHub integration: " + err.Error()), nil
 	}
 
 	// Get the actual GitHub token based on auth type
@@ -1752,10 +1752,7 @@ func (k *githubAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterCont
 		githubToken, err = common.GetGithubAppInstallationToken(tokenCtx, password)
 		if err != nil {
 			ctx.GetLogger().Error("Failed to get GitHub App installation token", "error", err)
-			return GetRecommendationResolutionStatusResponse{
-				Status:        RecommendationResolutionStatusFailed,
-				StatusMessage: fmt.Sprintf("GitHub authentication failed: %s", err.Error()),
-			}, nil
+			return unverifiedPRStatus("GitHub authentication failed: " + err.Error()), nil
 		}
 	} else {
 		// For token auth, use the password directly as the token
@@ -1782,26 +1779,30 @@ func (k *githubAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterCont
 	}))
 	if err != nil {
 		ctx.GetLogger().Error("Error getting PR status", "error", err)
-		return GetRecommendationResolutionStatusResponse{}, err
+		return unverifiedPRStatus("GitHub request failed: " + err.Error()), nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	jsonBodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return GetRecommendationResolutionStatusResponse{}, err
-	}
-
-	jsonBody := map[string]any{}
-	err = common.UnmarshalJson(jsonBodyBytes, &jsonBody)
-	if err != nil {
-		return GetRecommendationResolutionStatusResponse{}, err
+		return unverifiedPRStatus("reading GitHub's response: " + err.Error()), nil
 	}
 	if resp.StatusCode != 200 {
 		ctx.GetLogger().Error("Error getting PR status", "status", resp.StatusCode, "data", string(jsonBodyBytes))
-		return GetRecommendationResolutionStatusResponse{
-			Status:        RecommendationResolutionStatusFailed,
-			StatusMessage: string(jsonBodyBytes),
-		}, nil
+	}
+	return githubPRStatusFromResponse(resp.StatusCode, jsonBodyBytes), nil
+}
+
+// githubPRStatusFromResponse maps GitHub's answer for a pull request onto a
+// resolution status. Only a 200 carrying the pull request is an answer; any
+// other response says nothing about whether the pull request is still open.
+func githubPRStatusFromResponse(statusCode int, body []byte) GetRecommendationResolutionStatusResponse {
+	if statusCode != 200 {
+		return unverifiedPRStatus(fmt.Sprintf("GitHub returned %d: %s", statusCode, body))
+	}
+	jsonBody := map[string]any{}
+	if err := common.UnmarshalJson(body, &jsonBody); err != nil {
+		return unverifiedPRStatus("reading GitHub's response: " + err.Error())
 	}
 
 	prStatus := RecommendationResolutionStatusInProgress
@@ -1819,7 +1820,7 @@ func (k *githubAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterCont
 	return GetRecommendationResolutionStatusResponse{
 		Status:        prStatus,
 		StatusMessage: prMessage,
-	}, nil
+	}
 }
 
 //nolint:unused
