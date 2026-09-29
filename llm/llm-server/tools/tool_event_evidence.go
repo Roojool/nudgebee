@@ -66,6 +66,7 @@ func (t GetEventEvidenceTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The event ID to fetch evidence for",
@@ -185,10 +186,11 @@ func (t GetEventEvidenceTool) Call(nbRequestContext core.NbToolContext, input co
 	eventTool := EventsExecuteTool{FullEvidence: true}
 	// The event lives in the delegated target's account; evidence files stay
 	// in this conversation's workspace (nbRequestContext.AccountId).
-	dataAccountID, targetErr := TargetDataAccountID(nbRequestContext)
+	dataCtx, targetErr := callDataContext(nbRequestContext, input)
 	if targetErr != nil {
 		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
 	}
+	dataAccountID := dataCtx.AccountId
 	toolCtx := core.NewNbToolContext(
 		nbRequestContext.Ctx, eventTool,
 		dataAccountID, nbRequestContext.UserId,

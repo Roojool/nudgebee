@@ -154,6 +154,7 @@ func (m SecurityExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "security_view SQL Query to execute",
@@ -164,6 +165,10 @@ func (m SecurityExecuteTool) InputSchema() core.ToolSchema {
 }
 
 func (m SecurityExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	// check if input has security_view or cis_scan
 	if strings.Contains(input.Command, "cis_scan") {
 		resp, _, err := sqlToolCall(nbRequestContext, input.Command, "security_view", cisScanView, 10, nil)

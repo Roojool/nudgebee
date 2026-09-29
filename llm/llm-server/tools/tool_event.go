@@ -168,6 +168,7 @@ func (m EventsExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "events SQL Query to execute",
@@ -843,7 +844,7 @@ func castIsoTimestampLiterals(sql string) string {
 }
 
 func (m EventsExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbRequestContext, err := targetDataContext(nbRequestContext)
+	nbRequestContext, err := callDataContext(nbRequestContext, input)
 	if err != nil {
 		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: err.Error()}, nil
 	}

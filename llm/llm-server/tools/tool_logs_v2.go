@@ -65,6 +65,7 @@ func (t *NBLogToolV2) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "JSON query to Execute",
@@ -95,9 +96,27 @@ func (t *NBLogToolV2) InputSchema() core.ToolSchema {
 // an empty Query (executeFetchLogsCanonical). One path serves every provider;
 // services-server owns the canonical→provider resolution and native query build.
 func (t *NBLogToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	// A targeted child's call reads the target's account throughout (views,
+	// provider, routing), exactly as inside the metrics/traces sub-agents.
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
+	// Account-driven provider — resolved once at tool construction and shared
+	// across requests via the 30-min tool cache.
+	resolvedProvider := t.logProvider
+	if nbRequestContext.AccountId != t.accountId {
+		// The tool was built for the conversation's account; a target may use
+		// a different log backend.
+		provider, err := GetLogProvider(nbRequestContext.AccountId)
+		if err != nil {
+			return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: fmt.Sprintf("no log provider for the target account: %v", err)}, nil
+		}
+		resolvedProvider = provider
+	}
 	// Local, never written back to the receiver: this tool instance is cached and
 	// shared across requests, so a write would pin one request's override for all.
-	logProvider := EffectiveLogProvider(t.logProvider, nbRequestContext.QueryConfig.LogProviderOverride)
+	logProvider := EffectiveLogProvider(resolvedProvider, nbRequestContext.QueryConfig.LogProviderOverride)
 
 	nbRequestContext.Ctx.GetLogger().Info("logs_v2: executing canonical getLogs tool call", "query", input.Command, "provider", logProvider.Provider)
 

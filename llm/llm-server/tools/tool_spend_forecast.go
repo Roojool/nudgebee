@@ -40,6 +40,7 @@ func (t SpendForecastTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"account_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "UUID of a specific cloud account to scope the forecast to. Defaults to the current account.",
@@ -55,7 +56,7 @@ func (t SpendForecastTool) InferToolRequestType(_ *security.RequestContext, _, _
 }
 
 func (t SpendForecastTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := targetDataContext(nbCtx)
+	nbCtx, targetErr := callDataContext(nbCtx, input)
 	if targetErr != nil {
 		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
 	}

@@ -160,12 +160,12 @@ func TestTargetBlindToolsRefusedUnlessNeutral(t *testing.T) {
 	require.NoError(t, err, "a tool that reads no account data stays usable")
 	_, err = prepareDelegatedActionInput(namedTestTool{"recommendation_execute"}, nil, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 	require.NoError(t, err, "an untargeted child is unchanged")
-	for _, tool := range []toolcore.NBTool{tools.PrometheusExecuteTool{}, &tools.NBLogToolV2{}, tools.TracesExecuteClickhouseTool{}} {
+	for _, tool := range []toolcore.NBTool{tools.PrometheusExecuteTool{}, &tools.NBLogToolV2{}, tools.TracesExecuteClickhouseTool{}, tools.MetricsListTool{}, tools.NBTraceToolV2{}} {
 		_, err = prepareDelegatedActionInput(tool, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 		require.NoError(t, err, "%T reads the target from the call context", tool)
 	}
-	_, err = prepareDelegatedActionInput(tools.MetricsListTool{}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
-	require.Error(t, err, "metric listing reads only the conversation's own account")
+	_, err = prepareDelegatedActionInput(tools.DatadogLogExecuteTool{}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
+	require.Error(t, err, "Datadog credentials come from the conversation account's integration")
 	_, err = prepareDelegatedActionInput(toolcore.NewClientToolWrapper(toolcore.NBToolCommand{}), bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 	require.NoError(t, err, "client tools run on the user's side")
 }

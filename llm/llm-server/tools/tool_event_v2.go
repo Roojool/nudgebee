@@ -225,7 +225,9 @@ func eventReferences(nbCtx core.NbToolContext, dataAccountID string, data []map[
 			}, ""))
 		}
 	}
-	references = append(references, core.GetNudgebeeUIReferenceForClusterDetails(nbCtx, []string{"events", "summary"}, "Event Details", nil, ""))
+	detailsCtx := nbCtx
+	detailsCtx.AccountId = dataAccountID // the events page of the account queried
+	references = append(references, core.GetNudgebeeUIReferenceForClusterDetails(detailsCtx, []string{"events", "summary"}, "Event Details", nil, ""))
 	return references
 }
 
@@ -251,6 +253,7 @@ func (t GetEventByIdTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The event's UUID (events.id).",
@@ -284,7 +287,7 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := targetDataContext(nbCtx)
+	dataCtx, targetErr := callDataContext(nbCtx, input)
 	if targetErr != nil {
 		return eventsV2ErrorResponse(targetErr), nil
 	}
@@ -663,6 +666,7 @@ func (t ListEventsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target":       core.ToolTargetSchemaProperty(),
 			"subject_name": {Type: core.ToolSchemaTypeString, Description: "ILIKE (substring) match on subject_name."},
 			"subject_namespace": {
 				Type: core.ToolSchemaTypeArray, Items: map[string]any{"type": "string"},
@@ -731,7 +735,7 @@ func (t ListEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequ
 
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := targetDataContext(nbCtx)
+	dataCtx, targetErr := callDataContext(nbCtx, input)
 	if targetErr != nil {
 		return eventsV2ErrorResponse(targetErr), nil
 	}
@@ -835,6 +839,7 @@ func (t AggregateEventsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"group_by": {
 				Type:        core.ToolSchemaTypeString,
 				Enum:        []any{"aggregation_key", "subject_namespace", "subject_type", "finding_type", "priority", "source", "nb_status"},
@@ -912,7 +917,7 @@ func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCal
 	// queryable, while calls without a start bound already received the default.
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := targetDataContext(nbCtx)
+	dataCtx, targetErr := callDataContext(nbCtx, input)
 	if targetErr != nil {
 		return eventsV2ErrorResponse(targetErr), nil
 	}

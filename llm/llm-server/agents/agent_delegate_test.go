@@ -854,3 +854,36 @@ func TestFinOpsReadsFollowTheTargetWritesDoNot(t *testing.T) {
 		assert.Equal(t, want, toolcore.SupportsDelegatedTarget(tool), name)
 	}
 }
+
+// A target-aware agent's own tools must follow the target or read no account
+// data; only writes, which await target-scoped approval, may be refused.
+func TestTargetAwareAgentsToolsFollowTheTarget(t *testing.T) {
+	writesAwaitingApproval := map[string]bool{tools.ToolTriggerImageScan: true, tools.ToolTriggerCisScan: true}
+	for _, agent := range []core.NBAgent{newEventsAgent("origin-id"), SecurityAgent{accountId: "origin-id"}, newServiceDependencyGraphAgent("origin-id"), newNudgebeeAgent("origin-id")} {
+		_, aware := agent.(core.ExecutionTargetAwareAgent)
+		require.True(t, aware, agent.GetName())
+		for _, tool := range agent.GetSupportedTools(nil) {
+			if writesAwaitingApproval[tool.Name()] {
+				assert.False(t, toolcore.SupportsDelegatedTarget(tool), tool.Name())
+				continue
+			}
+			assert.True(t, toolcore.SupportsDelegatedTarget(tool) || toolcore.IsTargetNeutral(tool.Name()), "%s: %s cannot take the target", agent.GetName(), tool.Name())
+		}
+	}
+}
+
+// A tool that applies a delegated target from the call context must also let
+// a top-level agent name one: without a "target" input it silently answers
+// for the conversation's own account (seen live with prometheus_execute).
+func TestContextTargetToolsAcceptAPerCallTarget(t *testing.T) {
+	for _, name := range toolcore.ListRegisteredSystemToolNames() {
+		tool, ok := toolcore.GetNBTool("00000000-0000-0000-0000-000000000001", name)
+		if !ok || tool == nil || !toolcore.SupportsDelegatedTarget(tool) {
+			continue
+		}
+		if _, preparer := tool.(toolcore.DelegatedTargetInputPreparer); preparer {
+			continue // applies the target to its own selector (cluster, account, --context)
+		}
+		assert.Contains(t, tool.InputSchema().Properties, "target", "%s follows a handed target but cannot be given one", name)
+	}
+}

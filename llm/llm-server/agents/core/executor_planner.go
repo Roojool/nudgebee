@@ -173,12 +173,20 @@ func CheckMessageTerminationStatus(messageId, accountId, conversationId string) 
 	}
 
 	// Fetch from database on cache miss
+	status := ConversationStatus("")
 	message, err := dao.GetConversationMessage(messageId, accountId, conversationId)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The metrics/traces sub-agents run under a delegated target's
+		// account, not the message's; the conversation still identifies it.
+		status, err = dao.GetConversationMessageStatus(messageId, conversationId)
+	} else if err == nil {
+		status = message.Status
+	}
 	if err != nil {
 		return false, err
 	}
 
-	isTerminated := message.Status == ConversationStatusTerminated
+	isTerminated := status == ConversationStatusTerminated
 
 	// Cache the result.
 	// If terminated, we can cache it for longer as it's a final state.
@@ -249,9 +257,20 @@ func normalizeToolInputForTool(tool toolcore.NBTool, input string) string {
 
 	args := map[string]any{}
 
+	// Only scalar properties can be written as plain text. An object property
+	// such as "target" must not capture a PromQL label or SQL column that
+	// happens to share its name ('up{target="x"}', 'WHERE target=1').
+	textProperty := func(name string) bool {
+		prop, exists := schema.Properties[name]
+		return exists && prop.Type != toolcore.ToolSchemaTypeObject
+	}
+
 	// Try XML tags: <id>value</id><limit>1</limit>
 	if strings.Contains(input, "<") && strings.Contains(input, ">") {
 		for propName := range schema.Properties {
+			if !textProperty(propName) {
+				continue
+			}
 			if val := common.XmlExtractTagContent(input, propName); val != "" {
 				args[propName] = val
 			}
@@ -267,7 +286,7 @@ func normalizeToolInputForTool(tool toolcore.NBTool, input string) string {
 				if eqIdx := strings.Index(part, "="); eqIdx > 0 {
 					key := strings.TrimSpace(part[:eqIdx])
 					val := strings.TrimSpace(part[eqIdx+1:])
-					if _, exists := schema.Properties[key]; exists && val != "" {
+					if textProperty(key) && val != "" {
 						args[key] = val
 					}
 				}

@@ -123,6 +123,7 @@ func (m PrometheusExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Prometheus Query to Execute",
@@ -270,6 +271,12 @@ func extractPromQLFromCommand(command string, arguments map[string]any) (string,
 }
 
 func (m PrometheusExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	// A targeted child's call reads the target's account throughout (views,
+	// provider, routing), exactly as inside the metrics/traces sub-agents.
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	nbRequestContext.Ctx.GetLogger().Info("prometheus: executing queryPrometheus tool call", "query", input.Command)
 
 	// Guard: LLM may wrap PromQL inside a JSON object (double-serialization).
@@ -604,6 +611,7 @@ func (m MetricsListTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "metrics name to search (required)",
@@ -748,6 +756,17 @@ func esDiscoveryProvenance(fromDocuments, fromMapping int) string {
 }
 
 func (m MetricsListTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	originAccountID := nbRequestContext.AccountId
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
+	if nbRequestContext.AccountId != originAccountID {
+		// The provider was resolved for the conversation's account when the
+		// tool was built; the target may use a different metrics backend.
+		m.Provider = MetricsDiscoveryProvider(nbRequestContext.AccountId)
+		m.DefaultIndex = "" // resolved for the target below
+	}
 	nbRequestContext.Ctx.GetLogger().Info("metrics: executing metrics.metrics tool call", "query", input.Command)
 	query := strings.ReplaceAll(input.Command, "\\", "")
 	query = strings.ReplaceAll(query, "`", "")
@@ -1176,6 +1195,7 @@ func (m ListMetricsLabelsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "metrics name to fetch labels",
@@ -1186,6 +1206,17 @@ func (m ListMetricsLabelsTool) InputSchema() core.ToolSchema {
 }
 
 func (m ListMetricsLabelsTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	originAccountID := nbRequestContext.AccountId
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
+	if nbRequestContext.AccountId != originAccountID {
+		// The provider was resolved for the conversation's account when the
+		// tool was built; the target may use a different metrics backend.
+		m.Provider = MetricsDiscoveryProvider(nbRequestContext.AccountId)
+		m.DefaultIndex = "" // resolved for the target below
+	}
 	nbRequestContext.Ctx.GetLogger().Info("metrics: executing metrics.label tool call", "query", input.Command)
 	query := strings.ReplaceAll(input.Command, "\\", "")
 	query = strings.ReplaceAll(query, "`", "")
@@ -1295,6 +1326,7 @@ func (m ListMetricsLabelValuesTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"label": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Label name whose values to list (required), e.g. 'instance', 'node', 'pod'.",
@@ -1374,6 +1406,17 @@ func filterAndCapLabelValues(raw []core.ObservabilityMetricsLabelValue, filter s
 }
 
 func (m ListMetricsLabelValuesTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	originAccountID := nbRequestContext.AccountId
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
+	if nbRequestContext.AccountId != originAccountID {
+		// The provider was resolved for the conversation's account when the
+		// tool was built; the target may use a different metrics backend.
+		m.Provider = MetricsDiscoveryProvider(nbRequestContext.AccountId)
+		m.DefaultIndex = "" // resolved for the target below
+	}
 	label := strings.TrimSpace(argString(input, "label"))
 	if label == "" {
 		// Some planners pass a single required arg in the bare command instead.
@@ -1533,6 +1576,7 @@ func (s SearchMetricsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "natural language description of the metric (e.g. 'redis memory usage', 'kafka consumer lag', 'HTTP error rate')",
@@ -1543,6 +1587,10 @@ func (s SearchMetricsTool) InputSchema() core.ToolSchema {
 }
 
 func (s SearchMetricsTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	nbRequestContext.Ctx.GetLogger().Info("search_metrics: executing semantic metric search", "query", input.Command)
 	query := strings.TrimSpace(input.Command)
 	query = strings.ReplaceAll(query, "\\", "")

@@ -258,6 +258,10 @@ func delegateE2ETarget(envKey, fallback string) string {
 
 type e2eToolCall struct {
 	MessageId, AgentName, DelegatedTarget, ToolName, Status, Parameters, Response string
+	// AgentAccount is the account the calling agent runs under. The metrics and
+	// traces sub-agents run under the target's own account with no delegated
+	// target set.
+	AgentAccount string
 }
 
 // fetchConversationToolCalls returns every tool call in a conversation with
@@ -267,13 +271,14 @@ func fetchConversationToolCalls(t *testing.T, conversationId string) []e2eToolCa
 	dbm, err := common.GetDatabaseManager(common.Metastore)
 	require.NoError(t, err)
 	rows, err := dbm.Db.Query(`
-		SELECT COALESCE(t.message_id::text, ''), a.agent_name,
+		SELECT COALESCE(t.message_id::text, ''), a.agent_name, COALESCE(ca.account_name, ''),
 		       COALESCE(a.query_config::jsonb->'delegated_target'->>'name', ''),
 		       t.tool_name, COALESCE(t.status, ''),
 		       -- SQL tools persist their real input (SQL plus any target) in params_sql.
 		       COALESCE(NULLIF(t.params_sql, ''), t.parameters, ''), COALESCE(t.response, '')
 		FROM llm_conversation_tool_calls t
 		JOIN llm_conversation_agent a ON a.id = t.agent_id
+		LEFT JOIN cloud_accounts ca ON ca.id = a.account_id
 		WHERE t.conversation_id = $1
 		ORDER BY t.created_at`, conversationId)
 	require.NoError(t, err)
@@ -281,7 +286,7 @@ func fetchConversationToolCalls(t *testing.T, conversationId string) []e2eToolCa
 	var calls []e2eToolCall
 	for rows.Next() {
 		var c e2eToolCall
-		require.NoError(t, rows.Scan(&c.MessageId, &c.AgentName, &c.DelegatedTarget, &c.ToolName, &c.Status, &c.Parameters, &c.Response))
+		require.NoError(t, rows.Scan(&c.MessageId, &c.AgentName, &c.AgentAccount, &c.DelegatedTarget, &c.ToolName, &c.Status, &c.Parameters, &c.Response))
 		t.Logf("tool call: agent=%s target=%q tool=%s status=%s params=%s", c.AgentName, c.DelegatedTarget, c.ToolName, c.Status, c.Parameters)
 		calls = append(calls, c)
 	}
@@ -416,6 +421,84 @@ func TestNaturalQuestion_OtherClusterRunsThere(t *testing.T) {
 	}
 }
 
+// toolDataString returns a tool response's data as text: a string as is,
+// anything else as JSON (not Go's %v formatting, which the helpers below
+// could not parse).
+func toolDataString(data any) string {
+	if str, ok := data.(string); ok {
+		return str
+	}
+	if encoded, err := json.Marshal(data); err == nil {
+		return string(encoded)
+	}
+	return fmt.Sprintf("%v", data)
+}
+
+// clusterNodes is ground truth for node-level metrics: the node names kubectl
+// reports on a named cluster.
+func clusterNodes(t *testing.T, cluster string) []string {
+	t.Helper()
+	accountId := os.Getenv("TEST_ACCOUNT")
+	kubectl, ok := toolcore.GetNBTool(accountId, "kubectl_execute")
+	require.True(t, ok)
+	ctx := toolcore.NewNbToolContext(tenantWideE2EContext(), kubectl, accountId, os.Getenv("TEST_USER"), uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", toolcore.NBQueryConfig{}, "oracle-nodes-"+cluster)
+	resp, err := kubectl.Call(ctx, toolcore.NBToolCallRequest{
+		Command:   "kubectl get nodes --no-headers -o custom-columns=:metadata.name",
+		Arguments: map[string]any{"cluster": cluster},
+	})
+	require.NoError(t, err)
+	out := toolDataString(resp.Data)
+	var envelope struct{ Stdout string }
+	if json.Unmarshal([]byte(out), &envelope) == nil && envelope.Stdout != "" {
+		out = envelope.Stdout
+	}
+	nodes := strings.Fields(out)
+	require.NotEmpty(t, nodes, "oracle must list nodes on %s", cluster)
+	return nodes
+}
+
+func nodesIn(response string, nodes []string) []string {
+	var found []string
+	for _, n := range nodes {
+		if strings.Contains(response, n) {
+			found = append(found, n)
+		}
+	}
+	return found
+}
+
+// TestPrometheusExecute_PerCallTarget pins the bug where a top-level agent
+// called prometheus_execute for another cluster and got the conversation's
+// own cluster's metrics (conversation e70d5577). It calls the tool directly,
+// so the result does not depend on the route a model picks, and checks the
+// node names in the series against kubectl on each cluster.
+func TestPrometheusExecute_PerCallTarget(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	accountId := os.Getenv("TEST_ACCOUNT")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	origin := delegateE2ETarget("TEST_DELEGATE_K8S_ORIGIN", "k8s-dev")
+	targetNodes, originNodes := clusterNodes(t, target), clusterNodes(t, origin)
+
+	prom, ok := toolcore.GetNBTool(accountId, "prometheus_execute")
+	require.True(t, ok)
+	call := func(args map[string]any) string {
+		ctx := toolcore.NewNbToolContext(tenantWideE2EContext(), prom, accountId, os.Getenv("TEST_USER"), uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", toolcore.NBQueryConfig{}, "prometheus-per-call-target")
+		resp, err := prom.Call(ctx, toolcore.NBToolCallRequest{Command: "node_uname_info", Arguments: args})
+		require.NoError(t, err)
+		require.NotEqual(t, toolcore.NBToolResponseStatusError, resp.Status, "%v", resp.Data)
+		return fmt.Sprintf("%v", resp.Data)
+	}
+
+	withTarget := call(map[string]any{"range": "1h", "target": map[string]any{"provider": "kubernetes", "name": target}})
+	t.Logf("with target: %d %s nodes, %d %s nodes", len(nodesIn(withTarget, targetNodes)), target, len(nodesIn(withTarget, originNodes)), origin)
+	assert.NotEmpty(t, nodesIn(withTarget, targetNodes), "series must come from %s's nodes", target)
+	assert.Empty(t, nodesIn(withTarget, originNodes), "no series may come from the conversation's own cluster %s", origin)
+
+	withoutTarget := call(map[string]any{"range": "1h"})
+	assert.NotEmpty(t, nodesIn(withoutTarget, originNodes), "without a target the conversation's own cluster is queried")
+	assert.Empty(t, nodesIn(withoutTarget, targetNodes))
+}
+
 // clusterNamespaces is the test's own ground truth: it runs kubectl_execute
 // directly (no LLM) against a named cluster.
 func clusterNamespaces(t *testing.T, cluster string) map[string]bool {
@@ -429,7 +512,7 @@ func clusterNamespaces(t *testing.T, cluster string) map[string]bool {
 		Arguments: map[string]any{"cluster": cluster},
 	})
 	require.NoError(t, err)
-	out := fmt.Sprintf("%v", resp.Data)
+	out := toolDataString(resp.Data)
 	var envelope struct{ Stdout string }
 	if json.Unmarshal([]byte(out), &envelope) == nil && envelope.Stdout != "" {
 		out = envelope.Stdout
@@ -580,11 +663,11 @@ func TestNaturalQuestion_OtherClusterObservability(t *testing.T) {
 			}
 			return p.Provider, err
 		}},
-		{"metrics", "How has CPU usage on %s trended over the last 6 hours? Any spikes?", []string{"metrics"}, func(id string) (string, error) {
+		{"metrics", "How has CPU usage on %s trended over the last 6 hours? Any spikes?", []string{"metrics", "prometheus_execute"}, func(id string) (string, error) {
 			p, err := tools.GetMetricsProvider(id)
 			return p.Provider, err
 		}},
-		{"traces", "Which endpoints on %s have been slowest over the last hour?", []string{"traces"}, func(id string) (string, error) {
+		{"traces", "Which endpoints on %s have been slowest over the last hour?", []string{"traces", "traces_execute", "traces_execute_v2", "traces_execute_clickhouse", "traces_execute_default", "traces_execute_jaeger", "traces_execute_chronosphere"}, func(id string) (string, error) {
 			p, err := tools.GetTraceProvider(id)
 			return p.Provider, err
 		}},
@@ -606,7 +689,7 @@ func TestNaturalQuestion_OtherClusterObservability(t *testing.T) {
 				if !lo.Contains(tc.tools, c.ToolName) {
 					continue
 				}
-				targeted := ranOn(c, target) || strings.EqualFold(c.DelegatedTarget, target)
+				targeted := ranOn(c, target) || strings.EqualFold(c.DelegatedTarget, target) || strings.EqualFold(c.AgentAccount, target)
 				switch {
 				case targeted && c.Status == "success":
 					onTargetOK++
@@ -629,8 +712,8 @@ func TestNaturalQuestion_OtherClusterObservability(t *testing.T) {
 // originOnlyTools answer from the conversation's own account whatever the
 // child's target is; inside a child targeted elsewhere they must be refused.
 var originOnlyTools = []string{
-	"service_dependency_graph", "recommendation_execute", "finops", "remediation", "remediation_generate",
-	"remediation_execute", "memory", "security", "workflow",
+	"remediation", "remediation_generate", "remediation_execute", "memory", "workflow",
+	"recommendation_apply", "recommendation_execute_cli", "recommendation_set_dismissal",
 }
 
 // eventTools read the events store; under a target they must read the
@@ -729,6 +812,52 @@ func TestNaturalQuestion_OtherClusterRecommendations(t *testing.T) {
 		}
 	}
 	require.NotZero(t, recommendationCalls, "recommendations are only in the recommendation store; it must be queried")
+}
+
+// TestNaturalQuestion_OtherClusterSecurityAndDependencies asks about another
+// cluster's security findings and service dependencies. Whichever agent or
+// tool answers must run on that cluster; nothing may answer from the
+// conversation's own account.
+func TestNaturalQuestion_OtherClusterSecurityAndDependencies(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	accountId := os.Getenv("TEST_ACCOUNT")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	resolved, err := tools.ResolveAgentHandoffTarget(tenantWideE2EContext(), accountId, &toolcore.ExecutionTarget{Provider: "kubernetes", Name: target})
+	require.NoError(t, err)
+	for _, tc := range []struct{ name, question string }{
+		{"security", "Are there any critical security findings on %s I should look at first?"},
+		{"dependencies", "What does app-prod depend on in %s, and what depends on it?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(accountId), "natural-other-cluster-"+tc.name, fmt.Sprintf(tc.question, target))
+			calls := fetchConversationToolCalls(t, resp.ConversationId)
+			logRoute(t, calls)
+			accountScoped := append([]string{"security", "security_execute", "service_dependency_graph", "service_dependency_graph_execute"}, recommendationTools...)
+			var onTarget int
+			for _, c := range calls {
+				if c.DelegatedTarget != "" {
+					assert.Equal(t, target, c.DelegatedTarget)
+				}
+				if c.Status != "success" {
+					continue
+				}
+				targeted := strings.EqualFold(c.DelegatedTarget, target) || ranOn(c, target) || strings.EqualFold(c.AgentAccount, target)
+				if lo.Contains(accountScoped, c.ToolName) && !targeted {
+					t.Errorf("%s answered without the target, i.e. from the conversation's own account: %s", c.ToolName, c.Parameters)
+				}
+				if targeted {
+					onTarget++
+				}
+				for _, failure := range knownTargetFailures {
+					assert.NotContains(t, c.Response, failure)
+				}
+			}
+			for id, account := range recommendationAccounts(t, calls) {
+				assert.Equal(t, resolved.AccountID, account, "recommendation %s belongs to another account than %s", id, target)
+			}
+			require.NotZero(t, onTarget, "the answer must come from %s", target)
+		})
+	}
 }
 
 // TestNaturalQuestion_OtherClusterAlerts asks about another cluster's alerts,
@@ -966,7 +1095,7 @@ func clusterPods(t *testing.T, cluster, namespace string) []string {
 		Arguments: map[string]any{"cluster": cluster},
 	})
 	require.NoError(t, err)
-	out := fmt.Sprintf("%v", resp.Data)
+	out := toolDataString(resp.Data)
 	var envelope struct{ Stdout string }
 	if json.Unmarshal([]byte(out), &envelope) == nil && envelope.Stdout != "" {
 		out = envelope.Stdout

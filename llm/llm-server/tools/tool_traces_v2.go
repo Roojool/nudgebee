@@ -42,6 +42,7 @@ func (m NBTraceToolV2) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Canonical JSON query with a 'where' clause to filter traces.",
@@ -64,6 +65,12 @@ func (m NBTraceToolV2) InputSchema() core.ToolSchema {
 }
 
 func (m NBTraceToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	// A targeted child's call reads the target's account throughout (views,
+	// provider, routing), exactly as inside the metrics/traces sub-agents.
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	nbRequestContext.Ctx.GetLogger().Info("traces: executing canonical (v2) traces tool call")
 
 	queryBuilder, startTime, endTime, err := core.BuildTraceQueryBuilder(nbRequestContext, input.Command)

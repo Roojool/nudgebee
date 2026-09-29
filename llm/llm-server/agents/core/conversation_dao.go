@@ -255,6 +255,10 @@ type IConversationDao interface {
 	ListConversationMessages(status ConversationStatus, workerName string, conversationId string, deadWorker bool) ([]ConversationMessage, error)
 	SaveConversationMessage(id, conversationId, accountID, userId string, role MessageRole, messageType MessageType, message, response, agentName string, parentAgentId uuid.UUID, messageConfig any, messageContext string, llmProvider, llmModel string, status ConversationStatus) (uuid.UUID, error)
 	GetConversationMessage(id, accountId, conversationId string) (ConversationMessage, error)
+	// GetConversationMessageStatus reads only a message's status. A sub-agent
+	// that queries a delegated target runs under that target's account, which
+	// is not the message's account (see CheckMessageTerminationStatus).
+	GetConversationMessageStatus(id, conversationId string) (ConversationStatus, error)
 	CleanupConversationMessage(id, accountId string) error
 	UpdateConversationMessageContext(messageId string, context map[string]any) error
 	UpdateConversationMessage(id, response string, status ConversationStatus) error
@@ -2382,6 +2386,15 @@ func (chat *ConversationDao) CleanupConversationMessage(id, accountId string) er
 		return fmt.Errorf("history: failed to update message: %w", err)
 	}
 	return nil
+}
+
+func (chat *ConversationDao) GetConversationMessageStatus(id, conversationId string) (ConversationStatus, error) {
+	var status ConversationStatus
+	err := chat.dbManager.Db.QueryRowx(`select status from llm_conversation_messages WHERE id = $1 and conversation_id = $2`, id, conversationId).Scan(&status)
+	if err != nil {
+		return "", fmt.Errorf("history: failed to read message status: %w", err)
+	}
+	return status, nil
 }
 
 func (chat *ConversationDao) GetConversationMessage(id, accountId, conversationId string) (ConversationMessage, error) {

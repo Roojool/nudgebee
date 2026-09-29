@@ -82,6 +82,7 @@ func (m TracesExecuteClickhouseTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
+			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Sql query to Execute",
@@ -149,6 +150,12 @@ func (m TracesExecuteClickhouseTool) getTracesView(accountId string) string {
 }
 
 func (m TracesExecuteClickhouseTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	// A targeted child's call reads the target's account throughout (views,
+	// provider, routing), exactly as inside the metrics/traces sub-agents.
+	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	nbRequestContext.Ctx.GetLogger().Info("traces: executing getTraces tool call")
 	finalQuery := m.cleanUpQuery(input.Command)
 	// Expand the logical `traces_view` (optionally schema-qualified as `default.traces_view`)

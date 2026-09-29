@@ -64,6 +64,15 @@ func ParseExecutionTarget(input NBToolCallRequest) (*ExecutionTarget, error) {
 }
 
 // AgentTargetSchemaProperty is shared by every agent-to-agent tool schema.
+// ToolTargetSchemaProperty is the per-call target of a data tool: which
+// connected cluster or account to query instead of the conversation's own.
+func ToolTargetSchemaProperty() ToolSchemaProperty {
+	return ToolSchemaProperty{
+		Type:        ToolSchemaTypeObject,
+		Description: "Optional connected cluster or cloud account to query instead of the conversation's own: {provider: kubernetes|aws|gcp|azure, name: exact connected name}. Use it when the question names another cluster or account; omit it otherwise. This does not grant access.",
+	}
+}
+
 func AgentTargetSchemaProperty() ToolSchemaProperty {
 	return ToolSchemaProperty{
 		Type:        ToolSchemaTypeObject,

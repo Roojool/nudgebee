@@ -364,7 +364,7 @@ func (m RecommendationExecuteTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "recommendation_view SQL Query to execute",
 			},
-			"target": core.AgentTargetSchemaProperty(),
+			"target": core.ToolTargetSchemaProperty(),
 		},
 		Required: []string{"command"},
 	}

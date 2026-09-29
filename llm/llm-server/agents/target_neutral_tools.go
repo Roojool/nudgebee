@@ -33,7 +33,16 @@ func init() {
 		tools.ToolKGSearchNodes,
 		tools.ToolKGTraverse,
 		tools.ToolKGGetNode,
-		NudgebeeAgentName,
+		// Nudgebee product state: tenant-wide lists and docs; explicit account
+		// ids are arguments, not the conversation's account.
+		tools.ToolNudgebeeAccountsList,
+		tools.ToolNudgebeeAccountsCount,
+		tools.ToolNudgebeeAccountGet,
+		tools.ToolNudgebeeIntegrationsList,
+		tools.ToolNudgebeeIntegrationsCount,
+		tools.ToolNudgebeeIntegrationGetStatus,
+		tools.ToolNudgebeeIntegrationDiagnose,
+		tools.ToolNudgebeeDocsSearch,
 		// Tenant-wide integrations.
 		GithubAgentName,
 		GitlabAgentName,
