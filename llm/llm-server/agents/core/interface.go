@@ -232,6 +232,10 @@ type NBAgentPlannerToolAction struct {
 	// persisted before this field existed, which are then replayed one per
 	// message exactly as before.
 	TurnID string `json:"turn_id,omitempty"`
+	// FollowupAnswer is the user's answer to a question this call's sub-agent
+	// asked, set only for the call's resumed run and handed to the tool as
+	// NbToolContext.FollowupAnswer. Not persisted: it belongs to one resume.
+	FollowupAnswer string `json:"-"`
 	// ExecutionBatchID groups tool calls that were emitted in one multi-action
 	// planner turn. ExecutionMode records whether the shared executor actually
 	// dispatched that batch through its parallel or sequential path; this is a

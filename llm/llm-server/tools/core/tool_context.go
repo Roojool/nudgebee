@@ -403,6 +403,11 @@ type NbToolContext struct {
 	// selection across delegation. See NBAgentRequest field comments for semantics.
 	OriginalQuery    string
 	SelectedSkillIds []string
+	// FollowupAnswer is the user's answer to a question this tool's sub-agent
+	// asked. It is set only when a paused tool resumes after that question, so a
+	// tool that runs a sub-agent can hand the answer to it instead of treating it
+	// as the tool's own input.
+	FollowupAnswer string
 	// KBPrestepContent, KBPrestepExecuted, and KBReferences carry the pre-step retrieval results
 	// across delegation so sub-agents can reuse them without triggering redundant RAG executions.
 	KBPrestepContent  string

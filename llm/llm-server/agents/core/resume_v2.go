@@ -157,15 +157,12 @@ func resumeFollowupLocked(ctx *security.RequestContext, req NBAgentRequest) (NBA
 	// registered"), the whole request errors out, and the user's approved
 	// write silently never runs (message stuck WAITING forever, prod bug at
 	// conv 7564e464). Fall back to the closest registered ancestor and treat
-	// this as a parent-resume: the ancestor's planner re-plans the delegation
-	// with the same intent, and the user's Yes rides through via
-	// QueryConfig.ToolConfirmations (already merged into req.QueryConfig
-	// below at line 190) so the re-planned action executes for real.
-	//
-	// Semantically correct because dynamicReActAgent holds no persistent
-	// planner state we could restore — its full state is the (prompt, tools,
-	// max_iterations) tuple captured on the parent's delegate_agent tool_call.
-	// Re-planning is the state.
+	// this as a parent-resume. The ancestor does NOT re-plan: its saved state
+	// holds the WAITING delegate_agent action, which the planner re-dispatches
+	// with its original input; the child resumes from its own saved state
+	// (keyed by the tool call), with the approval in
+	// QueryConfig.ToolConfirmations (merged into req.QueryConfig below) or the
+	// answer in NbToolContext.FollowupAnswer.
 	if _, implRegistered := GetNBAgent(ctx, agent.AgentName, req.AccountId, AgentStatusEnabled); !implRegistered {
 		// The helper is called for its `walked > 0` verdict (does a registered
 		// ancestor exist anywhere up the chain?). DAO errors bubble up so a

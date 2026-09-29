@@ -505,6 +505,17 @@ func childAgentTarget(ctx toolcore.NbToolContext, agent NBAgent, query toolcore.
 	return resolved, nil
 }
 
+// subAgentQuery is what a tool-run sub-agent is started or resumed with: the
+// tool's command, or — when the sub-agent paused on a question — the user's
+// answer. The answer used to arrive by replacing the calling tool's input,
+// which broke tools whose input is a JSON envelope (delegate_agent's "prompt").
+func subAgentQuery(nbRequestContext toolcore.NbToolContext, query toolcore.NBToolCallRequest) string {
+	if nbRequestContext.FollowupAnswer != "" {
+		return nbRequestContext.FollowupAnswer
+	}
+	return query.Command
+}
+
 func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent, query toolcore.NBToolCallRequest) (NBAgentResponse, error) {
 	target, err := childAgentTarget(nbRequestContext, agent, query)
 	if err != nil {
@@ -538,7 +549,7 @@ func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent
 	}
 
 	agentRequest := NBAgentRequest{
-		Query:          query.Command,
+		Query:          subAgentQuery(nbRequestContext, query),
 		AccountId:      nbRequestContext.AccountId,
 		UserId:         nbRequestContext.UserId,
 		ConversationId: nbRequestContext.ConversationId,

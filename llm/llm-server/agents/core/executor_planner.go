@@ -444,6 +444,10 @@ type plannerExecutor struct {
 	summaryToolName     string
 	semaphore           chan struct{}
 	toolCallCache       turnToolCallCache // Normalized cache for tool results, persists across plan regeneration within a turn
+	// pausedOn holds, per paused tool call, the followup it paused on. Unmarshal
+	// fills it before dropping the WAITING steps, so the resume pass can tell an
+	// approval from a question, and this agent's question from a sub-agent's.
+	pausedOn map[string]FollowupRequest
 	// configMu guards agentRequest.QueryConfig's ToolConfigs and ToolConfigMetadata
 	// maps. doIterationParallel runs several actions against this one executor, and
 	// every one of them resolves its tool's config through the same maps.
@@ -2658,7 +2662,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 			err = summaryErr
 		}
 	} else {
-		observation, err = callNbTool(actionCtx, e.agentRequest, e.agent.GetName(), tool, action.ToolInput, nil, queryContext, action.ToolID)
+		observation, err = callNbTool(actionCtx, e.agentRequest, e.agent.GetName(), tool, action.ToolInput, nil, queryContext, action.ToolID, action.FollowupAnswer)
 	}
 	var dt []string
 	if val, ok := observation.AdditionalDetails["discovered_tools"]; ok && val != nil {
@@ -4126,6 +4130,12 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 		for _, s := range e.steps {
 			if s.Status == ToolStatusWaiting || s.Status == ToolStatusWaitingForClient {
 				droppedWaitingIDs[s.Action.ToolID] = struct{}{}
+				if s.Followup != nil {
+					if e.pausedOn == nil {
+						e.pausedOn = map[string]FollowupRequest{}
+					}
+					e.pausedOn[s.Action.ToolID] = *s.Followup
+				}
 				continue
 			}
 			filteredSteps = append(filteredSteps, s)
@@ -4308,7 +4318,7 @@ func delegationSkillScope(parentInherited []string, parentAgentName string) []st
 	return scope
 }
 
-func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentRequest, parentAgentName string, tool toolcore.NBTool, input string, previousHistory []llms.MessageContent, queryContext string, toolId string) (resp toolcore.NBToolResponse, err error) {
+func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentRequest, parentAgentName string, tool toolcore.NBTool, input string, previousHistory []llms.MessageContent, queryContext string, toolId string, followupAnswer string) (resp toolcore.NBToolResponse, err error) {
 	// Recover from panics and convert to proper error responses
 	defer func() {
 		if r := recover(); r != nil {
@@ -4355,6 +4365,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// back to routine defaults (small tail, no error filter), missing rare-error
 	// clusters in long streams.
 	toolContext.OriginalQuery = agentRequest.OriginalQuery
+	toolContext.FollowupAnswer = followupAnswer
 
 	// Every delegated agent performs its own account-wide search using the original
 	// question plus its delegated task. Agent mappings therefore do not need to be
@@ -4702,10 +4713,29 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					// config step (e.g., project selection after integration selection).
 					isConfigResolved := isToolConfigResolved(request.QueryConfig.ToolConfigs, action.Tool)
 					isConfirmationApproved := confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId)
+					// When the pause came from a sub-agent (delegate_agent, an agent
+					// tool), the user's reply is not this tool's input: an approval is
+					// recorded under the sub-agent's own tool key, so the check above
+					// misses it, and a question's answer belongs to the sub-agent.
+					// Replacing the input there broke tools whose input is a JSON
+					// envelope. Only this case changes; every other resume is as before,
+					// including one where this agent's own id cannot be read.
+					pausedOn, paused := executor.pausedOn[toolId]
+					ownAgentId, ownIdErr := uuid.Parse(executor.agentRequest.AgentId)
+					pausedOnSubAgent := paused && ownIdErr == nil && pausedOn.AgentId != uuid.Nil && pausedOn.AgentId != ownAgentId
 					if isConfigResolved || isConfirmationApproved {
 						// The user's answer was a config/confirmation choice, not the tool input — keep the original command.
 						ctx.GetLogger().Info("plannerexecutor: resuming tool after config/confirmation, keeping original input",
 							"tool", action.Tool, "toolId", toolId, "isConfigResolved", isConfigResolved, "isConfirmationApproved", isConfirmationApproved, "dbLookupFailed", err != nil)
+					} else if pausedOnSubAgent && (pausedOn.FollowupType == FollowupTypeToolConfirmation || pausedOn.FollowupType == FollowupTypeToolConfig) {
+						// The sub-agent finds the decision in the confirmations and
+						// configs propagated to it; the tool re-runs with its own input.
+						ctx.GetLogger().Info("plannerexecutor: resuming tool after its sub-agent's approval or config choice, keeping original input",
+							"tool", action.Tool, "toolId", toolId, "followupType", pausedOn.FollowupType, "subAgentId", pausedOn.AgentId.String())
+					} else if pausedOnSubAgent {
+						ctx.GetLogger().Info("plannerexecutor: resuming tool with the answer to its sub-agent's question",
+							"tool", action.Tool, "toolId", toolId, "subAgentId", pausedOn.AgentId.String())
+						action.FollowupAnswer = request.Query
 					} else {
 						ctx.GetLogger().Info("plannerexecutor: immediately resuming waiting tool",
 							"tool", action.Tool, "toolId", toolId, "newInput", request.Query)
@@ -4748,6 +4778,11 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 								State:       string(currentState),
 							}, nil
 						}
+					} else {
+						// As in the main loop: the planner sees the failure instead of
+						// re-planning as if the resumed call never happened.
+						executor.steps = append(executor.steps, executor.recordFailedActionStep(action, "action execution failed", errAct))
+						executor.stepKeys[action.ToolID] = true
 					}
 				}
 			}
