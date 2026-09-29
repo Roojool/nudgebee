@@ -173,27 +173,7 @@ func (m GCPMonitoringWebhook) ProcessEventWebook(sc *security.RequestContext, se
 	eventPriority := mapGCPSeverityToPriority(sev)
 
 	// Determine subject name from resource (needed for fingerprint and labels).
-	// Resolution order matches polling in gcloud_monitoring_incidents_v3.go.
-	subjectName := inc.ResourceDisplayName
-	if subjectName == "" {
-		subjectName = inc.Resource.Labels["instance_id"]
-	}
-	if subjectName == "" {
-		subjectName = inc.Resource.Labels["resource_id"]
-	}
-	if subjectName == "" {
-		// database_id kept as-is (e.g., "project:instance") to match polling behavior
-		subjectName = inc.Resource.Labels["database_id"]
-	}
-	if subjectName == "" {
-		subjectName = inc.Resource.Labels["pod_name"]
-	}
-	if subjectName == "" {
-		subjectName = inc.Resource.Labels["container_name"]
-	}
-	if subjectName == "" {
-		subjectName = inc.Resource.Labels["function_name"]
-	}
+	subjectName := gcpSubjectName(inc)
 
 	// Extract region from zone (matches polling logic in gcloud_monitoring_incidents_v3.go)
 	var region string
@@ -535,6 +515,68 @@ func gcpLogEnrichmentLabels(inc GCPMonitoringIncident, projectID, policyPath str
 		labels["gcp_policy_id"] = policyPath
 	}
 	return labels
+}
+
+// gcpSubjectName resolves the resource name an incident fired on.
+// Resolution order matches polling in gcloud_monitoring_incidents_v3.go.
+func gcpSubjectName(inc GCPMonitoringIncident) string {
+	if inc.ResourceDisplayName != "" {
+		return inc.ResourceDisplayName
+	}
+	// database_id kept as-is (e.g., "project:instance") to match polling behavior
+	for _, key := range []string{"instance_id", "resource_id", "database_id", "pod_name", "container_name", "function_name"} {
+		if v := inc.Resource.Labels[key]; v != "" {
+			return v
+		}
+	}
+	// Cloud Run, GKE clusters, Pub/Sub etc. carry their name in a type-specific
+	// label (service_name, cluster_name, ...) that the generic chain above misses.
+	for _, key := range gcpResourceIDLabelKeys(inc.Resource.Type) {
+		if v := inc.Resource.Labels[key]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// gcpResourceIDLabelKeys returns the monitored-resource label keys that identify a
+// resource for a given GCP resource type, in preference order.
+// Mirrors gcpResourceIDLabelKeys in cloud-collector's gcloud_monitoring_incidents_v3.go.
+func gcpResourceIDLabelKeys(resourceType string) []string {
+	switch resourceType {
+	case "cloud_run_revision":
+		return []string{"service_name", "configuration_name", "revision_name"}
+	case "gke_cluster", "k8s_cluster":
+		return []string{"cluster_name"}
+	case "gke_nodepool":
+		return []string{"nodepool_name", "cluster_name"}
+	case "k8s_node_pool":
+		return []string{"node_pool_name", "cluster_name"}
+	case "k8s_node", "gke_node":
+		return []string{"node_name", "cluster_name"}
+	case "audited_resource":
+		return []string{"method", "service"}
+	case "gae_app":
+		return []string{"module_id", "version_id"}
+	case "cloud_tasks_queue":
+		return []string{"queue_id"}
+	case "pubsub_topic":
+		return []string{"topic_id"}
+	case "pubsub_subscription":
+		return []string{"subscription_id"}
+	case "gcs_bucket":
+		return []string{"bucket_name"}
+	case "https_lb_rule", "http_load_balancer", "l7_lb_rule", "tcp_ssl_proxy_rule":
+		return []string{"forwarding_rule_name", "url_map_name", "backend_service_name", "target_proxy_name", "backend_name"}
+	case "bigquery_dataset", "bigquery_table":
+		return []string{"dataset_id", "table_id"}
+	case "redis_instance":
+		return []string{"instance_id", "node_id"}
+	case "spanner_instance":
+		return []string{"instance_id"}
+	default:
+		return nil
+	}
 }
 
 // gcpResourceTypeToServiceName maps GCP monitored resource types to human-readable service names.

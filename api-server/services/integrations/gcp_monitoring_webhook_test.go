@@ -73,3 +73,34 @@ func TestGCPLogEnrichmentLabels(t *testing.T) {
 	// then have to treat as present.
 	assert.Empty(t, gcpLogEnrichmentLabels(GCPMonitoringIncident{}, "", ""))
 }
+
+// TestGCPSubjectName pins the Application name for webhook incidents. Cloud Run and
+// GKE cluster alerts (incl. log-based ones like "GKE Resource Upgrade Started" and
+// "Kubernetes Secret Modified") carry their name only in service_name / cluster_name,
+// which the generic label chain missed, so they showed "-" in the Application column.
+// Values are synthetic — real project/instance names must not be committed.
+func TestGCPSubjectName(t *testing.T) {
+	cases := []struct {
+		name string
+		inc  GCPMonitoringIncident
+		want string
+	}{
+		{"cloud run service", GCPMonitoringIncident{Resource: GCPMonitoringResource{Type: "cloud_run_revision",
+			Labels: map[string]string{"project_id": "p", "service_name": "svc-a", "revision_name": "svc-a-00001"}}}, "svc-a"},
+		{"k8s cluster log alert", GCPMonitoringIncident{Resource: GCPMonitoringResource{Type: "k8s_cluster",
+			Labels: map[string]string{"project_id": "p", "cluster_name": "cluster-a", "location": "us-central1"}}}, "cluster-a"},
+		{"gke cluster", GCPMonitoringIncident{Resource: GCPMonitoringResource{Type: "gke_cluster",
+			Labels: map[string]string{"cluster_name": "cluster-a"}}}, "cluster-a"},
+		{"cloud sql keeps database_id", GCPMonitoringIncident{Resource: GCPMonitoringResource{Type: "cloudsql_database",
+			Labels: map[string]string{"database_id": "p:db-a"}}}, "p:db-a"},
+		{"display name wins", GCPMonitoringIncident{ResourceDisplayName: "shown", Resource: GCPMonitoringResource{Type: "cloud_run_revision",
+			Labels: map[string]string{"service_name": "svc-a"}}}, "shown"},
+		{"unknown type", GCPMonitoringIncident{Resource: GCPMonitoringResource{Type: "something_else",
+			Labels: map[string]string{"service_name": "svc-a"}}}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, gcpSubjectName(tc.inc))
+		})
+	}
+}
