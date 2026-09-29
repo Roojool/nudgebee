@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import { Box, Typography } from '@mui/material';
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import { Card } from '@ui/Card';
-import { Skeleton } from '@ui/Skeleton';
+import { Chip } from '@ui/Chip';
 import SafeIcon from '@shared/icons/SafeIcon';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import { User1, NotificationIcon1, IntegrationsIcon, AgentIcon, SettingsIcon } from '@assets';
@@ -14,9 +14,10 @@ import { getAdminOverviewCounts } from '@api1/admin-overview';
 // tab. Each card carries a short description, an at-a-glance count line, and
 // quick-action links that deep-link into that tab (or a specific sub-tab).
 //
-// The counts are decorative: every one is fetched independently and fail-soft,
-// so a slow or failing source degrades to a dash rather than blanking the card
-// or blocking the others. Fired in parallel — none depends on another.
+// Each count deep-links (via its stat's `target`) into the tab it summarises and
+// counts only active/enabled rows (see getAdminOverviewCounts). Every one is
+// fetched independently and fail-soft, so a slow or failing source degrades to a
+// (non-clickable) dash rather than blocking the others.
 //
 // Each quick-action link either navigates (hash, optionally + an Integrations
 // `?integration=` slug) or opens a modal / selects an inner tab at the
@@ -57,9 +58,9 @@ const CARDS = [
     // custom-roles feature (listCustomRoles 403/400s), so a dash would read as
     // an error — drop the stat instead.
     stats: [
-      { key: 'users', one: 'user', many: 'users' },
-      { key: 'groups', one: 'group', many: 'groups' },
-      { key: 'roles', one: 'role', many: 'roles', omitOnNull: true },
+      { key: 'users', one: 'user', many: 'users', target: { hash: 'access-users' } },
+      { key: 'groups', one: 'group', many: 'groups', target: { hash: 'access-users/groups' } },
+      { key: 'roles', one: 'role', many: 'roles', omitOnNull: true, target: { hash: 'access-users/roles' } },
     ],
     links: [
       { label: 'Invite new users', hash: 'access-users', action: 'invite-user' },
@@ -75,8 +76,8 @@ const CARDS = [
     icon: IntegrationsIcon,
     description: 'Connect clouds, clusters, observability tools, ticketing and messaging.',
     stats: [
-      { key: 'connected', one: 'connected', many: 'connected' },
-      { key: 'accounts', one: 'account', many: 'accounts' },
+      { key: 'connected', one: 'connected', many: 'connected', target: { hash: 'integrations' } },
+      { key: 'accounts', one: 'account', many: 'accounts', target: { hash: 'integrations', query: { integration: 'account' } } },
     ],
     links: [
       { label: 'Connect a cloud account', hash: 'integrations', query: { integration: 'account' } },
@@ -92,16 +93,16 @@ const CARDS = [
     icon: NotificationIcon1,
     description: 'Decide which events reach your team, for which clusters, and on which channel.',
     stats: [
-      { key: 'rules', one: 'rule', many: 'rules' },
-      { key: 'channels', one: 'channel', many: 'channels' },
+      { key: 'rules', one: 'rule', many: 'rules', target: { hash: 'notification-rules' } },
+      { key: 'channels', one: 'channel', many: 'channels', target: { hash: 'integrations', query: { integration: 'alert' } } },
     ],
     // The four alert links open the Create Rule modal preset to that source
     // type; channels have no modal in this tab, so that one navigates to the
     // messaging integrations tile.
     links: [
-      { label: 'Create a troubleshooting alert', hash: 'notification-rules', action: 'alert-troubleshoot' },
-      { label: 'Create an optimization alert', hash: 'notification-rules', action: 'alert-optimize' },
-      { label: 'Create an SLO alert', hash: 'notification-rules', action: 'alert-slo' },
+      { label: 'Route troubleshooting alerts to a channel', hash: 'notification-rules', action: 'alert-troubleshoot' },
+      { label: 'Route optimization alerts to a channel', hash: 'notification-rules', action: 'alert-optimize' },
+      { label: 'Route SLO alerts to a channel', hash: 'notification-rules', action: 'alert-slo' },
       { label: 'Schedule a weekly digest', hash: 'notification-rules', action: 'alert-weekly_digest' },
       { label: 'Manage notification channels', hash: 'integrations', query: { integration: 'alert' } },
     ],
@@ -112,8 +113,8 @@ const CARDS = [
     icon: AgentIcon,
     description: 'Choose the models, tools and agents that power the assistant.',
     stats: [
-      { key: 'providers', one: 'provider', many: 'providers' },
-      { key: 'mcps', one: 'MCP', many: 'MCPs' },
+      { key: 'providers', one: 'provider', many: 'providers', target: { hash: 'ai-tools/providers' } },
+      { key: 'mcps', one: 'MCP', many: 'MCPs', target: { hash: 'ai-tools/tools-mcp' } },
     ],
     // Most links navigate to the relevant AI & Tools sub-tab, but two point
     // elsewhere because the admin sub-tab is a read-only mirror, not where the
@@ -138,7 +139,7 @@ const CARDS = [
     title: 'Tenant Settings',
     icon: SettingsIcon,
     description: "Your tenant's identity, self-onboarding, label mapping and feature flags.",
-    stats: [{ key: 'flags', one: 'feature on', many: 'features on' }],
+    stats: [{ key: 'flags', one: 'feature on', many: 'features on', target: { hash: 'tenant-settings', action: 'settings-features' } }],
     links: [
       { label: 'Edit tenant identity', hash: 'tenant-settings', action: 'settings-general' },
       { label: 'Set up self-onboarding', hash: 'tenant-settings', action: 'settings-general' },
@@ -148,28 +149,6 @@ const CARDS = [
     ],
   },
 ];
-
-// Renders one count as text. Loading → skeleton; failed → em dash; number → count.
-const StatValue = ({ value, one, many }) => {
-  if (value === undefined) {
-    return <Skeleton shape='rect' width='54px' height='13px' />;
-  }
-  if (value === null) {
-    return (
-      <Typography component='span' sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-500)' }}>
-        &mdash;
-      </Typography>
-    );
-  }
-  return (
-    <Typography component='span' sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
-      <Box component='span' sx={{ fontWeight: 'var(--ds-font-weight-semibold)', color: 'var(--ds-foreground)' }}>
-        {value}
-      </Box>{' '}
-      {value === 1 ? one : many}
-    </Typography>
-  );
-};
 
 const OverviewCards = () => {
   const router = useRouter();
@@ -290,16 +269,45 @@ const OverviewCards = () => {
 
                 {visibleStats.length > 0 && (
                   <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 'var(--ds-space-2)' }}>
-                    {visibleStats.map((s, i) => (
-                      <React.Fragment key={s.key}>
-                        {i > 0 && (
-                          <Box component='span' sx={{ color: 'var(--ds-gray-300)' }}>
-                            &middot;
-                          </Box>
-                        )}
-                        <StatValue value={counts[s.key]} one={s.one} many={s.many} />
-                      </React.Fragment>
-                    ))}
+                    {visibleStats.map((s) => {
+                      const value = counts[s.key];
+                      const testId = `admin-overview-stat-${card.fragment}-${s.key}`;
+                      // Loading → subtle chip with spinner; failed → subtle chip with a dash;
+                      // a real count → filled blue (info) chip, clickable to its tab. Blue reads
+                      // as "here's a number you can open"; the grey states have nothing to open.
+                      // variant='count' is explicit so the chip keeps the info fill: an onClick
+                      // alone derives variant 'action', which renders transparent (outline only).
+                      if (value === undefined) {
+                        return (
+                          <Chip key={s.key} size='md' tone='subtle' loading>
+                            {s.many}
+                          </Chip>
+                        );
+                      }
+                      if (value === null) {
+                        return (
+                          <Chip key={s.key} size='md' tone='subtle'>
+                            —
+                          </Chip>
+                        );
+                      }
+                      return (
+                        <Chip
+                          key={s.key}
+                          variant='count'
+                          size='md'
+                          tone='info'
+                          onClick={s.target ? () => go(s.target) : undefined}
+                          id={testId}
+                          data-testid={testId}
+                        >
+                          <Box component='span' sx={{ fontWeight: 'var(--ds-font-weight-semibold)' }}>
+                            {value}
+                          </Box>{' '}
+                          {value === 1 ? s.one : s.many}
+                        </Chip>
+                      );
+                    })}
                   </Box>
                 )}
 

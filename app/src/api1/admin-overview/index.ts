@@ -12,18 +12,24 @@ import { queryGraphQL } from '@lib/HttpService';
 // queries use) are valid GraphQL and resolved from the AST by the gateway —
 // verified against the live gateway before committing to this shape.
 //
+// Counts are scoped to active/enabled rows where the where-schema allows it
+// (users/accounts status "active"; llm/mcp/connected status "enabled"). rules,
+// groups and channels stay total: groups/channels have no active state, and
+// notifications_aggregate_rules can't filter is_active (selectable on the row,
+// absent from its where input).
+//
 // Not here: `channels` (needs the messaging-platform + integration merge that
 // apiNotifications.getInstalledTools does — a raw messagingplatforms_list count
 // misses integration-based channels) and `roles` count when the custom-roles
 // feature is off (returns null, dropped by the card).
 export const ADMIN_OVERVIEW_COUNTS = `
 query AdminOverviewCounts {
-  users: users_aggregate_by_tenant(where: {}) { rows { count } }
+  users: users_aggregate_by_tenant(where: { status: { _eq: "active" } }) { rows { count } }
   groups: usergroups_aggregate(where: {}) { rows { count } }
   rules: notifications_aggregate_rules(where: { source: { _neq: "ai_cost" } }) { rows { count } }
-  accounts: accounts_aggregate(where: {}) { rows { count } }
-  providers: integrations_aggregate(where: { type: { _eq: "llm" } }) { rows { count } }
-  mcps: integrations_aggregate(where: { type: { _eq: "mcp" } }) { rows { count } }
+  accounts: accounts_aggregate(where: { status: { _eq: "active" } }) { rows { count } }
+  providers: integrations_aggregate(where: { type: { _eq: "llm" }, status: { _eq: "enabled" } }) { rows { count } }
+  mcps: integrations_aggregate(where: { type: { _eq: "mcp" }, status: { _eq: "enabled" } }) { rows { count } }
   connected: integrations_aggregate(where: { status: { _eq: "enabled" } }) { rows { count } }
   flags: featureflags_list(where: { account_id: { _is_null: true } }) { rows { status } }
   roles: customroles_list { roles { id } }
