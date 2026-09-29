@@ -11,9 +11,19 @@ jest.mock('next/router', () => ({ useRouter: () => ({ push: mockPush }) }));
 // The card reads who may act from the gate, which reads it from the session —
 // not from `hasWriteAccess()`, whose backing global only `withAuth` populates.
 const mockCanManage = jest.fn(() => true);
+// Defaults true: most tests below exercise the admin/has-an-account paths and
+// don't care about this signal. The three read-only tests that do set it
+// explicitly, matching whether their own `mockGetAllAccount` payload is empty.
+const mockHasConnectedAccount = jest.fn(() => true);
 const mockGateRefresh = jest.fn();
 jest.mock('@context/SetupGateContext', () => ({
-  useSetupGate: () => ({ loading: false, locked: false, canManageSetup: mockCanManage(), refresh: mockGateRefresh }),
+  useSetupGate: () => ({
+    loading: false,
+    locked: false,
+    canManageSetup: mockCanManage(),
+    hasConnectedAccount: mockHasConnectedAccount(),
+    refresh: mockGateRefresh,
+  }),
 }));
 
 jest.mock('@hooks/useTenantBranding', () => ({
@@ -193,6 +203,7 @@ const aiIntegrationsResponse = (rows: unknown[]) => ({ data: { data: { integrati
 beforeEach(() => {
   jest.clearAllMocks();
   mockCanManage.mockReturnValue(true);
+  mockHasConnectedAccount.mockReturnValue(true);
   mockListProviderCapabilities.mockResolvedValue(capabilities([]));
   mockListK8sAccAgentHealth.mockImplementation((ids: string[]) => Promise.resolve(agentHealth(ids)));
   mockGetKnowledgeBases.mockResolvedValue({ data: [] });
@@ -236,14 +247,16 @@ describe('SetupCenter', () => {
     expect(screen.queryByTestId('setup-item-metrics')).not.toBeInTheDocument();
   });
 
-  it('hides the provider grid for a read-only viewer on a fresh tenant, showing only the write-access note', async () => {
+  it('shows a non-admin only the ask-an-admin message on a tenant with no accounts — no checklist at all', async () => {
     mockCanManage.mockReturnValue(false);
+    mockHasConnectedAccount.mockReturnValue(false);
     mockGetAllAccount.mockResolvedValue(payload());
     render(<SetupCenter />);
 
-    await screen.findByText('Set up Nudgebee');
+    expect(await screen.findByTestId('setup-ask-admin')).toBeInTheDocument();
+    expect(screen.queryByText('Set up Nudgebee')).not.toBeInTheDocument();
     expect(screen.queryByText('Start here — pick a provider')).not.toBeInTheDocument();
-    expect(screen.getByText(/You need write access to connect accounts/)).toBeInTheDocument();
+    expect(screen.queryByText(/You need write access to connect accounts/)).not.toBeInTheDocument();
   });
 
   it('offers the way out as soon as one account exists, with everything else empty', async () => {
@@ -550,7 +563,10 @@ describe('SetupCenter', () => {
   });
 
   it('hides every action from a read-only user and says why', async () => {
+    // Has an account already — the ask-admin-only branch is for the *other*
+    // read-only case (no account at all yet), not this one.
     mockCanManage.mockReturnValue(false);
+    mockHasConnectedAccount.mockReturnValue(true);
     mockGetAllAccount.mockResolvedValue(payload([k8s]));
     render(<SetupCenter />);
 
@@ -1094,7 +1110,9 @@ describe('module chips', () => {
   });
 
   it('hides the chips from a read-only viewer, who cannot act on them', async () => {
+    // Has an account already — see the same note on 'hides every action...' above.
     mockCanManage.mockReturnValue(false);
+    mockHasConnectedAccount.mockReturnValue(true);
     mockGetAllAccount.mockResolvedValue(payload([k8s]));
     render(<SetupCenter />);
 

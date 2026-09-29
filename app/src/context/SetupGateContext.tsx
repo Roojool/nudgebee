@@ -46,9 +46,23 @@ import { accountRowState, type OnboardingAccount } from '@lib/onboardingReadines
  *   agent-health lookup that itself fails falls back to trusting `status`
  *   alone (`accountRowState`'s own contract), the same as everywhere else
  *   that lookup is used, rather than stranding every K8s row at `partial`.
- * - **A user who cannot add an account is never gated.** Holding someone on
- *   a page whose only exit is an action they lack permission for is a trap
- *   with no exit, whatever the gate keys on.
+ * - **A non-admin reaches a page here too now, but never a checklist.**
+ *   `locked` used to also require `canManageSetup`, on the theory that
+ *   holding someone on a page whose only exit is an action they lack
+ *   permission for is a trap with no exit. Reversed after a live report: a
+ *   non-admin on a genuinely unconfigured tenant landed on an ordinary page
+ *   (the demo account's mock data, same as anyone else) with nothing telling
+ *   them the tenant had never been set up, or who to ask. `SetupCenter`
+ *   itself is what keeps the original trap concern from actually recurring —
+ *   it branches on `canManageSetup` (still exposed below) and gives a
+ *   non-admin one line saying to ask an admin, never the checklist an admin
+ *   sees, so nothing here implies an action that isn't theirs to take.
+ *   `hasConnectedAccount` is exposed for exactly that branch, so the page's
+ *   content and the redirect that sent them there read the same signal.
+ *   What this does not fix: once locked, a non-admin has no self-service way
+ *   out, and nothing re-checks in the background — if an admin fixes the
+ *   tenant a minute later, this non-admin's own tab won't notice until they
+ *   reload. Accepted, not fixed here.
  */
 
 /** The one route a gated tenant may open. */
@@ -67,6 +81,11 @@ interface SetupGateValue {
    * global only `withAuth` populates — and `withAuth` wraps neither `/setup`
    * nor `/home`, so on the gated page it answers "not an admin" for everyone. */
   canManageSetup: boolean;
+  /** `null` while unknown (never a confident zero). The same signal `locked`
+   * is built from — exposed so `/setup` can tell a genuinely unconfigured
+   * tenant apart from a non-admin just read-only browsing one that already
+   * has an account, without computing that a second way. */
+  hasConnectedAccount: boolean | null;
   /** Re-reads accounts (and agent health). Call it after connecting one, or
    * after an agent checks in, so the gate lifts without a page reload. */
   refresh: () => void;
@@ -76,6 +95,7 @@ const SetupGateContext = React.createContext<SetupGateValue>({
   loading: true,
   locked: false,
   canManageSetup: false,
+  hasConnectedAccount: null,
   refresh: () => {},
 });
 
@@ -200,8 +220,10 @@ export const SetupGateProvider = ({ children }: { children: React.ReactNode }): 
 
   const loading = accountsLoading || sessionStatus === 'loading';
   // `hasConnectedAccount === false` and not merely falsy: `null` is the
-  // unknown case, and unknown must never lock.
-  const locked = !loading && hasConnectedAccount === false && canManageSetup;
+  // unknown case, and unknown must never lock. No `&& canManageSetup` here
+  // any more — a non-admin is locked too now, see the file doc comment above
+  // for why that stopped being the trap it used to be.
+  const locked = !loading && hasConnectedAccount === false;
 
   // Dimming the nav rail stops the rail and nothing else: a typed URL, a
   // bookmark or browser Back all reach the page regardless. This redirect is the
@@ -228,7 +250,10 @@ export const SetupGateProvider = ({ children }: { children: React.ReactNode }): 
     replaceRef.current(SETUP_ROUTE);
   }, [loading, locked, pathname]);
 
-  const value = React.useMemo(() => ({ loading, locked, canManageSetup, refresh }), [loading, locked, canManageSetup, refresh]);
+  const value = React.useMemo(
+    () => ({ loading, locked, canManageSetup, hasConnectedAccount, refresh }),
+    [loading, locked, canManageSetup, hasConnectedAccount, refresh]
+  );
 
   return <SetupGateContext.Provider value={value}>{children}</SetupGateContext.Provider>;
 };

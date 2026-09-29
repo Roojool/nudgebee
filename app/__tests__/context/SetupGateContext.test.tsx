@@ -203,20 +203,32 @@ describe('locking requires positive evidence', () => {
   });
 });
 
-describe('a user who cannot act is never gated', () => {
-  // Holding someone on a page whose only exit is an action they lack permission
-  // for is a trap with no exit, whatever the gate keys on.
-  it('leaves a read-only user in the product', async () => {
+describe('a non-admin is gated too now, but never onto a checklist', () => {
+  // Used to also require canManageSetup, on the theory that holding someone on
+  // a page whose only exit is an action they lack permission for is a trap
+  // with no exit. Reversed after a live report — see the file's own doc
+  // comment for why. SetupCenter is what keeps the trap from recurring: it
+  // reads `hasConnectedAccount` off this same context and shows a non-admin
+  // one line, never the checklist. This file only pins `locked` itself.
+  it('gates a read-only user on a tenant with no accounts', async () => {
     session = { roles: ['tenant_admin_readonly'], tenant: { id: 't1' } };
+    renderGate();
+    await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('GATED'));
+    expect(mockReplace).toHaveBeenCalledWith('/setup');
+  });
+
+  it('gates a user with no roles at all on a tenant with no accounts', async () => {
+    session = { roles: [], tenant: { id: 't1' } };
+    renderGate();
+    await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('GATED'));
+  });
+
+  it('never gates a non-admin once the tenant has an account — role and account state are independent', async () => {
+    session = { roles: [], tenant: { id: 't1' } };
+    mockGetAllAccount.mockResolvedValue(accounts([account()]));
     renderGate();
     await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('OPEN'));
     expect(mockReplace).not.toHaveBeenCalled();
-  });
-
-  it('leaves a user with no roles at all in the product', async () => {
-    session = { roles: [], tenant: { id: 't1' } };
-    renderGate();
-    await waitFor(() => expect(screen.getByTestId('probe')).toHaveTextContent('OPEN'));
   });
 
   it('reports who may act, so the card does not have to ask twice', async () => {
@@ -230,6 +242,19 @@ describe('a user who cannot act is never gated', () => {
       </SetupGateProvider>
     );
     await waitFor(() => expect(screen.getByTestId('roles')).toHaveTextContent('true'));
+  });
+
+  it('reports hasConnectedAccount too, so the page can tell "unconfigured" apart from "just not an admin"', async () => {
+    const Signal = () => {
+      const { hasConnectedAccount } = useSetupGate();
+      return <div data-testid='signal'>{String(hasConnectedAccount)}</div>;
+    };
+    render(
+      <SetupGateProvider>
+        <Signal />
+      </SetupGateProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId('signal')).toHaveTextContent('false'));
   });
 });
 

@@ -53,6 +53,7 @@ import { Select } from '@ui/Select';
 import { Modal } from '@ui/Modal';
 import { ProgressBar } from '@ui/ProgressBar';
 import { Skeleton } from '@ui/Skeleton';
+import { EmptyState } from '@ui/EmptyState';
 import { fillBrandTokens, useBrandingConfig } from '@hooks/useTenantBranding';
 import { useSetupGate } from '@context/SetupGateContext';
 import { useOnboardingReadiness } from '@hooks/useOnboardingReadiness';
@@ -1160,7 +1161,7 @@ const SetupCenter = () => {
   // neither `/setup` nor `/home` — so on this page it answered "not an admin"
   // for everyone, real admins included, and the card rendered with nothing the
   // user could act on and no way out.
-  const { canManageSetup: canWrite, refresh: refreshGate } = useSetupGate();
+  const { canManageSetup: canWrite, hasConnectedAccount, refresh: refreshGate } = useSetupGate();
 
   // Shared with `SetupProgressBanner` (see the hook's own doc comment) so the
   // two can never disagree on "X of N connected" for the same tenant.
@@ -1455,6 +1456,32 @@ const SetupCenter = () => {
   // top of it; generous on purpose, since the bar's own text can wrap to two
   // lines on a narrow viewport.
   const exitBarVisible = canWrite;
+
+  // A non-admin who reaches here on a tenant with no connected account (see
+  // SetupGateContext's own doc comment for why they're sent here at all now)
+  // has nothing below they could act on — showing the checklist, even
+  // read-only the way the `!canWrite` notes further down do once an account
+  // exists, would just tease actions that aren't theirs to take. One line
+  // instead. `hasConnectedAccount` is the exact signal that sent them here,
+  // not a second, possibly-disagreeing computation of the same question.
+  if (!canWrite && hasConnectedAccount === false) {
+    return (
+      <Box data-testid='setup-ask-admin'>
+        {/* `no-permissions` over `first-time`: what's special about this render
+            path isn't that the tenant is new (an admin on the same tenant sees
+            the full checklist instead) — it's that this viewer specifically
+            can't act on it. `surface`, since this replaces the page's entire
+            content rather than sitting inside one of the bordered Cards below. */}
+        <EmptyState
+          size='page'
+          surface
+          illustration='no-permissions'
+          title={`${brandTitle} hasn't been set up yet`}
+          description="Ask a tenant administrator to connect an account. There's nothing to do here until then."
+        />
+      </Box>
+    );
+  }
 
   return (
     <Box
