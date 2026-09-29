@@ -75,7 +75,6 @@ export const LOGS_PROVIDERS: OnboardingProviderDef[] = [
   { route: 'NEWRELIC', label: 'New Relic', types: ['newrelic'] },
   { route: 'DYNATRACE', label: 'Dynatrace', types: ['dynatrace'], cloudCapable: true },
   { route: 'PINOT', label: 'Pinot', types: ['pinot'] },
-  { route: 'HIVE', label: 'Hive', types: ['hive'] },
   { route: 'SPLUNK_ENTERPRISE', label: 'Splunk Enterprise', types: ['splunk_enterprise'] },
   { route: 'CUBEAPM', label: 'CubeAPM', types: ['cubeapm'] },
 ];

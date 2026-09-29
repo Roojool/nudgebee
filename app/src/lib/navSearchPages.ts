@@ -307,7 +307,6 @@ export const integrationProviders: string[] = [
   'SOLARWINDS',
   'ES',
   'PINOT',
-  'HIVE',
   // queue
   'RABBITMQ',
   // ci_cd

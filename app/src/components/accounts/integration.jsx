@@ -30,7 +30,15 @@ import SafeIcon from '@shared/icons/SafeIcon';
 // --- CONFIGURATION ---
 // Exported so navSearchPages.ts's hand-synced `integrationProviders` list can
 // be tested against this, the actual source of truth, for drift.
-export const DISABLED_PROVIDERS = new Set(['SPLUNK', 'SPLUNK_OBSERVABILITY_PLATFORM', 'SPLUNK_WEBHOOK', 'GRAFANA-TEMPO', 'BITBUCKET', 'LAST9']);
+export const DISABLED_PROVIDERS = new Set([
+  'SPLUNK',
+  'SPLUNK_OBSERVABILITY_PLATFORM',
+  'SPLUNK_WEBHOOK',
+  'GRAFANA-TEMPO',
+  'BITBUCKET',
+  'LAST9',
+  'HIVE',
+]);
 // Constants moved to top level for better organization
 const PROVIDERS = {
   CLOUD: ['K8S', 'AWS', 'AZURE', 'GCP', 'CLOUDFOUNDRY', 'SELFHOSTED'],
