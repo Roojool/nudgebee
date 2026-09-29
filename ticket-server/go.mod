@@ -100,7 +100,7 @@ require (
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
-	github.com/gin-contrib/pprof v1.5.5
+	github.com/gin-contrib/pprof v1.5.6
 	github.com/gin-contrib/sse v1.1.1 // indirect
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/locales v0.14.1 // indirect
