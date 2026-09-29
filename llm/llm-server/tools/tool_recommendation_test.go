@@ -136,3 +136,19 @@ func TestTruncateRecommendationJSON(t *testing.T) {
 		})
 	}
 }
+
+// TestRecommendationViewScopesAccountBeforeWindow pins #36006: the account
+// filter must be the view's own WHERE, which Postgres applies before the
+// ROW_NUMBER() window. The filter sqlExecuteQuery wraps around the view cannot
+// be pushed through the window, so on its own it ranked every tenant's rows.
+func TestRecommendationViewScopesAccountBeforeWindow(t *testing.T) {
+	const acct = "883efbbc-bb2c-404b-9ed9-6b7ecbf6f509"
+	view := recommendationViewFor(acct)
+
+	assert.NotContains(t, view, "__ACCOUNT_ID__")
+	where := strings.LastIndex(view, "WHERE r.cloud_account_id = '"+acct+"'::uuid")
+	assert.Greater(t, where, strings.Index(view, "ROW_NUMBER() OVER"),
+		"the account filter must be the view's own WHERE, after the window in the text")
+	assert.Equal(t, recommendationView, recommendationViewFor("x' OR '1'='1"),
+		"a non-UUID account must not be substituted into the SQL")
+}

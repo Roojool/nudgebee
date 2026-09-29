@@ -3,9 +3,12 @@ package tools
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"nudgebee/llm/common"
 	"nudgebee/llm/tools/core"
+
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -175,7 +178,24 @@ var recommendationView = `
 		LEFT JOIN cloud_resourses cr ON r.resource_id = cr.id
 		JOIN tenant t ON r.tenant_id = t.id
 		JOIN cloud_accounts ca ON r.cloud_account_id = ca.id
+		-- The window above is an optimisation fence: the account filter that
+		-- sqlExecuteQuery wraps around this view cannot be pushed through it,
+		-- so without this the rank ran over every tenant's recommendations
+		-- (118s on dev for a 6k-row account). Filtering here also matches
+		-- recommendation_groupings_v2, which pushes account_id into its CTE
+		-- before ranking. Substituted by recommendationViewFor.
+		WHERE r.cloud_account_id = '__ACCOUNT_ID__'::uuid
 	`
+
+// recommendationViewFor scopes recommendationView to one account. A non-UUID
+// account is left unsubstituted: sqlExecuteQuery rejects it before any SQL runs.
+func recommendationViewFor(accountId string) string {
+	id, err := uuid.Parse(accountId)
+	if err != nil {
+		return recommendationView
+	}
+	return strings.ReplaceAll(recommendationView, "__ACCOUNT_ID__", id.String())
+}
 
 // RecommendationDefaultColumns is the explicit column list queries should
 // default to, instead of SELECT * (the recommendation JSON can exceed 100 KB
@@ -338,7 +358,7 @@ func truncateRecommendationJSON(r map[string]any, _ int, _ int) map[string]any {
 }
 
 func (m RecommendationExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	resp, rows, err := sqlToolCall(nbRequestContext, input.Command, "recommendation_view", recommendationView, 10, truncateRecommendationJSON)
+	resp, rows, err := sqlToolCall(nbRequestContext, input.Command, "recommendation_view", recommendationViewFor(nbRequestContext.AccountId), 10, truncateRecommendationJSON)
 	if err == nil {
 		if len(rows) == 0 {
 			resp.Data = emptyResultWithRuleCatalog(nbRequestContext)
