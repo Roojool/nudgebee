@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/integrations/core"
 	"nudgebee/services/security"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 )
@@ -77,6 +80,9 @@ func (m OpenObserve) ConfigSchema() core.IntegrationSchema {
 					"collector writes to a differently-named stream (e.g. 'k8s_logs').",
 				Default:  OpenObserveDefaultLogStream,
 				Priority: 65,
+				// Testable so that editing only this field re-runs validation on save and
+				// asks for a fresh connection test, which is where a missing stream is named.
+				IsTestable: true,
 			},
 			"openobserve_trace_stream": {
 				Type: core.ToolSchemaTypeString,
@@ -84,6 +90,9 @@ func (m OpenObserve) ConfigSchema() core.IntegrationSchema {
 					"collector writes spans to a differently-named stream.",
 				Default:  OpenObserveDefaultTraceStream,
 				Priority: 64,
+				// Testable so that editing only this field re-runs validation on save and
+				// asks for a fresh connection test, which is where a missing stream is named.
+				IsTestable: true,
 			},
 			core.IntegrationConfigName: {
 				Type:             core.ToolSchemaTypeString,
@@ -125,7 +134,7 @@ func (m OpenObserve) ConfigSchema() core.IntegrationSchema {
 }
 
 func (m OpenObserve) ValidateConfig(sc *security.SecurityContext, config []core.IntegrationConfigValue, accountId string) []error {
-	var openobserveURL, orgID, username, password string
+	var openobserveURL, orgID, username, password, logStream, traceStream string
 	for _, c := range config {
 		switch c.Name {
 		case "openobserve_url":
@@ -136,6 +145,10 @@ func (m OpenObserve) ValidateConfig(sc *security.SecurityContext, config []core.
 			username = c.Value
 		case "openobserve_password":
 			password = c.Value
+		case "openobserve_log_stream":
+			logStream = c.Value
+		case "openobserve_trace_stream":
+			traceStream = c.Value
 		}
 	}
 
@@ -160,6 +173,17 @@ func (m OpenObserve) ValidateConfig(sc *security.SecurityContext, config []core.
 	}
 	if password == "" {
 		errs = append(errs, fmt.Errorf("openobserve_password is required"))
+	}
+	// Blank means the default stream. Anything else must pass the same check
+	// GetOpenObserveConfigs applies at query time — which fails every OpenObserve query
+	// for the account, metrics included, so the name has to be caught here, on save.
+	for _, stream := range []struct{ field, name string }{
+		{"openobserve_log_stream", logStream},
+		{"openobserve_trace_stream", traceStream},
+	} {
+		if name := strings.TrimSpace(stream.name); name != "" && !IsSafeOpenObserveStreamName(name) {
+			errs = append(errs, fmt.Errorf("%s %q is not a valid OpenObserve stream name: use only letters, digits and underscores", stream.field, name))
+		}
 	}
 	return errs
 }
@@ -212,6 +236,111 @@ func (m OpenObserve) TestConnection(sc *security.RequestContext, config []core.I
 	default:
 		return fmt.Errorf("OpenObserve API returned unexpected status: HTTP %d", resp.StatusCode)
 	}
+}
+
+// openObserveStreamNoteLimit caps how many stream names a connection note lists.
+const openObserveStreamNoteLimit = 10
+
+// ConnectionNotes reports a configured log or trace stream the organization does not
+// hold. A wrong stream name fails nothing: OpenObserve answers a search on it with
+// "stream not found", which the query path reads as an idle window, so the log and trace
+// screens are just empty. It is a note, not a TestConnection failure, because that probe
+// also decides provider status, where failing would mark the working signals — metrics
+// share this integration — disconnected too.
+//
+// A signal the organization holds no stream of at all is not reported: that is an org not
+// sending it (or not yet), and a note on every test would be noise.
+func (m OpenObserve) ConnectionNotes(sc *security.RequestContext, config []core.IntegrationConfigValue, accountId string) []string {
+	var openobserveURL, orgID, username, password string
+	logStream, traceStream := OpenObserveDefaultLogStream, OpenObserveDefaultTraceStream
+	for _, c := range config {
+		switch c.Name {
+		case "openobserve_url":
+			openobserveURL = c.Value
+		case "openobserve_org_id":
+			orgID = c.Value
+		case "openobserve_username":
+			username = c.Value
+		case "openobserve_password":
+			password = c.Value
+		case "openobserve_log_stream":
+			if name := strings.TrimSpace(c.Value); name != "" {
+				logStream = name
+			}
+		case "openobserve_trace_stream":
+			if name := strings.TrimSpace(c.Value); name != "" {
+				traceStream = name
+			}
+		}
+	}
+	openobserveURL = normalizeOpenObserveURL(openobserveURL)
+	orgID = strings.TrimSpace(orgID)
+	username = strings.TrimSpace(username)
+
+	var notes []string
+	for _, stream := range []struct{ signal, streamType, field, name string }{
+		{"log", "logs", "openobserve_log_stream", logStream},
+		{"trace", "traces", "openobserve_trace_stream", traceStream},
+	} {
+		available, err := listOpenObserveStreams(openobserveURL, orgID, username, password, stream.streamType)
+		if err != nil || len(available) == 0 || slices.Contains(available, stream.name) {
+			continue
+		}
+		notes = append(notes, fmt.Sprintf("%s stream %q was not found in organization %q, so %s searches will "+
+			"come back empty. Set %s to one of this organization's %s streams: %s.",
+			strings.ToUpper(stream.signal[:1])+stream.signal[1:], stream.name, orgID, stream.signal,
+			stream.field, stream.signal, summarizeOpenObserveStreams(available)))
+	}
+	return notes
+}
+
+// listOpenObserveStreams returns the names of the organization's streams of one type.
+func listOpenObserveStreams(openobserveURL, orgID, username, password, streamType string) ([]string, error) {
+	resp, err := common.HttpGet(
+		fmt.Sprintf("%s/api/%s/streams?type=%s", openobserveURL, neturl.PathEscape(orgID), neturl.QueryEscape(streamType)),
+		common.HttpWithHeaders(map[string]string{
+			"Authorization": fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(username+":"+password))),
+			"Content-Type":  "application/json",
+		}),
+		common.HttpWithTimeout(15*time.Second),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OpenObserve streams list returned HTTP %d", resp.StatusCode)
+	}
+
+	var body struct {
+		List []struct {
+			Name       string `json:"name"`
+			StreamType string `json:"stream_type"`
+		} `json:"list"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(body.List))
+	for _, s := range body.List {
+		// The type filter is re-checked rather than trusted: a server that ignores it
+		// would otherwise offer a metrics stream as a place to find logs.
+		if s.Name != "" && (s.StreamType == "" || s.StreamType == streamType) {
+			names = append(names, s.Name)
+		}
+	}
+	return names, nil
+}
+
+// summarizeOpenObserveStreams lists stream names in order, capped so an organization
+// with thousands of streams does not produce an unreadable note.
+func summarizeOpenObserveStreams(names []string) string {
+	sorted := slices.Clone(names)
+	sort.Strings(sorted)
+	if len(sorted) <= openObserveStreamNoteLimit {
+		return strings.Join(sorted, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(sorted[:openObserveStreamNoteLimit], ", "), len(sorted)-openObserveStreamNoteLimit)
 }
 
 // normalizeOpenObserveURL trims whitespace and strips any path/query/fragment
