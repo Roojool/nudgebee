@@ -1267,6 +1267,7 @@ func (l CodeAgent2) GetSupportedTools(ctx *security.RequestContext) []toolcore.N
 func (l CodeAgent2) GetSystemPrompt(ctx *security.RequestContext, query core.NBAgentRequest) core.NBAgentPrompt {
 
 	instructions := []string{
+		codeOwnershipInstructions,
 		"Your primary goal is to analyze error logs and correlate them with source code to identify root causes and debug issues.",
 		"You execute a sophisticated multi-agent system (orchestrator, router, and specialist agents) that uses ReAct planning to analyze repositories.",
 		"The analysis includes: cloning the repository, searching for relevant code, correlating logs with code patterns, identifying root causes, and optionally proposing fixes.",
@@ -1782,6 +1783,7 @@ func (l CodeAgent2) Execute(ctx *security.RequestContext, query core.NBAgentRequ
 		"workloads.nudgebee.com/git.hash": codeAgentRequest.GitCommit,
 		"workloads.nudgebee.com/git.repo": codeAgentRequest.GitRepo,
 	}
+	addCompanionIssueGuidance(actualResponse)
 	jsonResponse, err := json.Marshal(actualResponse)
 	if err != nil {
 		return core.NBAgentResponse{}, err

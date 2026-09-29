@@ -21,6 +21,7 @@ import (
 	"nudgebee/code-analysis-agent/internal/credentials"
 	"nudgebee/code-analysis-agent/internal/git"
 	"nudgebee/code-analysis-agent/internal/gitprovider"
+	"nudgebee/code-analysis-agent/internal/ownership"
 	"nudgebee/code-analysis-agent/internal/session"
 	"nudgebee/code-analysis-agent/llm"
 
@@ -241,18 +242,19 @@ func (o *LLMConfigOverride) toConfigOverride() config.LLMOverride {
 }
 
 type PRInfo struct {
-	Number      int    `json:"number,omitempty"`
-	IID         int    `json:"iid,omitempty"` // GitLab internal ID (merge request IID)
-	Title       string `json:"title,omitempty"`
-	Author      string `json:"author,omitempty"`
-	URL         string `json:"url,omitempty"`
-	WebURL      string `json:"web_url,omitempty"` // GitLab web URL format
-	State       string `json:"state,omitempty"`
-	Branch      string `json:"branch,omitempty"`
-	CreatedAt   string `json:"created_at,omitempty"`
-	MergedAt    string `json:"merged_at,omitempty"`
-	Description string `json:"description,omitempty"`
-	Provider    string `json:"provider,omitempty"` // "github" or "gitlab"
+	Ownership   *ownership.Result `json:"ownership,omitempty"`
+	Number      int               `json:"number,omitempty"`
+	IID         int               `json:"iid,omitempty"` // GitLab internal ID (merge request IID)
+	Title       string            `json:"title,omitempty"`
+	Author      string            `json:"author,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	WebURL      string            `json:"web_url,omitempty"` // GitLab web URL format
+	State       string            `json:"state,omitempty"`
+	Branch      string            `json:"branch,omitempty"`
+	CreatedAt   string            `json:"created_at,omitempty"`
+	MergedAt    string            `json:"merged_at,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Provider    string            `json:"provider,omitempty"` // "github" or "gitlab"
 
 	// Duplicate detection fields
 	Status        string   `json:"status,omitempty"`         // e.g., "skipped_duplicate", "success"
@@ -1172,6 +1174,15 @@ func (ah *AgenticAnalyzeHandler) parseAgentResponse(responseStr string) (*Analys
 			URL:    prURL,
 			State:  "OPEN", // Default state for newly created PR
 			Branch: ah.getStringField(fixPRMap, "branch"),
+		}
+
+		if raw, ok := fixPRMap["ownership"]; ok {
+			if encoded, err := json.Marshal(raw); err == nil {
+				var owner ownership.Result
+				if json.Unmarshal(encoded, &owner) == nil {
+					fixPRInfo.Ownership = &owner
+				}
+			}
 		}
 
 		// Handle different PR statuses
