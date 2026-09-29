@@ -84,6 +84,17 @@ func registerNBAgentFactoryAndTool(agent string, agentFactory func(accountId str
 // but only the canonical name is exposed as a tool to parent orchestrators.
 func RegisterNBAgentFactoryAndToolWithAliases(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string, aliases ...string) {
 	RegisterNBAgentFactoryAndTool(agent, agentFactory, toolDescription, toolInput, toolOutput)
+	registerAgentAliases(agentFactory, aliases)
+}
+
+// RegisterTargetAwareNBAgentFactoryAndToolWithAliases is the aliased form of
+// RegisterTargetAwareNBAgentFactoryAndTool.
+func RegisterTargetAwareNBAgentFactoryAndToolWithAliases(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string, aliases ...string) {
+	RegisterTargetAwareNBAgentFactoryAndTool(agent, agentFactory, toolDescription, toolInput, toolOutput)
+	registerAgentAliases(agentFactory, aliases)
+}
+
+func registerAgentAliases(agentFactory func(accountId string) (NBAgent, error), aliases []string) {
 	for _, alias := range aliases {
 		RegisterNBAgentFactory(alias, agentFactory)
 		nbSystemAgentAliases[strings.ToLower(alias)] = true
@@ -302,6 +313,18 @@ func (m *nbAgentTool) InputSchema() toolcore.ToolSchema {
 	}
 }
 
+// PrepareDelegatedTargetInput lets a targeted child hand its own target to a
+// target-aware agent it calls without naming one. Target-blind agents are left
+// unchanged; an explicit target in the input still wins.
+func (m *nbAgentTool) PrepareDelegatedTargetInput(target *toolcore.ExecutionTarget, input string) (string, error) {
+	if !m.targetSupported {
+		return input, nil
+	}
+	return tools.AddDelegatedTargetObject(input, target)
+}
+
+func (m *nbAgentTool) SupportsDelegatedTarget() bool { return m.targetSupported }
+
 func (m *nbAgentTool) ConfigSchema(ctx *security.RequestContext) toolcore.ToolConfigSchema {
 	toolNames := map[string]any{}
 	agent := m.GetAgent(ctx)
@@ -473,6 +496,12 @@ func childAgentTarget(ctx toolcore.NbToolContext, agent NBAgent, query toolcore.
 	if err != nil {
 		return nil, fmt.Errorf("agent target: %w", err)
 	}
+	// A nested child re-resolves its caller's target by name; keep the
+	// connection identity validated at the first handoff.
+	if bound := ctx.QueryConfig.DelegatedTarget; bound != nil && bound.AccountID != "" &&
+		bound.Provider == resolved.Provider && strings.EqualFold(bound.Name, resolved.Name) && bound.AccountID != resolved.AccountID {
+		return nil, fmt.Errorf("delegated %s target %q changed since handoff; select the connection again", bound.Provider, bound.Name)
+	}
 	return resolved, nil
 }
 
@@ -481,7 +510,9 @@ func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent
 	if err != nil {
 		return NBAgentResponse{}, err
 	}
-	// A nested agent inherits the conversation, not its caller's delegated target.
+	// The child's target is only what its input names. A targeted caller's
+	// planner injects its own target into target-aware agents' input
+	// (PrepareDelegatedTargetInput), so a nested handoff keeps the target.
 	nbRequestContext.QueryConfig.DelegatedTarget = target
 	existingAgentId := ""
 	if nbRequestContext.ToolCallId != "" {

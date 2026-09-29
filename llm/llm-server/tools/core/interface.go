@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"strings"
 
 	"nudgebee/llm/security"
 )
@@ -58,6 +59,41 @@ type NBTool interface {
 // own the parsing and precedence of their explicit per-call selectors.
 type DelegatedTargetInputPreparer interface {
 	PrepareDelegatedTargetInput(target *ExecutionTarget, input string) (string, error)
+}
+
+// DelegatedTargetSupport states whether a tool honors a delegated target. It
+// overrides the preparer check: agent-tools implement the preparer for every
+// instance, and some backend tools read the target from the call context
+// without a preparer.
+type DelegatedTargetSupport interface {
+	SupportsDelegatedTarget() bool
+}
+
+// targetNeutralTools names tools that read no account-scoped data (reasoning,
+// skills, docs, web, tenant-wide integrations), so a child targeted at another
+// account may still use them. Written only from init().
+var targetNeutralTools = map[string]bool{}
+
+// MarkTargetNeutral records tools whose answer does not depend on the account
+// they run under. Every other tool without target support is refused inside a
+// child targeted at a different account.
+func MarkTargetNeutral(names ...string) {
+	for _, name := range names {
+		targetNeutralTools[strings.ToLower(name)] = true
+	}
+}
+
+func IsTargetNeutral(name string) bool {
+	return targetNeutralTools[strings.ToLower(name)]
+}
+
+// SupportsDelegatedTarget reports whether tool applies a delegated target.
+func SupportsDelegatedTarget(tool NBTool) bool {
+	if support, ok := tool.(DelegatedTargetSupport); ok {
+		return support.SupportsDelegatedTarget()
+	}
+	_, ok := tool.(DelegatedTargetInputPreparer)
+	return ok
 }
 
 // WriteTargetInputValidator lets a tool refuse a write whose concrete target

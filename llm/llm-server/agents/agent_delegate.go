@@ -9,6 +9,7 @@ import (
 
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/security"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 )
 
@@ -97,6 +98,23 @@ func (t *delegateAgentTool) InputSchema() toolcore.ToolSchema {
 		},
 		Required: []string{"prompt"},
 	}
+}
+
+// PrepareDelegatedTargetInput keeps a targeted caller's target for the
+// sub-investigator unless the call names its own.
+func (t *delegateAgentTool) PrepareDelegatedTargetInput(target *toolcore.ExecutionTarget, input string) (string, error) {
+	if target == nil {
+		return input, nil
+	}
+	if !strings.HasPrefix(strings.TrimSpace(input), "{") {
+		// A plain-text input is the prompt; keep it as the prompt, not a command.
+		encoded, err := json.Marshal(map[string]string{"prompt": input})
+		if err != nil {
+			return "", fmt.Errorf("encode delegate prompt for delegated target: %w", err)
+		}
+		input = string(encoded)
+	}
+	return tools.AddDelegatedTargetObject(input, target)
 }
 
 func (t *delegateAgentTool) Call(ctx toolcore.NbToolContext, input toolcore.NBToolCallRequest) (toolcore.NBToolResponse, error) {

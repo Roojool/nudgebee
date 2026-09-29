@@ -183,9 +183,15 @@ func (t GetEventEvidenceTool) Call(nbRequestContext core.NbToolContext, input co
 	// mining) must operate on the complete log body, not the scratchpad-lean
 	// truncation; raw mode is bounded by the per-observation scratchpad cap.
 	eventTool := EventsExecuteTool{FullEvidence: true}
+	// The event lives in the delegated target's account; evidence files stay
+	// in this conversation's workspace (nbRequestContext.AccountId).
+	dataAccountID, targetErr := TargetDataAccountID(nbRequestContext)
+	if targetErr != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
 	toolCtx := core.NewNbToolContext(
 		nbRequestContext.Ctx, eventTool,
-		nbRequestContext.AccountId, nbRequestContext.UserId,
+		dataAccountID, nbRequestContext.UserId,
 		nbRequestContext.ConversationId, nbRequestContext.MessageId,
 		nbRequestContext.ParentAgentId, eventId,
 		nil, "", core.NBQueryConfig{}, "",

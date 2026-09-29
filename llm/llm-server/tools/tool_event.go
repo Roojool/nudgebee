@@ -843,6 +843,10 @@ func castIsoTimestampLiterals(sql string) string {
 }
 
 func (m EventsExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	nbRequestContext, err := targetDataContext(nbRequestContext)
+	if err != nil {
+		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: err.Error()}, nil
+	}
 	// Validate that the input is actually SQL, not descriptive text
 	if isDescriptiveText(input.Command) {
 		return core.NBToolResponse{

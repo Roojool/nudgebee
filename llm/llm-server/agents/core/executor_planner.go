@@ -2011,13 +2011,25 @@ func confirmationKeyForAction(tool toolcore.NBTool, action NBAgentPlannerToolAct
 	return action.Tool
 }
 
-func prepareDelegatedActionInput(tool toolcore.NBTool, target *toolcore.ExecutionTarget, action NBAgentPlannerToolAction) (NBAgentPlannerToolAction, error) {
+func prepareDelegatedActionInput(tool toolcore.NBTool, target *toolcore.ExecutionTarget, originAccountID string, action NBAgentPlannerToolAction) (NBAgentPlannerToolAction, error) {
 	if target == nil {
+		return action, nil
+	}
+	if _, isClientTool := tool.(*toolcore.ClientToolWrapper); isClientTool {
+		return action, nil // runs on the user's side, not against an account
+	}
+	if !toolcore.SupportsDelegatedTarget(tool) {
+		// A target-blind tool would answer from the conversation's own account
+		// while the child reports it as the target's. Refuse unless the tool
+		// reads no account data or the target is the conversation's account.
+		if target.AccountID != originAccountID && !toolcore.IsTargetNeutral(tool.Name()) {
+			return action, fmt.Errorf("%s cannot run against the %s %q: it only reads this conversation's own account, so its result would not describe %q. Use a tool that accepts the target, or state that this was not checked on %q", tool.Name(), target.Kind(), target.Name, target.Name, target.Name)
+		}
 		return action, nil
 	}
 	preparer, ok := tool.(toolcore.DelegatedTargetInputPreparer)
 	if !ok {
-		return action, nil
+		return action, nil // applies the target from the call context
 	}
 	input, err := preparer.PrepareDelegatedTargetInput(target, action.ToolInput)
 	if err != nil {
@@ -2374,7 +2386,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 	}
 
 	var targetErr error
-	action, targetErr = prepareDelegatedActionInput(tool, e.agentRequest.QueryConfig.DelegatedTarget, action)
+	action, targetErr = prepareDelegatedActionInput(tool, e.agentRequest.QueryConfig.DelegatedTarget, e.agentRequest.AccountId, action)
 	if targetErr != nil {
 		return NBAgentPlannerToolActionStep{
 			Action:      action,
@@ -3196,7 +3208,7 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		if strings.EqualFold(action.Tool, toolcore.ToolExecuteShellCommand) {
 			inputTool = tools.ShellTool{}
 		}
-		prepared, err := prepareDelegatedActionInput(inputTool, e.agentRequest.QueryConfig.DelegatedTarget, action)
+		prepared, err := prepareDelegatedActionInput(inputTool, e.agentRequest.QueryConfig.DelegatedTarget, e.agentRequest.AccountId, action)
 		if err != nil {
 			return []NBAgentPlannerToolActionStep{
 				{
@@ -4576,7 +4588,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 			// read all current actions as steps
 			for i, action := range executor.currentAction {
 				if tool, ok := lookupToolForPlanner(resumeNameToTool, executor.agentRequest.AccountId, action.Tool); ok {
-					prepared, prepErr := prepareDelegatedActionInput(tool, executor.agentRequest.QueryConfig.DelegatedTarget, action)
+					prepared, prepErr := prepareDelegatedActionInput(tool, executor.agentRequest.QueryConfig.DelegatedTarget, executor.agentRequest.AccountId, action)
 					if prepErr != nil {
 						executor.steps = append(executor.steps, NBAgentPlannerToolActionStep{Action: action, Observation: prepErr.Error(), Status: ToolStatusFailure})
 						executor.stepKeys[action.ToolID] = true

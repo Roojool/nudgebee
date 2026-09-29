@@ -28,10 +28,14 @@ ROUTING_KEYWORDS: configuration_changes, configuration, config, kube-state-metri
 	toolInput := "Provide events question in natural language"
 	toolOutput := "The tool will return the events data retrieved your query"
 
-	core.RegisterNBAgentFactoryAndToolAndPrioritizeAgentResponseForTool(EventsAgentName, func(accountId string) (core.NBAgent, error) {
+	core.RegisterTargetAwareNBAgentFactoryAndTool(EventsAgentName, func(accountId string) (core.NBAgent, error) {
 		return newEventsAgent(accountId), nil
 	}, toolDescription, toolInput, toolOutput)
 }
+
+// AcceptsExecutionTarget: every events tool reads the delegated target's
+// account (tools.TargetDataAccountID), so the agent can be handed a target.
+func (AgentEvents) AcceptsExecutionTarget() {}
 
 func newEventsAgent(accountId string) core.NBAgent {
 	return AgentEvents{
@@ -1103,6 +1107,10 @@ func (l AgentEvents) UpdateToolResponseForPlanner(toolRequest core.NBAgentPlanne
 
 const ToolEventSummary = "event_summary"
 
+// SupportsDelegatedTarget: it summarizes the observations it is given and
+// takes the cloud provider from the delegated target's account.
+func (EventSummaryTool) SupportsDelegatedTarget() bool { return true }
+
 type EventSummaryTool struct {
 }
 
@@ -1225,7 +1233,11 @@ func (m EventSummaryTool) Call(nbRequestContext toolcore.NbToolContext, input to
 	}
 
 	// Add account context (cloud provider) as a hidden system instruction
-	if cloudProvider := GetCloudProviderForAccount(nbRequestContext.AccountId); cloudProvider != "" {
+	providerAccountID, targetErr := tools.TargetDataAccountID(nbRequestContext)
+	if targetErr != nil {
+		return toolcore.NBToolResponse{}, fmt.Errorf("event summary: %w", targetErr)
+	}
+	if cloudProvider := GetCloudProviderForAccount(providerAccountID); cloudProvider != "" {
 		eventPrompt = eventPrompt + "\n\n[INTERNAL INSTRUCTION - DO NOT INCLUDE IN OUTPUT]: The infrastructure runs on " + cloudProvider + ". Use this context to guide your analysis approach, but do NOT mention the cloud provider context, infrastructure type, or deployment controller details in your output. Your response must remain provider-agnostic. Focus only on the evidence and findings."
 	}
 

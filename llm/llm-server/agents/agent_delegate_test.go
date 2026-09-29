@@ -6,6 +6,7 @@ import (
 
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/security"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
@@ -790,4 +791,66 @@ func TestDynamicReActAgent_InjectDefaultSkills(t *testing.T) {
 	agent := &dynamicReActAgent{name: "test_delegate", accountId: "acct-1"}
 	assert.True(t, agent.OptOutDefaultTools(), "delegate must still opt out of default tools (parent-curated scope)")
 	assert.True(t, agent.InjectDefaultSkills(), "delegate must re-enable load_skills via the skills carve-out")
+}
+
+func TestDelegateAgentKeepsCallerTarget(t *testing.T) {
+	tool := &delegateAgentTool{}
+	bound := &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod", AccountID: "aws-id"}
+	for _, input := range []string{
+		"Check the public buckets",
+		`{"prompt":"Check the public buckets","tools":["aws_execute"]}`,
+	} {
+		prepared, err := tool.PrepareDelegatedTargetInput(bound, input)
+		require.NoError(t, err)
+		request := toolcore.NBToolCallRequest{Command: prepared}
+		prompt, _, _, err := parseDelegateInput(request)
+		require.NoError(t, err)
+		assert.Equal(t, "Check the public buckets", prompt)
+		target, err := toolcore.ParseExecutionTarget(request)
+		require.NoError(t, err)
+		assert.Equal(t, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"}, target)
+	}
+
+	explicit := `{"prompt":"p","tools":["aws_execute"],"target":{"provider":"aws","name":"aws-dev"}}`
+	prepared, err := tool.PrepareDelegatedTargetInput(bound, explicit)
+	require.NoError(t, err)
+	assert.Equal(t, explicit, prepared, "an explicit target wins")
+}
+
+// Every tool the events agent can run must read the delegated target's
+// account; one that could not would answer from the conversation's own.
+func TestEventsAgentToolsFollowTheTarget(t *testing.T) {
+	agent := newEventsAgent("origin-id")
+	_, aware := agent.(core.ExecutionTargetAwareAgent)
+	require.True(t, aware)
+	for _, tool := range agent.GetSupportedTools(nil) {
+		assert.True(t, toolcore.SupportsDelegatedTarget(tool), "%s cannot take the target", tool.Name())
+	}
+	tool, ok := toolcore.GetNBTool("origin-id", EventsAgentName)
+	require.True(t, ok)
+	assert.True(t, toolcore.SupportsDelegatedTarget(tool), "the events agent-tool must accept a target")
+}
+
+// FinOps reads follow a handed target; its writes stay refused under another
+// account until approvals are bound to a target.
+func TestFinOpsReadsFollowTheTargetWritesDoNot(t *testing.T) {
+	_, aware := core.NBAgent(&FinOpsAgent{}).(core.ExecutionTargetAwareAgent)
+	require.True(t, aware)
+	for name, want := range map[string]bool{
+		FinOpsAgentName:                                true,
+		tools.ToolSpendSummary:                         true,
+		tools.ToolSpendForecast:                        true,
+		tools.ToolSpendAllocation:                      true,
+		tools.ToolRecommendationExecuteSql:             true,
+		tools.ToolRecommendationResolutionExecuteSql:   true,
+		tools.ToolProposeRecommendationApply:           true,
+		tools.ToolRecommendationApply:                  false,
+		tools.ToolRecommendationExecuteCli:             false,
+		tools.ToolRecommendationSetDismissal:           false,
+		tools.ToolRecommendationRecordTicketResolution: false,
+	} {
+		tool, ok := toolcore.GetNBTool("origin-id", name)
+		require.True(t, ok, name)
+		assert.Equal(t, want, toolcore.SupportsDelegatedTarget(tool), name)
+	}
 }

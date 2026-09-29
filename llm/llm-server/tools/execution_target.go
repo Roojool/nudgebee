@@ -87,3 +87,34 @@ func ResolveObservabilityTarget(ctx core.NbToolContext, input core.NBToolCallReq
 	}
 	return resolved, resolved.AccountID, nil
 }
+
+// TargetDataAccountID is the account a data query should read: the delegated
+// target's, re-validated for this caller, or the conversation's own account.
+// Workspace files stay on ctx.AccountId, which the parent agent can read.
+func TargetDataAccountID(ctx core.NbToolContext) (string, error) {
+	if ctx.QueryConfig.DelegatedTarget == nil {
+		return ctx.AccountId, nil
+	}
+	_, accountID, err := ResolveObservabilityTarget(ctx, core.NBToolCallRequest{})
+	return accountID, err
+}
+
+// targetDataContext returns ctx scoped to the account its data queries must
+// read. Only for tools that write nothing to the workspace: the copy's
+// AccountId is the target's.
+func targetDataContext(ctx core.NbToolContext) (core.NbToolContext, error) {
+	return callDataContext(ctx, core.NBToolCallRequest{})
+}
+
+// callDataContext is targetDataContext for tools that also take a per-call
+// "target" argument: an explicit target wins over the delegated one, and both
+// are validated for this caller.
+func callDataContext(ctx core.NbToolContext, input core.NBToolCallRequest) (core.NbToolContext, error) {
+	_, accountID, err := ResolveObservabilityTarget(ctx, input)
+	if err != nil {
+		return ctx, err
+	}
+	ctx.AccountId = accountID
+	ctx.QueryConfig.DelegatedTarget = nil
+	return ctx, nil
+}

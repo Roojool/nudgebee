@@ -16,14 +16,14 @@ func TestDelegatedTargetPreparationBindsDirectWriteConfirmation(t *testing.T) {
 	action := NBAgentPlannerToolAction{Tool: tool.Name(), ToolInput: `{"command":"aws ec2 terminate-instances --instance-ids i-1"}`}
 	require.Equal(t, tool.Name(), confirmationKeyForAction(tool, action))
 
-	prepared, err := prepareDelegatedActionInput(tool, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"}, action)
+	prepared, err := prepareDelegatedActionInput(tool, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"}, "origin-id", action)
 	require.NoError(t, err)
 	require.Equal(t, "aws_execute@aws-prod", confirmationKeyForAction(tool, prepared))
 	requested, err := tool.RequestedTarget(prepared.ToolInput)
 	require.NoError(t, err)
 	require.Equal(t, "aws-prod", requested)
 
-	preparedAgain, err := prepareDelegatedActionInput(tool, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"}, prepared)
+	preparedAgain, err := prepareDelegatedActionInput(tool, &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod"}, "origin-id", prepared)
 	require.NoError(t, err)
 	require.Equal(t, prepared.ToolInput, preparedAgain.ToolInput, "resume must use the same approval target")
 }

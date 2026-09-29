@@ -215,13 +215,13 @@ func mergeEvidenceManifests(data, evidenceData []map[string]any) {
 	}
 }
 
-func eventReferences(nbCtx core.NbToolContext, data []map[string]any) []core.NBToolResponseReference {
+func eventReferences(nbCtx core.NbToolContext, dataAccountID string, data []map[string]any) []core.NBToolResponseReference {
 	references := []core.NBToolResponseReference{}
 	for _, e := range data {
 		if idStr, ok := e["id"].(string); ok {
 			references = append(references, core.GetNudgebeeUIReference(nbCtx, "investigate", "Investigate - "+idStr, map[string]string{
 				"id":        idStr,
-				"accountId": nbCtx.AccountId,
+				"accountId": dataAccountID,
 			}, ""))
 		}
 	}
@@ -282,8 +282,15 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 		pq.QuoteLiteral(eventID),
 	)
 
-	view := resolveEventsViewPlaceholders(eventsViewWithId, nbCtx.AccountId, true)
-	resp, data, err := sqlToolCall(nbCtx, query, "events", view, 1, nil)
+	// dataCtx reads the delegated target's account; nbCtx keeps the
+	// conversation's workspace.
+	dataCtx, targetErr := targetDataContext(nbCtx)
+	if targetErr != nil {
+		return eventsV2ErrorResponse(targetErr), nil
+	}
+	dataAccountID := dataCtx.AccountId
+	view := resolveEventsViewPlaceholders(eventsViewWithId, dataAccountID, true)
+	resp, data, err := sqlToolCall(dataCtx, query, "events", view, 1, nil)
 	if err != nil {
 		return resp, err
 	}
@@ -312,7 +319,7 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 		return core.NBToolResponse{}, marshalErr
 	}
 	resp.Data = string(bytesData)
-	resp.References = append(eventReferences(nbCtx, data), overflowRefs...)
+	resp.References = append(eventReferences(nbCtx, dataAccountID, data), overflowRefs...)
 	return resp, nil
 }
 
@@ -722,20 +729,27 @@ func (t ListEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequ
 
 	limit := intArg(input, "limit", 10)
 
-	metadataView := buildListEventsMetadataView(nbCtx.AccountId, whereClauses)
+	// dataCtx reads the delegated target's account; nbCtx keeps the
+	// conversation's workspace.
+	dataCtx, targetErr := targetDataContext(nbCtx)
+	if targetErr != nil {
+		return eventsV2ErrorResponse(targetErr), nil
+	}
+	dataAccountID := dataCtx.AccountId
+	metadataView := buildListEventsMetadataView(dataAccountID, whereClauses)
 	metadataQuery := "SELECT id, title, starts_at, priority, source, aggregation_key, finding_type, subject_type, " +
 		"subject_name, subject_namespace, nb_status, computed_priority, computed_score, event_count " +
 		"FROM events ORDER BY starts_at DESC"
-	resp, data, err := sqlToolCall(nbCtx, metadataQuery, "events", metadataView, limit, nil)
+	resp, data, err := sqlToolCall(dataCtx, metadataQuery, "events", metadataView, limit, nil)
 	if err != nil {
 		return resp, err
 	}
 
 	if len(data) > 0 {
-		evidenceView := buildListEventsEvidenceView(nbCtx.AccountId, data)
+		evidenceView := buildListEventsEvidenceView(dataAccountID, data)
 		if evidenceView != "" {
 			evidenceQuery := "SELECT id, evidences FROM events"
-			_, evidenceData, evidenceErr := sqlToolCall(nbCtx, evidenceQuery, "events", evidenceView, len(data), nil)
+			_, evidenceData, evidenceErr := sqlToolCall(dataCtx, evidenceQuery, "events", evidenceView, len(data), nil)
 			if evidenceErr != nil {
 				return core.NBToolResponse{}, evidenceErr
 			}
@@ -749,7 +763,7 @@ func (t ListEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequ
 		return core.NBToolResponse{}, marshalErr
 	}
 	resp.Data = string(bytesData)
-	resp.References = eventReferences(nbCtx, data)
+	resp.References = eventReferences(nbCtx, dataAccountID, data)
 	return resp, nil
 }
 
@@ -896,8 +910,15 @@ func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCal
 	// The typed time predicates above are authoritative. Do not reapply the
 	// legacy view's fixed 30-day lower bound: explicit older ranges must remain
 	// queryable, while calls without a start bound already received the default.
-	view := resolveEventsViewPlaceholders(eventsViewWithId, nbCtx.AccountId, true)
-	resp, _, err := sqlToolCall(nbCtx, query, "events", view, 0, nil)
+	// dataCtx reads the delegated target's account; nbCtx keeps the
+	// conversation's workspace.
+	dataCtx, targetErr := targetDataContext(nbCtx)
+	if targetErr != nil {
+		return eventsV2ErrorResponse(targetErr), nil
+	}
+	dataAccountID := dataCtx.AccountId
+	view := resolveEventsViewPlaceholders(eventsViewWithId, dataAccountID, true)
+	resp, _, err := sqlToolCall(dataCtx, query, "events", view, 0, nil)
 	if err != nil {
 		return resp, err
 	}

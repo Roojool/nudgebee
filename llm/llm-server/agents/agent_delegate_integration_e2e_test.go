@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -268,7 +269,9 @@ func fetchConversationToolCalls(t *testing.T, conversationId string) []e2eToolCa
 	rows, err := dbm.Db.Query(`
 		SELECT COALESCE(t.message_id::text, ''), a.agent_name,
 		       COALESCE(a.query_config::jsonb->'delegated_target'->>'name', ''),
-		       t.tool_name, COALESCE(t.status, ''), COALESCE(t.parameters, ''), COALESCE(t.response, '')
+		       t.tool_name, COALESCE(t.status, ''),
+		       -- SQL tools persist their real input (SQL plus any target) in params_sql.
+		       COALESCE(NULLIF(t.params_sql, ''), t.parameters, ''), COALESCE(t.response, '')
 		FROM llm_conversation_tool_calls t
 		JOIN llm_conversation_agent a ON a.id = t.agent_id
 		WHERE t.conversation_id = $1
@@ -621,6 +624,217 @@ func TestNaturalQuestion_OtherClusterObservability(t *testing.T) {
 			}
 		})
 	}
+}
+
+// originOnlyTools answer from the conversation's own account whatever the
+// child's target is; inside a child targeted elsewhere they must be refused.
+var originOnlyTools = []string{
+	"service_dependency_graph", "recommendation_execute", "finops", "remediation", "remediation_generate",
+	"remediation_execute", "memory", "security", "workflow",
+}
+
+// eventTools read the events store; under a target they must read the
+// target's account.
+var eventTools = []string{"list_events", "aggregate_events", "get_event_by_id", "events_execute", "anomaly_execute", "get_event_evidence"}
+
+var uuidPattern = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+
+// eventAccounts is the ground truth for event tool output: the account each
+// event id in the responses belongs to, read from the events table.
+func eventAccounts(t *testing.T, calls []e2eToolCall) map[string]string {
+	t.Helper()
+	var ids []string
+	for _, c := range calls {
+		if lo.Contains(eventTools, c.ToolName) && c.Status == "success" {
+			ids = append(ids, uuidPattern.FindAllString(c.Response, -1)...)
+		}
+	}
+	accounts := map[string]string{}
+	if len(ids) == 0 {
+		return accounts
+	}
+	dbm, err := common.GetDatabaseManager(common.Metastore)
+	require.NoError(t, err)
+	rows, err := dbm.Db.Query(`SELECT id::text, cloud_account_id::text FROM events WHERE id::text = ANY($1)`, pq.Array(lo.Uniq(ids)))
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id, account string
+		require.NoError(t, rows.Scan(&id, &account))
+		accounts[id] = account
+	}
+	require.NoError(t, rows.Err())
+	return accounts
+}
+
+// recommendationTools read recommendation rows.
+var recommendationTools = []string{"recommendation_execute", "recommendation_resolution_execute"}
+
+// recommendationAccounts is the ground truth for recommendation output: the
+// account each recommendation id in the responses belongs to.
+func recommendationAccounts(t *testing.T, calls []e2eToolCall) map[string]string {
+	t.Helper()
+	var ids []string
+	for _, c := range calls {
+		if lo.Contains(recommendationTools, c.ToolName) && c.Status == "success" {
+			ids = append(ids, uuidPattern.FindAllString(c.Response, -1)...)
+		}
+	}
+	accounts := map[string]string{}
+	if len(ids) == 0 {
+		return accounts
+	}
+	dbm, err := common.GetDatabaseManager(common.Metastore)
+	require.NoError(t, err)
+	rows, err := dbm.Db.Query(`SELECT id::text, cloud_account_id::text FROM recommendation WHERE id::text = ANY($1)`, pq.Array(lo.Uniq(ids)))
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var id, account string
+		require.NoError(t, rows.Scan(&id, &account))
+		accounts[id] = account
+	}
+	require.NoError(t, rows.Err())
+	return accounts
+}
+
+// TestNaturalQuestion_OtherClusterRecommendations: before the fix, this
+// question answered with the conversation's own cluster's recommendations
+// labelled as the other cluster's (conversation 78722bae). Every
+// recommendation returned must belong to the cluster the user named.
+func TestNaturalQuestion_OtherClusterRecommendations(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	accountId := os.Getenv("TEST_ACCOUNT")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	resolved, err := tools.ResolveAgentHandoffTarget(tenantWideE2EContext(), accountId, &toolcore.ExecutionTarget{Provider: "kubernetes", Name: target})
+	require.NoError(t, err)
+
+	resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(accountId), "natural-other-cluster-recommendations",
+		fmt.Sprintf("What are the top cost-saving recommendations for %s?", target))
+	calls := fetchConversationToolCalls(t, resp.ConversationId)
+	logRoute(t, calls)
+
+	accounts := recommendationAccounts(t, calls)
+	t.Logf("recommendation ids in responses: %d", len(accounts))
+	for id, account := range accounts {
+		assert.Equal(t, resolved.AccountID, account, "recommendation %s belongs to another account than %s", id, target)
+	}
+	var recommendationCalls int
+	for _, c := range calls {
+		if lo.Contains(recommendationTools, c.ToolName) && c.Status == "success" {
+			recommendationCalls++
+			if c.DelegatedTarget == "" && !ranOn(c, target) {
+				t.Errorf("%s ran without the target: %s", c.ToolName, c.Parameters)
+			}
+		}
+	}
+	require.NotZero(t, recommendationCalls, "recommendations are only in the recommendation store; it must be queried")
+}
+
+// TestNaturalQuestion_OtherClusterAlerts asks about another cluster's alerts,
+// which only the events store answers. Every event reported must be one of
+// that cluster's events, never the conversation's own.
+func TestNaturalQuestion_OtherClusterAlerts(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	accountId := os.Getenv("TEST_ACCOUNT")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	resolved, err := tools.ResolveAgentHandoffTarget(tenantWideE2EContext(), accountId, &toolcore.ExecutionTarget{Provider: "kubernetes", Name: target})
+	require.NoError(t, err)
+
+	resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(accountId), "natural-other-cluster-alerts",
+		fmt.Sprintf("Which alerts fired on %s in the last 24 hours, and which were the noisiest?", target))
+	calls := fetchConversationToolCalls(t, resp.ConversationId)
+	logRoute(t, calls)
+
+	accounts := eventAccounts(t, calls)
+	t.Logf("event ids in event tool responses: %d", len(accounts))
+	for id, account := range accounts {
+		assert.Equal(t, resolved.AccountID, account, "event %s belongs to another account than %s", id, target)
+	}
+	var eventCalls int
+	for _, c := range calls {
+		if lo.Contains(eventTools, c.ToolName) {
+			eventCalls++
+			if c.DelegatedTarget == "" && !ranOn(c, target) {
+				t.Errorf("%s ran without the target: %s", c.ToolName, c.Parameters)
+			}
+		}
+	}
+	require.NotZero(t, eventCalls, "alerts are only in the events store; it must be queried")
+}
+
+// TestNaturalQuestion_OtherClusterHealth asks a broad health question about
+// another cluster, the kind that tempts a planner to reach for the events
+// agent and the logs agent. Anything a child targeted at that cluster runs
+// must come from that cluster; tools that can only read the conversation's
+// own account must be refused there, not answer for it.
+func TestNaturalQuestion_OtherClusterHealth(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	query := fmt.Sprintf("Is anything unhealthy on %s right now? Any warning events or errors in the logs?", target)
+	resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(os.Getenv("TEST_ACCOUNT")), "natural-other-cluster-health", query)
+
+	calls := fetchConversationToolCalls(t, resp.ConversationId)
+	logRoute(t, calls)
+	var onTarget int
+	for _, c := range calls {
+		if c.DelegatedTarget != "" {
+			assert.Equal(t, target, c.DelegatedTarget, "every targeted child, nested ones included, must carry the cluster the user named")
+		}
+		if strings.EqualFold(c.DelegatedTarget, target) && lo.Contains(originOnlyTools, c.ToolName) && c.Status == "success" {
+			t.Errorf("%s answered inside a child targeted at %s, but it can only read the conversation's own account: %s", c.ToolName, target, c.Parameters)
+		}
+		if (isRemoteCall(c, "kubectl") && ranOn(c, target) || lo.Contains(backendQueryTools, c.ToolName) && strings.EqualFold(c.DelegatedTarget, target)) && c.Status == "success" {
+			onTarget++
+		}
+		for _, failure := range knownTargetFailures {
+			assert.NotContains(t, c.Response, failure)
+		}
+	}
+	require.NotZero(t, onTarget, "the health check must actually look at %s", target)
+}
+
+// TestTargetedChild_HealthCheck runs the orchestrator in the state a child
+// is in after a handoff: the conversation belongs to TEST_ACCOUNT, the agent
+// is aimed at another cluster. The question is natural. Agents it calls
+// without naming a target (logs) must inherit the target, and tools that can
+// only read the conversation's own account (events) must be refused.
+func TestTargetedChild_HealthCheck(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	accountId := os.Getenv("TEST_ACCOUNT")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	sc := tenantWideE2EContext()
+	resolved, err := tools.ResolveAgentHandoffTarget(sc, accountId, &toolcore.ExecutionTarget{Provider: "kubernetes", Name: target})
+	require.NoError(t, err)
+	require.NotEqual(t, accountId, resolved.AccountID, "the target must be a different account than the conversation's")
+
+	sessionId := fmt.Sprintf("targeted-child-health-%d", time.Now().Unix())
+	resp, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), os.Getenv("TEST_USER"), accountId, sessionId,
+		"Is anything unhealthy right now? Any warning events or errors in the nudgebee namespace logs?",
+		core.ConversationSessionRequestWithConfig(toolcore.NBQueryConfig{DelegatedTarget: resolved}))
+	require.NoError(t, err)
+	t.Logf("Preserved sessionId=%s conversationId=%s status=%s", sessionId, resp.ConversationId, resp.Status)
+
+	calls := fetchConversationToolCalls(t, resp.ConversationId)
+	var onTarget int
+	for _, c := range calls {
+		if c.DelegatedTarget != "" {
+			assert.Equal(t, target, c.DelegatedTarget, "nested agents must keep the target")
+		}
+		if lo.Contains(originOnlyTools, c.ToolName) && c.Status == "success" {
+			t.Errorf("%s answered for %s from the conversation's own account: %s", c.ToolName, target, c.Parameters)
+		}
+		if c.AgentName == "logs" && c.DelegatedTarget == "" {
+			t.Errorf("the logs agent lost the target: %s %s", c.ToolName, c.Parameters)
+		}
+		if (isRemoteCall(c, "kubectl") && ranOn(c, target) || lo.Contains(backendQueryTools, c.ToolName) && strings.EqualFold(c.DelegatedTarget, target)) && c.Status == "success" {
+			onTarget++
+		}
+	}
+	for id, account := range eventAccounts(t, calls) {
+		assert.Equal(t, resolved.AccountID, account, "event %s belongs to another account than %s", id, target)
+	}
+	require.NotZero(t, onTarget, "the check must actually look at %s", target)
 }
 
 // knownTargetFailures are messages this feature must never surface for a

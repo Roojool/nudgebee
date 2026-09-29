@@ -84,6 +84,10 @@ func (t EventRulesTool) InferToolRequestType(_ *security.RequestContext, _, _ st
 }
 
 func (t EventRulesTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
+	nbCtx, targetErr := targetDataContext(nbCtx)
+	if targetErr != nil {
+		return triageErrorResponse(targetErr), nil
+	}
 	if nbCtx.AccountId == "" {
 		return triageErrorResponse(errors.New("an account context is required to list event rules")), nil
 	}
