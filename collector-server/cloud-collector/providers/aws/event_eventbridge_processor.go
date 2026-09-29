@@ -1133,6 +1133,7 @@ func (p *TemplatedEventBridgeProcessor) executeAction(
 		if err := mapToStruct(renderedParams, &params); err != nil {
 			return nil, fmt.Errorf("eventprocessor: parsing aws_get_metric params: %w", err)
 		}
+		params.Dimensions = dropEmptyDimensions(params.Dimensions)
 
 		// When dimensions or statistic are missing/default, auto-extract from the alarm's
 		// metric configuration. CloudWatch GetMetricData requires dimensions to scope the
@@ -2165,6 +2166,23 @@ func parseLogGroupForContainerFromTaskDefMeta(meta map[string]any, containerName
 		return group
 	}
 	return ""
+}
+
+// dropEmptyDimensions removes {Name, Value} dimensions whose value rendered
+// empty, e.g. ServiceName for a task that belongs to no service. Left in,
+// getAwsCloudwatchMetrics reads the map as {dimName: value} pairs and queries
+// the made-up dimension Name=<dimName>, which matches nothing.
+func dropEmptyDimensions(dims []map[string]string) []map[string]string {
+	kept := make([]map[string]string, 0, len(dims))
+	for _, d := range dims {
+		_, hasName := d["Name"]
+		value, hasValue := d["Value"]
+		if hasName && hasValue && strings.TrimSpace(value) == "" {
+			continue
+		}
+		kept = append(kept, d)
+	}
+	return kept
 }
 
 // mapToStruct converts a map to a struct using JSON tags.

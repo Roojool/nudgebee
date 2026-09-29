@@ -34,7 +34,7 @@ rules:
         template: >-
           {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
           ECS Task {{ (index .Detail "taskArn") }} in cluster {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last }}
-          (part of service {{ (index .Detail "group") | str | default "" | replace "service:" "" | default "N/A" }})
+          (part of service {{ $group := (index .Detail "group") | str }}{{ if hasPrefix $group "service:" }}{{ $group | splitList ":" | last }}{{ else }}N/A{{ end }})
           was stopped, likely due to health check failures (Region: {{ (index .Event "region") }}).
           Stopped Reason: {{ (index .Detail "stoppedReason") }}.
           Container '{{ safeIndex $fc "name" }}' last status: {{ safeIndex $fc "lastStatus" }}.
@@ -84,11 +84,15 @@ rules:
         params:
           service_name: "ecs" # Changed to ecs to use enhanced aws_get_resource
           resource_type: "service" # To trigger GetECSServiceDetails
-          resource_identifier: "arn:aws:ecs:{{ (index .Event \"region\") }}:{{ (index .Event \"account\") }}:service/{{ (index .Detail \"clusterArn\") | str | default \"\" | splitList \"/\" | last }}/{{ (index .Detail \"group\") | str | default \"\" | replace \"service:\" \"\" }}"
+          resource_identifier: "arn:aws:ecs:{{ (index .Event \"region\") }}:{{ (index .Event \"account\") }}:service/{{ (index .Detail \"clusterArn\") | str | default \"\" | splitList \"/\" | last }}/{{ (index .Detail \"group\") | str | default \"\" | splitList \":\" | last }}"
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
 
   - name: "ECS_Service_Deployment_Failed_EventBridge"
+    # AWS sends the service only as the ARN in resources[0]
+    # (arn:aws:ecs:<region>:<account>:service/<cluster>/<service>); detail has
+    # no serviceName or clusterName. Services created before the long ARN
+    # format have service/<service>, with no cluster.
     triggers:
       source: "AWS_EventBridge"
       alert_name: "aws.ecs"
@@ -99,18 +103,21 @@ rules:
           description: "Deployment eventName is SERVICE_DEPLOYMENT_FAILED"
     event_template:
       title:
-        template: "ECS Deployment FAILED for service {{ (index .Detail \"serviceName\") }}"
+        template: '{{ $arn := "" }}{{ if (index .Event "resources") }}{{ $arn = (index .Event "resources" 0) | str }}{{ end }}{{ $p := $arn | splitList "/" }}ECS Deployment FAILED for service {{ if ge (len $p) 3 }}{{ index $p 2 }}{{ else if eq (len $p) 2 }}{{ index $p 1 }}{{ end }}'
       severity: "Critical"
       fingerprint:
-        template: "ecs-deploy-failed:{{ (index .Detail \"clusterName\") }}:{{ (index .Detail \"serviceName\") }}"
+        # One alert per failed deployment, so a second failure of the same
+        # service is not folded into the first.
+        template: '{{ $arn := "" }}{{ if (index .Event "resources") }}{{ $arn = (index .Event "resources" 0) | str }}{{ end }}{{ $p := $arn | splitList "/" }}ecs-deploy-failed:{{ if ge (len $p) 3 }}{{ index $p 1 }}:{{ index $p 2 }}{{ else if eq (len $p) 2 }}:{{ index $p 1 }}{{ end }}:{{ (index .Detail "deploymentId") }}'
       description:
         template: >-
-          ECS deployment for service {{ (index .Detail "serviceName") }} in cluster {{ (index .Detail "clusterName") }} (Account: {{ (index .Event "account") }}) has FAILED.
+          {{ $arn := "" }}{{ if (index .Event "resources") }}{{ $arn = (index .Event "resources" 0) | str }}{{ end }}{{ $p := $arn | splitList "/" }}
+          ECS deployment for service {{ if ge (len $p) 3 }}{{ index $p 2 }} in cluster {{ index $p 1 }}{{ else if eq (len $p) 2 }}{{ index $p 1 }}{{ end }} (Account: {{ (index .Event "account") }}) has FAILED.
           Reason: {{ (index .Detail "reason") }}.
           Deployment ID: {{ (index .Detail "deploymentId") }}.
       status: "FIRING"
-      resource_id: # Service name, possibly with cluster prefix if not globally unique
-        template: "{{ (index .Detail \"clusterName\") }}/{{ (index .Detail \"serviceName\") }}"
+      resource_id:
+        template: '{{ if (index .Event "resources") }}{{ (index .Event "resources" 0) }}{{ end }}'
       resource_type:
         value: "service"
       resource_service_name:
@@ -119,32 +126,12 @@ rules:
         template: "{{ (index .Event \"region\") }}"
     actions:
       - name: "ecs_service_details_on_deployment_failure"
-        type: "aws_get_resource" # Should fetch service details, including deployment info
-        params:
-          service_name: "ecs"
-          resource_type: "service"
-          # Service ARN might be constructed or found in a different field depending on the exact event structure
-          resource_identifier: "arn:aws:ecs:{{ (index .Event \"region\") }}:{{ (index .Event \"account\") }}:service/{{ (index .Detail \"clusterName\") }}/{{ (index .Detail \"serviceName\") }}"
-          identifier_type: "arn"
-          region: "{{ (index .Event \"region\") }}"
-        description: "Fetch ECS service details, focusing on the failed deployment."
-      - name: "ecs_deployment_events_on_failure" # Placeholder for fetching service events
-        type: "aws_get_log" # Or a custom action to get ECS service events
-        params:
-          # This is a placeholder; actual ECS service events are not typically in CloudWatch Logs Insights this way.
-          # You might need a custom action to call ecs:DescribeServices and look at the 'events' array.
-          log_group_name: "/aws/ecs/service_events" # Hypothetical
-          query: "fields @timestamp, @message | filter serviceName = '{{ (index .Detail \"serviceName\") }}' and deploymentId = '{{ (index .Detail \"deploymentId\") }}' | sort @timestamp desc | limit 20"
-          start_time_offset: "-1h"
-          end_time_offset: "+5m"
-        description: "Placeholder: Fetch recent ECS service events related to the deployment."
-      - name: "get_ecs_service_events_on_failure" # Fetch service events using the enhanced aws_get_resource
         type: "aws_get_resource"
-        description: "Fetch ECS service details to inspect deployment events."
+        description: "Fetch ECS service details, including its deployments and recent service events."
         params:
           service_name: "ecs"
           resource_type: "service"
-          resource_identifier: "arn:aws:ecs:{{ (index .Event \"region\") }}:{{ (index .Event \"account\") }}:service/{{ (index .Detail \"clusterName\") }}/{{ (index .Detail \"serviceName\") }}"
+          resource_identifier: '{{ if (index .Event "resources") }}{{ (index .Event "resources" 0) }}{{ end }}'
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
 
@@ -169,8 +156,9 @@ rules:
       fingerprint:
         template: 'ecs-created:{{ safeIndex .Detail "responseElements" "service" "serviceArn" }}'
       description:
+        # serviceName is expected string
         template: >-
-          New ECS service '{{ safeIndex .Detail "responseElements" "service" "serviceName" }}' # serviceName is expected string
+          New ECS service '{{ safeIndex .Detail "responseElements" "service" "serviceName" }}'
           in cluster '{{ safeIndex .Detail "responseElements" "service" "clusterArn" | str | default "" | splitList "/" | last }}'
           has been created. Initiating alarm setup.
           Task Definition: {{ safeIndex .Detail "responseElements" "service" "taskDefinition" }}
@@ -367,16 +355,20 @@ rules:
         value: "ecs"
       resource_region:
         template: "{{ (index .Event \"region\") }}"
+    # Cluster and service come from the alarm's ClusterName / ServiceName
+    # dimensions. The alarms aws_create_alarm makes have no dimensions: they are
+    # named "<cluster>-<service>-TaskLogErrors-Auto" with namespace
+    # "ECS/<service>/Logs-Auto", so for those the service comes from the
+    # namespace and the cluster is what is left of the alarm name. Names can
+    # contain "-", so the alarm name is never split on it.
     actions:
       - name: "get_ecs_service_logs_on_log_alarm"
         type: "aws_get_log"
         description: "Fetch logs for the ECS service that triggered the log alarm."
         params:
-          log_group_name: | # Assumes log group name convention /ecs/<service-name>
-            {{ $alarmNameParts := (index .Detail "alarmName") | str | default "" | splitList "-" }}
-            {{ $serviceName := "" }}
-            {{ if ge (len $alarmNameParts) 4 }}{{ $serviceName = (index $alarmNameParts 1) }}{{ end }}
-            /ecs/{{ $serviceName }}
+          auto_detect_log_group: true # Same log group the alarm's metric filter was created on
+          cluster_name: '{{ $d := alarmDimension .Detail "ClusterName" }}{{ if $d }}{{ $d }}{{ else }}{{ $ns := (alarmNamespace .Detail) | str | splitList "/" }}{{ if ge (len $ns) 3 }}{{ replace ((index .Detail "alarmName") | str) (printf "-%s-TaskLogErrors-Auto" (index $ns 1)) "" }}{{ end }}{{ end }}'
+          service_name: '{{ $d := alarmDimension .Detail "ServiceName" }}{{ if $d }}{{ $d }}{{ else }}{{ $ns := (alarmNamespace .Detail) | str | splitList "/" }}{{ if ge (len $ns) 3 }}{{ index $ns 1 }}{{ end }}{{ end }}'
           query: "fields @timestamp, @message | filter @message like /error|Error|exception|Exception|EXCEPTION|Warning/ | sort @timestamp desc | limit 200"
           start_time_offset: "-1h" # Look back further for log errors
           end_time_offset: "+5m"
@@ -387,14 +379,7 @@ rules:
         params:
           service_name: "ecs"
           resource_type: "service"
-          resource_identifier: | # Construct service ARN
-            {{ $alarmNameParts := (index .Detail "alarmName") | str | default "" | splitList "-" }}
-            {{ $clusterName := "" }}{{ $serviceName := "" }}
-            {{ if ge (len $alarmNameParts) 4 }}
-              {{ $clusterName = (index $alarmNameParts 0) }}
-              {{ $serviceName = (index $alarmNameParts 1) }}
-            {{ end }}
-            arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ $clusterName }}/{{ $serviceName }}
+          resource_identifier: 'arn:aws:ecs:{{ (index .Event "region") }}:{{ (index .Event "account") }}:service/{{ $d := alarmDimension .Detail "ClusterName" }}{{ if $d }}{{ $d }}{{ else }}{{ $ns := (alarmNamespace .Detail) | str | splitList "/" }}{{ if ge (len $ns) 3 }}{{ replace ((index .Detail "alarmName") | str) (printf "-%s-TaskLogErrors-Auto" (index $ns 1)) "" }}{{ end }}{{ end }}/{{ $d := alarmDimension .Detail "ServiceName" }}{{ if $d }}{{ $d }}{{ else }}{{ $ns := (alarmNamespace .Detail) | str | splitList "/" }}{{ if ge (len $ns) 3 }}{{ index $ns 1 }}{{ end }}{{ end }}'
           identifier_type: "arn"
           region: "{{ (index .Event \"region\") }}"
 
@@ -595,17 +580,21 @@ rules:
           region: "{{ (index .Event \"region\") }}"
       - name: "get_task_memory_metrics_for_oom"
         type: "aws_get_metric"
-        description: "Fetch memory utilization metrics for the task."
+        # AWS/ECS has no per-task metrics (no TaskId dimension), so this is the
+        # memory of the service the task belongs to, taken from group
+        # ("service:<name>"). A standalone task has no service: its empty
+        # ServiceName is dropped and the graph is the cluster's memory.
+        description: "Fetch memory utilization metrics for the task's service."
         params:
-          namespace: "AWS/ECS" # Or AWS/ECS/ContainerInsights
+          namespace: "AWS/ECS"
           metric_name: "MemoryUtilization"
           dimensions:
             - Name: "ClusterName"
               Value: |
                 {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last }}
-            - Name: "TaskId"
+            - Name: "ServiceName"
               Value: |
-                {{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}
+                {{ $group := (index .Detail "group") | str }}{{ if hasPrefix $group "service:" }}{{ $group | splitList ":" | last }}{{ end }}
           period_seconds: 300
           statistic: "Average"
           start_time_offset: "-1h"
@@ -687,14 +676,16 @@ rules:
         description: "Fetch ECR repository details."
         params:
           service_name: "ecr"
-          # Attempt to parse repo name from image string (e.g., account.dkr.ecr.region.amazonaws.com/repo:tag)
-          resource_identifier: | # Ensure $image is a string before splitList
+          # Repository is everything after the registry host, up to :tag or @digest:
+          # 123456789012.dkr.ecr.us-east-1.amazonaws.com/team/web:v9 -> team/web.
+          # Non-ECR images (e.g. nginx:latest) render empty, so no lookup runs.
+          resource_identifier: >-
             {{ $fc := pickFailingContainer (index .Detail "containers") .TaskDefContainerDefs }}
-            {{ $image := safeIndex $fc "image" | str | default "" }}
-            {{ $parts := $image | splitList "/" }}
-            {{ if ge (len $parts) 2 }}{{ index (splitList ":" (index $parts 1)) 0 }}{{ else }}{{ $image }}{{ end }} # Basic parsing
-          identifier_type: "name" # Assuming repo name is the identifier
-          region: "{{ (index .Event \"region\") }}" # ECR repo is regional
+            {{ $image := index ((safeIndex $fc "image") | str | splitList "@") 0 }}
+            {{ $host := index ($image | splitList "/") 0 }}
+            {{ if and (containsStr $host ".dkr.ecr.") (ne $host $image) }}{{ index (splitList ":" (replace $image (printf "%s/" $host) "")) 0 }}{{ end }}
+          identifier_type: "name"
+          region: "{{ (index .Event \"region\") }}"
       - name: "get_cloudtrail_for_ecr_pull_errors"
         type: "aws_get_cloudtrail_events"
         description: "Fetch recent CloudTrail events related to ECR or IAM for potential permission issues."
@@ -876,20 +867,8 @@ rules:
       resource_region:
         template: "{{ (index .Event \"region\") }}"
     actions:
-      - name: "get_ecs_service_logs_on_alb_5xx"
-        type: "aws_get_log"
-        description: "Fetch application logs from the ECS service associated with the Target Group."
-        params:
-          auto_detect_log_group: true # Requires cluster_name and service_name
-          # These need to be derived. This is the tricky part: mapping TargetGroup ARN to ECS Service/Cluster.
-          # Option 1: If alarm tags or description contains ECS cluster/service name.
-          # Option 2: A new action `aws_get_ecs_service_for_target_group` to find the service.
-          # For now, placeholder - assuming you might tag alarms or have a convention.
-          cluster_name: "{{ index ((index .Detail \"alarmName\") | str | default \"\" | splitList \"-\") 0 }}" # Placeholder: Assumes alarm name format like MyCluster-MyService-ALB-5XX
-          service_name: "{{ index ((index .Detail \"alarmName\") | str | default \"\" | splitList \"-\") 1 }}" # Placeholder: Assumes alarm name format
-          query: "fields @timestamp, @message | filter @message like /error|exception/i | sort @timestamp desc | limit 200"
-          start_time_offset: "-15m" # Look at logs around the time the alarm triggered
-          end_time_offset: "+5m"
+      # No ECS log fetch: nothing on the alarm says which ECS service owns the
+      # target group, and guessing it from the alarm name returned nothing.
       - name: "get_alb_metrics_on_5xx"
         type: "aws_get_metric"
         description: "Fetch related ALB metrics (TargetResponseTime, RequestCount)."
@@ -975,23 +954,9 @@ rules:
       # backed up the EventBridge SQS queue. Tasks are also frequently gone by the
       # time the event is processed (CloudTrail delivery lag), so the fetch mostly
       # produced "target resource gone" noise.
-      - name: "get_task_metrics_on_any_event"
-        type: "aws_get_metric"
-        description: "Fetch CPU and Memory utilization metrics for the task."
-        params:
-          namespace: "AWS/ECS" # Or AWS/ECS/ContainerInsights
-          metric_name: "CPUUtilization" # Fetch both CPU and Memory
-          dimensions:
-            - Name: "ClusterName"
-              Value: |
-                {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last }}
-            - Name: "TaskId"
-              Value: |
-                {{ (index .Detail "taskArn") | str | default "" | splitList "/" | last }}
-          period_seconds: 300
-          statistic: "Average"
-          start_time_offset: "-15m"
-          end_time_offset: "+5m"
+      # NOTE: no per-task metric fetch here either. AWS/ECS has no TaskId
+      # dimension, so it always came back empty, and it ran on every task
+      # state change.
       # NOTE: get_task_logs is intentionally NOT run here. Fetching logs requires a
       # CloudWatch Logs Insights query (StartQuery + 3s poll loop, up to 60s) which
       # dominates per-event processing time. Running it on EVERY task state change
@@ -1024,12 +989,14 @@ rules:
         template: "ECS Service Event: {{ (index .Event \"detailType\") }} for {{ (index .Detail \"serviceName\") | default ((index .Detail \"clusterName\") | default \"Unknown Cluster\") }}"
       severity: "Info"
       description:
+        # Reason: ensure reason is string or handled by default.
+        # Cluster / Service: ensure input to splitList is string.
         template: |
           ECS Service event of type '{{ (index .Event "detailType") }}' occurred.
           Event Name: {{ (index .Detail "eventName") | default "N/A" }}.
-          Reason: {{ (index .Detail "reason") | default "N/A" }}. # Ensure reason is string or handled by default
-          Cluster: {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last | default ((index .Detail "clusterName") | default "N/A") }}. # Ensure input to splitList is string
-          Service: {{ (index .Detail "serviceArn") | str | default "" | splitList "/" | last | default ((index .Detail "serviceName") | default "N/A") }}. # Ensure input to splitList is string
+          Reason: {{ (index .Detail "reason") | default "N/A" }}.
+          Cluster: {{ (index .Detail "clusterArn") | str | default "" | splitList "/" | last | default ((index .Detail "clusterName") | default "N/A") }}.
+          Service: {{ (index .Detail "serviceArn") | str | default "" | splitList "/" | last | default ((index .Detail "serviceName") | default "N/A") }}.
           Event ID: {{ (index .Event "id") }}.
           Detail: {{ toJson .Detail }}
       status: "CLOSED" # Default status
