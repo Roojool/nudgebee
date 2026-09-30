@@ -107,6 +107,7 @@ var eventAnalysisSources = map[string]bool{
 	"prometheus_alertmanager_webhook": true,
 	"workflow_webhook":                true,
 	"cubeapm_webhook":                 true,
+	"event_webhook":                   true,
 }
 
 const (
@@ -383,9 +384,51 @@ func GetLinkedCloudAccountIds(sc *security.RequestContext, accountId, integratio
 	return append(ids, accountId), nil
 }
 
+// WebhookPayloadValidator is implemented by integrations whose payload contract
+// is validated synchronously, so the sender gets a 400 naming what is wrong
+// instead of a 200 for a delivery that later fails to parse. It must be pure
+// (no DB, no network): ValidateAndStoreWebhook calls it before storing.
+type WebhookPayloadValidator interface {
+	ValidateWebhookPayload(webhookPayload string) error
+}
+
+// ResolvedReplaySkipper is implemented by integrations for which replaying a
+// stored resolve delivery must do nothing (see ReplayWebhookEvent).
+type ResolvedReplaySkipper interface {
+	SkipResolvedReplay() bool
+}
+
+// WebhookValidationItemError is one reason a delivery was rejected. Index is the
+// position of the offending item in a batch (-1 for the delivery as a whole).
+type WebhookValidationItemError struct {
+	Index  int    `json:"index"`
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
+// WebhookValidationError is returned by ValidateAndStoreWebhook when a
+// WebhookPayloadValidator rejects a delivery. Its Items are safe to return to
+// the caller; any other error from ValidateAndStoreWebhook is not.
+type WebhookValidationError struct {
+	Items []WebhookValidationItemError
+}
+
+func (e *WebhookValidationError) Error() string {
+	parts := make([]string, 0, len(e.Items))
+	for _, it := range e.Items {
+		parts = append(parts, fmt.Sprintf("item %d: %s: %s", it.Index, it.Field, it.Reason))
+	}
+	return "invalid webhook payload: " + strings.Join(parts, "; ")
+}
+
 // ValidateAndStoreWebhook validates the webhook token, looks up the integration,
 // and stores the raw payload in event_incoming_webhooks with processing_status='pending'.
 // Returns the row UUID for async processing.
+//
+// Integrations implementing WebhookPayloadValidator are validated after the token
+// lookup (so the check is keyed on the integration type, not the request path).
+// A rejected delivery is still stored, as 'failed' with the reasons, so support
+// can see what the sender posted; the *WebhookValidationError is returned.
 func ValidateAndStoreWebhook(sc *security.RequestContext, requestUrl string, requestHeaders map[string]string, webhookPayload string) (string, error) {
 	token := extractWebhookToken(requestUrl, requestHeaders)
 	if token == "" {
@@ -402,6 +445,8 @@ func ValidateAndStoreWebhook(sc *security.RequestContext, requestUrl string, req
 		return "", fmt.Errorf("integrations: failed to get database manager: %w", err)
 	}
 
+	validationErr := validateWebhookPayload(info, webhookPayload)
+
 	rowID := uuid.NewString()
 	_, err = dbms.Db.Exec(`INSERT INTO event_incoming_webhooks(id, tenant_id, account_id, integration_id, integration_type, webhook_id, event_type, event_id, event_url, event_status, event_priority, event_created_at, event_title, event_description, raw, processing_status, request_url)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
@@ -411,7 +456,40 @@ func ValidateAndStoreWebhook(sc *security.RequestContext, requestUrl string, req
 		return "", fmt.Errorf("integrations: failed to store webhook for async processing: %w", err)
 	}
 
+	if validationErr != nil {
+		updateWebhookStatus(dbms, rowID, webhookProcessingStatusFailed, validationErr)
+		return "", validationErr
+	}
+
 	return rowID, nil
+}
+
+// validateWebhookPayload runs the integration's WebhookPayloadValidator, if it
+// has one. Such integrations also need a linked cloud account: without one
+// every event would be dropped after a 200, which is exactly the silent
+// failure synchronous validation exists to prevent.
+func validateWebhookPayload(info *webhookIntegrationInfo, webhookPayload string) *WebhookValidationError {
+	integration, found := GetIntegration(info.IntegrationType)
+	if !found {
+		return nil
+	}
+	validator, ok := integration.(WebhookPayloadValidator)
+	if !ok {
+		return nil
+	}
+	if info.AccountID == "" {
+		return &WebhookValidationError{Items: []WebhookValidationItemError{{
+			Index: -1, Field: "integration", Reason: "no account is linked to this integration; link one in Nudgebee",
+		}}}
+	}
+	if err := validator.ValidateWebhookPayload(webhookPayload); err != nil {
+		var verr *WebhookValidationError
+		if errors.As(err, &verr) {
+			return verr
+		}
+		return &WebhookValidationError{Items: []WebhookValidationItemError{{Index: -1, Field: "payload", Reason: err.Error()}}}
+	}
+	return nil
 }
 
 // ProcessStoredWebhook fetches a pending webhook row, runs the integration-specific parser,
@@ -963,6 +1041,16 @@ func ReplayWebhookEvent(sc *security.RequestContext, webhookEventId string) erro
 		return fmt.Errorf("integrations: integration type %s does not support webhook events", webhookData.IntegrationType)
 	}
 
+	// Replay forces the delivery to "triggered" below. For a resolve delivery that
+	// would re-run investigation with the resolve's payload, overwriting the
+	// closed event's priority/labels or, if the firing's event is gone, inserting
+	// a new open one. Integrations that opt in make replaying a resolve a no-op.
+	if skipper, ok := integration.(ResolvedReplaySkipper); ok && skipper.SkipResolvedReplay() &&
+		strings.EqualFold(webhookData.EventStatus, string(eventtypes.EventStatusResolved)) {
+		sc.GetLogger().Info("integrations: not replaying a resolve delivery", "webhook_event_id", webhookEventId, "integration_type", webhookData.IntegrationType)
+		return nil
+	}
+
 	// Get the actual integration settings
 	webhookSettings, err := getIntegrationSettings(dbms, webhookData.IntegrationID)
 	if err != nil {
@@ -1029,6 +1117,11 @@ func ReplayWebhookEvent(sc *security.RequestContext, webhookEventId string) erro
 // avoids collision with any user-defined schema property name.
 const SyntheticIntegrationNameKey = "__integration_name"
 
+// SyntheticIntegrationIdKey is the settings key under which getIntegrationSettings
+// injects the integration's own id, for parsers that scope sender-chosen ids to
+// the integration (event_webhook). Synthetic like SyntheticIntegrationNameKey.
+const SyntheticIntegrationIdKey = "__integration_id"
+
 func getIntegrationSettings(dbms *database.DatabaseManager, integrationId string) ([]IntegrationConfigValue, error) {
 	var settings []IntegrationConfigValue
 	// Single round trip: pull every integration_config_values row PLUS a
@@ -1043,9 +1136,11 @@ func getIntegrationSettings(dbms *database.DatabaseManager, integrationId string
 		UNION ALL
 		SELECT $2, name, false
 		FROM integrations
-		WHERE id = $1 AND name <> ''`
+		WHERE id = $1 AND name <> ''
+		UNION ALL
+		SELECT $3, $1::text, false`
 
-	err := dbms.Db.Select(&settings, query, integrationId, SyntheticIntegrationNameKey)
+	err := dbms.Db.Select(&settings, query, integrationId, SyntheticIntegrationNameKey, SyntheticIntegrationIdKey)
 	if err != nil {
 		return nil, err
 	}

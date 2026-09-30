@@ -158,7 +158,7 @@ const CloudProviderIcon = ({ cloud_provider, width, height, sx = {} }) => {
     Icon = OpentelemetryIcon;
   } else if (cloud_provider.toUpperCase() === 'AZURE_MONITOR_WEBHOOK') {
     Icon = AzureMonitorWebhookIcon;
-  } else if (cloud_provider.toUpperCase() === 'WORKFLOW_WEBHOOK') {
+  } else if (cloud_provider.toUpperCase() === 'WORKFLOW_WEBHOOK' || cloud_provider.toUpperCase() === 'EVENT_WEBHOOK') {
     Icon = WorkflowWebhookIcon;
   } else if (cloud_provider.toUpperCase() === 'SSH') {
     Icon = TerminalIcon;

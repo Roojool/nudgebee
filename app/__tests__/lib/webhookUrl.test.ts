@@ -41,6 +41,7 @@ describe('buildWebhookUrl', () => {
     ['openobserve_webhook', 'openobserve'],
     ['workflow_webhook', 'workflow'],
     ['cubeapm_webhook', 'cubeapm'],
+    ['event_webhook', 'event'],
   ];
 
   it.each(cases)('derives the %s endpoint', (integrationName, endpoint) => {

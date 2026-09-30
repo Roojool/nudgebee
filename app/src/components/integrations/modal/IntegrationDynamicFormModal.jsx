@@ -125,6 +125,21 @@ const CANONICAL_TRACE_FIELD_OPTIONS = ALL_TRACE_LABEL_FIELDS.map(({ field }) => 
 const TRACE_CONCEPT_LABELS = Object.fromEntries(ALL_TRACE_LABEL_FIELDS.map(({ field, label }) => [field, label]));
 const TRACE_CONCEPT_ORDER = ALL_TRACE_LABEL_FIELDS.map(({ field }) => field);
 
+// Example request body for the event webhook, shown in its setup modal.
+// Contract: api-server/services/integrations/event_webhook.go.
+const EVENT_WEBHOOK_EXAMPLE = `{
+  "id": "evt-4411",
+  "fingerprint": "site24x7:dc01.example.com:cpu",
+  "status": "firing",
+  "title": "CPU above 85% on dc01",
+  "rule_name": "cpu_high",
+  "severity": "high",
+  "starts_at": "2026-09-29T10:00:00Z",
+  "subject": { "name": "dc01.example.com", "type": "host" },
+  "source_tool": "Site24x7",
+  "labels": { "client": "example-school" }
+}`;
+
 // Alert Template body NudgeBee expects from OpenObserve. Every `{variable}` is
 // substituted by OpenObserve at delivery; the k8s_* keys resolve from the
 // matching stream row and are simply dropped when the stream has no such field,
@@ -2047,6 +2062,13 @@ const IntegrationDynamicFormModal = ({
       endpoint: 'workflow',
       message: 'Point your external system at the following URL to trigger the associated automation',
     },
+    event_webhook: {
+      endpoint: 'event',
+      message: 'POST alerts as JSON to the following URL from any tool that can send a webhook',
+      template: EVENT_WEBHOOK_EXAMPLE,
+      templateMessage:
+        'Send one alert, or {"events": [...]} with up to 100. Required: id (one occurrence), fingerprint (same on every occurrence), status (firing or resolved), title, rule_name. A resolve closes the alert with the same id and must carry the same labels. Optional: severity (critical, high, medium, low, info), description, starts_at / ends_at (RFC 3339), subject, source_tool, url, labels (string values only). An invalid request is rejected with the reason.',
+    },
     cubeapm_webhook: {
       endpoint: 'cubeapm',
       message:
@@ -2349,6 +2371,7 @@ const IntegrationDynamicFormModal = ({
             'elasticsearch_webhook',
             'openobserve_webhook',
             'workflow_webhook',
+            'event_webhook',
           ].includes(integrationName)
         }
         width='md'

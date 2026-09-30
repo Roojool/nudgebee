@@ -53,6 +53,7 @@ var webhookFiringIdentity = map[string]firingIdentity{
 	IntegrationNewRelicWebhook:      {perFiringEventId, "issue id / incident id"},
 	IntegrationSplunkWebhook:        {perFiringEventId, "sid (search job id); falls back to search_name, which is per alert"},
 	IntegrationGenericWebhook:       {perFiringEventId, "random id per delivery"},
+	IntegrationEventWebhook:         {perFiringEventId, "sender's id, required to name one firing (contract)"},
 
 	IntegrationElasticsearchWebhook: {noFiringIdentity, "rule id + alert id are per alert; the documented template carries no per-firing field ({{alert.uuid}} would be one)"},
 	IntegrationOpenObserveWebhook:   {noFiringIdentity, "fingerprint is derived from alert identity and OpenObserve sends no resolve"},

@@ -248,6 +248,8 @@ export default function AddAccountForm() {
             return <ListIntegrations integrationName={'gcp_monitoring_webhook'} />;
           case 'workflow_webhook':
             return <ListIntegrations integrationName={'workflow_webhook'} />;
+          case 'event_webhook':
+            return <ListIntegrations integrationName={'event_webhook'} />;
           case 'vm_agent':
             return <ListIntegrations integrationName={'vm_agent'} />;
           case 'mssql':

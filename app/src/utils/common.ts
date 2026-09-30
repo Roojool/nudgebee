@@ -312,6 +312,9 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
     case 'WORKFLOW_WEBHOOK':
       label = 'Automation Webhook';
       break;
+    case 'EVENT_WEBHOOK':
+      label = 'Event Webhook';
+      break;
     case 'BITBUCKET':
       label = 'Bitbucket';
       break;
