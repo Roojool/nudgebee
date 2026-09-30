@@ -462,12 +462,14 @@ GlobalContextFormModal.propTypes = {
 };
 
 const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
-  // Tenant-wide read-only mode: when Settings is opened from the global
-  // sidebar there's no current account. The backend routes empty
-  // account_id to ListGlobalContextsForTenant (KB pattern) and applies
-  // the standard HasAccountAccess ladder. We hide writes and surface
-  // the owning account on each card to disambiguate.
+  // Tenant-wide mode: when Settings is opened from the global sidebar
+  // there's no current account. The backend routes empty account_id to
+  // ListGlobalContextsForTenant (KB pattern) and applies the standard
+  // HasAccountAccess ladder. We hide Create and surface the owning account
+  // on each card to disambiguate; Edit / Delete run against that account.
   const isTenantWide = !accountId;
+  const contextAccountId = (context) => (isTenantWide ? context?.account_id || '' : accountId);
+  const canWriteContext = (context) => Boolean(contextAccountId(context)) && hasWriteAccess(contextAccountId(context));
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [globalContexts, setGlobalContexts] = useState([]);
@@ -527,13 +529,14 @@ const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
     // Fetch full context data (including content) before editing
     try {
       setSubmitting(true);
-      const response = await apiGlobalContext.getGlobalContext(accountId, context.id);
+      const response = await apiGlobalContext.getGlobalContext(contextAccountId(context), context.id);
       if (response.errors && response.errors.length > 0) {
         snackbar.error('Failed to fetch account context details');
         return;
       }
       if (response.data) {
-        setSelectedContext(response.data);
+        // Keep the card's account on the selection: the update below is sent to it.
+        setSelectedContext({ ...response.data, account_id: response.data.account_id || context.account_id });
         setFormModalOpen(true);
       } else {
         snackbar.error('Failed to fetch account context details');
@@ -558,7 +561,7 @@ const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
 
       if (selectedContext) {
         // Update existing
-        response = await apiGlobalContext.updateGlobalContext(accountId, selectedContext.id, data);
+        response = await apiGlobalContext.updateGlobalContext(contextAccountId(selectedContext), selectedContext.id, data);
         if (response.errors && response.errors.length > 0) {
           const errorMessage = response.errors[0]?.message || 'Failed to update account context';
           snackbar.error(errorMessage);
@@ -594,7 +597,7 @@ const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
 
     try {
       setSubmitting(true);
-      const response = await apiGlobalContext.deleteGlobalContext(accountId, selectedContext.id);
+      const response = await apiGlobalContext.deleteGlobalContext(contextAccountId(selectedContext), selectedContext.id);
 
       if (response.errors && response.errors.length > 0) {
         const errorMessage = response.errors[0]?.message || 'Failed to delete account context';
@@ -684,10 +687,7 @@ const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
 
       {isTenantWide && (
         <Box sx={{ mb: ds.space[4] }}>
-          <Banner
-            tone='info'
-            message='Viewing all account contexts across this tenant. Switch to an account-scoped page to create, edit, or delete.'
-          />
+          <Banner tone='info' message='Viewing all account contexts across this tenant. Switch to an account-scoped page to create one.' />
         </Box>
       )}
 
@@ -737,7 +737,7 @@ const GlobalContextTab = ({ accountId, cardElevation = 'raised' }) => {
               context={context}
               onEdit={handleEdit}
               onDelete={handleDelete}
-              hasAccess={hasAccess}
+              hasAccess={canWriteContext(context)}
               showAccount={isTenantWide}
               elevation={cardElevation}
             />

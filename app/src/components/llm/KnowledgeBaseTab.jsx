@@ -536,12 +536,26 @@ TestRetrievalPanel.propTypes = {
 };
 
 const KnowledgeBaseTab = ({ accountId }) => {
-  // Tenant-wide read-only mode: when no accountId is in scope (b-Cortex
-  // opened from the global sidebar where the page has no current
-  // account), fetch every KB the caller can read across the tenant. The
-  // backend handler routes empty account_id to a tenant-wide read and
-  // row-filters by HasAccountAccess; the UI hides write affordances.
+  // Tenant-wide mode: when no accountId is in scope (b-Cortex opened from
+  // the global sidebar where the page has no current account), fetch every
+  // KB the caller can read across the tenant. The backend handler routes
+  // empty account_id to a tenant-wide read and row-filters by
+  // HasAccountAccess. Create and the account-level settings stay hidden;
+  // a row's actions run against the one account it belongs to.
   const isTenantWide = !accountId;
+  // Grouped integration rows that span several accounts have no single
+  // account to act in, so they resolve to '' and stay read-only.
+  const kbAccountId = (kb) => {
+    if (!isTenantWide) return accountId;
+    if (!kb) return '';
+    if (kb.accounts) return kb.accounts.length === 1 ? kb.accounts[0].id || '' : '';
+    return kb.account_id || '';
+  };
+  const canWriteKb = (kb) => Boolean(kbAccountId(kb)) && hasWriteAccess(kbAccountId(kb));
+  // The account the create/edit form works in: the page's, or in tenant-wide
+  // mode the account of the KB being edited (set by handleEdit).
+  const [editAccountId, setEditAccountId] = useState('');
+  const formAccountId = isTenantWide ? editAccountId : accountId;
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [knowledgeBases, setKnowledgeBases] = useState([]);
@@ -602,9 +616,8 @@ const KnowledgeBaseTab = ({ accountId }) => {
     }
   }, [knowledgeBases, retrievalKbId]);
 
-  // In tenant-wide mode every write affordance is hidden — writes always
-  // require the per-account context, so we never paint Create / Edit /
-  // Delete / Retrigger when the caller has no account to act in.
+  // Create and the account-level settings need the page's account, so they
+  // stay hidden in tenant-wide mode. Row actions use canWriteKb instead.
   const hasAccess = !isTenantWide && hasWriteAccess(accountId);
 
   // silent = background poll: skip the full-page spinner and error toasts.
@@ -662,15 +675,15 @@ const KnowledgeBaseTab = ({ accountId }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId]);
 
-  // Agents and tools back the `@`/`#` suggestions in the content box. Both are
-  // skipped in tenant-wide mode, which paints no write affordances and so never
-  // opens the form.
+  // Agents and tools back the `@`/`#` suggestions in the content box. Both load
+  // for the form's account, which in tenant-wide mode is unset until an edit
+  // opens.
   useEffect(() => {
-    if (isTenantWide) return undefined;
+    if (!formAccountId) return undefined;
     let cancelled = false;
     setAgentsLoading(true);
     apiAskNudgebee
-      .listAgents({ accountId })
+      .listAgents({ accountId: formAccountId })
       .then((response) => {
         if (cancelled) return;
         const list = response?.data?.data?.ai_list_agents?.data || [];
@@ -687,14 +700,14 @@ const KnowledgeBaseTab = ({ accountId }) => {
     return () => {
       cancelled = true;
     };
-  }, [accountId, isTenantWide]);
+  }, [formAccountId]);
 
   useEffect(() => {
-    if (isTenantWide) return undefined;
+    if (!formAccountId) return undefined;
     let cancelled = false;
     setToolsLoading(true);
     apiAskNudgebee
-      .listTools({ accountId })
+      .listTools({ accountId: formAccountId })
       .then((response) => {
         if (cancelled) return;
         const list = response?.data?.data?.ai_list_tools?.data;
@@ -711,16 +724,16 @@ const KnowledgeBaseTab = ({ accountId }) => {
     return () => {
       cancelled = true;
     };
-  }, [accountId, isTenantWide]);
+  }, [formAccountId]);
 
   // Context-tag options — the account's real k8s resources (workloads shown as
-  // "Service", namespaces as "Namespace"). Fetched once per account so the
-  // create/edit modal opens with the picker ready. Skipped in tenant-wide mode.
+  // "Service", namespaces as "Namespace"). Fetched once per form account so the
+  // create/edit modal opens with the picker ready.
   useEffect(() => {
-    if (isTenantWide || !accountId) return undefined;
+    if (!formAccountId) return undefined;
     let cancelled = false;
     setContextTagsLoading(true);
-    Promise.all([apiKubernetes.getK8sWorkloadNames({ accountId }), apiKubernetes.getK8sNamespaceNames(accountId)])
+    Promise.all([apiKubernetes.getK8sWorkloadNames({ accountId: formAccountId }), apiKubernetes.getK8sNamespaceNames(formAccountId)])
       .then(([workloadsRes, namespacesRes]) => {
         if (cancelled) return;
         const services = [...new Set(workloadsRes?.data?.workloadNames || [])].sort((a, b) => a.localeCompare(b));
@@ -738,11 +751,11 @@ const KnowledgeBaseTab = ({ accountId }) => {
     return () => {
       cancelled = true;
     };
-  }, [accountId, isTenantWide]);
+  }, [formAccountId]);
 
   // Poll every 60s so async KB status changes (processing -> active) appear
-  // without a manual reload. Skipped in tenant-wide mode — that surface is
-  // read-only, so the per-row status doesn't transition under the user.
+  // without a manual reload. Skipped in tenant-wide mode, where the list spans
+  // every account; a row action there refreshes it once when it completes.
   useEffect(() => {
     if (isTenantWide) return undefined;
     let cancelled = false;
@@ -761,10 +774,13 @@ const KnowledgeBaseTab = ({ accountId }) => {
   };
 
   const handleEdit = async (knowledgeBase) => {
+    const kbAccount = kbAccountId(knowledgeBase);
+    // Tenant-wide: point the form's agent / tool / tag loaders at this KB's account.
+    if (isTenantWide) setEditAccountId(kbAccount);
     // Fetch full knowledge base data (including content) before editing
     try {
       setSubmitting(true);
-      const response = await apiKnowledgeBase.getKnowledgeBase(accountId, knowledgeBase.id);
+      const response = await apiKnowledgeBase.getKnowledgeBase(kbAccount, knowledgeBase.id);
       if (response.errors && response.errors.length > 0) {
         snackbar.error('Failed to fetch knowledge base details');
         return;
@@ -774,7 +790,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
         // its real state on first paint. A failure here is not fatal: the KB is
         // still editable, the picker just opens with nothing ticked, so warn
         // rather than silently implying it is mapped to nobody.
-        const agentsResponse = await apiKnowledgeBase.getKBAgents(accountId, knowledgeBase.id);
+        const agentsResponse = await apiKnowledgeBase.getKBAgents(kbAccount, knowledgeBase.id);
         if (agentsResponse.errors && agentsResponse.errors.length > 0) {
           snackbar.error('Failed to fetch the agents this knowledge base is mapped to');
         }
@@ -800,7 +816,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
   const handleRetrigger = async (knowledgeBase) => {
     try {
       setSubmitting(true);
-      const response = await apiKnowledgeBase.retriggerKB(accountId, knowledgeBase.id);
+      const response = await apiKnowledgeBase.retriggerKB(kbAccountId(knowledgeBase), knowledgeBase.id);
       if (response.errors && response.errors.length > 0) {
         snackbar.error(response.errors[0]?.message || 'Failed to retrigger knowledge base');
         return;
@@ -825,7 +841,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
     setTogglingEnabledIds((prev) => [...prev, id]);
     applyLocally(nextEnabled);
     try {
-      const response = await apiKnowledgeBase.setKnowledgeBaseEnabled(accountId, id, nextEnabled);
+      const response = await apiKnowledgeBase.setKnowledgeBaseEnabled(kbAccountId(knowledgeBase), id, nextEnabled);
       if (response.errors && response.errors.length > 0) {
         applyLocally(!nextEnabled);
         snackbar.error(response.errors[0]?.message || 'Failed to update knowledge base');
@@ -959,7 +975,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
                   size='sm'
                   checked={kb.enabled !== false}
                   loading={togglingEnabledIds.includes(kb.id)}
-                  disabled={!hasAccess}
+                  disabled={!canWriteKb(kb)}
                   onChange={(_event, checked) => handleToggleEnabled(kb, checked)}
                   aria-label={`${kb.enabled === false ? 'Allow' : 'Exclude'} knowledge base ${kb.name} in answers`}
                 />
@@ -1054,28 +1070,24 @@ const KnowledgeBaseTab = ({ accountId }) => {
             <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-400)' }}>—</Typography>
           ),
       },
-      // Actions column is omitted entirely in tenant-wide mode — every
-      // write requires per-account context, so we don't paint affordances
-      // the user can't act on.
-      ...(isTenantWide
-        ? []
-        : [
-            {
-              key: 'actions',
-              label: '',
-              type: 'actions',
-              render: (kb) => (
-                <KnowledgeBaseActions
-                  knowledgeBase={kb}
-                  onEdit={handleEdit}
-                  onDelete={handleDelete}
-                  onRetrigger={handleRetrigger}
-                  onViewHistory={handleViewHistory}
-                  hasAccess={hasAccess}
-                />
-              ),
-            },
-          ]),
+      // Row actions need one account to run in: every row in account mode, and
+      // in tenant-wide mode only rows that belong to a single account.
+      {
+        key: 'actions',
+        label: '',
+        type: 'actions',
+        render: (kb) =>
+          kbAccountId(kb) ? (
+            <KnowledgeBaseActions
+              knowledgeBase={kb}
+              onEdit={handleEdit}
+              onDelete={handleDelete}
+              onRetrigger={handleRetrigger}
+              onViewHistory={handleViewHistory}
+              hasAccess={canWriteKb(kb)}
+            />
+          ) : null,
+      },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handlers intentionally omitted, see docstring above
     [hasAccess, accountId, isTenantWide, togglingEnabledIds]
@@ -1093,8 +1105,8 @@ const KnowledgeBaseTab = ({ accountId }) => {
     }
 
     const results = await Promise.all([
-      ...toMap.map((agentId) => apiKnowledgeBase.mapKnowledgeBaseToAgent(accountId, kbId, agentId)),
-      ...toUnmap.map((agentId) => apiKnowledgeBase.unmapKnowledgeBaseFromAgent(accountId, kbId, agentId)),
+      ...toMap.map((agentId) => apiKnowledgeBase.mapKnowledgeBaseToAgent(formAccountId, kbId, agentId)),
+      ...toUnmap.map((agentId) => apiKnowledgeBase.unmapKnowledgeBaseFromAgent(formAccountId, kbId, agentId)),
     ]);
     const failed = results.filter((r) => r?.errors?.length > 0).length;
     if (failed > 0) {
@@ -1112,7 +1124,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
       let kbId;
 
       if (selectedKnowledgeBase) {
-        response = await apiKnowledgeBase.updateKnowledgeBase(accountId, selectedKnowledgeBase.id, kbPayload);
+        response = await apiKnowledgeBase.updateKnowledgeBase(formAccountId, selectedKnowledgeBase.id, kbPayload);
         if (response.errors && response.errors.length > 0) {
           const errorMessage = response.errors[0]?.message || 'Failed to update knowledge base';
           snackbar.error(errorMessage);
@@ -1154,7 +1166,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
 
     try {
       setSubmitting(true);
-      const response = await apiKnowledgeBase.deleteKnowledgeBase(accountId, selectedKnowledgeBase.id);
+      const response = await apiKnowledgeBase.deleteKnowledgeBase(kbAccountId(selectedKnowledgeBase), selectedKnowledgeBase.id);
 
       if (response.errors && response.errors.length > 0) {
         const errorMessage = response.errors[0]?.message || 'Failed to delete knowledge base';
@@ -1247,7 +1259,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
             }}
           >
             {isTenantWide
-              ? 'Viewing all knowledge bases across this tenant. Switch to an account-scoped page to create, edit, or retrigger a knowledge base.'
+              ? 'Viewing all knowledge bases across this tenant. Switch to an account-scoped page to create one, or to manage one shared across several accounts.'
               : "Account-scoped document library with AI semantic search-upload docs, map to agents, and they'll automatically search when needed."}
           </Typography>
         </Box>
@@ -1473,7 +1485,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
           setHistoryModalOpen(false);
           setHistoryKB(null);
         }}
-        accountId={accountId}
+        accountId={kbAccountId(historyKB)}
         kbId={historyKB?.id}
         kbName={historyKB?.name}
       />
@@ -1487,7 +1499,7 @@ const KnowledgeBaseTab = ({ accountId }) => {
         accountId={accountId || documentsKB?.account_id}
         kbId={documentsKB?.id}
         kbName={documentsKB?.name}
-        canEdit={hasAccess}
+        canEdit={Boolean(documentsKB) && canWriteKb(documentsKB)}
       />
     </Box>
   );
