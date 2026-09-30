@@ -1235,6 +1235,14 @@ func (m KubectlExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestCont
 	answer - write
 	reason - command is updating node details
 
+	command - kubectl exec pod1 -n ns -- cat /var/log/app.log
+	answer - read
+	reason - command only reads a file inside the container, nothing is changed
+
+	command - kubectl exec pod1 -n ns -- sh -c 'kill -HUP 1'
+	answer - write
+	reason - command sends a signal to a process inside the container, changing its state
+
 	`
 	return prompt, nil
 }
@@ -1313,6 +1321,20 @@ func InferKubectlVerbType(command string) core.ToolRequestType {
 	}
 	if verb == "delete" {
 		return core.ToolRequestTypeDelete
+	}
+
+	// `exec` is a write-capable channel (it can run anything inside the pod),
+	// so it stays out of kubectlReadVerbs above. But the remote command after
+	// `--` is frequently a plain diagnostic read (nc -z, curl GET, df, grep on
+	// a log file already on disk) that the codebase's own remediation-plan
+	// scorer already knows how to recognize (core.ExecRemoteCommandIsReadOnly).
+	// Reuse that here instead of sending every exec to the LLM fallback with
+	// no static anchor. Anything not on that allowlist still falls through to
+	// "" below — fail-closed, unchanged.
+	if verb == "exec" {
+		if core.ExecRemoteCommandIsReadOnly(parts) {
+			return core.ToolRequestTypeRead
+		}
 	}
 
 	return ""

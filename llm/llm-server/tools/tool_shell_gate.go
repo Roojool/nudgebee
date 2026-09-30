@@ -718,6 +718,11 @@ func shellScanBasename(token string) string {
 	return filepath.Base(strings.ReplaceAll(token, `\`, ""))
 }
 
+// isKnownReadOnlyCurlCommand and isCurlMutationToken delegate to tools/core
+// so this shell-local classification and the kubectl-exec/SSM payload
+// classification (tools/core/readonly_remote.go) share one definition of
+// "read-only curl" instead of drifting into two independently-maintained
+// copies.
 func isKnownReadOnlyCurlCommand(input string) bool {
 	tokens, err := shlex.Split(input)
 	if err != nil || len(tokens) == 0 {
@@ -735,44 +740,7 @@ func isKnownReadOnlyCurlCommand(input string) bool {
 }
 
 func isCurlMutationToken(token string) bool {
-	if hasShellMutationFlag(token, "-d", "--data", "--data-raw", "--data-binary",
-		"--data-ascii", "--data-urlencode", "--json", "--form-string",
-		"-F", "--form", "-T", "--upload-file", "-X", "--request", "-K", "--config",
-		"-Q", "--quote") {
-		return true
-	}
-	return hasMutatingCurlShortOption(token)
-}
-
-// hasMutatingCurlShortOption understands curl's bundled short-option syntax.
-// Once it reaches an option that consumes an attached value, the remaining
-// bytes are data rather than more options: -o/tmp/data and -HHeader:data must
-// not be mistaken for -d/-T/-X. Flag-only prefixes still expose a later
-// mutation, so -sSXPOST and -sK- remain gated.
-func hasMutatingCurlShortOption(token string) bool {
-	if len(token) < 2 || token[0] != '-' || strings.HasPrefix(token, "--") {
-		return false
-	}
-	for i := 1; i < len(token); i++ {
-		switch token[i] {
-		case 'd', 'F', 'T', 'X', 'K', 'Q':
-			return true
-		case 'A', 'b', 'c', 'C', 'D', 'e', 'E', 'h', 'H', 'm', 'o', 'P',
-			'r', 't', 'u', 'U', 'w', 'x', 'y', 'Y', 'z':
-			return false
-		}
-	}
-	return false
-}
-
-func hasShellMutationFlag(token string, flags ...string) bool {
-	for _, flag := range flags {
-		if token == flag || strings.HasPrefix(token, flag+"=") ||
-			(len(flag) == 2 && strings.HasPrefix(token, flag) && len(token) > len(flag)) {
-			return true
-		}
-	}
-	return false
+	return core.IsCurlMutationToken(token)
 }
 
 // splitShellPipeline separates unquoted pipeline stages. Unlike compound
