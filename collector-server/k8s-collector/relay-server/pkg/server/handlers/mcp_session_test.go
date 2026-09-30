@@ -8,14 +8,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// fakeMCPServer issues a new Mcp-Session-Id on every initialize, answers 404
-// for requests carrying an unknown session (as the MCP spec requires), and
-// records DELETE terminations.
+// fakeMCPServer issues a new Mcp-Session-Id on every initialize, answers 400
+// for requests without a session and 404 for an unknown session (as the MCP
+// spec requires), and records DELETE terminations.
 type fakeMCPServer struct {
 	mu         sync.Mutex
 	next       int
@@ -45,6 +46,12 @@ func (f *fakeMCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.live[sid] = true
 		w.Header().Set("Mcp-Session-Id", sid)
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{}}`))
+		return
+	}
+	if sid == "" {
+		// Per the MCP spec: a server that requires sessions answers a request
+		// without one with 400, and an unknown session with 404.
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if !f.live[sid] {
@@ -195,19 +202,103 @@ func TestIsMCPSessionGone(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
-		body   string
 		sid    string
 		want   bool
 	}{
-		{"404 with session", 404, "", "s1", true},
-		{"400 mentioning session", 400, "Invalid session", "s1", true},
-		{"400 unrelated", 400, "bad params", "s1", false},
-		{"404 without session", 404, "", "", false},
-		{"200", 200, "session", "s1", false},
+		{"404 with session", 404, "s1", true},
+		{"400 is never treated as gone", 400, "s1", false},
+		{"404 without session", 404, "", false},
+		{"200", 200, "s1", false},
 	}
 	for _, c := range cases {
-		if got := isMCPSessionGone(c.status, c.body, c.sid); got != c.want {
+		if got := isMCPSessionGone(c.status, c.sid); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestMCPSession_SessionlessServerInitializedOncePerKey(t *testing.T) {
+	var mu sync.Mutex
+	inits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"initialize"`) {
+			mu.Lock()
+			inits++
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	origClient := mcpHTTPClient
+	mcpHTTPClient = srv.Client()
+	resetMCPSessionCache()
+	t.Cleanup(func() {
+		srv.Close()
+		mcpHTTPClient = origClient
+		resetMCPSessionCache()
+	})
+
+	for range 3 {
+		callMCP(t, srv.URL+"|acct|conv", srv.URL)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if inits != 1 {
+		t.Fatalf("sessionless server should be initialized once per key, got %d", inits)
+	}
+}
+
+func TestMCPSession_SessionlessEntryDroppedWhenServerRejectsCall(t *testing.T) {
+	_, url := setupFakeMCP(t)
+	key := url + "|acct|conv"
+	mcpSessionCache.Lock()
+	mcpSessionCache.sessions[key] = mcpSessionEntry{expiry: time.Now().Add(mcpSessionTTL)}
+	mcpSessionCache.Unlock()
+
+	// The fake server requires sessions: a call without one gets 400 (per the
+	// MCP spec), which must clear the stale sessionless entry.
+	_, status, err := doMCPRequest(context.Background(), key, url, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`), "", []byte(testMCPRawBody), slog.Default())
+	if err != nil || status != http.StatusBadRequest {
+		t.Fatalf("expected 400 from session-requiring server, got %d %v", status, err)
+	}
+	mcpSessionCache.RLock()
+	_, stillCached := mcpSessionCache.sessions[key]
+	mcpSessionCache.RUnlock()
+	if stillCached {
+		t.Fatal("stale sessionless entry should be dropped")
+	}
+	callMCP(t, key, url) // re-initializes and succeeds with a real session
+}
+
+func TestMCPSession_RealSessionReplacesConcurrentSessionlessEntry(t *testing.T) {
+	var key string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// While our initialize is in flight, a concurrent request caches the
+		// key as sessionless (a server with mixed versions mid-upgrade).
+		mcpSessionCache.Lock()
+		mcpSessionCache.sessions[key] = mcpSessionEntry{expiry: time.Now().Add(mcpSessionTTL)}
+		mcpSessionCache.Unlock()
+		w.Header().Set("Mcp-Session-Id", "real-1")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{}}`))
+	}))
+	origClient := mcpHTTPClient
+	mcpHTTPClient = srv.Client()
+	resetMCPSessionCache()
+	t.Cleanup(func() {
+		srv.Close()
+		mcpHTTPClient = origClient
+		resetMCPSessionCache()
+	})
+	key = srv.URL + "|acct|conv"
+
+	sid, err := ensureMCPSession(context.Background(), key, srv.URL, []byte(testMCPRawBody), slog.Default())
+	if err != nil || sid != "real-1" {
+		t.Fatalf("expected the real session to win, got %q %v", sid, err)
+	}
+	mcpSessionCache.RLock()
+	cached := mcpSessionCache.sessions[key].sessionID
+	mcpSessionCache.RUnlock()
+	if cached != "real-1" {
+		t.Fatalf("real session should replace the sessionless entry, cached %q", cached)
 	}
 }

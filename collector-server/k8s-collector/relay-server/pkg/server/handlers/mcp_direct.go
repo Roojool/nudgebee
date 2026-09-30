@@ -91,6 +91,9 @@ func mcpSessionCacheSweeper() {
 // 404 (already gone) or 405 (client termination not supported), and any error
 // is only logged — the server's own timeout remains the backstop.
 func terminateMCPSession(entry mcpSessionEntry) {
+	if entry.sessionID == "" {
+		return // sessionless server: nothing to end upstream
+	}
 	mcpTerminateSlots <- struct{}{}
 	defer func() { <-mcpTerminateSlots }()
 
@@ -243,7 +246,13 @@ func ensureMCPSession(ctx context.Context, cacheKey string, mcpURL string, rawBo
 		return "", err
 	}
 	if sessionID == "" {
-		// Server doesn't require sessions — that's fine
+		// Server doesn't use sessions. Cache that too, or every call on this
+		// key would repeat the initialize handshake.
+		mcpSessionCache.Lock()
+		if _, ok := mcpSessionCache.sessions[cacheKey]; !ok {
+			mcpSessionCache.sessions[cacheKey] = mcpSessionEntry{expiry: time.Now().Add(mcpSessionTTL)}
+		}
+		mcpSessionCache.Unlock()
 		return "", nil
 	}
 
@@ -256,9 +265,10 @@ func ensureMCPSession(ctx context.Context, cacheKey string, mcpURL string, rawBo
 		authBody:  mcpAuthSnapshot(rawBody),
 	}
 	mcpSessionCache.Lock()
-	if existing, ok := mcpSessionCache.sessions[cacheKey]; ok && time.Now().Before(existing.expiry) {
+	if existing, ok := mcpSessionCache.sessions[cacheKey]; ok && existing.sessionID != "" && time.Now().Before(existing.expiry) {
 		// A concurrent request initialized a session for this key first: use
 		// theirs so both calls share state, and end the one we just opened.
+		// A cached sessionless entry never wins over a real session.
 		mcpSessionCache.Unlock()
 		go terminateMCPSession(created)
 		return existing.sessionID, nil
@@ -311,15 +321,11 @@ func performMCPInitialize(ctx context.Context, mcpURL string, rawBody []byte) (s
 }
 
 // isMCPSessionGone reports whether a response means the upstream server has
-// dropped the session we sent.
-func isMCPSessionGone(statusCode int, responseData, sessionID string) bool {
-	if sessionID == "" {
-		return false
-	}
-	if statusCode == http.StatusNotFound {
-		return true
-	}
-	return statusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(responseData), "session")
+// dropped the session we sent. Only 404, as the MCP spec prescribes: guessing
+// from a 400's text would drop a live session and replay a tool call on an
+// ordinary tool error.
+func isMCPSessionGone(statusCode int, sessionID string) bool {
+	return sessionID != "" && statusCode == http.StatusNotFound
 }
 
 // doMCPRequest sends the actual MCP JSON-RPC request with session and SSE handling.
@@ -330,9 +336,14 @@ func doMCPRequest(ctx context.Context, cacheKey string, mcpURL string, mcpBody [
 		return "", 0, err
 	}
 
-	// The server no longer knows our session: per the MCP spec it answers 404,
-	// and some servers answer 400 mentioning the session. Re-initialize and retry once.
-	if isMCPSessionGone(statusCode, responseData, sessionID) {
+	// A key cached as sessionless whose server now rejects the call may have
+	// started requiring sessions: forget it so the next call re-initializes.
+	if sessionID == "" && (statusCode == http.StatusBadRequest || statusCode == http.StatusNotFound) {
+		dropMCPSession(cacheKey, "")
+	}
+
+	// The server no longer knows our session (404): re-initialize and retry once.
+	if isMCPSessionGone(statusCode, sessionID) {
 		logger.Info("MCP session expired, re-initializing", "url", mcpURL, "status", statusCode)
 		dropMCPSession(cacheKey, sessionID)
 
