@@ -198,11 +198,13 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
   // global sidebar (no current account in scope), the backend's
   // agentListAgent routes empty account_id to ListAgentsForTenant — the
   // system catalog + every custom agent the caller can read across the
-  // tenant. The UI hides per-account affordances (Create / Edit / Delete /
-  // KB-mapping / tool config / agent extensions) because writes all require
-  // account context, and renders an Account column so cross-account custom
-  // agents are distinguishable.
+  // tenant. Writes all require account context, so the UI hides Create,
+  // the KB-count column and every system-agent action (override / extend),
+  // and renders an Account column so cross-account custom agents are
+  // distinguishable. Custom agents keep their Action menu: each row carries
+  // the account it belongs to (account_id), which the actions run against.
   const isTenantWide = !accountId;
+  const agentAccountId = (agent) => (isTenantWide ? agent?.account_id || '' : accountId);
   const [data, setData] = React.useState([]);
   const [originalData, setOriginalData] = React.useState([]);
   const [createAgentModal, setCreateAgentModal] = React.useState(false);
@@ -263,10 +265,10 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
     }
   };
 
-  const fetchAvailableKbs = async () => {
+  const fetchAvailableKbs = async (agent) => {
     setIsLoadingKbs(true);
     try {
-      const response = await apiKnowledgeBase.getKnowledgeBases(accountId);
+      const response = await apiKnowledgeBase.getKnowledgeBases(agentAccountId(agent));
       if (response?.errors?.length > 0) {
         snackbar.error('Failed to fetch knowledge bases');
         setAvailableKbs([]);
@@ -288,8 +290,8 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
       // reach this agent as well, and rendering them unticked would read as "not
       // mapped" right after someone chose "All agents" in the KB form.
       const [response, wildcardResponse] = await Promise.all([
-        apiKnowledgeBase.getAgentKnowledgeBases(accountId, agent.name),
-        apiKnowledgeBase.getAgentKnowledgeBases(accountId, KB_AGENT_WILDCARD),
+        apiKnowledgeBase.getAgentKnowledgeBases(agentAccountId(agent), agent.name),
+        apiKnowledgeBase.getAgentKnowledgeBases(agentAccountId(agent), KB_AGENT_WILDCARD),
       ]);
       if (!response?.errors?.length) {
         const mappedIds = (response.data || []).map((kb) => kb.id);
@@ -312,7 +314,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
     setAlreadyMappedKbIds([]);
     setAllAgentsKbIds([]);
     setIsKbSelectionModalOpen(true);
-    fetchAvailableKbs();
+    fetchAvailableKbs(agent);
     fetchAlreadyMappedKbs(agent);
   };
 
@@ -360,7 +362,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
 
       for (const kbId of toMap) {
         try {
-          const response = await apiKnowledgeBase.mapKnowledgeBaseToAgent(accountId, kbId, selectedAgent.name);
+          const response = await apiKnowledgeBase.mapKnowledgeBaseToAgent(agentAccountId(selectedAgent), kbId, selectedAgent.name);
           if (response?.errors?.length > 0) {
             mapError++;
           } else {
@@ -374,7 +376,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
 
       for (const kbId of toUnmap) {
         try {
-          const response = await apiKnowledgeBase.unmapKnowledgeBaseFromAgent(accountId, kbId, selectedAgent.name);
+          const response = await apiKnowledgeBase.unmapKnowledgeBaseFromAgent(agentAccountId(selectedAgent), kbId, selectedAgent.name);
           if (response?.errors?.length > 0) {
             unmapError++;
           } else {
@@ -403,7 +405,10 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
       }
 
       handleCloseKbSelectionModal();
-      fetchKBCounts();
+      // KB counts are per-account and not shown in tenant-wide mode.
+      if (!isTenantWide) {
+        fetchKBCounts();
+      }
     } catch (error) {
       console.error('Error saving KB changes:', error);
       snackbar.error('Failed to save knowledge base changes');
@@ -528,7 +533,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
 
     setIsDeleting(true);
     try {
-      const response = await apiAskNudgebee.deleteAgent(accountId, agentToDelete.name);
+      const response = await apiAskNudgebee.deleteAgent(agentAccountId(agentToDelete), agentToDelete.name);
       if (!(response?.data?.data?.ai_delete_agent?.data?.status === 'ok')) {
         snackbar.error('Failed to delete agent');
         return;
@@ -622,6 +627,26 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
         const currentAgentName = agent.name;
         const kbCount = (kbCountsMap[currentAgentName] || 0) + wildcardKbCount;
         const hasExtensions = extensionsMap[currentAgentName]?.length > 0;
+        const rowAccountId = agentAccountId(agent);
+        const canManage = (!isTenantWide || agent.type === 'custom') && Boolean(rowAccountId) && hasWriteAccess(rowAccountId);
+        const actionCell = {
+          component: canManage ? (
+            // Portal the menu to <body> so it escapes the nested
+            // overflow:auto + sticky-column stack this table lives in
+            // (scrollable TableContainer inside the fixed-height Settings
+            // modal). Rendered inline, Safari mis-lays-out the popover
+            // surface into a tall empty panel; a body portal avoids that.
+            <ThreeDotsMenu
+              menuItems={getMenuItems(agent)}
+              onMenuClick={handleMenuAction}
+              data={agent}
+              disablePortal={false}
+              sx={{ padding: ds.space[1] }}
+            />
+          ) : (
+            <></>
+          ),
+        };
         // Letter fallback shown when no icon resolves to something drawable.
         const avatarFallback = (
           <Avatar
@@ -739,13 +764,14 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
             component: <AgentUsageCell agentName={agent.name} />,
           },
           // Tools column is already present above; in tenant-wide mode we
-          // skip the KB-count and Actions columns and replace them with an
-          // Account column so the user can tell custom rows apart.
+          // skip the KB-count column and replace it with an Account column
+          // so the user can tell custom rows apart.
           ...(isTenantWide
             ? [
                 {
                   component: <Text value={agent.account_name || (agent.type === 'system' ? '—' : agent.account_id || '—')} />,
                 },
+                actionCell,
               ]
             : [
                 {
@@ -769,24 +795,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
                     </Box>
                   ),
                 },
-                {
-                  component: hasWriteAccess(accountId) ? (
-                    // Portal the menu to <body> so it escapes the nested
-                    // overflow:auto + sticky-column stack this table lives in
-                    // (scrollable TableContainer inside the fixed-height Settings
-                    // modal). Rendered inline, Safari mis-lays-out the popover
-                    // surface into a tall empty panel; a body portal avoids that.
-                    <ThreeDotsMenu
-                      menuItems={getMenuItems(agent)}
-                      onMenuClick={handleMenuAction}
-                      data={agent}
-                      disablePortal={false}
-                      sx={{ padding: ds.space[1] }}
-                    />
-                  ) : (
-                    <></>
-                  ),
-                },
+                actionCell,
               ]),
         ];
       });
@@ -983,7 +992,7 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
         }
       >
         <CreateAgentNew
-          accountId={accountId}
+          accountId={agentAccountId(selectedAgent)}
           handleClose={(value) => {
             if (value == 'success') {
               refreshAgentListing();
@@ -1188,11 +1197,12 @@ const ListAgents = ({ accountId, refreshAgentListing, allAgents, loadingAgents, 
               isTenantWide
                 ? [
                     { name: 'Name', width: '20%' },
-                    { name: 'Description', width: '35%' },
+                    { name: 'Description', width: '30%' },
                     { name: 'Status', width: '10%' },
                     { name: 'Tools', width: '15%' },
                     { name: 'Usage', width: '5%', info: USAGE_COLUMN_INFO },
                     { name: 'Account', width: '15%' },
+                    { name: 'Action', width: '5%' },
                   ]
                 : [
                     { name: 'Name', width: '15%' },
