@@ -835,10 +835,19 @@ func trailingNewline(values []string) string {
 // A command that ran and exited non-zero therefore gets 200 with both fields:
 // the output still reaches the caller, and the workspace (and kubectl_execute's
 // status) sees a failure instead of a success.
+//
+// A request the cluster agent refused is answered the same way. As a 500 it
+// would reach the model inside the shim's "Server returned 500" wrapper, which
+// reads as an infrastructure fault; the agent's own reason (a read-only
+// allowlist, an unregistered action) is what it needs to see.
 func workspaceExecuteReply(result any, err error) (int, gin.H) {
 	var exitErr *tools.RelayCommandExitError
 	if errors.As(err, &exitErr) {
 		return http.StatusOK, gin.H{"result": result, "error": exitErr.Error()}
+	}
+	var refusedErr *tools.RelayCommandRefusedError
+	if errors.As(err, &refusedErr) {
+		return http.StatusOK, gin.H{"result": result, "error": refusedErr.Error()}
 	}
 	if err != nil {
 		return http.StatusInternalServerError, gin.H{"error": err.Error(), "result": result}

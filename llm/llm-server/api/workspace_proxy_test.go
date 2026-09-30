@@ -884,6 +884,14 @@ func TestWorkspaceExecuteReply(t *testing.T) {
 	status, body = workspaceExecuteReply(nil, errors.New("unable to access relay server"))
 	assert.Equal(t, http.StatusInternalServerError, status)
 	assert.Equal(t, "unable to access relay server", body["error"])
+
+	// A request the cluster agent refused fails the command like a non-zero
+	// exit, with the agent's reason as the printed output.
+	refusal := `kubectl: verb "patch" not in read-only allowlist`
+	status, body = workspaceExecuteReply(refusal, &tools.RelayCommandRefusedError{StatusCode: 500, Message: refusal})
+	assert.Equal(t, http.StatusOK, status, "a refusal must stay 200 so the shim prints the agent's reason")
+	assert.Equal(t, refusal, body["result"])
+	assert.Contains(t, body["error"], refusal)
 }
 
 // The workspace's per-account config list only holds its own cluster, so a
