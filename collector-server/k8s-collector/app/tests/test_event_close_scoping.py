@@ -329,6 +329,7 @@ class TestWorkloadsWithNewPodRestarts(unittest.TestCase):
         p.namespace = namespace
         p.workload_name = workload_name
         p.restart_count = restart_count
+        p.tenant_id = TENANT
         return p
 
     def _run(self, pods, stored_rows):
@@ -398,8 +399,19 @@ class TestWorkloadsWithNewPodRestarts(unittest.TestCase):
         self.assertIn("FROM k8s_pods", query)
         self.assertIn("restart_count", query)
         self.assertEqual(params[0], ACCOUNT)
-        self.assertEqual(params[1], ["default"])
-        self.assertEqual(params[2], ["web-0"])
+        self.assertEqual(params[1], TENANT)
+        self.assertEqual(params[2], ["default"])
+        self.assertEqual(params[3], ["web-0"])
+
+    def test_query_matches_the_active_namespace_index(self):
+        """Runs on every snapshot. Without tenant_id and this exact is_active predicate
+        the planner cannot use the partial index idx_k8s_pods_active_account_namespace
+        and scans every pod the account ever had."""
+        with mock.patch.object(dh.database, "run_query", return_value=[]) as q:
+            dh._workloads_with_new_pod_restarts(ACCOUNT, [self._pod("web-0", {"app": 0})])
+        query = q.call_args.args[0]
+        self.assertIn("tenant_id = %s", query)
+        self.assertIn("is_active IS NOT FALSE", query)
 
     def test_runs_before_the_pod_upsert(self):
         """Ordering is the whole correctness argument: the upsert overwrites the

@@ -1388,11 +1388,16 @@ def _workloads_with_new_pod_restarts(cloud_account_id: str, pods: List[Any]) -> 
     wanted = {(p.namespace, p.name): p for p in pods if getattr(p, "workload_name", None)}
     if not wanted:
         return set()
+    # tenant_id + `is_active IS NOT FALSE` match idx_k8s_pods_active_account_namespace.
+    # Without them this runs on every snapshot as a full scan of k8s_pods, which keeps
+    # every pod the account ever had (hundreds of thousands of inactive rows).
     rows = database.run_query(
         "SELECT namespace, name, restart_count FROM k8s_pods "
-        "WHERE cloud_account_id = %s AND namespace = ANY(%s) AND name = ANY(%s)",
+        "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active IS NOT FALSE "
+        "AND namespace = ANY(%s) AND name = ANY(%s)",
         [
             cloud_account_id,
+            next(iter(wanted.values())).tenant_id,
             list({ns for ns, _ in wanted}),
             list({name for _, name in wanted}),
         ],
