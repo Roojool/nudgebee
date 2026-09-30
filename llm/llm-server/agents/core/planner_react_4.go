@@ -90,6 +90,14 @@ type NBReActPlanner4 struct {
 	// planCallCount is transient and identifies the first Plan invocation for
 	// this planner instance even when restored history already contains steps.
 	planCallCount int
+	// turnStartedAt is the timestamp rendered into the human message. It is
+	// captured once per planner instance (one turn) rather than on every Plan()
+	// call: the human message sits right after the system prompt, so a
+	// per-second clock there changed the prompt prefix on every tool step and
+	// defeated provider prefix caching for the whole tool loop (#39633). react_3
+	// already renders its human message once per turn. Time math is unaffected:
+	// the model is told to use [[Time:...]] macros, resolved at tool execution.
+	turnStartedAt time.Time
 
 	// enableCritique is the per-request critique override (request.EnableCritique).
 	// maxRefinementAttempts bounds the refine loop. Both are derived at
@@ -1264,7 +1272,7 @@ func (o *NBReActPlanner4) humanText(input string) string {
 	}
 
 	out, err := tmpl.Format(map[string]any{
-		"today":                    time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
+		"today":                    o.turnStartTime().Format("Monday, January 2, 2006, 15:04:05 UTC"),
 		"kb_prestep_content":       strings.TrimSpace(o.request.KBPrestepContent),
 		"skill_lists_menu":         strings.TrimSpace(o.request.SkillListsMenu),
 		"global_preferences_block": strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)),
@@ -1286,6 +1294,15 @@ func (o *NBReActPlanner4) humanText(input string) string {
 		return fmt.Sprintf("<question>%s</question>", input)
 	}
 	return out
+}
+
+// turnStartTime returns the UTC time this planner instance first rendered its
+// human message, capturing it on first use. See turnStartedAt.
+func (o *NBReActPlanner4) turnStartTime() time.Time {
+	if o.turnStartedAt.IsZero() {
+		o.turnStartedAt = time.Now().UTC()
+	}
+	return o.turnStartedAt
 }
 
 // renderStepsToMessages reconstructs the native tool-calling history from the
