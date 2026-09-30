@@ -44,6 +44,11 @@ type EventIncomingWebhook struct {
 	EventSubjectOwnerKind string                            `json:"event_subject_owner_kind"`
 	CloudResourceId       string                            `json:"cloud_resource_id"`
 	ServiceKey            string                            `json:"service_key"`
+	// FiringKey identifies one firing of the alert EventId names, for parsers whose
+	// EventId is stable across firings. Set it and each firing gets its own events
+	// row (see firingFindingIDFor); leave it empty when the source offers no such
+	// key, or when EventId is already per firing.
+	FiringKey string `json:"firing_key,omitempty"`
 }
 
 type EventIncomingWebhookInvestigationSeverity string
@@ -884,6 +889,17 @@ func investigateWebhookEvent(sc *security.RequestContext, tenantId, accountId st
 
 func triggerEventAnalysisUsingLLM(sc *security.RequestContext, webhookEvent EventIncomingWebhook, tenantId, accountId, userId string, source string) error {
 	eventToInsert := convertWebhookEventToEvent(webhookEvent, tenantId, accountId, source)
+	if webhookEvent.FiringKey != "" {
+		dbms, err := database.GetDatabaseManager(database.Metastore)
+		if err != nil {
+			return fmt.Errorf("integrations: unable to get database manager: %w", err)
+		}
+		findingId, err := firingFindingIDFor(dbms, tenantId, accountId, source, webhookEvent)
+		if err != nil {
+			sc.GetLogger().Warn("integrations: firing row lookup failed, using the minted id", "error", err, "event_id", webhookEvent.EventId, "finding_id", findingId)
+		}
+		eventToInsert.FindingId = findingId
+	}
 
 	if InvestigateEventFn == nil {
 		return errors.New("integrations: InvestigateEventFn not registered")

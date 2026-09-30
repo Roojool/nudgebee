@@ -208,6 +208,7 @@ func (m PrometheusAlertManagerWebhook) ProcessEventWebook(sc *security.RequestCo
 			WebhookId:             uuid.NewString(),
 			EventType:             alertName,
 			EventId:               fingerprint,
+			FiringKey:             core.FiringKeyFromStart(fingerprint, startsAt),
 			EventUrl:              generatorURL,
 			EventStatus:           string(mapGrafanaStatus(status)),
 			EventPriority:         string(mapGrafanaSeverity(labels["severity"])),
