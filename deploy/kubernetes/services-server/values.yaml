@@ -55,6 +55,17 @@ service:
   type: ClusterIP
   port: 8000
 
+# Keeps a terminating pod serving until it has left the Service's endpoints.
+# Without it the process exits on SIGTERM while kube-proxy still routes new
+# connections to the pod's IP, and callers (every app request's session check)
+# sit out a 10s connect timeout. The image is alpine, so `sleep` exists; an
+# exec hook also works on clusters older than the native sleep action (1.30).
+# Must stay well under terminationGracePeriodSeconds (default 30s).
+lifecycle:
+  preStop:
+    exec:
+      command: ['sleep', '10']
+
 ingress:
   # -- Enable [ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/).
   enabled: false
@@ -127,6 +138,8 @@ worker:
   # worker only needs to override what genuinely differs from the API pods.
   resources: {}
   podAnnotations: {}
+  # Empty falls back to the top-level lifecycle; null that to drop the hook on both.
+  lifecycle: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}

@@ -73,12 +73,24 @@ export async function revokeBearerSession(userId: string, jti: string, expiresAt
  * is extracted. Failing closed on errors would lock everyone out if the DB
  * blips, so a backend error logs and returns false — the existing
  * signature+expiry checks remain authoritative.
+ *
+ * The check runs before every cookie request, so it is bounded: a
+ * services-server pod that exits while still in the Service's endpoints
+ * otherwise holds every request for undici's 10 s connect timeout, only to
+ * fail open anyway. On dev the 24h p99 was 247 ms and nothing landed between
+ * 1 s and 9 s, so the bound only cuts those stalls.
  */
+const REVOCATION_CHECK_TIMEOUT_MS = 1000;
+
 export async function isSessionRevoked(userId: string, jti: string | null, iatSec: number): Promise<boolean> {
   try {
-    const response = await queryGraphQL(IS_REVOKED_MUTATION, 'AuthCheckSession', {
-      object: { user_id: userId, jti: jti ?? '', iat: iatSec },
-    });
+    const response = await queryGraphQL(
+      IS_REVOKED_MUTATION,
+      'AuthCheckSession',
+      { object: { user_id: userId, jti: jti ?? '', iat: iatSec } },
+      undefined,
+      AbortSignal.timeout(REVOCATION_CHECK_TIMEOUT_MS)
+    );
     if (response?.data?.errors?.length) {
       console.error('[sessionRevocation] isSessionRevoked errors', JSON.stringify(response.data.errors));
       return false;

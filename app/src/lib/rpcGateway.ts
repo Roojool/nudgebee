@@ -355,6 +355,15 @@ export type ForwardError =
 
 export type ForwardResult = { ok: true; payload: unknown } | { ok: false; error: ForwardError };
 
+// A timeout signal (AbortSignal.timeout) firing means the upstream was too slow,
+// not that the caller left, so it is reported as unreachable and logged as such.
+function abortedError(opts: ForwardOptions, url: string): ForwardError {
+  if ((opts.signal?.reason as { name?: string } | undefined)?.name === 'TimeoutError') {
+    return { kind: 'upstream_unreachable', method: opts.method, url, detail: 'timed out' };
+  }
+  return { kind: 'client_disconnected', method: opts.method, url };
+}
+
 export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult> {
   const route = routes[opts.method];
   if (!route) return { ok: false, error: { kind: 'method_not_found', method: opts.method } };
@@ -482,7 +491,7 @@ export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult
       signal: opts.signal,
     });
   } catch (err: unknown) {
-    if (opts.signal?.aborted) return { ok: false, error: { kind: 'client_disconnected', method: opts.method, url: upstreamUrl } };
+    if (opts.signal?.aborted) return { ok: false, error: abortedError(opts, upstreamUrl) };
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, error: { kind: 'upstream_unreachable', method: opts.method, url: upstreamUrl, detail } };
   }
@@ -492,7 +501,7 @@ export async function forwardAction(opts: ForwardOptions): Promise<ForwardResult
   try {
     rawBody = await upstream.text();
   } catch (err: unknown) {
-    if (opts.signal?.aborted) return { ok: false, error: { kind: 'client_disconnected', method: opts.method, url: upstreamUrl } };
+    if (opts.signal?.aborted) return { ok: false, error: abortedError(opts, upstreamUrl) };
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, error: { kind: 'upstream_unreachable', method: opts.method, url: upstreamUrl, detail } };
   }
@@ -811,6 +820,9 @@ export function bypassGraphQLAsServer(opts: {
   // source this from a trusted server-only value (license.tenantId, etc.)
   // — never from a client-supplied header.
   tenantOverride?: string;
+  // See ForwardOptions.signal. Server callers pass AbortSignal.timeout(...)
+  // to bound a call that must not hold up the request it runs inside.
+  signal?: AbortSignal;
 }): Promise<GraphQLBypassResult> {
   return tryBypassGraphQL({
     query: opts.query,
@@ -819,6 +831,7 @@ export function bypassGraphQLAsServer(opts: {
     traceparent: opts.traceparent,
     requestId: opts.requestId,
     tenantOverride: opts.tenantOverride,
+    signal: opts.signal,
   });
 }
 
