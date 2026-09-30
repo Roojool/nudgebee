@@ -345,14 +345,23 @@ func (c *ZenDutyClient) CreateIncident(ctx context.Context, req *CreateIncidentR
 	return &incident, nil
 }
 
-// GetIncident fetches an incident by ID from ZenDuty.
-func (c *ZenDutyClient) GetIncident(ctx context.Context, incidentID string) (*ZenDutyIncident, error) {
-	var incident ZenDutyIncident
-	endpoint := fmt.Sprintf("/incidents/%s/", incidentID)
-	if err := c.getJSON(ctx, endpoint, &incident); err != nil {
-		return nil, fmt.Errorf("failed to get incident: %w", err)
+// GetIncidentWithBody fetches an incident by ID from ZenDuty and also returns
+// the response as ZenDuty sent it, including the keys ZenDutyIncident does not
+// model.
+func (c *ZenDutyClient) GetIncidentWithBody(ctx context.Context, incidentID string) (*ZenDutyIncident, map[string]any, error) {
+	body, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/incidents/%s/", incidentID), nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get incident: %w", err)
 	}
-	return &incident, nil
+	var incident ZenDutyIncident
+	if err := json.Unmarshal(body, &incident); err != nil {
+		return nil, nil, fmt.Errorf("failed to get incident: %w", err)
+	}
+	var full map[string]any
+	if err := json.Unmarshal(body, &full); err != nil {
+		return nil, nil, fmt.Errorf("failed to get incident: %w", err)
+	}
+	return &incident, full, nil
 }
 
 // UpdateIncident partially updates an incident in ZenDuty using PATCH.

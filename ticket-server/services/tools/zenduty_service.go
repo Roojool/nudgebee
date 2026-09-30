@@ -43,7 +43,7 @@ func (s *ZenDutyService) Get(ctx *gin.Context, config models.TicketConfiguration
 		return nil, fmt.Errorf("invalid incident ID: %w", err)
 	}
 	client := clients.CreateZenDutyClient(config.Password)
-	incident, err := client.GetIncident(ctx, ticketID)
+	incident, full, err := client.GetIncidentWithBody(ctx, ticketID)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func (s *ZenDutyService) Get(ctx *gin.Context, config models.TicketConfiguration
 		Platform:    "zenduty",
 		URL:         incident.HTMLURL,
 		CreatedAt:   &createdAt,
-		Raw:         marshalToMap(incident),
+		Raw:         rawWithUnmodeled(incident, full),
 	}, nil
 }
 

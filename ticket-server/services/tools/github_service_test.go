@@ -184,7 +184,9 @@ func TestGetGithubIssueWithClient_MapsMetadata(t *testing.T) {
 	const owner, repo = "nudgebee", "demo"
 
 	handler := http.NewServeMux()
-	handler.HandleFunc("/repos/"+owner+"/"+repo+"/issues/42", func(w http.ResponseWriter, _ *http.Request) {
+	var accept string
+	handler.HandleFunc("/repos/"+owner+"/"+repo+"/issues/42", func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"number": 42,
@@ -198,7 +200,8 @@ func TestGetGithubIssueWithClient_MapsMetadata(t *testing.T) {
 			"assignee": {"login": "rohitutekar123"},
 			"assignees": [{"login": "Kankshit-02"}, {"login": "rohitutekar123"}],
 			"labels": [{"name": "bug"}, {"name": "Workflow"}],
-			"milestone": {"title": "v1.0"}
+			"milestone": {"title": "v1.0"},
+			"issue_field_values": [{"issue_field_name": "Linked incident", "data_type": "text", "value": "PD-1234"}]
 		}`))
 	})
 
@@ -240,5 +243,21 @@ func TestGetGithubIssueWithClient_MapsMetadata(t *testing.T) {
 	}
 	if got.Platform != "github" {
 		t.Errorf("Platform = %q, want github", got.Platform)
+	}
+	if accept != "application/vnd.github.squirrel-girl-preview" {
+		t.Errorf("Accept = %q, want the header Issues.Get sends", accept)
+	}
+	fields, _ := got.Raw["issue_field_values"].([]any)
+	var value any
+	if len(fields) == 1 {
+		if field, ok := fields[0].(map[string]any); ok {
+			value = field["value"]
+		}
+	}
+	if value != "PD-1234" {
+		t.Errorf("Raw issue_field_values = %v, want the linked incident value", got.Raw["issue_field_values"])
+	}
+	if got.Raw["title"] != "Issue Title" {
+		t.Errorf("Raw title = %v, want the issue title", got.Raw["title"])
 	}
 }
