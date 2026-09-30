@@ -539,12 +539,19 @@ func (o *NBReActPlanner4) Plan(
 		// A tool call written as text gets one corrective re-prompt here. The
 		// executor has no retry for ErrParseFailure — it stops the loop and
 		// summarizes — so without this the run ends with the work undone.
-		if errors.Is(perr, errReact4TextToolCall) && !textToolCallRetried {
-			textToolCallRetried = true
-			messages = append(messages, textToolCallRetryMessages(result.Choices[0].Content)...)
-			o.ctx.GetLogger().Warn("react4: model wrote a tool call as text; re-prompting once",
-				"agent", o.agentName())
-			continue
+		if errors.Is(perr, errReact4TextToolCall) {
+			// The rejected text is logged because it is persisted nowhere else:
+			// without it a false positive or a new leaked shape is invisible.
+			leaked := common.TruncateHead(result.Choices[0].Content, textToolCallLogBytes)
+			if !textToolCallRetried {
+				textToolCallRetried = true
+				messages = append(messages, textToolCallRetryMessages(result.Choices[0].Content)...)
+				o.ctx.GetLogger().Warn("react4: model wrote a tool call as text; re-prompting once",
+					"agent", o.agentName(), "text", leaked)
+				continue
+			}
+			o.ctx.GetLogger().Warn("react4: model wrote a tool call as text again after the re-prompt; giving up",
+				"agent", o.agentName(), "text", leaked)
 		}
 		// Tool calls to dispatch, or a hard parse error: hand straight back to
 		// the executor. Only a final answer (finish != nil) is critiqued.
@@ -721,6 +728,10 @@ const geminiTextToolCallMarker = "call:default_api:"
 // never dispatched. Plan re-prompts once on it before surfacing the wrapped
 // ErrParseFailure to the executor.
 var errReact4TextToolCall = errors.New("tool call written as text instead of a native tool call")
+
+// textToolCallLogBytes caps how much of a rejected text tool call is logged:
+// enough to see its shape, not a whole answer.
+const textToolCallLogBytes = 300
 
 // containsTextToolCall reports whether text is an attempted tool call written
 // as prose instead of a native call. Used only when the turn produced NO native
