@@ -65,6 +65,14 @@ const timeout = '190s';
 const names = variants.map((v) => v.id);
 const t = thresholds(3000, names);
 if (sweep) t.http_req_failed = ['rate<0.01']; // a sweep should report every variant, not abort
+// Per-account lines (first 8 characters of the id), overall and per action, so a slow metrics
+// store shows up against its own cluster. setup() requests carry no account tag.
+const actions = new Set(variants.map((v) => v.action));
+for (const account of accountIds) {
+  const tag = `account:${account.slice(0, 8)}`;
+  t[`http_req_duration{${tag}}`] = [...t.http_req_duration];
+  for (const action of actions) t[`http_req_duration{${tag},action:${action}}`] = [...t.http_req_duration];
+}
 export const options = {
   setupTimeout: '10m',
   scenarios: sweep
@@ -75,13 +83,13 @@ export const options = {
 
 const emptyResponse = new Rate('metrics_empty_response');
 
-function post(path, action, input, tag) {
+function post(path, action, input, tags) {
   const body = JSON.stringify({ action: { name: action }, input, request_query: '', session_variables: sessionVariables });
-  return http.post(`${url}${path}`, body, { headers, timeout, tags: { name: tag, action } });
+  return http.post(`${url}${path}`, body, { headers, timeout, tags: { action, ...tags } });
 }
 
 function setupRows(action, input) {
-  const res = post('/rpc/query', action, input, `setup:${action}`);
+  const res = post('/rpc/query', action, input, { name: `setup:${action}` });
   if (res.status !== 200) throw new Error(`setup ${action}: HTTP ${res.status} ${String(res.body).slice(0, 300)}`);
   return res.json('rows') || [];
 }
@@ -90,7 +98,7 @@ function setupRows(action, input) {
 function setupSeries(account, query) {
   const end = Date.now();
   const input = { request: { account_id: account, queries: { A: query }, instant: true, start_time: end - 3e5, end_time: end } };
-  const res = post('/rpc/metrics', 'metrics_list', input, 'setup:metrics_list');
+  const res = post('/rpc/metrics', 'metrics_list', input, { name: 'setup:metrics_list' });
   if (res.status !== 200) {
     console.warn(`account ${account}: setup query failed, HTTP ${res.status} ${String(res.body).slice(0, 300)}`);
     return [];
@@ -235,7 +243,7 @@ export function run(data) {
     request.end_time = Date.now();
     request.start_time = request.end_time - WINDOW_MS[variant.window];
   }
-  const res = post('/rpc/metrics', variant.action, { request }, variant.id);
+  const res = post('/rpc/metrics', variant.action, { request }, { name: variant.id, account: account.slice(0, 8) });
 
   let body = null;
   try {
