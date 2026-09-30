@@ -230,9 +230,9 @@ func (m mcpIntegrationTool) CircuitBreakerKey(ctx NbToolContext, _ NBToolCallReq
 // relay transport failure, HTTP/JSON-RPC decode failure, upstream MCP
 // server unreachable — which is exactly the "infra is broken" signal
 // the breaker is designed to short-circuit on. A logical failure (the
-// LLM picking a tool that's not registered with the server, say) is
-// reported back through the JSON-RPC payload as a successful Call with
-// a normal NBToolResponse; that path stays unaffected.
+// LLM picking a tool that's not registered with the server, or the tool
+// returning result.isError) comes back with a nil error and an
+// NBToolResponseStatusError response; it does not trip the breaker.
 func (m mcpIntegrationTool) IsInfrastructureFailure(err error, _ NBToolResponse) bool {
 	return err != nil
 }
@@ -284,11 +284,42 @@ func (m mcpIntegrationTool) Call(ctx NbToolContext, input NBToolCallRequest) (NB
 		}, err
 	}
 
+	// The MCP server answered, but the answer can still be a failure: a
+	// tool-level error (result.isError, e.g. "connection refused" from the
+	// server's own backend) or a JSON-RPC error object (unknown tool, bad
+	// params). Report those as errors so the stored status, tool-health
+	// metrics and the planner's evidence accounting see them. err stays nil:
+	// the integration itself is reachable, so the circuit breaker must not trip.
+	status := NBToolResponseStatusSuccess
+	if isMCPToolCallError(response) {
+		log.Warn("mcp-integration: tool returned an error result")
+		status = NBToolResponseStatusError
+	}
+
 	return NBToolResponse{
-		Status: NBToolResponseStatusSuccess,
+		Status: status,
 		Data:   response,
 		Type:   NBToolResponseTypeText,
 	}, nil
+}
+
+// isMCPToolCallError reports whether a tools/call JSON-RPC reply carries a
+// failure: either a JSON-RPC error object or a result with isError set. A reply
+// that isn't parseable JSON-RPC is not classified as an error here.
+func isMCPToolCallError(response string) bool {
+	var rpcResp struct {
+		Result *struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(unwrapSSEIfPresent(response)), &rpcResp); err != nil {
+		return false
+	}
+	if rpcResp.Error != nil {
+		return true
+	}
+	return rpcResp.Result != nil && rpcResp.Result.IsError
 }
 
 // classifyMCPError buckets an MCP/relay failure into a short reason tag so the
