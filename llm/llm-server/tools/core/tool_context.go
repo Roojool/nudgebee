@@ -113,6 +113,12 @@ type NBQueryConfig struct {
 	// conversation's next turn (see handleConversationRequest).
 	SkipConversationHistory bool `json:"skip_conversation_history,omitempty"`
 
+	// Memory overrides the server-wide memory settings for this one request.
+	// Grouped rather than three flat flags because they are one concern, and a
+	// reader should not have to know that a "rerank" flag relates to a "memory"
+	// one.
+	Memory *MemoryOverrides `json:"memory,omitempty"`
+
 	// Tool infrastructure (managed by executor/planner)
 	ToolConfigs map[string]string `json:"tool_configs,omitempty"`
 	// DelegatedTarget is scoped to one child agent invocation. It is saved on
@@ -134,7 +140,102 @@ func (q NBQueryConfig) IsEmpty() bool {
 		q.LlmProvider == "" && q.LlmModelName == "" && len(q.LlmTierModels) == 0 && q.LlmConfigSource == "" && !q.LlmConfigReset && len(q.ToolConfigs) == 0 && q.DelegatedTarget == nil &&
 		len(q.ClientTools) == 0 && q.Capabilities.IsEmpty() && len(q.ToolConfirmations) == 0 &&
 		len(q.ToolConfigMetadata) == 0 && q.LogProviderOverride == "" && !q.SkipConversationHistory &&
-		len(q.DiscoveredTools) == 0
+		len(q.DiscoveredTools) == 0 && q.Memory.IsEmpty()
+}
+
+// MemoryOverrides narrows what memory may do for one request. The three
+// switches are independent — reading, writing and reranking are separate
+// decisions, and a caller commonly wants one off without the others (a
+// benchmark reads real memory but must not add to it; a cost experiment keeps
+// memory but drops the reranker).
+//
+// Every field is a pointer because the server defaults are ON. A plain bool
+// cannot tell "the caller asked for off" apart from "the caller said nothing",
+// and the second must leave the deployment's setting alone — the same reason
+// an empty K8sOrchestratorMode defers to the boot-time default.
+//
+// Off-only: these narrow, never widen. A request cannot switch on what the
+// deployment, the tenant's enrolment or the user's consent has switched off.
+// Enabling a licensed capability is not a caller's decision.
+type MemoryOverrides struct {
+	// Read injects stored memory into the prompt and serves the memory tool.
+	Read *bool `json:"read,omitempty"`
+	// Write records what this turn learned. Off leaves the store untouched, so
+	// a diagnostic or benchmark turn cannot contaminate what it is measuring.
+	Write *bool `json:"write,omitempty"`
+	// Rerank scores retrieved candidates with an LLM before injection. Off
+	// falls back to cosine order, and also skips the overfetch that exists only
+	// to feed the reranker.
+	Rerank *bool `json:"rerank,omitempty"`
+}
+
+// Clone returns an independent copy, including the switches themselves. Merging
+// must never alias: src is usually the conversation's stored config, inherited
+// by sub-agents that the planner runs concurrently, so a shared pointer would
+// let one action's merge mutate another's view — and the executor already lost a
+// process to shared request state being written from parallel actions.
+func (m *MemoryOverrides) Clone() *MemoryOverrides {
+	if m == nil {
+		return nil
+	}
+	return &MemoryOverrides{Read: cloneBool(m.Read), Write: cloneBool(m.Write), Rerank: cloneBool(m.Rerank)}
+}
+
+// cloneBool copies the pointed-to value so two configs never share a switch.
+func cloneBool(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// ReadSwitch and RerankSwitch expose one switch for the context carrier,
+// nil-safe on an absent block so callers need no guard of their own.
+func (m *MemoryOverrides) ReadSwitch() *bool {
+	if m == nil {
+		return nil
+	}
+	return m.Read
+}
+
+func (m *MemoryOverrides) RerankSwitch() *bool {
+	if m == nil {
+		return nil
+	}
+	return m.Rerank
+}
+
+// IsEmpty reports whether the caller set no override at all.
+func (m *MemoryOverrides) IsEmpty() bool {
+	return m == nil || (m.Read == nil && m.Write == nil && m.Rerank == nil)
+}
+
+// allowed resolves one switch: unset defers, set narrows.
+func allowed(p *bool) bool { return p == nil || *p }
+
+// MemoryReadAllowed reports whether THIS REQUEST allows memory to be read.
+//
+// Request scope only. Whether the deployment, the tenant's enrolment and the
+// user's consent allow it is a separate question, answered by each gate's own
+// config check before it asks this one. An earlier version took the deployment
+// default as an argument, but every caller passed a literal true — so it
+// enforced nothing while reading as though it did.
+func (q NBQueryConfig) MemoryReadAllowed() bool {
+	return q.Memory == nil || allowed(q.Memory.Read)
+}
+
+// MemoryWriteAllowed reports whether this request allows memory to be recorded.
+// Reading off implies writing off: a turn that ran without memory should not
+// shape later turns with what it produced.
+func (q NBQueryConfig) MemoryWriteAllowed() bool {
+	return q.MemoryReadAllowed() && (q.Memory == nil || allowed(q.Memory.Write))
+}
+
+// MemoryRerankAllowed reports whether this request allows retrieved memory to
+// be LLM-reranked. Reading off implies no rerank: there is nothing to rank.
+func (q NBQueryConfig) MemoryRerankAllowed() bool {
+	return q.MemoryReadAllowed() && (q.Memory == nil || allowed(q.Memory.Rerank))
 }
 
 // MergeFrom copies fields from src into q only when q's field is the zero value.
@@ -218,6 +319,22 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 	// it is independent of the LLM model config above and of a reset turn.
 	if q.LogProviderOverride == "" {
 		q.LogProviderOverride = src.LogProviderOverride
+	}
+	if q.Memory == nil {
+		q.Memory = src.Memory.Clone()
+	} else if src.Memory != nil {
+		// Per-switch fill-if-unset, matching every other field: a turn that set
+		// only one switch must still inherit the others. Copied by value, so the
+		// two configs never share a switch.
+		if q.Memory.Read == nil {
+			q.Memory.Read = cloneBool(src.Memory.Read)
+		}
+		if q.Memory.Write == nil {
+			q.Memory.Write = cloneBool(src.Memory.Write)
+		}
+		if q.Memory.Rerank == nil {
+			q.Memory.Rerank = cloneBool(src.Memory.Rerank)
+		}
 	}
 	if !q.SkipConversationHistory {
 		q.SkipConversationHistory = src.SkipConversationHistory
