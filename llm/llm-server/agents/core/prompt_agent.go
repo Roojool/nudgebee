@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 
@@ -138,7 +139,10 @@ func UpdatePromptForMultiCommandTool(query NBAgentRequest, tools []toolcore.NBTo
 
 					// Add one optional arg example if no required args shown
 					if len(exampleArgs) == 0 && len(schema.Properties) > 0 {
-						for argName, prop := range schema.Properties {
+						// Sorted so the chosen example is the same on every build: the
+						// system prompt must be byte-stable for prompt caching (#39633).
+						for _, argName := range slices.Sorted(maps.Keys(schema.Properties)) {
+							prop := schema.Properties[argName]
 							// Ensure it's not already added if it was somehow required but not listed
 							isAlreadyAdded := false
 							for _, req := range schema.Required {
@@ -399,7 +403,11 @@ func GetPromptTemplate(p NBAgentPrompt, query NBAgentRequest, plannerType AgentP
 		} else {
 			sb.WriteString("Instructions on tool usage:\n")
 		}
-		for toolName, usage := range p.ToolUsage {
+		// Sorted: ranging the map directly gave a different tool order on every
+		// build, so the system prompt changed between executions and defeated
+		// both explicit and implicit prompt caching (#39633).
+		for _, toolName := range slices.Sorted(maps.Keys(p.ToolUsage)) {
+			usage := p.ToolUsage[toolName]
 			fmt.Fprintf(&sb, "**%s**\n", toolName)
 			for _, usage := range usage {
 				fmt.Fprintf(&sb, "- %s\n", usage)
