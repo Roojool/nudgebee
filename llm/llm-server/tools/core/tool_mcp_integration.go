@@ -407,6 +407,7 @@ func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegratio
 	}
 
 	var agentType string
+	noAgent := false
 
 	if cfg.ConnectionMode == "direct" {
 		actionParams["connection_mode"] = "direct"
@@ -437,6 +438,7 @@ func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegratio
 			actionParams["auth_credentials"] = authCreds
 		}
 		// No agent type needed for direct mode — relay handles it
+		noAgent = true
 	} else {
 		// vm_agent mode — route to forager
 		actionParams["connection_mode"] = "vm_agent"
@@ -458,6 +460,7 @@ func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegratio
 		ActionName:   "mcp_request",
 		ActionParams: actionParams,
 		AgentType:    agentType,
+		NoAgent:      noAgent,
 		Timeout:      duration,
 	}
 
