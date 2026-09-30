@@ -25,6 +25,7 @@ import {
 } from '@shared/settings/labelMapperFields';
 import { Divider } from '@ui/Divider';
 import K8sAccountModal from '@components/integrations/modal/K8sAccountModal';
+import { buildK8sInstallCommand } from '@components/integrations/k8sInstallCommand';
 import { ListingLayout } from '@ui/ListingLayout';
 import FilterDropdown from '@ui/FilterDropdown';
 import SearchInput from '@ui/SearchInput';
@@ -206,8 +207,7 @@ const K8sIntegrationTile = () => {
     } else if (menuItem.id === 'renew-token') {
       apiAccount.generateAgentToken(data.id).then((res) => {
         if (res?.data?.data?.agents_create_token?.access_secret) {
-          const k8CurlCmd = `wget https://raw.githubusercontent.com/nudgebee/k8s-agent/main/installation.sh && bash installation.sh -a "${res?.data?.data?.agents_create_token?.access_key}:${res?.data?.data?.agents_create_token?.access_secret}"`;
-          setK8sCurlCommand(k8CurlCmd);
+          setK8sCurlCommand(buildK8sInstallCommand(res.data.data.agents_create_token.access_key, res.data.data.agents_create_token.access_secret));
         }
       });
     } else if (menuItem.id === 'toggle-enabled') {
