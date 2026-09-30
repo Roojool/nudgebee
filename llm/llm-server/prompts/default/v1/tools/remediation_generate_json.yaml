@@ -20,7 +20,8 @@ body: |2
 
   If the investigation does NOT support any hypothesis with reasonable confidence — the root cause is genuinely unclear — do NOT invent remediation. Return an empty actions list and say so.
 
-  Each action is a self-contained recovery strategy (an execution plan the operator picks from), not a sequential step. Rank actions best-first and give each a confidence.
+  Each action is a recovery strategy the operator picks from. Rank actions best-first and give each a confidence.
+  Some fixes need more than one change, in order: a restart after the configuration it reloads, a queue redrive after the permission the consumer lacked, a limit raise after the quota that would refuse it. Emit each change as its own action and give every change after the first an "after" naming the action it must follow; give all of them the kind and confidence of the whole fix, and make the last one's verify check that the incident is resolved, not just that its own field changed. Never split a fix into competing actions without "after", and never join changes into one command.
 
   Separate a real fix from a mitigation. A fix removes the root cause, so the problem does not come back. A mitigation only restores service for now — restarting a pod, scaling a workload, deleting a bad object — and the problem returns as soon as the cause acts again. Investigations often label a mitigation as an "Immediate Fix"; do not take that at face value. Judge each action against the root cause you derived and classify it yourself.
 
@@ -60,6 +61,7 @@ body: |2
         "verify_argv": ["a read-only command that confirms the change took effect, as an argument list. [] if none applies."],
         "rollback_argv": ["the exact command that reverts execute_argv, as an argument list. [] if none applies."],
         "required_change": "OPTIONAL — include ONLY on a fix whose change is not applied by a command (execute_command is empty). Shape: {\"where\": \"deployment_source\" | \"code\" | \"infrastructure\" | \"dependency\" | \"process\", \"target\": \"the exact file, values key, repository, resource or job the change is made in\", \"change\": \"the exact change, with the current and new value where there is one\"}",
+        "after": "OPTIONAL — the exact \"action\" name of the action that must be applied before this one, when this change fails or has no effect without it. Omit for an alternative strategy.",
         "alert_rule_change": "OPTIONAL — include ONLY on an action that changes the alert rule itself, as described under the \"## Alert rule this event came from\" section; omit the key on every other action. Shape: {\"operation\": \"edit\" | \"disable\" | \"mute\", \"expr\": \"the complete new rule expression (edit only)\", \"duration\": \"the new for, e.g. 10m (edit only)\", \"mute_scope\": \"workload\" | \"rule\" (mute only)}"
       }
     ]
@@ -115,5 +117,5 @@ body: |2
   - verify_command must be strictly read-only: kubectl get / describe / logs / rollout status / top; aws describe-* / list-* / get-*; gcloud ... list / describe (space-separated verbs — there is no gcloud list-instances); az ... show / list.
   - rollback_command must be the exact inverse of execute_command, or empty. A `kubectl rollout restart` changes no desired state, so it needs NO rollback — leave it empty; `kubectl rollout undo` is not its inverse, it reverts the previous real deployment. Never repeat execute_command as the rollback. Never put a destructive command (delete, stop, terminate, scale to zero) in the rollback of an action that was not itself destructive. If you cannot express a true inverse — because the value it would restore is not in the context — leave it empty and say so in the title rather than offering an undo that does something else.
   - Prefer the smallest, safest change that resolves the root cause. Avoid destructive commands (delete namespace, delete pv, scale to zero, aws ec2 terminate-instances, aws s3 rb --force, az group delete) unless genuinely required, and when used always provide a rollback_command.
-  - Order actions best-first: every fix before any mitigation, and within each group highest-confidence and safest first. Include between 0 and 5 actions (0 only when no hypothesis is confident enough).
+  - Order actions best-first: every fix before any mitigation, and within each group highest-confidence and safest first. An action with "after" goes directly after the action it names. Include between 0 and 5 actions (0 only when no hypothesis is confident enough).
   - An action with an empty execute_command is valid and expected for a fix that is applied outside the command path (a code change, a threshold change). Do not invent a command for it, and do not drop the action just because it has no command.

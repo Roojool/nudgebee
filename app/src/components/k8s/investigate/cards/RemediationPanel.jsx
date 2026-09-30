@@ -426,7 +426,20 @@ OptionalHardening.propTypes = {
 // confidence, shown inline — there is no separate hypotheses box), and its command rows. A per-block
 // "Run" button runs this action's execute → verify one-by-one, stopping on the first failure.
 // A code-fix action carries no command, so it renders the diff instead of command rows.
-function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, appliedAt, onExecuted, codeFix, alertControls, onAlertRuleApplied }) {
+function ActionCard({
+  index,
+  action,
+  hypothesis,
+  accountId,
+  eventId,
+  canRun,
+  appliedAt,
+  onExecuted,
+  codeFix,
+  alertControls,
+  onAlertRuleApplied,
+  after,
+}) {
   const [running, setRunning] = useState(false);
   const execRef = useRef(null);
   const verifyRef = useRef(null);
@@ -482,6 +495,7 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
             </Box>
           </Box>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-2)' }}>
+            {after ? <Label tone={after.applied ? 'neutral' : 'warning'} size='sm' textTransform='none' text={`After “${after.name}”`} /> : null}
             {kindMeta ? <Label tone={kindMeta.tone} size='sm' text={kindMeta.text} /> : null}
             {appliedAt ? <Label tone='success' size='sm' text={appliedLabel ? `Applied · ${appliedLabel}` : 'Applied'} /> : null}
             {ruleChangeApplied ? <Label tone='success' size='sm' text='Applied' /> : null}
@@ -494,7 +508,16 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
               >{`${confidence}% likely to resolve`}</Box>
             ) : null}
             {execCmd ? (
-              <Tooltip title={!canRun ? 'Requires write access' : 'Run this action (execute, then verify), stopping on failure'} placement='bottom'>
+              <Tooltip
+                title={
+                  !canRun
+                    ? 'Requires write access'
+                    : after && !after.applied
+                    ? `Apply “${after.name}” first: this change has no effect without it`
+                    : 'Run this action (execute, then verify), stopping on failure'
+                }
+                placement='bottom'
+              >
                 <span>
                   <Button
                     tone={appliedAt ? 'secondary' : 'primary'}
@@ -608,7 +631,20 @@ ActionCard.propTypes = {
   codeFix: PropTypes.object,
   alertControls: PropTypes.object,
   onAlertRuleApplied: PropTypes.func,
+  // The action this one must follow; applied is false until that action has run here.
+  after: PropTypes.shape({ name: PropTypes.string.isRequired, applied: PropTypes.bool.isRequired }),
 };
+
+// afterOf resolves an action's "after" to the action it names, and whether that one has been applied.
+// A command-less prerequisite (a required change) is made outside the panel, so it cannot be known.
+export function afterOf(action, actions, executedCommands) {
+  const name = trimmedString(action?.after);
+  if (!name) return null;
+  const prior = (actions || []).find((a) => trimmedString(a?.action) === name);
+  if (!prior) return null;
+  const cmd = trimmedString(prior.execute_command);
+  return { name, applied: cmd ? !!executedCommands?.[cmd] : false };
+}
 
 // RemediationPanel renders below the investigation analysis. "Generate Remediation" reuses the
 // already-computed investigation as context (no re-investigation) and turns it into a structured plan
@@ -946,6 +982,7 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
               codeFix={codeFix}
               alertControls={alertControls}
               onAlertRuleApplied={loadAlertControls}
+              after={afterOf(action, actions, executedCommands)}
             />
           ))}
         </>

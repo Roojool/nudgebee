@@ -147,8 +147,8 @@ type RemediationHypothesis struct {
 	Confidence Confidence `json:"confidence"`
 }
 
-// RemediationAction is one candidate recovery strategy — a self-contained execution plan, not a
-// sequential step. The name and confidence are model-generated (never a fixed vocabulary): action
+// RemediationAction is one candidate recovery strategy, or one change of a strategy whose changes must
+// be applied in order (After). The name and confidence are model-generated (never a fixed vocabulary): action
 // is a short specific name for the strategy, confidence is the model's 0-100 estimate that it
 // durably resolves the root cause. Kind separates a real fix from a mitigation that only restores
 // service while the cause survives — investigations routinely label the latter an "Immediate Fix",
@@ -174,6 +174,10 @@ type RemediationAction struct {
 	// RequiredChange, when set, is a fix no command applies durably - a code, chart-values,
 	// infrastructure, dependency or process change - stated so the operator can make it.
 	RequiredChange *RequiredChange `json:"required_change,omitempty"`
+	// After names the action that must be applied before this one, when the change only works in that
+	// order (a restart after the config it reloads, a redrive after the permission it needs). Actions
+	// without it are alternative strategies.
+	After string `json:"after,omitempty"`
 }
 
 // HardeningItem is an improvement the incident does not require; kept apart from actions so it never reads as the fix.
@@ -309,6 +313,74 @@ func normalizePlan(plan *RemediationPlan, availableArtifacts []string, alertRule
 		}
 		return plan.Actions[i].Confidence > plan.Actions[j].Confidence
 	})
+	return append(notes, keepDependentsAfter(plan)...)
+}
+
+// keepDependentsAfter places each action directly after the one its After names, so ranking never
+// moves the second half of a change ahead of, or away from, its first. After naming no kept action
+// (dropped, misspelt, itself, or a cycle) is cleared: the action is then an alternative like any other.
+func keepDependentsAfter(plan *RemediationPlan) []planValidationNote {
+	notes := []planValidationNote{}
+	index := map[string]int{}
+	for i, a := range plan.Actions {
+		index[strings.ToLower(strings.TrimSpace(a.Action))] = i
+	}
+	parent := func(i int) (int, bool) {
+		p, ok := index[strings.ToLower(strings.TrimSpace(plan.Actions[i].After))]
+		return p, ok && p != i
+	}
+	for i := range plan.Actions {
+		if strings.TrimSpace(plan.Actions[i].After) == "" {
+			continue
+		}
+		// Walk up: a name that is not kept, or a loop back to i, means there is no order to keep. A loop
+		// further up is cleared when its own members are visited, so i keeps its order.
+		ok := true
+		seen := map[int]bool{i: true}
+		for j := i; ; {
+			p, found := parent(j)
+			if !found || p == i {
+				ok = false
+				break
+			}
+			if seen[p] || strings.TrimSpace(plan.Actions[p].After) == "" {
+				break
+			}
+			seen[p] = true
+			j = p
+		}
+		if !ok {
+			notes = append(notes, planValidationNote{Action: plan.Actions[i].Action, Rule: "after_cleared", Detail: plan.Actions[i].After})
+			plan.Actions[i].After = ""
+		}
+	}
+	// The card matches After against the name as written, so store the parent's exact name.
+	for i := range plan.Actions {
+		if p, ok := parent(i); ok && strings.TrimSpace(plan.Actions[i].After) != "" {
+			plan.Actions[i].After = plan.Actions[p].Action
+		}
+	}
+	children := map[int][]int{}
+	roots := []int{}
+	for i := range plan.Actions {
+		if p, ok := parent(i); ok && strings.TrimSpace(plan.Actions[i].After) != "" {
+			children[p] = append(children[p], i)
+		} else {
+			roots = append(roots, i)
+		}
+	}
+	ordered := make([]RemediationAction, 0, len(plan.Actions))
+	var visit func(int)
+	visit = func(i int) {
+		ordered = append(ordered, plan.Actions[i])
+		for _, c := range children[i] {
+			visit(c)
+		}
+	}
+	for _, r := range roots {
+		visit(r)
+	}
+	plan.Actions = ordered
 	return notes
 }
 

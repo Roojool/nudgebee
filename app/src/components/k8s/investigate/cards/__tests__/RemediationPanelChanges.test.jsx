@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { OptionalHardening, RequiredChangeDetails } from '../RemediationPanel';
+import { OptionalHardening, RequiredChangeDetails, afterOf } from '../RemediationPanel';
 
 // A fix no command applies (a chart value, a node pool) is shown as the change to make, not as the
 // event's code diff.
@@ -35,5 +35,28 @@ describe('OptionalHardening', () => {
     expect(screen.getByTestId('remediation-optional-hardening')).toHaveTextContent('Optional hardening — not required to resolve this incident');
     expect(screen.getByText('reject malformed batches', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('alert on duration at 80% of the timeout')).toBeInTheDocument();
+  });
+});
+
+describe('afterOf', () => {
+  const actions = [
+    { action: 'Patch web config', execute_command: 'kubectl patch configmap web -n demo -p x' },
+    { action: 'Restart web', after: 'Patch web config', execute_command: 'kubectl rollout restart deployment web -n demo' },
+    { action: 'Add API_TOKEN key', required_change: { target: 'Secret demo/api', change: 'add key' } },
+    { action: 'Restart api', after: 'Add API_TOKEN key', execute_command: 'kubectl rollout restart deployment api -n demo' },
+  ];
+
+  it('is unapplied until the prerequisite command has run, then applied', () => {
+    expect(afterOf(actions[1], actions, {})).toEqual({ name: 'Patch web config', applied: false });
+    expect(afterOf(actions[1], actions, { 'kubectl patch configmap web -n demo -p x': '2026-09-30T09:00:00Z' })).toEqual({
+      name: 'Patch web config',
+      applied: true,
+    });
+  });
+
+  it('cannot see a required change being made, and ignores actions without a known prerequisite', () => {
+    expect(afterOf(actions[3], actions, {})).toEqual({ name: 'Add API_TOKEN key', applied: false });
+    expect(afterOf(actions[0], actions, {})).toBeNull();
+    expect(afterOf({ after: 'nothing like this' }, actions, {})).toBeNull();
   });
 });
