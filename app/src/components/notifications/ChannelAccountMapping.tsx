@@ -292,8 +292,12 @@ const ChannelAccountMapping: React.FC<ChannelAccountMappingProps> = ({ provider,
       await loadMappings();
       setOpenModal(false);
       resetForm();
-    } catch {
-      snackbar.error('Failed to save');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save';
+      // The backend names the conflicting channel by its raw id (it doesn't know
+      // the display name); swap in the name we already resolved for the picker.
+      const channelName = channelNameMap[selectedChannel];
+      snackbar.error(channelName ? message.replace(selectedChannel, channelName) : message);
     } finally {
       setIsLoading(false);
     }
