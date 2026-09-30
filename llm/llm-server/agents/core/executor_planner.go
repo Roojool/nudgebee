@@ -692,7 +692,7 @@ func buildToolCallSummary(steps []NBAgentPlannerToolActionStep) (string, bool) {
 // when asked to summarize — observed live: benchmark run dd7bc6b21b45's
 // 108_logs_nearby_lines rerun returned raw "<update_notebook>...
 // </update_notebook>" markup (headers, tables, [NEXT] action items) as the
-// user-facing answer verbatim. Unlike parseCompletion's containsToolNameGrammar
+// user-facing answer verbatim. Unlike parseCompletion's containsTextToolCall
 // check (which treats this shape as a retryable parse failure mid-loop),
 // summarizeConversation is already the last-resort fallback — there is no
 // further retry to fall back to — so the correct recovery here is to unwrap
