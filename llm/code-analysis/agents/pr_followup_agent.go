@@ -113,6 +113,11 @@ type PRFollowupResult struct {
 	// execution_status like any other, this only tags the outcome metric so
 	// base syncs are separable from real fixes.
 	BaseSynced bool `json:"base_synced,omitempty"`
+	// Superseded reports that the PR head's bot-authored changes are already
+	// contained in the freshly fetched base branch. The lifecycle service owns
+	// any provider-side close; this agent only leaves the marker comment.
+	Superseded      bool   `json:"superseded,omitempty"`
+	AssessedHeadSHA string `json:"assessed_head_sha,omitempty"`
 }
 
 // reviewComment represents a single review comment that needs to be addressed.
@@ -238,6 +243,11 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 	// Merge all pending comments into one slice
 	pendingComments := append(inlineComments, issueComments...)
 	pendingComments = append(pendingComments, reviewBodyComments...)
+	if shouldAssessSuperseded(instruction, len(pendingComments), sync) {
+		if result := a.retireIfSuperseded(ctx, repoInfo, prNumber, baseBranch); result != nil {
+			return result, nil
+		}
+	}
 
 	// Build combined comments text for the prompt
 	commentsText := ""

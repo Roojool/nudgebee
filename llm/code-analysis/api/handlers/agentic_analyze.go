@@ -351,6 +351,10 @@ type AnalysisResult struct {
 	// tag the outcome metric, so base syncs are separable from real fixes; an
 	// older cron ignores it. Only set on the PR-followup path.
 	FollowupBaseSynced bool `json:"followup_base_synced,omitempty"`
+	// FollowupSuperseded signals that the agent proved the PR's bot changes are
+	// already in base. Closing remains the lifecycle service's responsibility.
+	FollowupSuperseded      bool   `json:"followup_superseded,omitempty"`
+	FollowupAssessedHeadSHA string `json:"followup_assessed_head_sha,omitempty"`
 	// FollowupInstructionHandled tells the caller this agent acted on
 	// followup_instruction. An older agent drops the field on the floor and
 	// reports its usual "nothing to do"; the flag lets api-server tell that
@@ -2078,6 +2082,47 @@ type ToolTrackable interface {
 	EnableToolTracking(tracker *common.ToolInvocationTracker, logger *common.Logger)
 }
 
+// followupAnalysisResult converts a PR-followup agent result into the
+// response body. Split out of performFollowupAnalysis so the status and marker
+// mapping can be tested without running the agent.
+func followupAnalysisResult(req AgenticAnalyzeRequest, result *agents.PRFollowupResult) *AnalysisResult {
+	// Convert result to standard response format. ExecutionStatus drives the
+	// PR-lifecycle cron's accounting:
+	//   "success" — agent committed/replied; reset iteration count
+	//   "no_op"   — nothing actionable yet, or planner produced no change;
+	//               do NOT charge an iteration so future signals can still trigger
+	//   "failed"  — real failure; charge an iteration
+	agentResponse := &AnalysisResult{
+		Title:           fmt.Sprintf("PR Followup: %s", req.PRURL),
+		Description:     result.Summary,
+		ExecutionStatus: "success",
+	}
+	if !result.Success {
+		agentResponse.ExecutionStatus = "failed"
+	} else if result.NoOp {
+		agentResponse.ExecutionStatus = "no_op"
+		// Tag a no_op that was really a non-convergence (had actionable input but
+		// couldn't apply a change) so the cron's outcome metric can separate it
+		// from a genuine "nothing to do". Purely observability — still a no_op.
+		agentResponse.FollowupUnresolved = result.Unresolved
+	}
+	// Set independently of the status branches above: a base sync can be the
+	// run's only work (a "success" that never ran the planner) or can ride along
+	// with a normal comment/CI fix.
+	agentResponse.FollowupBaseSynced = result.BaseSynced
+	agentResponse.FollowupSuperseded = result.Superseded
+	agentResponse.FollowupAssessedHeadSHA = result.AssessedHeadSHA
+	agentResponse.FollowupInstructionHandled = strings.TrimSpace(req.FollowupInstruction) != ""
+	// Likewise independent: a run can answer comments and still finish as a
+	// no_op (every reply skipped as unverified), and that record is worth
+	// keeping either way.
+	agentResponse.AddressedComments = result.AddressedComments
+	if result.CommitHash != "" {
+		agentResponse.ExecutionSummary = fmt.Sprintf("Committed and pushed: %s", result.CommitHash)
+	}
+	return agentResponse
+}
+
 // performFollowupAnalysis handles PR followup mode — routes to PRFollowupAgent
 // to address CI failures and review comments on existing PRs/MRs.
 func (ah *AgenticAnalyzeHandler) performFollowupAnalysis(ctx context.Context, cfg *config.Config, client *llm.Client, tokensBefore *llm.TokenUsage, req AgenticAnalyzeRequest, logger *common.Logger, resolvedCreds *credentials.ResolvedCredentials) (*AgenticAnalyzeResponse, error) {
@@ -2203,38 +2248,7 @@ func (ah *AgenticAnalyzeHandler) performFollowupAnalysis(ctx context.Context, cf
 
 	processingTime := time.Since(startTime).String()
 
-	// Convert result to standard response format. ExecutionStatus drives the
-	// PR-lifecycle cron's accounting:
-	//   "success" — agent committed/replied; reset iteration count
-	//   "no_op"   — nothing actionable yet, or planner produced no change;
-	//               do NOT charge an iteration so future signals can still trigger
-	//   "failed"  — real failure; charge an iteration
-	agentResponse := &AnalysisResult{
-		Title:           fmt.Sprintf("PR Followup: %s", req.PRURL),
-		Description:     result.Summary,
-		ExecutionStatus: "success",
-	}
-	if !result.Success {
-		agentResponse.ExecutionStatus = "failed"
-	} else if result.NoOp {
-		agentResponse.ExecutionStatus = "no_op"
-		// Tag a no_op that was really a non-convergence (had actionable input but
-		// couldn't apply a change) so the cron's outcome metric can separate it
-		// from a genuine "nothing to do". Purely observability — still a no_op.
-		agentResponse.FollowupUnresolved = result.Unresolved
-	}
-	// Set independently of the status branches above: a base sync can be the
-	// run's only work (a "success" that never ran the planner) or can ride along
-	// with a normal comment/CI fix.
-	agentResponse.FollowupBaseSynced = result.BaseSynced
-	agentResponse.FollowupInstructionHandled = strings.TrimSpace(req.FollowupInstruction) != ""
-	// Likewise independent: a run can answer comments and still finish as a
-	// no_op (every reply skipped as unverified), and that record is worth
-	// keeping either way.
-	agentResponse.AddressedComments = result.AddressedComments
-	if result.CommitHash != "" {
-		agentResponse.ExecutionSummary = fmt.Sprintf("Committed and pushed: %s", result.CommitHash)
-	}
+	agentResponse := followupAnalysisResult(req, result)
 
 	return &AgenticAnalyzeResponse{
 		Success:        result.Success,
