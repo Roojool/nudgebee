@@ -291,16 +291,65 @@ func (m mcpIntegrationTool) Call(ctx NbToolContext, input NBToolCallRequest) (NB
 	// metrics and the planner's evidence accounting see them. err stays nil:
 	// the integration itself is reachable, so the circuit breaker must not trip.
 	status := NBToolResponseStatusSuccess
+	data := mcpToolResultText(response)
 	if isMCPToolCallError(response) {
 		log.Warn("mcp-integration: tool returned an error result")
 		status = NBToolResponseStatusError
+		// Once unwrapped, an isError result is bare text ("connect: connection
+		// refused") and the planner does not tell the model a step failed, so
+		// say so in the text. A JSON-RPC error object is not unwrapped and
+		// already reads as an error.
+		if data != response {
+			data = "MCP tool returned an error: " + data
+		}
 	}
 
 	return NBToolResponse{
 		Status: status,
-		Data:   response,
+		Data:   data,
 		Type:   NBToolResponseTypeText,
 	}, nil
+}
+
+// mcpToolResultText returns what the model should read from a tools/call
+// reply: the tool's text content, not the JSON-RPC envelope around it. The
+// envelope (`{"result":{"content":[{"type":"text","text":"..."}]}}`) escapes
+// every quote and newline of the real output and adds nothing the model can
+// use. Text parts are joined with newlines; any other part (image, resource)
+// is kept as its JSON, matching nbCustomMCPTool.Call. A result with no
+// content returns its structuredContent JSON if it has one, else "" — the
+// executor classifies "" as an empty result and gives the model its
+// no-output message. A reply without a result (a JSON-RPC error object,
+// non-JSON text) is returned unchanged.
+func mcpToolResultText(response string) string {
+	var rpcResp struct {
+		Result *struct {
+			Content           []json.RawMessage `json:"content"`
+			StructuredContent json.RawMessage   `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(unwrapSSEIfPresent(response)), &rpcResp); err != nil || rpcResp.Result == nil {
+		return response
+	}
+	if len(rpcResp.Result.Content) == 0 {
+		if len(rpcResp.Result.StructuredContent) > 0 && string(rpcResp.Result.StructuredContent) != "null" {
+			return string(rpcResp.Result.StructuredContent)
+		}
+		return ""
+	}
+	parts := make([]string, 0, len(rpcResp.Result.Content))
+	for _, raw := range rpcResp.Result.Content {
+		var item struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &item); err == nil && item.Type == "text" {
+			parts = append(parts, item.Text)
+			continue
+		}
+		parts = append(parts, string(raw))
+	}
+	return strings.Join(parts, "\n")
 }
 
 // isMCPToolCallError reports whether a tools/call JSON-RPC reply carries a
