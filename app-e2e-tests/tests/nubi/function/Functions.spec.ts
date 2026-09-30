@@ -56,8 +56,12 @@ async function reopenChatWithFreshFunctions(page: Page, locators: NubiLocators, 
   });
 }
 
+// b-Cortex > Knowledge > My Functions. Knowledge is not b-Cortex's default landing
+// group and My Functions is not its default sub-tab, so this takes two clicks.
 async function openFunctionsTabFromPanel(locators: NubiLocators, accountName: string = CHAT_ACCOUNT): Promise<void> {
-  await locators.openAITools(locators.functionsTab).catch((e) => {
+  await locators.openBCortex(locators.knowledgeGroupTab);
+  await locators.knowledgeGroupTab.click();
+  await locators.functionsTab.waitFor({ state: "visible", timeout: 20000 }).catch((e) => {
     throw new Error(`${FUNCTIONS_TAB_HINT} Underlying failure: ${e}`);
   });
   await locators.functionsTab.click();
@@ -223,7 +227,7 @@ test.describe("Nubi Functions Tab", () => {
 
   test.describe("CRUD", () => {
     test(
-      "Nubi Functions - create a function in AI & Tools and verify it appears in the function list",
+      "Nubi Functions - create a function in b-Cortex and verify it appears in the function list",
       { tag: ["@dev", "@test", "@regression", "@functional", "@crud"] },
       async ({ page }) => {
         test.setTimeout(120000);
@@ -576,7 +580,7 @@ test.describe("Nubi Functions Tab", () => {
 
   test.describe("Usage in Nubi", () => {
     test(
-      "Nubi Functions - create a function in AI & Tools, reload, type /call in the Nubi chat, verify the function is offered as a suggestion and fills the box as /call <name>",
+      "Nubi Functions - create a function in b-Cortex, reload, type /call in the Nubi chat, verify the function is offered as a suggestion and fills the box as /call <name>",
       { tag: ["@dev", "@test", "@regression", "@functional"] },
       async ({ page }) => {
         test.setTimeout(180000);

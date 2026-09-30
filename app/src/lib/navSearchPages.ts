@@ -178,7 +178,6 @@ export const navSearchPages: NavSearchPage[] = [
   // no child fragment.
   { group: 'Admin', label: 'Agents', path: '/user-management#ai-tools' },
   { group: 'Admin', label: 'Tools & MCP', path: '/user-management#ai-tools/tools-mcp' },
-  { group: 'Admin', label: 'Functions', path: '/user-management#ai-tools/functions' },
   { group: 'Admin', label: 'Providers', path: '/user-management#ai-tools/providers' },
   { group: 'Admin', label: 'Gateway', path: '/user-management#ai-tools/gateway' },
   // EE-only sub-tabs (`eeOnly` in aiToolsConfig.js) are dropped from the Admin

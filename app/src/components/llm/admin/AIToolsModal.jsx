@@ -22,7 +22,6 @@ import Tabs from '@shared/navigation/Tabs';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import { missingPermissionMessage, isUiFeatureEnabled } from '@lib/auth';
 import { useBCortexEnabled, isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
-import { useFeatureAccess } from '@hooks/useFeatureAccess';
 import { ds } from '@utils/colors';
 import { AI_TOOLS_SUB_TABS } from './aiToolsConfig';
 
@@ -32,12 +31,8 @@ const AIToolsModal = ({ open, onClose }) => {
   // aiToolsConfig.js. `open` keeps the lookup active only while the modal
   // can actually be seen, same as BCortexModal's own useBCortexEnabled(open).
   const bcortexEnabled = useBCortexEnabled(open);
-  // Gates the Functions sub-tab (requiresFeature) — same
-  // hasFeatureAccess('LLM_FUNCTION') check Settings used.
-  const llmFunctionEnabled = useFeatureAccess('LLM_FUNCTION');
   // `bcortexEnabled !== false` (true or still resolving) hides the
   // legacyOnly tabs by default, same reasoning as user-management/index.jsx.
-  // requiresFeature only ever names 'LLM_FUNCTION' today (see aiToolsConfig.js).
   const visibleSubTabs = useMemo(
     () =>
       AI_TOOLS_SUB_TABS.filter((t) => {
@@ -47,19 +42,16 @@ const AIToolsModal = ({ open, onClose }) => {
         if (t.legacyOnly && bcortexEnabled !== false) {
           return false;
         }
-        if (t.requiresFeature && llmFunctionEnabled !== true) {
-          return false;
-        }
         if (t.requiresUiFeature && !isUiFeatureEnabled(t.requiresUiFeature)) {
           return false;
         }
         return true;
       }),
-    [bcortexEnabled, llmFunctionEnabled]
+    [bcortexEnabled]
   );
   const [activeTab, setActiveTab] = useState(AI_TOOLS_SUB_TABS[0].id);
 
-  // The active tab's own gate (legacyOnly/requiresFeature/requiresUiFeature)
+  // The active tab's own gate (legacyOnly/requiresUiFeature)
   // can flip false after an async check resolves while it's selected — reset
   // to the first still-visible tab so the strip's highlighted tab and the
   // rendered body never disagree. Same pattern BCortexModal.jsx already uses

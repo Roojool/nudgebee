@@ -161,7 +161,7 @@ export class RCAFormatLocators extends CommonLocators {
   // The readiness signal for the sub-tab itself, before any account is picked.
   // Asserted outermost-first — parent tab, then sub-tab, then body — so a hash
   // that resolved to the wrong level names the level that went wrong. The
-  // picker cannot lead: Agents, Tools & MCP and Functions each mount their own
+  // picker cannot lead: Agents and Tools & MCP each mount their own
   // AdminAccountFilter, and Access & Users' Ownership tab renders an
   // AccountSelect too, so a visible #account-select is not on its own evidence
   // that this is the right tab.

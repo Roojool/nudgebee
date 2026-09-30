@@ -116,7 +116,7 @@ export class ToolsAndMcpLocators extends CommonLocators {
     // fallback is the tab's own id: Tabs stamps a11yProps(opt.value, opt.id) and
     // takes the option's id when it has one, which AI_TOOLS_SUB_TABS entries do —
     // so unlike ds/Tabs' positional `#tab-${index}` it does not shift when a
-    // feature flag drops the Functions or Gateway sub-tab.
+    // feature flag drops the Gateway sub-tab.
     this.toolsMcpTab = page
       .getByRole("tab", { name: TOOLS_MCP_TAB_NAME })
       .or(page.locator(`#${TOOLS_MCP_TAB_FRAGMENT}`))

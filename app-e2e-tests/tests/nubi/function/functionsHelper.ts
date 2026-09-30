@@ -27,7 +27,7 @@ if (!CHAT_ACCOUNT) {
 }
 
 export const FUNCTIONS_TAB_HINT =
-  "The Functions tab is not in the AI & Tools modal. aiToolsConfig.js gates it on the " +
+  "The My Functions tab is not under b-Cortex -> Knowledge. BCortexModal.jsx gates it on the " +
   "LLM_FUNCTION tenant feature flag, so the tab is dropped from the strip whenever the flag " +
   "is off — check Admin -> Tenant Settings -> Features before reading this as a Functions " +
   "module failure. ensureLlmFunctionFeatureEnabled() is meant to have settled this already.";

@@ -8,7 +8,7 @@ export class NubiLocators {
   // SettingsModal is deleted (docs/ia-consolidation-plan.md, PR 3/Decision AA).
   // Its content now lives behind "AI & Tools" (admin-gated — every tab-name
   // locator below that used to open through "More", e.g. customAgentTab/
-  // ToolButton/functionsTab, opens through this one now). A non-admin-gated
+  // ToolButton, opens through this one now). A non-admin-gated
   // "Memory" button was tried as a fix for tenants without b-Cortex losing
   // access to Memory/Account Context, then reverted (Decision AB) — that
   // narrowing is an accepted trade-off. The rail is just these two buttons;
@@ -60,6 +60,7 @@ export class NubiLocators {
   readonly toolDisabledSuccessMessage: Locator;
 
   // Functions tab locators (LLM Functions)
+  readonly knowledgeGroupTab: Locator;
   readonly functionsTab: Locator;
   readonly createFunctionBtn: Locator;
   readonly searchFunctionInput: Locator;
@@ -169,8 +170,16 @@ export class NubiLocators {
     this.toolDisabledSuccessMessage = page.getByText('Tool updated successfully');
 
 
-    // Functions tab locators (LLM Functions)
-    this.functionsTab = page.getByRole('tab', { name: 'Functions' });
+    // Functions tab locators (LLM Functions) - b-Cortex > Knowledge > My Functions,
+    // the only Functions mount since Admin > AI & Tools dropped its Functions tab.
+    // exact:true on the group tab: "Knowledge" is also the prefix of the sibling
+    // "Knowledge Graph" group tab. NOT exact on My Functions: its icon is a plain
+    // require()d .svg, which Tabs.jsx renders as <SafeIcon alt={text}>, so the
+    // image alt joins the tab's accessible name. The fallback is the id Tabs
+    // stamps from the option's value (`tab-${value}`), which BCortexModal sets
+    // to the sub-tab id, so it does not shift when a flag drops a sibling.
+    this.knowledgeGroupTab = page.getByRole('tab', { name: 'Knowledge', exact: true });
+    this.functionsTab = page.getByRole('tab', { name: 'My Functions' }).or(page.locator('#tab-my-functions')).first();
     this.createFunctionBtn = page.locator('#create-function');
     this.searchFunctionInput = page.getByPlaceholder('Search Function');
     this.functionNameInput = page.getByPlaceholder('e.g., get_user_data, process_payment');
@@ -259,10 +268,10 @@ export class NubiLocators {
     await popover.waitFor({ state: "detached", timeout }).catch(() => {});
   }
 
-  // Admin → AI & Tools' Agents/Tools & MCP/Functions sub-tabs each mount their
-  // own AdminAccountFilter (AdminAccountFilter.jsx), defaulting to tenant-wide
-  // (accountId=''). ListAgents/ListTools/ListFunctions all hide their Create
-  // button entirely at tenant-wide (`!isTenantWide && hasWriteAccess(...)`) —
+  // Admin → AI & Tools' Agents/Tools & MCP sub-tabs each mount their own
+  // AdminAccountFilter (AdminAccountFilter.jsx), defaulting to tenant-wide
+  // (accountId=''). ListAgents/ListTools both hide their Create button
+  // entirely at tenant-wide (`!isTenantWide && hasWriteAccess(...)`) —
   // the old Settings mount always carried a real accountId from the panel, so
   // this never came up there. Picks the first real account so Create becomes
   // reachable, same as an admin narrowing the filter by hand.
@@ -360,8 +369,8 @@ export class NubiLocators {
 
   // Opens one of the two rail modals and waits until the tab it must land on is
   // on screen. Both modals build their tab strip behind an async round trip
-  // (AIToolsModal: hasFeatureAccess('LLM_FUNCTION'); BCortexModal:
-  // useBCortexEnabled), and a rail click landing while the panel is still
+  // (AIToolsModal: useBCortexEnabled; BCortexModal: useBCortexEnabled and
+  // hasFeatureAccess('LLM_FUNCTION')), and a rail click landing while the panel is still
   // animating in opens nothing at all - so the click and the wait are retried
   // as a pair rather than the click being fired once.
   //

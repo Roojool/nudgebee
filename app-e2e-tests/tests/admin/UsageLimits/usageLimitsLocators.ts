@@ -102,8 +102,8 @@ export class UsageLimitsLocators extends CommonLocators {
     // The sub-tab strip is a MUI Tabs, so the sub-tab is a real role="tab" and
     // "Budgets & Limits" is unique among the page's tabs. No .or(): the only
     // rung underneath is ds/Tabs' `#tab-${index}`, and this strip's indices
-    // shift with the feature flags that drop the Functions and Gateway
-    // sub-tabs, so that fallback would silently select a different tab.
+    // shift with the feature flag that drops the Gateway sub-tab, so that
+    // fallback would silently select a different tab.
     this.budgetsLimitsTab = page.getByRole("tab", { name: BUDGETS_LIMITS_TAB_NAME, exact: true });
 
     // ds/ToggleGroup sets role="group" + aria-label on its container and

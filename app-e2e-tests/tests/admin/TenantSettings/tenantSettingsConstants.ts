@@ -73,7 +73,7 @@ export const FEATURE_LLM_ANALYSER = "AI usage and cost tab";
 
 // LLM_FUNCTION's row on the same table — display_name from the same V900 migration.
 // Read by the Nubi Functions suite's one-time precondition check (functionsHelper.ts),
-// since AIToolsModal drops the whole Functions tab when this flag is off.
+// since b-Cortex drops its My Functions tab when this flag is off.
 export const FEATURE_LLM_FUNCTION = "Custom AI functions";
 
 // The row's description copy from featureRecommendedContent() in TenantSettings.jsx.

@@ -751,7 +751,6 @@ export const LLMFunctionIcon = require('@assets/ask-nudgebee/llm-function-icon.s
 // glyph here would be the odd one out.
 export const AgentIconTabBlue = require('@assets/ask-nudgebee/agent-icon-blue.svg');
 export const ToolsIconTabBlue = require('@assets/ask-nudgebee/tools-icon-blue.svg');
-export const LLMFunctionIconTabBlue = require('@assets/ask-nudgebee/llm-function-icon-blue.svg');
 export const LLMConsumptionIcon = LLMConsumptionIconComp;
 export const FollowUpBlueIcon = require('@assets/ask-nudgebee/followup-blue.svg');
 export const UploadIcon = require('@assets/upload-icon.svg');

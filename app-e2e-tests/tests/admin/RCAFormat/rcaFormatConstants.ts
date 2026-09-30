@@ -27,12 +27,12 @@ export const BUDGETS_LIMITS_TAB_NAME = "Budgets & Limits";
 // verbatim when the option carries one — and AI_TOOLS_SUB_TABS does, surviving
 // user-management's `{ ...sub, value: subIdx }` spread. So unlike ds/Tabs'
 // positional `#tab-${index}` these do not shift when a feature flag drops the
-// Functions or Gateway sub-tab, which makes them a real fallback rung.
+// Gateway sub-tab, which makes them a real fallback rung.
 export const RCA_FORMAT_TAB_ELEMENT_ID = "rca-format";
 export const BUDGETS_LIMITS_TAB_ELEMENT_ID = "budgets-limits";
 
 // RCAFormatAdminTab.jsx's EmptyState copy, rendered until an account is picked.
-// Unlike Agents/Tools/Functions, this sub-tab has no tenant-wide view, so the
+// Unlike Agents/Tools, this sub-tab has no tenant-wide view, so the
 // picker is a required precondition rather than an optional narrowing.
 export const EMPTY_STATE_TITLE = "Select an account";
 export const EMPTY_STATE_DESCRIPTION = "RCA Format is configured per account — pick one above to view or edit its template.";
