@@ -336,6 +336,18 @@ func TierAttributionForRecord(ctx *security.RequestContext) (modelTier *string, 
 // key suffix. Kept short because it is appended to the Google AI cache key.
 const promptVariantLean = "lean"
 
+// cacheModeOf reports how a call's cached tokens were obtained: "explicit" when
+// the request referenced a provider cache entry (Gemini CachedContent), otherwise
+// "implicit" (provider-side prefix caching, or Anthropic inline markers). Cached
+// tokens and is_cache_hit look the same for both, so this is the only per-call
+// signal that separates them (#39633).
+func cacheModeOf(metadata *LLMCallMetadata) string {
+	if metadata != nil && metadata.CacheInfo != nil && len(metadata.CacheInfo.Options) > 0 {
+		return "explicit"
+	}
+	return "implicit"
+}
+
 // promptVariantFromCtx returns the ContextKeyPromptVariant value on ctx, or ""
 // when unset (the full/default prompt).
 func promptVariantFromCtx(ctx *security.RequestContext) string {
@@ -813,6 +825,8 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 			"provider", provider,
 			"model", model,
 			"conversationId", conversationId,
+			"agent", agentName,
+			"cacheMode", cacheModeOf(callMetadata),
 			"cacheReadTokens", totalTokenInfo.CacheReadTokens,
 			"cacheCreationTokens", totalTokenInfo.CacheCreationTokens,
 			"nonCachedTokens", totalTokenInfo.InputTokens-totalTokenInfo.CacheReadTokens,
@@ -1651,6 +1665,7 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 						"cacheName", cacheResp.CacheInfo.CacheName,
 						"conversationId", rc.conversationId)
 					messagesToSend = rc.promptMessages // restore full messages
+					rc.lastCacheInfo = nil             // no cache was referenced; keeps cacheMode accurate
 				} else {
 					optionsToSend = append(optionsToSend, cacheResp.Options...)
 					rc.ctx.GetLogger().Info("Cache applied successfully",

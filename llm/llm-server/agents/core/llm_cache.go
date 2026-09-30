@@ -247,7 +247,11 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 	// same reason as the capability fingerprint: the lean prompt is a different
 	// cacheable prefix and must not overwrite the full-prompt slot. Empty
 	// (full/default) appends nothing, leaving existing slots byte-identical.
-	if req.PromptVariant != "" {
+	// Global scope is shared by helpers (memory_rerank, summaries) that inherit the
+	// variant from whichever orchestrator called them; their prompt does not depend
+	// on it, so a suffix there only splits one cache into two identical slots.
+	// Must match the key built in InvalidateCache.
+	if req.PromptVariant != "" && req.Scope != CacheScopeGlobal {
 		agentName = agentName + ":" + req.PromptVariant
 	}
 
@@ -288,6 +292,23 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 		"conversationId", req.ConversationId,
 		"cacheableMessages", len(cacheableMessages),
 		"nonCachedMessages", len(nonCacheableMessages))
+
+	// Conversation-scope CachedContent is created after a conversation's first
+	// call and rarely read before it expires, and a request that references one
+	// gets no implicit prefix caching on the rest of the prompt. For react_3/react_4
+	// its content is only the system prompt, so it also blocked implicit caching of
+	// every tool step (#39633). Leave these calls to Gemini's implicit caching.
+	if req.Scope == CacheScopeConversation {
+		logger.Info("Google AI cache: Not using cache - conversation scope left to implicit caching",
+			"conversationId", req.ConversationId,
+			"reason", "conversation_scope_implicit",
+			"cacheMode", "implicit")
+		common.MetricsLLMCacheSkip(req.Provider, req.Model, "conversation_scope_implicit", req.AccountId, req.AgentName, string(req.Scope))
+		return &CacheResponse{
+			Messages: req.Messages,
+			CacheHit: false,
+		}
+	}
 
 	// For Global and Account scopes, apply deterministic padding so system prompts meet minimum threshold
 	if req.Scope == CacheScopeGlobal || req.Scope == CacheScopeAccount {
@@ -792,7 +813,11 @@ func (p *GoogleAICacheProvider) InvalidateCache(ctx context.Context, req *CacheR
 	// same reason as the capability fingerprint: the lean prompt is a different
 	// cacheable prefix and must not overwrite the full-prompt slot. Empty
 	// (full/default) appends nothing, leaving existing slots byte-identical.
-	if req.PromptVariant != "" {
+	// Global scope is shared by helpers (memory_rerank, summaries) that inherit the
+	// variant from whichever orchestrator called them; their prompt does not depend
+	// on it, so a suffix there only splits one cache into two identical slots.
+	// Must match the key built in ApplyCache.
+	if req.PromptVariant != "" && req.Scope != CacheScopeGlobal {
 		agentName = agentName + ":" + req.PromptVariant
 	}
 	cacheKey := generateCacheKey(req.Scope, req.AccountId, req.ConversationId, agentName, req.Model, credsFingerprint(req.ApiKey, "", "", "", "", "", ""))

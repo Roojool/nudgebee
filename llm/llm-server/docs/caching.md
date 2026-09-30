@@ -38,9 +38,15 @@ If a cache reference fails at generation time (e.g. 403/404 `CachedContent not f
 ### 6. Observability & Metrics
 Prometheus metrics provide visibility into cache efficiency:
 - `nb_llm_cache`: Incremented on every cache operation with labels `provider`, `model`, `status` (`hit`/`miss`/`error`), `account_id`, `agent`, `scope`.
-- `nb_llm_cache_skip`: Tracks cache skips with labels `reason` (`no_cacheable_messages`, `model_no_cache_support`, `insufficient_tokens`, `exceeds_context_window`, `disabled`), `provider`, `model`, `account_id`, `agent`, `scope`.
+- `nb_llm_cache_skip`: Tracks cache skips with labels `reason` (`no_cacheable_messages`, `model_no_cache_support`, `insufficient_tokens`, `exceeds_context_window`, `disabled`, `conversation_scope_implicit`), `provider`, `model`, `account_id`, `agent`, `scope`.
 - `nb_llm_cached_tokens`: Total token savings from cached queries.
 - `nb_llm_cache_invalidations`: Churn tracking for caches invalidated before planned TTL.
+
+## Google AI Provider: Conversation Scope Uses Implicit Caching (#39633)
+
+Gemini 2.5+ caches repeated prompt prefixes automatically ("implicit" caching). A request that references one of our `CachedContent` entries gets **no** implicit caching on the rest of the prompt. On Gemini, **Conversation-scope calls never create or reference `CachedContent`**: those entries were created after a conversation's first call, read 1.4–3.9 times before expiring, and for react_3/react_4 held only the system prompt — so they capped every tool step at the system prompt. The calls are left to implicit caching, which covers the whole growing tool history. Global and Account scope are unchanged.
+
+Implicit caching needs a byte-stable prefix: anything that changes near the top of the prompt between steps (a per-second timestamp, the notebook, compression rewriting older steps, tool definitions in a different order) cuts the reusable prefix at that point. Measured on dev: implicit entries are best-effort (a hit ~6 in 10 times after a single call, never after 5 minutes), and inside a tool loop ~83% of follow-up calls hit. Explicit and implicit hits look the same in `llm_conversation_token_usage` (`is_cache_hit` is true whenever cached tokens > 0); the `cacheMode` field on the `LLM cache tokens used` log line tells them apart.
 
 ## Google AI Provider: System Message Handling
 
