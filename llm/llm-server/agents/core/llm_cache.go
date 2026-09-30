@@ -336,6 +336,22 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 
 	// Cache hit path (zero-latency: trust Redis TTL and let GenerateContent execute immediately)
 	if exists && cacheInfo.ExpiresAt.After(now) && cacheInfo.ContentHash == contentHash {
+		// Referencing the cache turns off implicit caching for the rest of the
+		// request. Once the tool history outweighs the cache, send the full prompt
+		// instead and let implicit caching cover the longer prefix (#39633).
+		if coverage, skip := geminiHybridSkip(cacheInfo.CacheCreationTokens, nonCacheableMessages); skip {
+			logger.Info("Google AI cache: Not using cache - tool history outweighs cached content",
+				"cacheName", cacheInfo.CacheName,
+				"conversationId", req.ConversationId,
+				"coverage", fmt.Sprintf("%.2f", coverage),
+				"reason", "hybrid_low_coverage",
+				"cacheMode", "implicit")
+			common.MetricsLLMCacheSkip(req.Provider, req.Model, "hybrid_low_coverage", req.AccountId, req.AgentName, string(req.Scope))
+			return &CacheResponse{
+				Messages: req.Messages,
+				CacheHit: false,
+			}
+		}
 		timeToExpiry := cacheInfo.ExpiresAt.Sub(now)
 		logger.Info("Google AI cache: CACHE HIT - Using existing cache",
 			"cacheName", cacheInfo.CacheName,
@@ -653,6 +669,61 @@ func (p *GoogleAICacheProvider) ApplyCache(ctx context.Context, req *CacheReques
 	}
 }
 
+// geminiHybridSkip reports whether the "hybrid" strategy should skip a live
+// CachedContent for this call, and the estimated share of the prompt it covers.
+// cachedTokens is the entry's exact size; the rest of the prompt is estimated
+// from its characters (tool output runs about 3 characters per token). An entry
+// with no recorded size is never skipped, and neither is a request without tool
+// history: implicit caching only pays off on a prompt that repeats across calls,
+// which is a tool loop. A one-shot call (a helper whose fixed prompt is small next
+// to its per-call input) would otherwise lose its explicit hit and gain nothing.
+func geminiHybridSkip(cachedTokens int32, rest []llms.MessageContent) (float64, bool) {
+	if !strings.EqualFold(strings.TrimSpace(config.Config.LlmServerGeminiCacheStrategy), "hybrid") || cachedTokens <= 0 || !hasToolHistory(rest) {
+		return 1, false
+	}
+	threshold := config.Config.LlmServerGeminiCacheHybridMinCoverage
+	if threshold <= 0 {
+		threshold = 0.65
+	}
+	restTokens := float64(messageChars(rest)) / scratchpadCharsPerToken
+	coverage := float64(cachedTokens) / (float64(cachedTokens) + restTokens)
+	return coverage, coverage < threshold
+}
+
+// hasToolHistory reports whether messages include a tool call or tool result.
+func hasToolHistory(messages []llms.MessageContent) bool {
+	for _, msg := range messages {
+		for _, part := range msg.Parts {
+			switch part.(type) {
+			case llms.ToolCall, llms.ToolCallResponse:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// messageChars sums the characters a prompt sends for text, tool calls and tool
+// results.
+func messageChars(messages []llms.MessageContent) int {
+	n := 0
+	for _, msg := range messages {
+		for _, part := range msg.Parts {
+			switch p := part.(type) {
+			case llms.TextContent:
+				n += len(p.Text)
+			case llms.ToolCall:
+				if p.FunctionCall != nil {
+					n += len(p.FunctionCall.Name) + len(p.FunctionCall.Arguments)
+				}
+			case llms.ToolCallResponse:
+				n += len(p.Name) + len(p.Content)
+			}
+		}
+	}
+	return n
+}
+
 // cacheInfoUsable reports whether a shared-cache pointer can be safely reused
 // for a request with the given contentHash. It must reference the SAME content
 // (Google prepends the cached block verbatim, so a mismatch would send the wrong
@@ -732,6 +803,12 @@ func (p *GoogleAICacheProvider) createCache(ctx context.Context, req *CacheReque
 	cachedContent, err := cachingHelper.CreateCachedContent(ctx, req.Model, cacheableMessages, ttl, displayName, req.Tools)
 	if err != nil {
 		return nil, err
+	}
+	// CountTokens above measures the messages only; the created entry also holds
+	// the tool declarations. Prefer the provider's total so storage cost and the
+	// hybrid coverage check see what Gemini actually caches.
+	if cachedContent.UsageMetadata != nil && cachedContent.UsageMetadata.TotalTokenCount > 0 {
+		tokenCount = cachedContent.UsageMetadata.TotalTokenCount
 	}
 
 	logger.Debug("Google AI cache: CreateCachedContent API returned",
