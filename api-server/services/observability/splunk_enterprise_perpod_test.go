@@ -204,9 +204,12 @@ func TestFetchMetricUtilisationServesSplunkRightsizingKeys(t *testing.T) {
 	assert.Contains(t, usage.Query, "exactperc95(nb_value)")
 	assert.Contains(t, usage.Query, `k8s.pod.name="checkout-*"`)
 
+	// A refusal is a capability statement, not a failure: empty with a note, and no error.
+	// On the error channel most callers read it as "this workload used nothing".
 	for _, key := range []string{"container_memory_max_usage_by_pod", "container_oomkilled_limit_by_pod"} {
-		require.NotNil(t, byKey[key].Error, key)
-		assert.Contains(t, *byKey[key].Error, "no Splunk", key)
+		assert.Nil(t, byKey[key].Error, key)
+		assert.Contains(t, byKey[key].Note, "no Splunk", key)
+		assert.Empty(t, byKey[key].Payload, key)
 	}
 	assert.Len(t, searches, 2, "one catalog read and one search; refused keys cost none")
 }

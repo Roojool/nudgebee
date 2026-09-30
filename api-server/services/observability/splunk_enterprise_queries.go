@@ -340,18 +340,18 @@ func fetchSplunkEnterpriseUtilisation(ctx *security.RequestContext, req GetUtili
 
 	for _, key := range meta.RequestedMetrics {
 		if reason, refused := splunkUtilisationRefusals[key]; refused {
-			results = append(results, splunkUtilisationError(key, reason))
+			results = append(results, splunkUtilisationUnavailable(key, reason))
 			continue
 		}
 		spec, ok := splunkUtilisationKeys[key]
 		if !ok {
-			results = append(results, splunkUtilisationError(key,
-				fmt.Sprintf("splunk enterprise: utilisation key %q is not supported for this provider", key)))
+			results = append(results, splunkUtilisationUnavailable(key,
+				fmt.Sprintf("splunk enterprise: utilisation key %q is not served by this provider", key)))
 			continue
 		}
 		family, found := resolved[spec.Role]
 		if !found {
-			results = append(results, splunkUtilisationError(key, fmt.Sprintf(
+			results = append(results, splunkUtilisationUnavailable(key, fmt.Sprintf(
 				"splunk enterprise: no metric in index %q carries %q (looked for: %s)",
 				index, key, strings.Join(SplunkUtilisationCandidates[spec.Role], ", "))))
 			continue
@@ -370,7 +370,7 @@ func fetchSplunkEnterpriseUtilisation(ctx *security.RequestContext, req GetUtili
 		if spec.PerPod {
 			spl, buildErr = buildSplunkPerPodQuery(family, index, step, scope, meta.Aggregate, instant)
 		} else {
-			spl, buildErr = buildSplunkUtilisationQuery(family, index, step, splunkUtilisationReducer(spec, instant), scope)
+			spl, buildErr = buildSplunkUtilisationQuery(family, index, step, splunkUtilisationReducer(spec, meta.Aggregate, instant), scope)
 		}
 		if buildErr != nil {
 			results = append(results, splunkUtilisationError(key, buildErr.Error()))
@@ -408,7 +408,20 @@ func fetchSplunkEnterpriseUtilisation(ctx *security.RequestContext, req GetUtili
 // The statistical reducers are left alone: avg, perc50, perc90 and max describe the whole
 // window by definition, so one number is the right answer whether or not the caller asked
 // for an instant.
-func splunkUtilisationReducer(spec splunkUtilisationSpec, instant bool) string {
+func splunkUtilisationReducer(spec splunkUtilisationSpec, agg ParsedAggregate, instant bool) string {
+	// count is the one aggregate the key cannot encode. Every other statistic this family
+	// serves has its own key -- p50_cpu, p90_cpu, max_usage_cpu, cpu_real -- so the spec's
+	// reducer IS the requested statistic and the caller's aggregate must not override it;
+	// answering p50_cpu with an average would return a mean under a name promising a
+	// median. There is no count_cpu key, so a count request has nowhere else to go.
+	//
+	// Without this the reducer was whatever the key hardcoded, and a count came back as the
+	// metric's own value: cpu_total answered count=12.0 -- the core count -- where the
+	// Prometheus control answered 15915. Anything sizing on count was wrong by three orders
+	// of magnitude, and doubling the step did not halve the answer (contract rule 4).
+	if agg.Name == "count" {
+		return "count"
+	}
 	if !instant && spec.Reducer == "latest" {
 		return ""
 	}
@@ -470,4 +483,19 @@ func splunkUtilisationStep(meta RequestMetadata, req GetUtilisationTrendRequest)
 
 func splunkUtilisationError(key, msg string) QueryResult {
 	return QueryResult{QueryKey: key, Error: &msg}
+}
+
+// splunkUtilisationUnavailable answers a key this provider cannot serve: empty payload, a
+// note saying why, and NO error.
+//
+// The distinction is the whole point. "This query failed" and "there is no such metric
+// here" are different answers, and only the first belongs on Error. Across api-server 91
+// call sites read Payload and only 62 read Error, so a capability gap reported as an error
+// is read by the majority as a workload that used nothing -- which once flagged a live
+// workload as abandoned. Elasticsearch already answers its absent HTTP keys this way.
+//
+// A genuine failure -- an unsafe metric name, a query that would not build -- keeps
+// splunkUtilisationError, because a caller must not read that as "no data".
+func splunkUtilisationUnavailable(key, note string) QueryResult {
+	return QueryResult{QueryKey: key, Note: note}
 }
