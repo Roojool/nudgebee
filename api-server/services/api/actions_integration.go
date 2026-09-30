@@ -488,7 +488,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 		// Lists the Elasticsearch cluster's queryable index targets from raw config
 		// values (add flow: the integration isn't saved yet), for the per-account
 		// index picker. Mirrors integrations_check_connection_config's request shape;
-		// the edit form sends stored ciphertext + is_encrypted for untyped secrets.
+		// the edit form flags untyped secrets is_encrypted, resolved to the saved ones.
 		reqInput, ok := actionPayload.Input["request"].(map[string]interface{})
 		if !ok {
 			c.JSON(400, common.ErrorActionBadRequest("invalid request input"))
@@ -499,12 +499,12 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return
 		}
-		decrypted, decErr := core.DecryptConfigValues(request.IntegrationConfigValues)
-		if decErr != nil {
-			c.JSON(200, ESIndexesResponse{Error: decErr.Error()})
+		resolved, resolveErr := core.ResolveKeptSecrets(ctx, request.IntegrationId, request.IntegrationConfigValues)
+		if resolveErr != nil {
+			c.JSON(200, ESIndexesResponse{Error: resolveErr.Error()})
 			return
 		}
-		cfg := observability.BuildElasticsearchConfigFromValues(decrypted)
+		cfg := observability.BuildElasticsearchConfigFromValues(resolved)
 		if cfg.Url == "" {
 			c.JSON(200, ESIndexesResponse{Error: "Elasticsearch URL is required"})
 			return

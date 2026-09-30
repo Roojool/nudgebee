@@ -1313,6 +1313,7 @@ const IntegrationDynamicFormModal = ({
     enabled: advancedSettingsUnlocked,
     provider: integrationName,
     providerSource: editData?.source || 'user',
+    integrationId: editData?.id,
     buildProbeConfigValues,
     accountIndexPairs: logFieldAccountPairs,
   });

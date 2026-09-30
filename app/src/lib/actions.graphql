@@ -4614,6 +4614,7 @@ input FetchLogLabelRequest {
   end_time: Float
   fetch_index: Boolean
   integration_config_values: [IntegrationConfigValueInput]
+  integration_id: String
 }
 
 input FetchLogLabelValuesRequest {

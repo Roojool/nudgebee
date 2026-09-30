@@ -260,7 +260,7 @@ func logLabelProbeContext(ctx *security.RequestContext, request *observability.F
 		return nil, 400, errors.New("log_provider is required with integration_config_values")
 	}
 
-	decrypted, err := core.DecryptConfigValues(request.IntegrationConfigValues)
+	resolved, err := core.ResolveKeptSecrets(ctx, request.IntegrationId, request.IntegrationConfigValues)
 	if err != nil {
 		return nil, 400, err
 	}
@@ -273,7 +273,7 @@ func logLabelProbeContext(ctx *security.RequestContext, request *observability.F
 		AccountId:       request.AccountId,
 		IntegrationName: request.LogProvider,
 		Source:          source,
-		Values:          decrypted,
+		Values:          resolved,
 	})
 	// Transport only — the values never travel further than this handler.
 	request.IntegrationConfigValues = nil

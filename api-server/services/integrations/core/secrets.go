@@ -2,10 +2,13 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"nudgebee/services/common"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/security"
 )
 
 // llmSecretFieldPrefixes is the canonical list of secret-shaped config-key
@@ -128,10 +131,6 @@ func augmentLLMConfigWithStoredSecrets(ctx context.Context, tenantId, integratio
 	if tenantId == "" || integrationId == "" {
 		return incoming
 	}
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return incoming
-	}
 	// Build the "already present" set so we don't override values the caller
 	// explicitly typed. Empty-value secret entries (omit-to-keep signals from
 	// the UI) deliberately do NOT count as present — without this filter, a
@@ -148,13 +147,49 @@ func augmentLLMConfigWithStoredSecrets(ctx context.Context, tenantId, integratio
 		}
 		incomingNames[v.Name] = struct{}{}
 	}
+	stored, err := loadStoredConfigValues(ctx, tenantId, integrationId)
+	if err != nil {
+		return incoming
+	}
+
+	augmented := make([]IntegrationConfigValue, 0, len(incoming))
+	augmented = append(augmented, incoming...)
+	for _, row := range stored {
+		if !IsLLMSecretFieldName(row.Name) {
+			continue
+		}
+		if _, present := incomingNames[row.Name]; present {
+			continue
+		}
+		if row.Value == "" {
+			continue
+		}
+		augmented = append(augmented, IntegrationConfigValue{
+			Name:        row.Name,
+			Value:       storedValuePlaintext(row.Value),
+			IsEncrypted: false,
+		})
+	}
+	return augmented
+}
+
+// loadStoredConfigValues returns an integration's stored config rows as they sit in
+// the database (values still encrypted where they were saved encrypted). The join on
+// integrations.tenant_id means an integration id from another tenant yields no rows.
+func loadStoredConfigValues(ctx context.Context, tenantId, integrationId string) ([]IntegrationConfigValue, error) {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, err
+	}
 	// QueryxContext (not Queryx) so the SELECT is cancelled if the request
 	// is cancelled or times out mid-validation — saves us from holding a
 	// row-lock or a network round-trip on behalf of a client that's already
 	// gone.
 	rows, err := dbms.Db.QueryxContext(
 		ctx,
-		`SELECT icv.name::text, icv.value::text, icv.is_encrypted
+		// COALESCE: both columns are nullable, and one NULL must not fail the scan
+		// for the whole integration.
+		`SELECT icv.name::text, COALESCE(icv.value, '')::text, COALESCE(icv.is_encrypted, false)
 		   FROM integration_config_values icv
 		   JOIN integrations i ON i.id = icv.integration_id
 		  WHERE icv.integration_id = $1
@@ -163,48 +198,121 @@ func augmentLLMConfigWithStoredSecrets(ctx context.Context, tenantId, integratio
 		tenantId,
 	)
 	if err != nil {
-		return incoming
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	augmented := make([]IntegrationConfigValue, 0, len(incoming))
-	augmented = append(augmented, incoming...)
+	var stored []IntegrationConfigValue
 	for rows.Next() {
-		var name, value string
-		var isEncrypted bool
-		if err := rows.Scan(&name, &value, &isEncrypted); err != nil {
-			continue
+		var row IntegrationConfigValue
+		if err := rows.Scan(&row.Name, &row.Value, &row.IsEncrypted); err != nil {
+			return nil, err
 		}
-		if !IsLLMSecretFieldName(name) {
-			continue
-		}
-		if _, present := incomingNames[name]; present {
-			continue
-		}
-		if value == "" {
-			continue
-		}
-		// Try-decrypt regardless of the is_encrypted flag. The write path's
-		// ON CONFLICT DO UPDATE historically did not refresh is_encrypted
-		// (see integration_config.go upsert), so legacy rows can carry
-		// ciphertext under is_encrypted=false. common.Decrypt is hex-decode +
-		// AES-GCM, so a plaintext credential (e.g. "AIza…", "sk-…") errors
-		// out cleanly rather than producing garbage — making this safe to
-		// attempt unconditionally for secret-shaped fields.
-		if dec, derr := common.Decrypt(value); derr == nil {
-			value = dec
-		}
-		augmented = append(augmented, IntegrationConfigValue{
-			Name:        name,
-			Value:       value,
-			IsEncrypted: false,
-		})
+		stored = append(stored, row)
 	}
 	// Surface iteration errors — a partial result shouldn't silently slip
-	// through. On error, fall back to the un-augmented payload (same policy
-	// as the DB-down branches above).
+	// through.
 	if err := rows.Err(); err != nil {
-		return incoming
+		return nil, err
 	}
-	return augmented
+	return stored, nil
+}
+
+// storedValuePlaintext decrypts a stored secret value, trying regardless of the
+// row's is_encrypted flag. The write path's ON CONFLICT DO UPDATE historically did
+// not refresh is_encrypted (see integration_config.go upsert), so legacy rows can
+// carry ciphertext under is_encrypted=false. common.Decrypt is hex-decode +
+// AES-GCM, so a plaintext credential (e.g. "AIza…", "sk-…") errors out cleanly
+// rather than producing garbage — making this safe to attempt unconditionally.
+func storedValuePlaintext(value string) string {
+	if dec, err := common.Decrypt(value); err == nil {
+		return dec
+	}
+	return value
+}
+
+// ResolveKeptSecrets replaces each value the caller flagged is_encrypted with the
+// secret stored for that field on integrationId, decrypted. It is the only way
+// request-supplied config values may carry is_encrypted into the server.
+//
+// The integration form shows saved secrets as a mask, and when the user leaves one
+// untouched it sends the stored ciphertext back with is_encrypted=true, meaning
+// "keep what is saved". The server used to decrypt that ciphertext, which made
+// every endpoint taking config values a decryption oracle: one global key and no
+// binding to tenant or integration, so any ciphertext produced under that key could
+// be sent in and read back — echoed in the response, quoted in a validation error,
+// or sent to a url the caller controls (#39639). Here the client's ciphertext is
+// only a marker and is never decrypted; the secret comes from the caller's own
+// tenant's stored row, looked up by id.
+//
+// No returned value has IsEncrypted set, so downstream code never sees a
+// request-sourced ciphertext. Values that are not flagged pass through unchanged,
+// and a request that flags nothing costs no query.
+func ResolveKeptSecrets(ctx *security.RequestContext, integrationId string, values []IntegrationConfigValue) ([]IntegrationConfigValue, error) {
+	kept := false
+	for _, v := range values {
+		if v.IsEncrypted {
+			kept = true
+			break
+		}
+	}
+	if !kept {
+		return values, nil
+	}
+
+	tenantId := ""
+	if ctx != nil && ctx.GetSecurityContext() != nil {
+		tenantId = ctx.GetSecurityContext().GetTenantId()
+	}
+	if integrationId == "" || tenantId == "" {
+		return nil, errors.New("integrations: is_encrypted is only accepted when editing a saved integration")
+	}
+	stored, err := loadStoredConfigValues(ctx.GetContext(), tenantId, integrationId)
+	if err != nil {
+		return nil, fmt.Errorf("integrations: failed to load stored config values: %w", err)
+	}
+	storedByName := make(map[string]string, len(stored))
+	for _, row := range stored {
+		storedByName[row.Name] = row.Value
+	}
+
+	resolved := make([]IntegrationConfigValue, len(values))
+	for i, v := range values {
+		if !v.IsEncrypted {
+			resolved[i] = v
+			continue
+		}
+		storedValue := storedByName[v.Name]
+		if storedValue == "" {
+			return nil, fmt.Errorf("integrations: field %s has no saved value to keep; enter it again", v.Name)
+		}
+		resolved[i] = IntegrationConfigValue{Name: v.Name, Value: storedValuePlaintext(storedValue)}
+	}
+	return resolved, nil
+}
+
+// isSecretConfigField reports whether a field's value must be encrypted at rest and
+// never returned to a client: the schema's IsEncrypted flag, plus the LLM
+// integration's dynamic per-agent / per-tier secret keys, which AllowsDynamicKey lets
+// through without a static schema entry.
+func isSecretConfigField(integrationType string, schema IntegrationSchema, name string) bool {
+	if schema.Properties[name].IsEncrypted {
+		return true
+	}
+	return integrationType == "llm" && IsLLMSecretFieldName(name)
+}
+
+// redactSecretConfigValues returns a copy of values with every secret field's value
+// blanked, for responses. Entries are kept, not dropped: the integration forms read
+// `configs.length === 0` as a failed save. Non-secret values the forms do read — the
+// generated webhook token, vm_agent access_key / access_secret — pass through.
+func redactSecretConfigValues(integrationType string, schema IntegrationSchema, values []IntegrationConfigValue) []IntegrationConfigValue {
+	redacted := make([]IntegrationConfigValue, len(values))
+	for i, v := range values {
+		redacted[i] = v
+		if v.Value != "" && isSecretConfigField(integrationType, schema, v.Name) {
+			redacted[i] = IntegrationConfigValue{Name: v.Name}
+		}
+	}
+	return redacted
 }
