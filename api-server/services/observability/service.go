@@ -3387,7 +3387,7 @@ func FetchMetricLabelsList(ctx *security.RequestContext, fetchMetricLabelListReq
 	return output, nil
 }
 
-func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTrendRequest) (OutputMetricQuery, error) {
+func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTrendRequest) (result OutputMetricQuery, retErr error) {
 	// Fail fast rather than resolving a provider for nothing. Every caller already
 	// checks this (the RPC handler 400s, both eventrule actions return early), and
 	// the integration lookup filters on cloud_account_id unconditionally — so an
@@ -3408,6 +3408,23 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	if metricsProvider == "" {
 		return OutputMetricQuery{}, nil
 	}
+
+	// One line per call naming the provider that served it and how long it took.
+	// Without it a slow utilisation chart cannot be attributed: the gateway logs
+	// only the operation name, and most providers log nothing on success.
+	start := time.Now()
+	defer func() {
+		failedKeys := 0
+		for _, r := range result.Results {
+			if r.Error != nil && *r.Error != "" {
+				failedKeys++
+			}
+		}
+		ctx.GetLogger().Info("observability: utilisation served",
+			"provider", metricsProvider, "source", integrationSource, "account_id", req.AccountId,
+			"keys", len(result.Results), "failed_keys", failedKeys,
+			"duration", time.Since(start), "error", retErr)
+	}()
 
 	// --- 1. Extract Metadata ---
 	meta, err := parseRequestMetadata(req.Request)
