@@ -495,8 +495,8 @@ const AgentHealth = () => {
             // Older agents send no error_class; they fall back to the bare message.
             component: datasource.error ? (
               <Box>
-                {datasource.error_class && (
-                  <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.red[500] }}>
+                {typeof datasource.error_class === 'string' && (
+                  <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.semibold, color: ds.red[500], textTransform: 'capitalize' }}>
                     {PROXY_ERROR_CLASS_LABELS[datasource.error_class] ?? datasource.error_class.replace(/_/g, ' ')}
                   </Typography>
                 )}
