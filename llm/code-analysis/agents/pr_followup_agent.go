@@ -187,6 +187,9 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 	if baseBranch != "" {
 		a.ensureBaseRefFetched(baseBranch)
 	}
+	// Pin CI inspection to the provider's current PR/MR head before a base
+	// merge changes the workspace HEAD. Never substitute a branch name here.
+	ciHead := a.resolveCIHead(repoInfo, prNumber)
 
 	// --- Step 0: Bring the branch up to date with base ---
 	// Runs before the gatherers so a clean merge can short-circuit the whole
@@ -229,7 +232,7 @@ func (a *PRFollowupAgent) Execute(ctx context.Context, req PRFollowupRequest) (*
 		inlineComments, inlineText = a.gatherInlineComments(ctx, repoInfo, prNumber, dbAddressed)
 		issueComments, issueText, answeredComments = a.gatherIssueComments(ctx, repoInfo, prNumber, dbAddressed)
 		reviewBodyComments, reviewBodyText = a.gatherReviewBodyComments(ctx, repoInfo, prNumber, answeredComments)
-		ciFailureLogs = a.gatherCIFailureLogs(ctx, repoInfo, prNumber, req.Branch)
+		ciFailureLogs = a.gatherCIFailureLogs(ctx, repoInfo, prNumber, ciHead)
 	}
 
 	// Merge all pending comments into one slice
@@ -1863,85 +1866,17 @@ func (a *PRFollowupAgent) gatherDiff(_ context.Context, repoInfo *gitprovider.Re
 	return out
 }
 
-// gatherCIFailureLogs fetches CI/CD failure logs with actual error output.
-func (a *PRFollowupAgent) gatherCIFailureLogs(_ context.Context, repoInfo *gitprovider.RepoInfo, prNumber string, branch string) string {
-	if a.provider == gitprovider.GitProviderGitLab {
-		encodedPath := url.PathEscape(repoInfo.FullPath)
-		out, err := a.runCommandInDir("glab", "api", fmt.Sprintf("projects/%s/merge_requests/%s/pipelines", encodedPath, prNumber))
-		if err != nil {
-			a.logger.Log(common.EventStepFailure, "Failed to gather GitLab CI logs", map[string]any{"error": err.Error()})
-			return ""
-		}
-		return out
-	}
+// gatherCIFailureLogs fetches deterministic, commit-pinned CI summaries.
+func (a *PRFollowupAgent) gatherCIFailureLogs(_ context.Context, repoInfo *gitprovider.RepoInfo, prNumber string, head ciHead) string {
+	return collectCIFailures(commandRunner{a}, a.provider, repoInfo.FullPath, prNumber, head)
+}
 
-	ref := branch
-	if ref == "" {
-		ref = "HEAD"
-	}
-
-	var sb strings.Builder
-
-	// Reject branch names that could lead to gh CLI argument injection
-	// (`gh run list --branch` and similar take `--` to terminate flags only at the binary level,
-	// but a leading `-` would still be interpreted as a flag by some subcommands).
-	if branch != "" && (strings.Contains(branch, "..") || strings.HasPrefix(branch, "-")) {
-		a.logger.Log(common.EventStepFailure, "Invalid branch name format", map[string]any{"branch": branch})
-		return ""
-	}
-
-	// URL-path-escape ref to prevent special characters (spaces, slashes, encoded sequences)
-	// from breaking the gh-api path or being interpreted as additional path segments.
-	escapedRef := url.PathEscape(ref)
-	checkNames, err := a.runCommandInDir("gh", "api", fmt.Sprintf("repos/%s/commits/%s/check-runs", repoInfo.FullPath, escapedRef), "--jq", `.check_runs[] | select(.conclusion=="failure") | .name`)
+func (a *PRFollowupAgent) resolveCIHead(repoInfo *gitprovider.RepoInfo, prNumber string) ciHead {
+	head, err := resolveCIHead(commandRunner{a}, a.provider, repoInfo.FullPath, prNumber)
 	if err != nil {
-		a.logger.Log(common.EventStepFailure, "Failed to list failed checks", map[string]any{"error": err.Error()})
-		return ""
+		a.logger.Log(common.EventStepFailure, "Failed to resolve CI head", map[string]any{"error": err.Error()})
 	}
-
-	failedChecks := strings.TrimSpace(checkNames)
-	if failedChecks == "" {
-		return ""
-	}
-
-	fmt.Fprintf(&sb, "### Failed Checks\n%s\n\n", failedChecks)
-
-	runListOut, err := a.runCommandInDir("gh", "run", "list", "--branch", branch, "--status", "failure", "--limit", "5", "--json", "databaseId,name,conclusion", "--repo", repoInfo.FullPath)
-	if err != nil {
-		a.logger.Log(common.EventStepFailure, "Failed to list failed runs", map[string]any{"error": err.Error()})
-		return sb.String()
-	}
-
-	var runs []struct {
-		DatabaseID int64  `json:"databaseId"`
-		Name       string `json:"name"`
-	}
-	if err := json.Unmarshal([]byte(runListOut), &runs); err != nil || len(runs) == 0 {
-		return sb.String()
-	}
-
-	maxRuns := 3
-	if len(runs) < maxRuns {
-		maxRuns = len(runs)
-	}
-	for i := 0; i < maxRuns; i++ {
-		run := runs[i]
-		fmt.Fprintf(&sb, "### Workflow: %s (Run #%d)\n", run.Name, run.DatabaseID)
-
-		logOut, err := a.runCommandInDir("gh", "run", "view", strconv.FormatInt(run.DatabaseID, 10), "--log-failed", "--repo", repoInfo.FullPath)
-		if err != nil {
-			fmt.Fprintf(&sb, "(Failed to fetch logs: %s)\n\n", err.Error())
-			continue
-		}
-		logOut = strings.TrimSpace(logOut)
-		if logOut == "" {
-			fmt.Fprintf(&sb, "(No log output available)\n\n")
-		} else {
-			fmt.Fprintf(&sb, "```\n%s\n```\n\n", truncateIfNeeded(logOut, 3000))
-		}
-	}
-
-	return sb.String()
+	return head
 }
 
 func (a *PRFollowupAgent) buildSystemPrompt(repo, prNumber, prDetails, diff, comments, ciLogs string, pendingComments []reviewComment, baseBranch string, sync baseSyncResult, instruction string) string {
@@ -1987,7 +1922,7 @@ You have access to the repository workspace and can read, modify, and create fil
 	}
 
 	if ciLogs != "" {
-		fmt.Fprintf(&sb, "## CI/CD Failure Logs\n%s\n\n", truncateIfNeeded(ciLogs, 10000))
+		fmt.Fprintf(&sb, "## CI/CD Failure Logs\n%s\n\n", ciLogs)
 	}
 
 	if sync.conflicted {
