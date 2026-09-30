@@ -176,3 +176,62 @@ func TestRenderMetricDigest_QueryHeadersStayInsideTheBudget(t *testing.T) {
 		t.Errorf("expected an overflow note, got:\n%s", got)
 	}
 }
+
+// A per-object rule returns every breaching object; the one the alert fired for
+// must be told apart from the rest and lead the digest (#39669).
+func TestRenderMetricDigest_AlertingSeriesLeadsAndSeriesAreNamedApart(t *testing.T) {
+	ev := events.InvestigateData{
+		PodMetrics: []events.InvestigateDataInsight{{
+			Data: `{"series_list_result":[{"metric":{"__name__":"container_memory_working_set_bytes","pod":"api-1"},"values":["1"],"timestamps":[1789382040]}]}`,
+		}},
+		MetricsData: []events.InvestigateDataInsight{{
+			Query: "kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes * 100 < 20",
+			Data: `{"result_type":"matrix","series_list_result":[` +
+				`{"alerting":true,"metric":{"namespace":"nudgebee","persistentvolumeclaim":"data-postgresql-0"},"values":["18.92"],"timestamps":[1789382040]},` +
+				`{"metric":{"namespace":"nudgebee","persistentvolumeclaim":"data-elasticsearch-0"},"values":["5.79"],"timestamps":[1789382040]}]}`,
+		}},
+	}
+	got := renderMetricDigest(ev)
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected a query header and three series, got:\n%s", got)
+	}
+	if !strings.HasPrefix(lines[0], "- query `kubelet_volume_stats") {
+		t.Errorf("expected the card holding the alerting series first, got:\n%s", got)
+	}
+	if !strings.Contains(lines[1], "persistentvolumeclaim=data-postgresql-0 [the object this alert fired for]") || !strings.Contains(lines[1], "last 18.920") {
+		t.Errorf("expected the postgres volume first and tagged, got:\n%s", got)
+	}
+	if !strings.Contains(lines[2], "persistentvolumeclaim=data-elasticsearch-0:") || strings.Contains(lines[2], "fired for") {
+		t.Errorf("expected the elasticsearch volume named and untagged, got:\n%s", got)
+	}
+}
+
+// The same series stored in two cards with different siblings is rendered once,
+// even though the labels that tell series apart differ per card.
+func TestRenderMetricDigest_SeriesInTwoCardsRenderedOnce(t *testing.T) {
+	a := `{"metric":{"namespace":"n","persistentvolumeclaim":"a"},"values":["1"],"timestamps":[1789382040]}`
+	b := `{"metric":{"namespace":"n","persistentvolumeclaim":"b"},"values":["2"],"timestamps":[1789382040]}`
+	ev := events.InvestigateData{
+		PodMetrics:  []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + a + `]}`}},
+		MetricsData: []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + a + `,` + b + `]}`}},
+	}
+	got := renderMetricDigest(ev)
+	if n := strings.Count(got, "\n"); n != 2 || !strings.Contains(got, "persistentvolumeclaim=b") {
+		t.Errorf("expected series a once and b once, got:\n%s", got)
+	}
+}
+
+// Two objects whose values match are still two series, and only the alerting
+// one is tagged.
+func TestRenderMetricDigest_SeriesWithEqualValuesStayApart(t *testing.T) {
+	ev := events.InvestigateData{MetricsData: []events.InvestigateDataInsight{{
+		Data: `{"series_list_result":[` +
+			`{"alerting":true,"metric":{"namespace":"n","persistentvolumeclaim":"a"},"values":["0"],"timestamps":[1789382040]},` +
+			`{"metric":{"namespace":"n","persistentvolumeclaim":"b"},"values":["0"],"timestamps":[1789382040]}]}`,
+	}}}
+	got := renderMetricDigest(ev)
+	if strings.Count(got, "\n") != 2 || strings.Count(got, "fired for") != 1 || !strings.Contains(got, "persistentvolumeclaim=b:") {
+		t.Errorf("expected both volumes, only a tagged, got:\n%s", got)
+	}
+}

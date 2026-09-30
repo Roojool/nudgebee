@@ -233,10 +233,13 @@ const KubernetesPrometheus: React.FC<KubernetesPrometheusProps> = ({
                   values.push(0);
                 }
               });
+              // The prometheus_enricher flags the series of the object the alert
+              // fired for and puts it first; say so, as other objects share the chart.
+              const metricLabel = Object.entries(item.metric)
+                .map(([key, value]) => `${key}=${value}`)
+                .join('\n');
               chartDataDataset.push({
-                label: Object.entries(item.metric)
-                  .map(([key, value]) => `${key}=${value}`)
-                  .join('\n'),
+                label: item.alerting ? `Alerting object\n${metricLabel}` : metricLabel,
                 data: values,
               });
               const metricData = metricKeys.map((h, i) => {

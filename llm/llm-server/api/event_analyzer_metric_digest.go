@@ -30,6 +30,13 @@ type metricPoint struct {
 type metricSeries struct {
 	name   string
 	points []metricPoint
+	// labels are the series' own Prometheus labels, when it has them.
+	labels map[string]any
+	// alerting marks the series of the object the alert fired for, as the
+	// prometheus_enricher flags it; the rule's other breaching objects are not.
+	alerting bool
+	// key identifies the series across cards for dedupe.
+	key string
 }
 
 // renderMetricDigest summarises every metric series the enrichers attached to the
@@ -50,25 +57,52 @@ type metricSeries struct {
 // A card that says what it measured (its query, and the unit when the query settles
 // it) gets that stated once, with its series nested under it: rate()/sum() series
 // carry no __name__, so without it the model got numbers with no metric or unit.
+//
+// A rule that fires per object returns every breaching object, so a card can hold
+// several databases or volumes. Each series is named by the labels that tell it
+// apart within its card, and the series of the object the alert fired for is
+// tagged and listed first, with its card ahead of the rest, so the budget below
+// never cuts it and the model does not quote another object's number.
 func renderMetricDigest(ev events.InvestigateData) string {
 	type digestCard struct {
-		header string
-		lines  []string
+		header   string
+		lines    []string
+		alerting bool
 	}
-	// The same series is often stored twice (grouped and flat), so dedupe the
-	// rendered lines before counting what did not fit.
+	// The same series is often stored twice (grouped and flat), so dedupe it before
+	// counting what did not fit. The key is the series' own name, labels and values,
+	// not the rendered line: the labels added to tell a card's series apart depend on
+	// the card, so two copies in different cards would render differently. A copy
+	// flagged alerting marks every copy, whichever one is kept.
+	evidenceCards := allEvidenceCards(ev)
+	collected := make([][]metricSeries, 0, len(evidenceCards))
+	alertingKeys := make(map[string]bool)
+	for _, card := range evidenceCards {
+		var series []metricSeries
+		collectMetricSeries(parseEvidenceData(card.Data), "", 0, &series)
+		for i := range series {
+			series[i].key = seriesDedupeKey(series[i])
+			alertingKeys[series[i].key] = alertingKeys[series[i].key] || series[i].alerting
+		}
+		collected = append(collected, series)
+	}
+
 	var cards []digestCard
 	total := 0
 	seen := make(map[string]bool)
-	for _, card := range allEvidenceCards(ev) {
-		var series []metricSeries
-		collectMetricSeries(parseEvidenceData(card.Data), "", 0, &series)
+	for i, card := range evidenceCards {
+		series := collected[i]
+		for j := range series {
+			series[j].alerting = alertingKeys[series[j].key]
+		}
+		nameSeriesApart(series)
+		sort.SliceStable(series, func(i, j int) bool { return series[i].alerting && !series[j].alerting })
 		c := digestCard{header: metricCardHeader(card)}
 		for _, s := range series {
-			line := formatMetricSeries(s)
-			if !seen[line] {
-				seen[line] = true
-				c.lines = append(c.lines, line)
+			if !seen[s.key] {
+				seen[s.key] = true
+				c.lines = append(c.lines, formatMetricSeries(s))
+				c.alerting = c.alerting || s.alerting
 			}
 		}
 		if len(c.lines) > 0 {
@@ -76,6 +110,7 @@ func renderMetricDigest(ev events.InvestigateData) string {
 			total += len(c.lines)
 		}
 	}
+	sort.SliceStable(cards, func(i, j int) bool { return cards[i].alerting && !cards[j].alerting })
 
 	var b strings.Builder
 	rendered := 0
@@ -205,7 +240,67 @@ func metricSeriesFrom(m map[string]any, parentKey string) (metricSeries, bool) {
 		return metricSeries{}, false
 	}
 	sort.SliceStable(points, func(i, j int) bool { return points[i].at.Before(points[j].at) })
-	return metricSeries{name: metricSeriesName(m, parentKey), points: points}, true
+	labels, _ := m["metric"].(map[string]any)
+	alerting, _ := m["alerting"].(bool)
+	return metricSeries{name: metricSeriesName(m, parentKey), points: points, labels: labels, alerting: alerting}, true
+}
+
+// seriesDedupeKey identifies a series by its name, its own labels and its values.
+// The labels keep two objects apart whose values happen to match (both volumes
+// flat at 0), so neither is dropped nor takes the other's alerting tag.
+func seriesDedupeKey(s metricSeries) string {
+	labels := make([]string, 0, len(s.labels))
+	for k, v := range s.labels {
+		labels = append(labels, fmt.Sprintf("%s=%v", k, v))
+	}
+	sort.Strings(labels)
+	return formatMetricSeries(metricSeries{name: s.name, points: s.points}) + "{" + strings.Join(labels, ",") + "}"
+}
+
+// maxDistinguishingLabels bounds how many labels are added to tell a card's
+// series apart.
+const maxDistinguishingLabels = 3
+
+// nameSeriesApart appends to each series' name the labels whose values differ
+// across the card's series and are not in the name already. The name is built
+// from a fixed set of labels, which leaves out the one a per-object rule varies
+// by (datname, deployment, persistentvolumeclaim, queue), so two volumes in one
+// namespace came out under the same name with different numbers.
+func nameSeriesApart(series []metricSeries) {
+	values := map[string]map[string]bool{}
+	for _, s := range series {
+		for k, v := range s.labels {
+			if str, ok := v.(string); ok {
+				if values[k] == nil {
+					values[k] = map[string]bool{}
+				}
+				values[k][str] = true
+			}
+		}
+	}
+	var keys []string
+	for k, vs := range values {
+		if len(vs) > 1 {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for i := range series {
+		var extra []string
+		for _, k := range keys {
+			v, _ := series[i].labels[k].(string)
+			if v == "" || strings.Contains(series[i].name, v) {
+				continue
+			}
+			if len(extra) == maxDistinguishingLabels {
+				break
+			}
+			extra = append(extra, k+"="+v)
+		}
+		if len(extra) > 0 {
+			series[i].name += " " + strings.Join(extra, " ")
+		}
+	}
 }
 
 // genericMetricKeys are container keys that never name a series.
@@ -246,8 +341,12 @@ func formatMetricSeries(s metricSeries) string {
 			hi = p
 		}
 	}
+	name := s.name
+	if s.alerting {
+		name += " [the object this alert fired for]"
+	}
 	return fmt.Sprintf("- %s: %d points %s→%s UTC · first %s · min %s @%s · max %s @%s · last %s\n",
-		s.name, len(s.points), metricClock(first.at), metricClock(last.at),
+		name, len(s.points), metricClock(first.at), metricClock(last.at),
 		metricValue(first.value), metricValue(lo.value), metricClock(lo.at),
 		metricValue(hi.value), metricClock(hi.at), metricValue(last.value))
 }
