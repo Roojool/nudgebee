@@ -27,16 +27,35 @@ var mcpHTTPClient = &http.Client{
 	CheckRedirect: safehttp.SafeCheckRedirect,
 }
 
+// mcpSessionTTL is an idle timeout: every use of a session pushes its expiry out
+// again, so a long-running conversation keeps its upstream session.
 const mcpSessionTTL = 30 * time.Minute
+
+// mcpSessionTerminateTimeout bounds the best-effort DELETE sent to an upstream
+// MCP server when an idle session is evicted.
+const mcpSessionTerminateTimeout = 10 * time.Second
+
+// mcpTerminateSlots caps concurrent upstream DELETEs, so a sweep that evicts
+// many sessions at once (e.g. after a burst of automation runs) doesn't flood
+// MCP servers or, for oauth2, their token endpoint.
+var mcpTerminateSlots = make(chan struct{}, 8)
 
 type mcpSessionEntry struct {
 	sessionID string
 	expiry    time.Time
+	// mcpURL and authBody are kept so the session can be terminated upstream
+	// (HTTP DELETE) when it is evicted. authBody holds only the auth fields of
+	// the request that created the session, not the tool call itself; this
+	// keeps those credentials in memory for as long as the session is live.
+	mcpURL   string
+	authBody []byte
 }
 
 // mcpSessionCache caches MCP session IDs per (URL, account, caller session) tuple.
-// Entries expire after mcpSessionTTL. Expired entries are evicted lazily on read
-// and periodically by a background sweeper to prevent unbounded growth.
+// Entries expire after mcpSessionTTL of inactivity. Expired entries are evicted
+// lazily on read and periodically by a background sweeper; either way the
+// upstream session is terminated so stateful servers (e.g. a browser per
+// session) don't accumulate abandoned sessions.
 var mcpSessionCache = struct {
 	sync.RWMutex
 	sessions map[string]mcpSessionEntry // "URL|accountID[|session_id]" -> MCP session entry
@@ -52,14 +71,74 @@ func mcpSessionCacheSweeper() {
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
+		var expired []mcpSessionEntry
 		mcpSessionCache.Lock()
 		for key, entry := range mcpSessionCache.sessions {
 			if now.After(entry.expiry) {
 				delete(mcpSessionCache.sessions, key)
+				expired = append(expired, entry)
 			}
 		}
 		mcpSessionCache.Unlock()
+		for _, entry := range expired {
+			go terminateMCPSession(entry)
+		}
 	}
+}
+
+// terminateMCPSession asks the upstream MCP server to end a session (MCP spec:
+// HTTP DELETE with the Mcp-Session-Id header). Best-effort: servers may answer
+// 404 (already gone) or 405 (client termination not supported), and any error
+// is only logged — the server's own timeout remains the backstop.
+func terminateMCPSession(entry mcpSessionEntry) {
+	mcpTerminateSlots <- struct{}{}
+	defer func() { <-mcpTerminateSlots }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), mcpSessionTerminateTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, entry.mcpURL, nil)
+	if err != nil {
+		slog.Debug("MCP session terminate: building request failed", "url", entry.mcpURL, "error", err)
+		return
+	}
+	req.Header.Set("Mcp-Session-Id", entry.sessionID)
+	if err := injectMCPAuth(req, entry.authBody); err != nil {
+		slog.Debug("MCP session terminate: auth setup failed", "url", entry.mcpURL, "error", err)
+		return
+	}
+	resp, err := mcpHTTPClient.Do(req)
+	if err != nil {
+		slog.Debug("MCP session terminate failed", "url", entry.mcpURL, "error", err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	slog.Debug("MCP session terminated", "url", entry.mcpURL, "status", resp.StatusCode)
+}
+
+// mcpAuthSnapshot extracts only the auth fields from a relay request body, in
+// the same shape injectMCPAuth reads, so they can be reused for a later DELETE
+// without retaining the rest of the request.
+func mcpAuthSnapshot(rawBody []byte) []byte {
+	actionParams := map[string]any{
+		"auth_type": gjson.GetBytes(rawBody, "body.action_params.auth_type").String(),
+	}
+	if creds := gjson.GetBytes(rawBody, "body.action_params.auth_credentials"); creds.Exists() {
+		actionParams["auth_credentials"] = json.RawMessage(creds.Raw)
+	}
+	b, _ := json.Marshal(map[string]any{"body": map[string]any{"action_params": actionParams}})
+	return b
+}
+
+// dropMCPSession removes cacheKey from the cache only if it still maps to
+// sessionID, so a session another request has just created is not discarded.
+func dropMCPSession(cacheKey, sessionID string) {
+	mcpSessionCache.Lock()
+	if entry, ok := mcpSessionCache.sessions[cacheKey]; ok && entry.sessionID == sessionID {
+		delete(mcpSessionCache.sessions, cacheKey)
+	}
+	mcpSessionCache.Unlock()
 }
 
 // handleDirectMCP handles MCP requests in direct mode (no agent needed).
@@ -141,25 +220,21 @@ func handleDirectMCP(c *gin.Context, rawBody []byte, logger *slog.Logger, start 
 }
 
 // ensureMCPSession returns a cached session ID or performs an initialize handshake.
-// Uses double-checked locking to prevent redundant handshakes from concurrent goroutines.
+// A cache hit extends the session's idle expiry.
 // cacheKey isolates sessions per (URL, caller) pair; mcpURL is the actual MCP server endpoint.
 func ensureMCPSession(ctx context.Context, cacheKey string, mcpURL string, rawBody []byte, logger *slog.Logger) (string, error) {
-	// Fast path: check cache with read lock
-	mcpSessionCache.RLock()
-	if entry, ok := mcpSessionCache.sessions[cacheKey]; ok && time.Now().Before(entry.expiry) {
-		mcpSessionCache.RUnlock()
-		return entry.sessionID, nil
-	}
-	mcpSessionCache.RUnlock()
-
-	// Slow path: acquire write lock and re-check before performing handshake
 	mcpSessionCache.Lock()
-	if entry, ok := mcpSessionCache.sessions[cacheKey]; ok && time.Now().Before(entry.expiry) {
-		mcpSessionCache.Unlock()
-		return entry.sessionID, nil
+	if entry, ok := mcpSessionCache.sessions[cacheKey]; ok {
+		if time.Now().Before(entry.expiry) {
+			entry.expiry = time.Now().Add(mcpSessionTTL)
+			mcpSessionCache.sessions[cacheKey] = entry
+			mcpSessionCache.Unlock()
+			return entry.sessionID, nil
+		}
+		// Expired: evict and terminate upstream.
+		delete(mcpSessionCache.sessions, cacheKey)
+		go terminateMCPSession(entry)
 	}
-	// Evict expired entry if present
-	delete(mcpSessionCache.sessions, cacheKey)
 	mcpSessionCache.Unlock()
 
 	// Perform initialize handshake (outside lock to avoid blocking other keys)
@@ -174,11 +249,21 @@ func ensureMCPSession(ctx context.Context, cacheKey string, mcpURL string, rawBo
 
 	logger.Info("MCP session initialized", "url", mcpURL)
 
-	mcpSessionCache.Lock()
-	mcpSessionCache.sessions[cacheKey] = mcpSessionEntry{
+	created := mcpSessionEntry{
 		sessionID: sessionID,
 		expiry:    time.Now().Add(mcpSessionTTL),
+		mcpURL:    mcpURL,
+		authBody:  mcpAuthSnapshot(rawBody),
 	}
+	mcpSessionCache.Lock()
+	if existing, ok := mcpSessionCache.sessions[cacheKey]; ok && time.Now().Before(existing.expiry) {
+		// A concurrent request initialized a session for this key first: use
+		// theirs so both calls share state, and end the one we just opened.
+		mcpSessionCache.Unlock()
+		go terminateMCPSession(created)
+		return existing.sessionID, nil
+	}
+	mcpSessionCache.sessions[cacheKey] = created
 	mcpSessionCache.Unlock()
 
 	return sessionID, nil
@@ -225,20 +310,31 @@ func performMCPInitialize(ctx context.Context, mcpURL string, rawBody []byte) (s
 	return resp.Header.Get("Mcp-Session-Id"), nil
 }
 
+// isMCPSessionGone reports whether a response means the upstream server has
+// dropped the session we sent.
+func isMCPSessionGone(statusCode int, responseData, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	if statusCode == http.StatusNotFound {
+		return true
+	}
+	return statusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(responseData), "session")
+}
+
 // doMCPRequest sends the actual MCP JSON-RPC request with session and SSE handling.
-// If the server returns 400 with "session" in the error, it retries with a fresh session.
+// If the server reports the session is gone, it retries once with a fresh session.
 func doMCPRequest(ctx context.Context, cacheKey string, mcpURL string, mcpBody []byte, sessionID string, rawBody []byte, logger *slog.Logger) (string, int, error) {
 	responseData, statusCode, err := executeMCPHTTP(ctx, mcpURL, mcpBody, sessionID, rawBody)
 	if err != nil {
 		return "", 0, err
 	}
 
-	// If we got a 400 with session-related error, invalidate and retry once
-	if statusCode == 400 && strings.Contains(strings.ToLower(responseData), "session") {
-		logger.Info("MCP session expired, re-initializing", "url", mcpURL)
-		mcpSessionCache.Lock()
-		delete(mcpSessionCache.sessions, cacheKey)
-		mcpSessionCache.Unlock()
+	// The server no longer knows our session: per the MCP spec it answers 404,
+	// and some servers answer 400 mentioning the session. Re-initialize and retry once.
+	if isMCPSessionGone(statusCode, responseData, sessionID) {
+		logger.Info("MCP session expired, re-initializing", "url", mcpURL, "status", statusCode)
+		dropMCPSession(cacheKey, sessionID)
 
 		newSessionID, err := ensureMCPSession(ctx, cacheKey, mcpURL, rawBody, logger)
 		if err != nil {

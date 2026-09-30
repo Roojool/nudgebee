@@ -257,7 +257,15 @@ func (m mcpIntegrationTool) Call(ctx NbToolContext, input NBToolCallRequest) (NB
 		"arguments": args,
 	}
 
-	response, err := executeMCPViaRelay(ctx.GoContext(), ctx.AccountId, m.config, "tools/call", callParams, time.Duration(config.Config.LlmServerMCPExecutionTimeoutSeconds)*time.Second)
+	// Scope the upstream MCP session to this conversation so stateful servers
+	// (browser, shell, DB session) don't share state across concurrent chats.
+	// SessionId is inherited by sub-agents, so a delegate sees its parent's state.
+	sessionKey := ctx.SessionId
+	if sessionKey == "" {
+		sessionKey = ctx.ConversationId
+	}
+
+	response, err := executeMCPViaRelay(ctx.GoContext(), ctx.AccountId, m.config, "tools/call", callParams, sessionKey, time.Duration(config.Config.LlmServerMCPExecutionTimeoutSeconds)*time.Second)
 	if err != nil {
 		log.Error("mcp-integration: tool call failed", "error", err)
 		// Emit the failure as JSON so the tool response is consistently JSON
@@ -305,12 +313,17 @@ func classifyMCPError(err error) string {
 // executeMCPViaRelay sends an MCP JSON-RPC request through the relay server.
 // For direct mode: relay handles the HTTP call to the MCP server.
 // For vm_agent mode: relay routes to forager via RabbitMQ.
-func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegrationConfig, method string, params map[string]any, timeout time.Duration) (string, error) {
+// sessionKey, when set, gives the call its own upstream MCP session in the relay
+// instead of the account-wide shared one.
+func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegrationConfig, method string, params map[string]any, sessionKey string, timeout time.Duration) (string, error) {
 	actionParams := map[string]any{
 		"method": method,
 	}
 	if params != nil {
 		actionParams["params"] = params
+	}
+	if sessionKey != "" {
+		actionParams["session_id"] = sessionKey
 	}
 
 	var agentType string
@@ -643,7 +656,7 @@ func discoverMCPTools(accountId string, cfg mcpIntegrationConfig) []NBTool {
 		common.MetricsToolDiscoveryLatency(mcpImplType, accountId, cfg.IntegrationID, time.Since(start).Seconds())
 	}()
 
-	response, err := executeMCPViaRelay(context.Background(), accountId, cfg, "tools/list", nil, time.Duration(config.Config.LlmServerMCPDiscoveryTimeoutSeconds)*time.Second)
+	response, err := executeMCPViaRelay(context.Background(), accountId, cfg, "tools/list", nil, "", time.Duration(config.Config.LlmServerMCPDiscoveryTimeoutSeconds)*time.Second)
 	if err != nil {
 		toolCircuitBreakerInstance.RecordFailure(mcpDiscoveryImplType, CircuitBreakerKey{AccountId: accountId, InstanceId: cfg.IntegrationID})
 		common.MetricsToolDiscovery(mcpImplType, accountId, cfg.IntegrationID, "failure")

@@ -727,6 +727,11 @@ func (t *MCPTask) executeViaIntegration(taskCtx types.TaskContext, integrationID
 			"arguments": toolArgs,
 		},
 	}
+	// Scope the upstream MCP session to this workflow run so stateful servers
+	// (browser, shell, DB session) don't share state with concurrent runs or chats.
+	if runID := taskCtx.GetWorkflowRunID(); runID != "" {
+		actionParams["session_id"] = runID
+	}
 
 	var agentType string
 
