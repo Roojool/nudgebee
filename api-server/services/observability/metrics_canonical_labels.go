@@ -76,6 +76,14 @@ var canonicalMetricLabels = map[string]map[string]string{
 		// dimension arrives under a different name.
 		"workload_name": CanonicalWorkload,
 	},
+	// OTel resource attributes, which survive HEC with their dots intact. Only the
+	// per-container keys carry labels; the summed keys have none to rename.
+	"splunk_enterprise": {
+		"k8s.namespace.name": CanonicalNamespace,
+		"k8s.pod.name":       CanonicalPod,
+		"k8s.container.name": CanonicalContainer,
+		"k8s.node.name":      CanonicalNode,
+	},
 }
 
 // canonicalSourcePriority breaks a tie when a series carries two labels that map to
