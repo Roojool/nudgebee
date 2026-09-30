@@ -155,7 +155,7 @@ func TestKubectlNamespace(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, kubectlNamespace(tc.command))
+			assert.Equal(t, tc.want, KubectlNamespace(tc.command))
 		})
 	}
 }

@@ -369,6 +369,59 @@ CodeFixDetails.propTypes = {
   }),
 };
 
+// Where a required change is made, in the operator's words.
+const REQUIRED_CHANGE_WHERE = {
+  deployment_source: 'Deployment source (chart or GitOps values)',
+  code: 'Application code',
+  infrastructure: 'Infrastructure',
+  dependency: 'Dependency',
+  process: 'Process',
+};
+
+// A fix no command applies durably: the operator makes this change in its source.
+export function RequiredChangeDetails({ change }) {
+  const where = REQUIRED_CHANGE_WHERE[trimmedString(change?.where)] || 'Change required';
+  return (
+    <Box
+      sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', fontSize: 'var(--ds-text-small)' }}
+      data-testid='remediation-required-change'
+    >
+      <Box sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>{`Change required — ${where}`}</Box>
+      {trimmedString(change?.target) ? <Box sx={{ color: 'var(--ds-gray-600)' }}>{change.target}</Box> : null}
+      <Box>{change.change}</Box>
+    </Box>
+  );
+}
+
+RequiredChangeDetails.propTypes = {
+  change: PropTypes.shape({ where: PropTypes.string, target: PropTypes.string, change: PropTypes.string }).isRequired,
+};
+
+// Improvements the incident does not need. Kept apart from the actions so they never read as its fix.
+export function OptionalHardening({ items }) {
+  return (
+    <Card variant='tinted' tone='neutral' size='sm' elevation='flat'>
+      <Box
+        sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)', fontSize: 'var(--ds-text-small)' }}
+        data-testid='remediation-optional-hardening'
+      >
+        <Box sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>Optional hardening — not required to resolve this incident</Box>
+        {items.map((h, i) => (
+          <Box key={i}>
+            {trimmedString(h?.target) ? <Box component='span' sx={{ fontWeight: 'var(--ds-font-weight-medium)' }}>{`${h.target}: `}</Box> : null}
+            {h.change}
+            {trimmedString(h?.reason) ? <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>{` — ${h.reason}`}</Box> : null}
+          </Box>
+        ))}
+      </Box>
+    </Card>
+  );
+}
+
+OptionalHardening.propTypes = {
+  items: PropTypes.arrayOf(PropTypes.shape({ target: PropTypes.string, change: PropTypes.string, reason: PropTypes.string })).isRequired,
+};
+
 // One remediation action: header (label + confidence), the hypothesis it addresses (with reasoning +
 // confidence, shown inline — there is no separate hypotheses box), and its command rows. A per-block
 // "Run" button runs this action's execute → verify one-by-one, stopping on the first failure.
@@ -392,7 +445,10 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
   // A change to the alert rule is applied from the card, not by a command, and is not the code fix.
   const ruleChange = action?.alert_rule_change || null;
   const ruleChangeApplied = ruleChange ? isAlertRuleChangeApplied(ruleChange, alertControls) : false;
-  const showCodeFix = !execCmd && !ruleChange && trimmedString(action?.kind).toLowerCase() === 'fix' && !!codeFix;
+  // A fix that states its own required change (chart values, infrastructure, another team's process)
+  // is not the code fix either: attaching the event's diff to it showed an unrelated change.
+  const requiredChange = action?.required_change && trimmedString(action.required_change.change) ? action.required_change : null;
+  const showCodeFix = !execCmd && !ruleChange && !requiredChange && trimmedString(action?.kind).toLowerCase() === 'fix' && !!codeFix;
 
   // Run the action's execute command, then (only if it succeeded) its verify command. Rollback is
   // never auto-run. Each row shows its own output live as it runs.
@@ -470,6 +526,7 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
             {hypConfidence !== null ? <Box component='span' sx={{ color: 'var(--ds-gray-500)' }}>{` — ${hypConfidence}% likely cause`}</Box> : null}
           </Box>
         ) : null}
+        {requiredChange ? <RequiredChangeDetails change={requiredChange} /> : null}
         {showCodeFix ? <CodeFixDetails codeFix={codeFix} /> : null}
         {ruleChange ? (
           <AlertRuleChangeAction
@@ -747,7 +804,9 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
           // A restored plan holds no diff (only generate() sees the analysis record), so fetch it
           // when the plan actually has a command-less fix to show it against. Skipped otherwise so
           // the common all-commands plan costs no extra request.
-          const needsCodeFix = saved.actions.some((a) => trimmedString(a?.kind).toLowerCase() === 'fix' && !trimmedString(a?.execute_command));
+          const needsCodeFix = saved.actions.some(
+            (a) => trimmedString(a?.kind).toLowerCase() === 'fix' && !trimmedString(a?.execute_command) && !trimmedString(a?.required_change?.change)
+          );
           if (needsCodeFix) {
             const rec = await apiKubernetes.generateAiRecommendation(accountId, eventId, 'pod_log_analysis');
             if (!cancelled && mountedRef.current) setCodeFix(extractCodeFix(rec));
@@ -821,6 +880,7 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
     if (key) hypByText[key] = h;
   });
   const actions = Array.isArray(plan.actions) ? plan.actions : [];
+  const hardening = Array.isArray(plan.optional_hardening) ? plan.optional_hardening.filter((h) => trimmedString(h?.change)) : [];
 
   return (
     <Box sx={{ mt: 'var(--ds-space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)' }}>
@@ -890,6 +950,8 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
           ))}
         </>
       )}
+
+      {hardening.length ? <OptionalHardening items={hardening} /> : null}
     </Box>
   );
 };

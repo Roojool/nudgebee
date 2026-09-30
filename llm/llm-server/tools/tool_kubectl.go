@@ -430,18 +430,18 @@ func kubectlResourceKind(command string) string {
 func kubectlUIRef(ctx core.NbToolContext, command string) core.NBToolResponseReference {
 	modules, label := kubectlUIReference(command)
 	var queryParams map[string]string
-	if ns := kubectlNamespace(command); ns != "" {
+	if ns := KubectlNamespace(command); ns != "" {
 		queryParams = map[string]string{"namespace": ns}
 	}
 	return core.GetNudgebeeUIReferenceForClusterDetails(ctx, modules, label, queryParams, "")
 }
 
-// kubectlNamespace extracts the namespace a kubectl command targets. It
+// KubectlNamespace extracts the namespace a kubectl command targets. It
 // recognises `-n <ns>`, `-n=<ns>`, `--namespace <ns>` and `--namespace=<ns>`.
 // It returns "" when no namespace is specified or when the command spans all
 // namespaces (`-A` / `--all-namespaces`) — in both cases the UI tab should
 // stay unfiltered rather than guess.
-func kubectlNamespace(command string) string {
+func KubectlNamespace(command string) string {
 	tokens := strings.Fields(command)
 	for i, tok := range tokens {
 		if tok == "-A" || tok == "--all-namespaces" {

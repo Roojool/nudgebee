@@ -1303,21 +1303,13 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 		recommendationStatus = models.RecommendationStatusClosed
 	case adapter.RecommendationResolutionStatusFailed:
 		// Not Dismissed: that is the user's decision not to act, and reporting it
-		// for a failure the platform hit says the opposite of what happened. The
-		// event stays unresolved either way — only Closed marks it RESOLVED below.
+		// for a failure the platform hit says the opposite of what happened.
 		recommendationStatus = models.RecommendationStatusOpen
 	case adapter.RecommendationResolutionStatusInProgress:
 		recommendationStatus = models.RecommendationStatusInProgress
 	}
 
-	if recommendationStatus == models.RecommendationStatusClosed {
-		_, err = dbms.Db.Exec("UPDATE events SET status = $3, updated_at = $2 WHERE id = $1", r.Id, time.Now().UTC().Format(time.RFC3339), "RESOLVED")
-		if err != nil {
-			ctx.GetLogger().Error("error closing recommendation", "error", err, "event_id", r.Id, "status", recommendationStatus)
-			return EventRecommendationApplyResponse{}, common.ErrorInternal(fmt.Sprintf("error closing recommendation: %s", err.Error()))
-		}
-	}
-
+	// The event's status is left alone: see recordResolutionStatus.
 	_, err = dbms.Db.Exec("UPDATE event_resolution SET type_reference_id = $2, updated_at = $3 WHERE id = $1", resolution.Id, resp.ResolutionTypeRefrenceId, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		ctx.GetLogger().Error("error updating type reference event resolution", "error", err)
@@ -2239,70 +2231,96 @@ func UpdateResolutionStatus(ctx *security.RequestContext) error {
 			}
 			continue
 		}
-		adptr := adapter.GetAdapterFromResolutionProvider(resolution.Type)
-		if adptr == nil {
-			ctx.GetLogger().Error("error getting adapter", "error", fmt.Errorf("adapter not found - %s", resolution.Type))
-			continue
-		}
-
-		adapterContext := security.NewRequestContext(ctx.GetContext(), security.NewSecurityContextForTenantAdmin(*event.Tenant), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
-		resp, err := adptr.GetRecommendationResolutionStatus(adapterContext, models.Recommendation{
-			Category:       "RightSizing",
-			RuleName:       "pod_right_sizing",
-			Id:             event.Id,
-			CloudAccountId: *event.CloudAccountId,
-			TenantId:       *event.Tenant,
-			Recommendation: models.NewJsonObject(map[string]any{}),
-		}, resolution.TypeReferenceId, resolution.Data, *resolution.StatusMessage)
-		var status models.RecommendationResolutionStatus
-		var statusMsg string
-		if err != nil {
-			ctx.GetLogger().Error("error getting event resolution status", "error", err)
-			statusMsg = fmt.Sprintf("error getting event resolution status - %s", err.Error())
-			status = models.RecommendationResolutionStatusFailed
-		} else {
-			status = models.RecommendationResolutionStatus(string(resp.Status))
-			statusMsg = resp.StatusMessage
-		}
-		// A check that could not reach the provider keeps the pull request in
-		// progress and leaves last_pr_check_at alone, up to the limit — see
-		// adapter.PRStatusUnverifiedLimit.
-		lastCheck := "last_pr_check_at" // an adapter error is not a sighting either
-		if err == nil && !resp.Unverified {
-			lastCheck = "(now() AT TIME ZONE 'UTC')"
-		}
-		if err == nil && resp.Unverified {
-			if adapter.PRStatusCheckExpired(resolution.LastPRCheckAt, time.Now().UTC()) {
-				status = models.RecommendationResolutionStatusFailed
-				statusMsg = adapter.PRStatusGaveUpMessage(resp.StatusMessage)
-			} else {
-				lastCheck = "COALESCE(last_pr_check_at, (now() AT TIME ZONE 'UTC'))"
-			}
-		}
-
-		// Guarded on the row still being InProgress, as the recommendation poller
-		// is: a webhook that settled it between our read and this write wins. An
-		// unverified check writes InProgress, and without the guard it would
-		// reopen a pull request the webhook had just recorded as merged.
-		_, err = dbms.Db.Exec("UPDATE event_resolution SET status = $2, updated_at = $3, status_message = $4, last_pr_check_at = "+lastCheck+" WHERE id = $1 AND status = $5", resolution.Id, status, time.Now().UTC().Format(time.RFC3339), statusMsg, models.RecommendationResolutionStatusInProgress)
-		if err != nil {
-			ctx.GetLogger().Error("error updating event resolution", "error", err)
+		if err := settleResolution(ctx, dbms, resolution, event); err != nil {
 			return err
-		}
-
-		if status == models.RecommendationResolutionStatusSuccess {
-			// The agent reports what it replaced; without capturing it here the applied value is
-			// recorded and the value it replaced is lost, so the action cannot be undone.
-			storeUndoStateFromTask(ctx, dbms, resolution)
-
-			_, err = dbms.Db.Exec("UPDATE events SET status = $3, updated_at = $2 WHERE id = $1", event.Id, time.Now().UTC().Format(time.RFC3339), "RESOLVED")
-			if err != nil {
-				ctx.GetLogger().Error("error closing recommendation", "error", err, "event_id", event.Id, "status", status)
-				return common.ErrorInternal(fmt.Sprintf("error closing recommendation: %s", err.Error()))
-			}
 		}
 	}
 
+	return nil
+}
+
+// settleResolution asks the resolution's adapter how the attempt went and records the answer.
+func settleResolution(ctx *security.RequestContext, dbms *database.DatabaseManager, resolution models.EventResolution, event models.Event) error {
+	adptr := adapter.GetAdapterFromResolutionProvider(resolution.Type)
+	if adptr == nil {
+		ctx.GetLogger().Error("error getting adapter", "error", fmt.Errorf("adapter not found - %s", resolution.Type))
+		return nil
+	}
+
+	if event.Tenant == nil || event.CloudAccountId == nil {
+		ctx.GetLogger().Error("resolution's event has no tenant or account", "event_id", event.Id, "resolution_id", resolution.Id)
+		return nil
+	}
+	statusMessage := ""
+	if resolution.StatusMessage != nil {
+		statusMessage = *resolution.StatusMessage
+	}
+	adapterContext := security.NewRequestContext(ctx.GetContext(), security.NewSecurityContextForTenantAdmin(*event.Tenant), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+	resp, err := adptr.GetRecommendationResolutionStatus(adapterContext, models.Recommendation{
+		Category:       "RightSizing",
+		RuleName:       "pod_right_sizing",
+		Id:             event.Id,
+		CloudAccountId: *event.CloudAccountId,
+		TenantId:       *event.Tenant,
+		Recommendation: models.NewJsonObject(map[string]any{}),
+	}, resolution.TypeReferenceId, resolution.Data, statusMessage)
+	var status models.RecommendationResolutionStatus
+	var statusMsg string
+	if err != nil {
+		ctx.GetLogger().Error("error getting event resolution status", "error", err)
+		statusMsg = fmt.Sprintf("error getting event resolution status - %s", err.Error())
+		status = models.RecommendationResolutionStatusFailed
+	} else {
+		status = models.RecommendationResolutionStatus(string(resp.Status))
+		statusMsg = resp.StatusMessage
+	}
+	// A check that could not reach the provider keeps the pull request in
+	// progress and leaves last_pr_check_at alone, up to the limit — see
+	// adapter.PRStatusUnverifiedLimit.
+	lastCheck := lastCheckKeep // an adapter error is not a sighting either
+	if err == nil && !resp.Unverified {
+		lastCheck = lastCheckNow
+	}
+	if err == nil && resp.Unverified {
+		if adapter.PRStatusCheckExpired(resolution.LastPRCheckAt, time.Now().UTC()) {
+			status = models.RecommendationResolutionStatusFailed
+			statusMsg = adapter.PRStatusGaveUpMessage(resp.StatusMessage)
+		} else {
+			lastCheck = lastCheckCoalesce
+		}
+	}
+	return recordResolutionStatus(ctx, dbms, resolution, status, statusMsg, lastCheck)
+}
+
+// How settleResolution moves last_pr_check_at: keep it, stamp now, or stamp now only if unset.
+const (
+	lastCheckKeep     = "keep"
+	lastCheckNow      = "now"
+	lastCheckCoalesce = "coalesce"
+)
+
+// recordResolutionStatus records a remediation attempt's outcome, and only that: applied != incident
+// ended, so events.status stays with the alert's source. Guarded on InProgress so a webhook that settled the row first wins.
+func recordResolutionStatus(ctx *security.RequestContext, dbms *database.DatabaseManager, resolution models.EventResolution, status models.RecommendationResolutionStatus, statusMsg, lastCheck string) error {
+	switch lastCheck {
+	case lastCheckKeep, lastCheckNow, lastCheckCoalesce:
+	default:
+		return fmt.Errorf("resolution: unexpected last_pr_check_at mode %q", lastCheck)
+	}
+	_, err := dbms.Db.Exec(`UPDATE event_resolution SET status = $2, updated_at = $3, status_message = $4,
+		last_pr_check_at = CASE $6 WHEN 'now' THEN (now() AT TIME ZONE 'UTC')
+		                           WHEN 'coalesce' THEN COALESCE(last_pr_check_at, (now() AT TIME ZONE 'UTC'))
+		                           ELSE last_pr_check_at END
+		WHERE id = $1 AND status = $5`, resolution.Id, status, time.Now().UTC().Format(time.RFC3339), statusMsg, models.RecommendationResolutionStatusInProgress, lastCheck)
+	if err != nil {
+		ctx.GetLogger().Error("error updating event resolution", "error", err)
+		return err
+	}
+	if status == models.RecommendationResolutionStatusSuccess {
+		// The agent reports what it replaced; without capturing it here the applied value is
+		// recorded and the value it replaced is lost, so the action cannot be undone.
+		storeUndoStateFromTask(ctx, dbms, resolution)
+	}
 	return nil
 }
 
