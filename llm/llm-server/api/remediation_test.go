@@ -209,6 +209,13 @@ func TestParseRelayExecResult(t *testing.T) {
 	assert.Equal(t, 0, code)
 	assert.Equal(t, "deployment.apps/api scaled", stdout)
 
+	// Seen on a read-only agent: the command never ran, so it must not read as success.
+	stdout, stderr, code, parsed = parseRelayExecResult(`{"error":"kubectl: verb \"set\" not in read-only allowlist; enable runner.enableWritePermissions for writes, or route mutating actions through pkg/mutate"}`)
+	assert.True(t, parsed)
+	assert.Equal(t, 1, code)
+	assert.Empty(t, stdout)
+	assert.Contains(t, stderr, "read-only allowlist")
+
 	// Plain (non-envelope) output: treated as success, passed through untouched.
 	stdout, _, code, parsed = parseRelayExecResult("pod/foo   1/1   Running")
 	assert.False(t, parsed)

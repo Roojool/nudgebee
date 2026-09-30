@@ -1127,6 +1127,9 @@ type relayExecEnvelope struct {
 	Stderr   *string `json:"stderr"`
 	Output   *string `json:"output"`
 	ExitCode *int    `json:"exit_code"`
+	// Error is how the agent refuses a command without running it, e.g. a write verb on an agent
+	// whose kubectl is read-only: {"error":"kubectl: verb \"set\" not in read-only allowlist; ..."}.
+	Error *string `json:"error"`
 }
 
 // parseRelayExecResult extracts stdout/stderr/exit_code from a relay result string. It returns
@@ -1137,7 +1140,13 @@ func parseRelayExecResult(raw string) (stdout, stderr string, exitCode int, pars
 	trimmed := strings.TrimSpace(raw)
 	if strings.HasPrefix(trimmed, "{") {
 		var env relayExecEnvelope
-		if err := json.Unmarshal([]byte(trimmed), &env); err == nil && env.ExitCode != nil {
+		err := json.Unmarshal([]byte(trimmed), &env)
+		// A refusal carries no exit code; without this it read as plain output and was recorded as a
+		// successful remediation although nothing ran.
+		if err == nil && env.ExitCode == nil && env.Stdout == nil && env.Output == nil && env.Error != nil && strings.TrimSpace(*env.Error) != "" {
+			return "", strings.TrimSpace(*env.Error), 1, true
+		}
+		if err == nil && env.ExitCode != nil {
 			out := ""
 			if env.Stdout != nil {
 				out = *env.Stdout
