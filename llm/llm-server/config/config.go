@@ -396,6 +396,8 @@ type appConfig struct {
 	// resolve the account's default trace provider.
 	LLMServerTraceProviderOverride   string `mapstructure:"llm_server_trace_provider_override"`
 	LlmServerAgentMaxSqlRows         int    `mapstructure:"llm_server_agent_max_sqlrows"`
+	LlmServerAgentSqlTimeoutSec      int    `mapstructure:"llm_server_agent_sql_timeout_sec"`
+	LlmServerAgentSqlWorkMemMB       int    `mapstructure:"llm_server_agent_sql_work_mem_mb"`
 	LlmServerAgentMaxTracesRows      int    `mapstructure:"llm_server_agent_max_tracesrows"`
 	LlmServerAgentMaxScratchpadChars int    `mapstructure:"llm_server_agent_max_scratchpad_chars"`
 	LlmServerMaxGCBytes              int    `mapstructure:"llm_server_max_gc_bytes"`
@@ -1243,6 +1245,8 @@ func init() {
 	viper.SetDefault("llm_server_agent_max_loglines", 100)
 	viper.SetDefault("llm_server_trace_provider_override", "")
 	viper.SetDefault("llm_server_agent_max_sqlrows", 10)
+	viper.SetDefault("llm_server_agent_sql_timeout_sec", 120)
+	viper.SetDefault("llm_server_agent_sql_work_mem_mb", 32)
 	viper.SetDefault("llm_server_agent_max_tracesrows", 10)
 	viper.SetDefault("llm_server_agent_max_scratchpad_chars", 200000)
 	viper.SetDefault("llm_server_max_skill_content_length", 5000)

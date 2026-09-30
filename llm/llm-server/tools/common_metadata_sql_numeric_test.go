@@ -51,7 +51,7 @@ func TestSqlToolCallSerialisesNumericAsDecimalText(t *testing.T) {
 		sqlmock.NewColumn("estimated_saving").OfType("numeric", nil),
 		sqlmock.NewColumn("blob").OfType("BYTEA", nil),
 	}
-	mock.ExpectQuery("select").WillReturnRows(sqlmock.NewRowsWithColumnDefinition(cols...).AddRow("rec-1", []byte("58.47"), []byte{0xff, 0x00}))
+	expectToolQuery(mock, "select").WillReturnRows(sqlmock.NewRowsWithColumnDefinition(cols...).AddRow("rec-1", []byte("58.47"), []byte{0xff, 0x00}))
 
 	nbCtx := core.NbToolContext{AccountId: "550e8400-e29b-41d4-a716-446655440000", Ctx: security.NewRequestContext(context.Background(), nil, nil, nil, nil)}
 	resp, data, err := sqlToolCall(nbCtx, "SELECT id, estimated_saving, blob FROM events", "events", "", 0, nil)

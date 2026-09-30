@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -244,52 +245,113 @@ func sqlExecuteQuery(ctx *security.RequestContext, query string, accountId strin
 		return nil, fmt.Errorf("sqlExecuteQuery: %w", err)
 	}
 	slog.Info("sql: updated tool query with account id", "account", accountId, "query", finalQuery, "table", tableName)
-	if tableView != "" {
-		finalQuery = replaceFirstMatch(finalQuery, tableName, "("+tableView+") as tv")
-	}
-	slog.Info("sql: executing tool query after appending view", "account", accountId, "query", finalQuery)
 
 	if limit == 0 {
 		limit = config.Config.LlmServerAgentMaxSqlRows
 	}
 
+	// The row cap is decided on the caller's SQL, before the view goes in: a
+	// LIMIT inside the view's own subqueries is not the caller's LIMIT.
 	finalQuery = buildLimitedQuery(finalQuery, limit)
+	if tableView != "" {
+		finalQuery = replaceFirstMatch(finalQuery, tableName, "("+tableView+") as tv")
+	}
 	slog.Info("sql: final tool query", "account", accountId, "query", finalQuery)
 
 	t0 := time.Now()
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlExecuteQuery: get database manager: %w", err)
 	}
-	rows, err := dbManager.Db.Queryx(finalQuery)
+
+	timeout := time.Duration(config.Config.LlmServerAgentSqlTimeoutSec) * time.Second
+	if timeout <= 0 {
+		// statement_timeout = 0 would mean no limit at all.
+		timeout = defaultSqlToolQueryTimeout
+	}
+	// The server-side statement_timeout is what stops the query; the client
+	// deadline, a little later, only covers a connection that stops answering.
+	queryCtx, cancel := context.WithTimeout(ctx.GetContext(), timeout+sqlToolQueryClientGrace)
+	defer cancel()
+
+	// READ ONLY also rejects DML hidden in a CTE, which the prefix check in
+	// sqlValidateReadOnly does not see.
+	tx, err := dbManager.Db.BeginTxx(queryCtx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlExecuteQuery: begin read-only transaction: %w", err)
+	}
+	defer func() {
+		if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) {
+			ctx.GetLogger().Warn("sql: rollback of tool query failed", "error", rerr)
+		}
+	}()
+	if _, err := tx.ExecContext(queryCtx, fmt.Sprintf("SET LOCAL statement_timeout = %d", timeout.Milliseconds())); err != nil {
+		return nil, fmt.Errorf("sqlExecuteQuery: set statement_timeout: %w", err)
+	}
+	// Enough memory for the view's ranking subqueries to stay hashed, so they
+	// are built once per query rather than re-run for every row.
+	if workMemMB := config.Config.LlmServerAgentSqlWorkMemMB; workMemMB > 0 {
+		if _, err := tx.ExecContext(queryCtx, fmt.Sprintf("SET LOCAL work_mem = '%dMB'", workMemMB)); err != nil {
+			return nil, fmt.Errorf("sqlExecuteQuery: set work_mem: %w", err)
+		}
+	}
+
+	rows, err := tx.QueryxContext(queryCtx, finalQuery)
+	if err != nil {
+		return nil, toolQueryError(ctx, tableName, timeout, err)
 	}
 	defer func() {
 		if err := rows.Close(); err != nil {
-			fmt.Printf("Error closing rows: %v\n", err)
+			ctx.GetLogger().Warn("sql: closing tool query rows failed", "error", err)
 		}
 	}()
 
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sqlExecuteQuery: read column types: %w", err)
 	}
 	numericCols := numericColumnNames(colTypes)
 	data := []map[string]any{}
 	for rows.Next() {
 		row := map[string]any{}
 		if err := rows.MapScan(row); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("sqlExecuteQuery: scan row: %w", err)
 		}
 		keepNumericText(row, numericCols)
 		data = append(data, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, toolQueryError(ctx, tableName, timeout, err)
 	}
 	ctx.GetLogger().Info("sql: executed tool query", "account", accountId, "query", finalQuery, "time", time.Since(t0).String(), "rows", len(data))
 	if len(data) > 5 && limit <= 0 {
 		data = data[0:5]
 	}
-	return data, err
+	return data, nil
+}
+
+// defaultSqlToolQueryTimeout applies when no positive timeout is configured.
+const defaultSqlToolQueryTimeout = 120 * time.Second
+
+// sqlToolQueryClientGrace is how long past the server-side statement_timeout
+// the client waits before abandoning the connection.
+const sqlToolQueryClientGrace = 5 * time.Second
+
+// pqQueryCanceled is the SQLSTATE Postgres reports when statement_timeout
+// cancels a statement.
+const pqQueryCanceled = "57014"
+
+// toolQueryError returns the error a failed tool query reports. A query that
+// ran out of time gets an error the model can act on, and it stays an error:
+// callers that read the rows must not mistake it for an empty result.
+func toolQueryError(ctx *security.RequestContext, tableName string, timeout time.Duration, err error) error {
+	if ctx.GetContext().Err() == nil {
+		var pqErr *pq.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &pqErr) && pqErr.Code == pqQueryCanceled) {
+			return fmt.Errorf("sql: the query on %s did not finish within %s; narrow it with a filter (status, category, a name or a time range) or aggregate instead of listing rows: %w", tableName, timeout, err)
+		}
+	}
+	return fmt.Errorf("sqlExecuteQuery: %w", err)
 }
 
 var limitRegex = regexp.MustCompile(`(?i)\bLIMIT\b`)
