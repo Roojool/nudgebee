@@ -220,6 +220,10 @@ class Config:
     if not relay_server_secret:
         raise ValueError("RELAY_SERVER_SECRET_KEY environment variable not set")
 
+    # llm-server — used by platform_capability_sync.py. Optional: unset
+    # simply means platform_capability rows never populate.
+    llm_server_url = os.environ.get("LLM_SERVER_URL", "")
+
 
 class OTELConfig:
     """OpenTelemetry configuration."""

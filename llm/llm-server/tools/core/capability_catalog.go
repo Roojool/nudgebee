@@ -75,10 +75,10 @@ const (
 
 // CapabilityEntry is one real, callable platform capability.
 type CapabilityEntry struct {
-	Surface     CapabilitySurface
-	Name        string
-	Description string
-	Scope       CapabilityScope
+	Surface     CapabilitySurface `json:"surface"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Scope       CapabilityScope   `json:"scope"`
 }
 
 // capabilityScopeTable is the source of truth for scope classification.

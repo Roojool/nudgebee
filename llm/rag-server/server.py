@@ -17,7 +17,12 @@ from qdrant_client.http.exceptions import ResponseHandlingException
 from config import setup_logger
 from controllers.document_controller import load_module_docs
 from rag.core.documents import collection as document_collection
-from rag.core.documents import embedding_migration, kb_capability_backfill, module_retag_migration
+from rag.core.documents import (
+    embedding_migration,
+    kb_capability_backfill,
+    module_retag_migration,
+    platform_capability_sync,
+)
 from utils.shared import set_global_trace, release_lock
 
 # Load .env *before* any os.environ.get below, so local development can
@@ -142,6 +147,10 @@ def post_startup_task():
                     logger.info("Embedding migration started in the background")
                 except Exception as emb_exc:  # defensive: migration must never block startup
                     logger.exception(f"Could not start embedding migration (non-fatal): {emb_exc}")
+
+            # Populate platform_capability rows before the backfill needs them.
+            # Best-effort — swallows its own failures, never blocks startup.
+            platform_capability_sync.sync_platform_capability_catalog()
 
             _start_kb_capability_backfill()
         except (
