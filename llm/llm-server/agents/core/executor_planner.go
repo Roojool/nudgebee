@@ -2527,44 +2527,25 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		}
 	}
 
-	// [Changed for TicketV2] Previously, config checks only ran when the current tool itself
-	// implemented NBToolConfig. TicketV2 agent's first tool call is often ask_clarification
-	// (non-configurable), but we still need to prompt for integration/project selection before
-	// the actual ticket tool runs. This fallback finds the agent's configurable tool so config
-	// checks fire proactively regardless of which tool is called first.
-	// Backward-compatible: for agents without configurable tools, configCheckTool == tool (no-op).
-	configCheckTool := tool
-	if tool.GetType() == toolcore.NBToolTypeTool {
-		if _, hasConfig := tool.(toolcore.NBToolConfig); !hasConfig && tool.Name() != toolcore.ToolExecuteShellCommand {
-			for _, t := range e.agent.GetSupportedTools(e.ctx) {
-				if _, ok := t.(toolcore.NBToolConfig); ok {
-					configCheckTool = t
-					break
-				}
-			}
+	// Resolving a config on behalf of a tool that is not being called cannot work:
+	// the follow-up builder matches on action.Tool, so no question can be produced.
+	if toolResolvesOwnConfig(tool) {
+		e.ctx.GetLogger().Debug("plannerexecutor: running config checks", "actionTool", action.Tool, "configTool", tool.Name())
+		followupSteps, followupFinish, err := e.followupForMultipleToolConfigs(tool, action)
+		if err != nil {
+			e.ctx.GetLogger().Info("plannerexecutor: error in generating followup for multiple tool configs", "tool", tool.Name(), "error", err)
+			return NBAgentPlannerToolActionStep{}, &NBAgentPlannerFinishAction{
+				Data:   "Error in handling request: " + err.Error(),
+				Status: ConversationStatusFailed,
+			}, nil
 		}
-	}
-
-	if configCheckTool.GetType() == toolcore.NBToolTypeTool {
-		if _, hasConfig := configCheckTool.(toolcore.NBToolConfig); hasConfig {
-			e.ctx.GetLogger().Debug("plannerexecutor: running config checks", "actionTool", action.Tool, "configTool", configCheckTool.Name())
-			followupSteps, followupFinish, err := e.followupForMultipleToolConfigs(configCheckTool, action)
-			if err != nil {
-				e.ctx.GetLogger().Info("plannerexecutor: error in generating followup for multiple tool configs", "tool", configCheckTool.Name(), "error", err)
-				return NBAgentPlannerToolActionStep{}, &NBAgentPlannerFinishAction{
-					Data:   "Error in handling request: " + err.Error(),
-					Status: ConversationStatusFailed,
-				}, nil
+		if followupFinish != nil {
+			e.ctx.GetLogger().Info("plannerexecutor: generated followup for multiple tool configs", "tool", tool.Name(), "followup", slog.AnyValue(followupFinish))
+			var fupStep NBAgentPlannerToolActionStep
+			if len(followupSteps) > 0 {
+				fupStep = followupSteps[0]
 			}
-			if followupFinish != nil {
-				e.ctx.GetLogger().Info("plannerexecutor: generated followup for multiple tool configs", "tool", configCheckTool.Name(), "followup", slog.AnyValue(followupFinish))
-				var fupStep NBAgentPlannerToolActionStep
-				if len(followupSteps) > 0 {
-					fupStep = followupSteps[0]
-				}
-				return fupStep, followupFinish, nil
-			}
-
+			return fupStep, followupFinish, nil
 		}
 	}
 
@@ -5316,6 +5297,16 @@ func (e *plannerExecutor) perCallWriteTarget(tool toolcore.NBTool, scoped toolco
 	saved, _ := toolcore.GetToolConfigByName(e.ctx, e.agentRequest.AccountId, tool, e.resolvedToolConfig(tool.Name()))
 	selected, err := tools.ResolveRequestedTarget(e.ctx, e.agentRequest.AccountId, tool.Name(), saved, requested)
 	return selected, err == nil, err
+}
+
+// toolResolvesOwnConfig reports whether this tool declares configurable integrations
+// of its own. Deliberately takes no agent: only the called tool's declaration counts.
+func toolResolvesOwnConfig(tool toolcore.NBTool) bool {
+	if tool == nil || tool.GetType() != toolcore.NBToolTypeTool {
+		return false
+	}
+	_, hasConfig := tool.(toolcore.NBToolConfig)
+	return hasConfig
 }
 
 func configOwnerForAction(tool toolcore.NBTool, accountID, input string) toolcore.NBTool {
