@@ -3,6 +3,7 @@ package core
 import (
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"time"
 
@@ -54,7 +55,14 @@ func CallTool(tc toolcore.NbToolContext, tool toolcore.NBTool, req toolcore.NBTo
 	}
 
 	start := time.Now()
-	resp, callErr := tool.Call(tc, req)
+	var resp toolcore.NBToolResponse
+	tc, callErr := tools.ResolveToolCallTarget(tc, tool, req)
+	if callErr != nil {
+		resp = toolcore.NBToolResponse{Status: toolcore.NBToolResponseStatusError, Data: callErr.Error()}
+		callErr = nil
+	} else {
+		resp, callErr = tool.Call(tc, req)
+	}
 	elapsed := time.Since(start)
 
 	status := toolcore.NBToolResponseStatusSuccess

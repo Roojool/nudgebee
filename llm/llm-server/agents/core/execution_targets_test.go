@@ -153,12 +153,12 @@ func TestNestedTargetAwareAgentInheritsDelegatedTarget(t *testing.T) {
 
 func TestTargetBlindToolsRefusedUnlessNeutral(t *testing.T) {
 	bound := &toolcore.ExecutionTarget{Provider: "aws", Name: "aws-prod", AccountID: "aws-id"}
-	toolcore.MarkTargetNeutral("neutral_test_tool")
-	_, err := prepareDelegatedActionInput(namedTestTool{"recommendation_execute"}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
-	require.ErrorContains(t, err, `recommendation_execute cannot run against the AWS account "aws-prod"`)
+	toolcore.DeclareAccountScope(toolcore.AccountScopeIndependent, "neutral_test_tool")
+	_, err := prepareDelegatedActionInput(namedTestTool{"recommendation_apply"}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
+	require.ErrorContains(t, err, `recommendation_apply cannot run against the AWS account "aws-prod"`, "a write declared origin-bound is refused")
 	_, err = prepareDelegatedActionInput(namedTestTool{"NEUTRAL_TEST_TOOL"}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 	require.NoError(t, err, "a tool that reads no account data stays usable")
-	_, err = prepareDelegatedActionInput(namedTestTool{"recommendation_execute"}, nil, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
+	_, err = prepareDelegatedActionInput(namedTestTool{"recommendation_apply"}, nil, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 	require.NoError(t, err, "an untargeted child is unchanged")
 	for _, tool := range []toolcore.NBTool{tools.PrometheusExecuteTool{}, &tools.NBLogToolV2{}, tools.TracesExecuteClickhouseTool{}, tools.MetricsListTool{}, tools.NBTraceToolV2{}} {
 		_, err = prepareDelegatedActionInput(tool, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})

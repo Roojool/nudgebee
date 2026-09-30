@@ -2,7 +2,6 @@ package core
 
 import (
 	"errors"
-	"strings"
 
 	"nudgebee/llm/security"
 )
@@ -61,39 +60,28 @@ type DelegatedTargetInputPreparer interface {
 	PrepareDelegatedTargetInput(target *ExecutionTarget, input string) (string, error)
 }
 
-// DelegatedTargetSupport states whether a tool honors a delegated target. It
-// overrides the preparer check: agent-tools implement the preparer for every
-// instance, and some backend tools read the target from the call context
-// without a preparer.
+// DelegatedTargetSupport lets an agent-tool say whether the agent behind it
+// accepts a target; every other tool's support comes from its declared
+// AccountScope (agents/tool_account_scopes.go).
 type DelegatedTargetSupport interface {
 	SupportsDelegatedTarget() bool
 }
 
-// targetNeutralTools names tools that read no account-scoped data (reasoning,
-// skills, docs, web, tenant-wide integrations), so a child targeted at another
-// account may still use them. Written only from init().
-var targetNeutralTools = map[string]bool{}
-
-// MarkTargetNeutral records tools whose answer does not depend on the account
-// they run under. Every other tool without target support is refused inside a
-// child targeted at a different account.
-func MarkTargetNeutral(names ...string) {
-	for _, name := range names {
-		targetNeutralTools[strings.ToLower(name)] = true
-	}
-}
-
+// IsTargetNeutral reports whether a tool uses no account-level data, so it
+// may run whichever account a call is about.
 func IsTargetNeutral(name string) bool {
-	return targetNeutralTools[strings.ToLower(name)]
+	d, ok := AccountScopeOf(name)
+	return ok && d.Scope == AccountScopeIndependent
 }
 
-// SupportsDelegatedTarget reports whether tool applies a delegated target.
+// SupportsDelegatedTarget reports whether a tool can run for another account:
+// it follows the call's target or routes one through its own selector.
 func SupportsDelegatedTarget(tool NBTool) bool {
 	if support, ok := tool.(DelegatedTargetSupport); ok {
 		return support.SupportsDelegatedTarget()
 	}
-	_, ok := tool.(DelegatedTargetInputPreparer)
-	return ok
+	d, ok := AccountScopeOf(tool.Name())
+	return ok && (d.Scope == AccountScopeFollowsTarget || d.Scope == AccountScopeOwnSelector)
 }
 
 // WriteTargetInputValidator lets a tool refuse a write whose concrete target

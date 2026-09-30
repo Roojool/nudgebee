@@ -225,7 +225,7 @@ func collectSearchToolCandidates(agentDtos []core.AgentDto, enabledTools []toolc
 			name:        tool.Name(),
 			kind:        "tool",
 			description: tool.Description(),
-			inputUsage:  summarizeToolInputSchema(tool.InputSchema()),
+			inputUsage:  summarizeToolInputSchema(toolcore.ModelInputSchema(tool)),
 		})
 	}
 

@@ -46,7 +46,6 @@ func (t SpendAllocationTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"group_by": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Dimension to attribute spend to. 'namespace' (k8s), 'workload' (k8s controller/Deployment), 'service', 'region', 'resource_type', or 'tag'.",
@@ -85,10 +84,7 @@ func (t SpendAllocationTool) InferToolRequestType(_ *security.RequestContext, _,
 }
 
 func (t SpendAllocationTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	groupBy := "namespace"
 	tagKey := ""
 	window := "30d"

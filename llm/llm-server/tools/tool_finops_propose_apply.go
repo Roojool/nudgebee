@@ -46,7 +46,6 @@ func (t ProposeRecommendationApplyTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"recommendation_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "ID of the recommendation to hand off for review and apply.",
@@ -68,10 +67,7 @@ func (t ProposeRecommendationApplyTool) InferToolRequestType(_ *security.Request
 }
 
 func (t ProposeRecommendationApplyTool) Call(ctx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	ctx, targetErr := callDataContext(ctx, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	ctx = ctx.ForTarget()
 	recID, _ := input.Arguments["recommendation_id"].(string)
 	recID = strings.TrimSpace(recID)
 	if recID == "" {

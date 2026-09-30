@@ -483,7 +483,12 @@ func TestPrometheusExecute_PerCallTarget(t *testing.T) {
 	require.True(t, ok)
 	call := func(args map[string]any) string {
 		ctx := toolcore.NewNbToolContext(tenantWideE2EContext(), prom, accountId, os.Getenv("TEST_USER"), uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", toolcore.NBQueryConfig{}, "prometheus-per-call-target")
-		resp, err := prom.Call(ctx, toolcore.NBToolCallRequest{Command: "node_uname_info", Arguments: args})
+		request := toolcore.NBToolCallRequest{Command: "node_uname_info", Arguments: args}
+		// The executor resolves the call's target before a follows-target
+		// tool runs; do the same for a direct call.
+		ctx, err := tools.ResolveCallTarget(ctx, request)
+		require.NoError(t, err)
+		resp, err := prom.Call(ctx, request)
 		require.NoError(t, err)
 		require.NotEqual(t, toolcore.NBToolResponseStatusError, resp.Status, "%v", resp.Data)
 		return fmt.Sprintf("%v", resp.Data)
@@ -589,7 +594,25 @@ func TestNaturalQuestion_OtherAwsAccount(t *testing.T) {
 			assert.Contains(t, field, expectedNumber, "every reported AWS identity must be %s's", target)
 		}
 	}
-	require.NotZero(t, onTarget, "at least one aws call must run on %s", target)
+	// The planner may answer from the AWS CLI or from the inventory; either is
+	// fine as long as it describes the named account, not the conversation's.
+	if onTarget == 0 {
+		require.NotEmpty(t, expectedNumber, "without an aws call the answer can only be checked by account number")
+		answer := conversationAnswer(t, resp.ConversationId)
+		assert.Contains(t, answer, expectedNumber, "the answer must give %s's account number", target)
+	}
+}
+
+// conversationAnswer is the top-level agent's final answer.
+func conversationAnswer(t *testing.T, conversationId string) string {
+	t.Helper()
+	dbm, err := common.GetDatabaseManager(common.Metastore)
+	require.NoError(t, err)
+	var answer string
+	require.NoError(t, dbm.Db.QueryRow(`SELECT COALESCE(response::text, '') FROM llm_conversation_agent
+		WHERE conversation_id = $1 AND parent_agent_id = '00000000-0000-0000-0000-000000000000'
+		ORDER BY created_at DESC LIMIT 1`, conversationId).Scan(&answer))
+	return answer
 }
 
 // TestNaturalQuestion_InaccessibleCluster: a user who can reach only their own
@@ -827,12 +850,13 @@ func TestNaturalQuestion_OtherClusterSecurityAndDependencies(t *testing.T) {
 	for _, tc := range []struct{ name, question string }{
 		{"security", "Are there any critical security findings on %s I should look at first?"},
 		{"dependencies", "What does app-prod depend on in %s, and what depends on it?"},
+		{"agent-health", "Is the Nudgebee agent on %s healthy and connected?"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(accountId), "natural-other-cluster-"+tc.name, fmt.Sprintf(tc.question, target))
 			calls := fetchConversationToolCalls(t, resp.ConversationId)
 			logRoute(t, calls)
-			accountScoped := append([]string{"security", "security_execute", "service_dependency_graph", "service_dependency_graph_execute"}, recommendationTools...)
+			accountScoped := append([]string{"security", "security_execute", "service_dependency_graph", "service_dependency_graph_execute", "nudgebee_agent_health_get"}, recommendationTools...)
 			var onTarget int
 			for _, c := range calls {
 				if c.DelegatedTarget != "" {

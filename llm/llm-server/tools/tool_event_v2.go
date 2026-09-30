@@ -253,7 +253,6 @@ func (t GetEventByIdTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "The event's UUID (events.id).",
@@ -287,10 +286,7 @@ func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return eventsV2ErrorResponse(targetErr), nil
-	}
+	dataCtx := nbCtx.ForTarget()
 	dataAccountID := dataCtx.AccountId
 	view := resolveEventsViewPlaceholders(eventsViewWithId, dataAccountID, true)
 	resp, data, err := sqlToolCall(dataCtx, query, "events", view, 1, nil)
@@ -666,7 +662,6 @@ func (t ListEventsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target":       core.ToolTargetSchemaProperty(),
 			"subject_name": {Type: core.ToolSchemaTypeString, Description: "ILIKE (substring) match on subject_name."},
 			"subject_namespace": {
 				Type: core.ToolSchemaTypeArray, Items: map[string]any{"type": "string"},
@@ -735,10 +730,7 @@ func (t ListEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequ
 
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return eventsV2ErrorResponse(targetErr), nil
-	}
+	dataCtx := nbCtx.ForTarget()
 	dataAccountID := dataCtx.AccountId
 	metadataView := buildListEventsMetadataView(dataAccountID, whereClauses)
 	metadataQuery := "SELECT id, title, starts_at, priority, source, aggregation_key, finding_type, subject_type, " +
@@ -839,7 +831,6 @@ func (t AggregateEventsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"group_by": {
 				Type:        core.ToolSchemaTypeString,
 				Enum:        []any{"aggregation_key", "subject_namespace", "subject_type", "finding_type", "priority", "source", "nb_status"},
@@ -917,10 +908,7 @@ func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCal
 	// queryable, while calls without a start bound already received the default.
 	// dataCtx reads the delegated target's account; nbCtx keeps the
 	// conversation's workspace.
-	dataCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return eventsV2ErrorResponse(targetErr), nil
-	}
+	dataCtx := nbCtx.ForTarget()
 	dataAccountID := dataCtx.AccountId
 	view := resolveEventsViewPlaceholders(eventsViewWithId, dataAccountID, true)
 	resp, _, err := sqlToolCall(dataCtx, query, "events", view, 0, nil)

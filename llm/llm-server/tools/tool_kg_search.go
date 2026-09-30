@@ -114,11 +114,12 @@ func (t KGSearchNodesTool) Call(nbCtx core.NbToolContext, input core.NBToolCallR
 	if reject := validateKGSearchInput(parsed); reject != nil {
 		return *reject, nil
 	}
-	// The graph is tenant-wide. Inside a child aimed at another cluster or
-	// account, default to that account so a same-named workload elsewhere
-	// is not mixed into the answer; explicit account_ids still win.
-	if target := nbCtx.QueryConfig.DelegatedTarget; target != nil && target.AccountID != "" && len(parsed.AccountIDs) == 0 {
-		parsed.AccountIDs = []string{target.AccountID}
+	// The graph is tenant-wide. When the call is about another cluster or
+	// account (a target named on the call or handed to the agent), default to
+	// that account so a same-named workload elsewhere is not mixed into the
+	// answer; explicit account_ids still win.
+	if data := nbCtx.DataAccountID(); data != nbCtx.AccountId && len(parsed.AccountIDs) == 0 {
+		parsed.AccountIDs = []string{data}
 	}
 
 	// Fetch the tenant's cloud_account map exactly once. We need it for two

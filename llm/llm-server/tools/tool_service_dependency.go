@@ -40,7 +40,6 @@ func (m ServiceDependencyGraphTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Sql query to Execute",
@@ -69,10 +68,7 @@ type serviceDependencyGraphToolInput struct {
 }
 
 func (m ServiceDependencyGraphTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	nbRequestContext.Ctx.GetLogger().Info("traces: executing getTraces tool call", "input", slog.AnyValue(input))
 
 	depInput := serviceDependencyGraphToolInput{}

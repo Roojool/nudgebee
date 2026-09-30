@@ -61,7 +61,6 @@ func (t EventRulesTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target":     core.ToolTargetSchemaProperty(),
 			"alert":      str("Optional: case-insensitive substring match on the alert name."),
 			"source":     str("Optional: exact match on rule source (e.g. prometheus, datadog, pagerduty)."),
 			"severity":   str("Optional: exact match on severity."),
@@ -85,10 +84,7 @@ func (t EventRulesTool) InferToolRequestType(_ *security.RequestContext, _, _ st
 }
 
 func (t EventRulesTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	if nbCtx.AccountId == "" {
 		return triageErrorResponse(errors.New("an account context is required to list event rules")), nil
 	}

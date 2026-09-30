@@ -1502,7 +1502,7 @@ func nbToolsToLlmTools(tools []toolcore.NBTool) []llms.Tool {
 	for _, t := range tools {
 
 		properties := map[string]any{}
-		for k, p := range t.InputSchema().Properties {
+		for k, p := range toolcore.ModelInputSchema(t).Properties {
 			prop := map[string]any{}
 			// string(p.Type), not p.Type: ToolSchemaType is a NAMED string type, and
 			// provider schema converters type-assert this value as a plain `string`
@@ -1538,7 +1538,7 @@ func nbToolsToLlmTools(tools []toolcore.NBTool) []llms.Tool {
 			properties[k] = prop
 		}
 
-		rawRequired := t.InputSchema().Required
+		rawRequired := toolcore.ModelInputSchema(t).Required
 		// Providers like OpenAI and Python-based LLM validators reject "required": null
 		// with "400: Invalid schema for function '...': None is not of type 'array'",
 		// and reject any required property not declared in properties.

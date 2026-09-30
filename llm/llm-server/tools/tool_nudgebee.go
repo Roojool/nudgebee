@@ -114,7 +114,6 @@ func (NudgebeeAgentHealthGetTool) Description() string {
 }
 func (NudgebeeAgentHealthGetTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{Type: core.ToolSchemaTypeObject, Properties: map[string]core.ToolSchemaProperty{
-		"target":     core.ToolTargetSchemaProperty(),
 		"account_id": nudgebeeStringProperty("Optional exact visible account id; defaults to the current account."),
 	}, Required: []string{}}
 }
@@ -122,10 +121,7 @@ func (t NudgebeeAgentHealthGetTool) Call(nbCtx core.NbToolContext, input core.NB
 	accountID := nudgebeeStringArg(input, "account_id")
 	if accountID == "" {
 		// "The current account" is a handed target's account when there is one.
-		dataCtx, err := callDataContext(nbCtx, input)
-		if err != nil {
-			return triageErrorResponse(err), nil
-		}
+		dataCtx := nbCtx.ForTarget()
 		accountID = strings.TrimSpace(dataCtx.AccountId)
 	}
 	if accountID == "" {

@@ -875,6 +875,7 @@ func TestTargetAwareAgentsToolsFollowTheTarget(t *testing.T) {
 // A tool that applies a delegated target from the call context must also let
 // a top-level agent name one: without a "target" input it silently answers
 // for the conversation's own account (seen live with prometheus_execute).
+// ModelInputSchema adds it from the tool's declared scope.
 func TestContextTargetToolsAcceptAPerCallTarget(t *testing.T) {
 	for _, name := range toolcore.ListRegisteredSystemToolNames() {
 		tool, ok := toolcore.GetNBTool("00000000-0000-0000-0000-000000000001", name)
@@ -884,6 +885,6 @@ func TestContextTargetToolsAcceptAPerCallTarget(t *testing.T) {
 		if _, preparer := tool.(toolcore.DelegatedTargetInputPreparer); preparer {
 			continue // applies the target to its own selector (cluster, account, --context)
 		}
-		assert.Contains(t, tool.InputSchema().Properties, "target", "%s follows a handed target but cannot be given one", name)
+		assert.Contains(t, toolcore.ModelInputSchema(tool).Properties, "target", "%s follows a handed target but cannot be given one", name)
 	}
 }

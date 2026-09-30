@@ -85,7 +85,6 @@ func (m AnomalyExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "anomaly SQL Query to execute",
@@ -101,10 +100,7 @@ func (m AnomalyExecuteTool) InferToolRequestType(_ *security.RequestContext, _, 
 }
 
 func (m AnomalyExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbRequestContext, err := callDataContext(nbRequestContext, input)
-	if err != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: err.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	// Recover SQL the model may have wrapped in JSON ({"query":...}) or routed
 	// through structured arguments before validating.
 	input.Command = extractAnomalySQL(input.Command, input.Arguments)

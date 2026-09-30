@@ -4446,6 +4446,11 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 		return *resp, nil
 	}
 
+	toolContext, targetErr := tools.ResolveToolCallTarget(toolContext, tool, request)
+	if targetErr != nil {
+		return toolcore.NBToolResponse{Status: toolcore.NBToolResponseStatusError, Data: targetErr.Error()}, nil
+	}
+
 	// Circuit-breaker pre-check. A tool opts in by implementing
 	// CircuitBreakerKeyer; tools that don't implement it never touch the
 	// breaker. When the circuit is open we short-circuit before the

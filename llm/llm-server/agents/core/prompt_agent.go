@@ -100,7 +100,7 @@ func UpdatePromptForMultiCommandTool(query NBAgentRequest, tools []toolcore.NBTo
 			}
 		} else {
 			// Handle standard single-command tools
-			schema := tool.InputSchema()
+			schema := toolcore.ModelInputSchema(tool)
 			if len(schema.Properties) > 0 {
 				usage = append(usage, "**Input Schema:**")
 				propNames := lo.Keys(schema.Properties)

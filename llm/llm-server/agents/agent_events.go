@@ -1107,10 +1107,6 @@ func (l AgentEvents) UpdateToolResponseForPlanner(toolRequest core.NBAgentPlanne
 
 const ToolEventSummary = "event_summary"
 
-// SupportsDelegatedTarget: it summarizes the observations it is given and
-// takes the cloud provider from the delegated target's account.
-func (EventSummaryTool) SupportsDelegatedTarget() bool { return true }
-
 type EventSummaryTool struct {
 }
 
@@ -1233,11 +1229,7 @@ func (m EventSummaryTool) Call(nbRequestContext toolcore.NbToolContext, input to
 	}
 
 	// Add account context (cloud provider) as a hidden system instruction
-	providerAccountID, targetErr := tools.TargetDataAccountID(nbRequestContext)
-	if targetErr != nil {
-		return toolcore.NBToolResponse{}, fmt.Errorf("event summary: %w", targetErr)
-	}
-	if cloudProvider := GetCloudProviderForAccount(providerAccountID); cloudProvider != "" {
+	if cloudProvider := GetCloudProviderForAccount(nbRequestContext.DataAccountID()); cloudProvider != "" {
 		eventPrompt = eventPrompt + "\n\n[INTERNAL INSTRUCTION - DO NOT INCLUDE IN OUTPUT]: The infrastructure runs on " + cloudProvider + ". Use this context to guide your analysis approach, but do NOT mention the cloud provider context, infrastructure type, or deployment controller details in your output. Your response must remain provider-agnostic. Focus only on the evidence and findings."
 	}
 

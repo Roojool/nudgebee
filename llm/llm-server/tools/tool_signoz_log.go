@@ -31,7 +31,6 @@ func (m SignozExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target":  core.ToolTargetSchemaProperty(),
 			"command": {Type: core.ToolSchemaTypeString, Description: "The Signoz log query to execute"},
 		},
 		Required: []string{"command"},
@@ -68,10 +67,7 @@ func (m SignozExecuteTool) buildSignozAPI(nbRequestContext core.NbToolContext, a
 func (m SignozExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 	// A targeted child's call reads the target's account throughout (views,
 	// provider, routing), exactly as inside the metrics/traces sub-agents.
-	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	nbRequestContext.Ctx.GetLogger().Info("signoz: executing logs tool call", "query", input.Command)
 	finalQuery := m.cleanupQuery(input.Command)
 	var result map[string]any

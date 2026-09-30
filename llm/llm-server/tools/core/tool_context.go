@@ -360,20 +360,26 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 }
 
 type NbToolContext struct {
-	AccountId      string
-	UserId         string
-	Query          string
-	QueryContext   string
-	QueryConfig    NBQueryConfig
-	ConversationId string
-	ParentAgentId  string
-	MessageId      string
-	History        []llms.MessageContent
-	Ctx            *security.RequestContext
-	ToolConfig     ToolConfig
-	ToolCallId     string
-	AccountContext string
-	AccountPrompt  string
+	// AccountId is the account the conversation belongs to (the origin): it
+	// owns the workspace, conversation records and billing.
+	AccountId string
+	// TargetAccountId is the account whose data this call reads. It equals
+	// AccountId unless the call is about another connected cluster or
+	// account. Read it through DataAccountID().
+	TargetAccountId string
+	UserId          string
+	Query           string
+	QueryContext    string
+	QueryConfig     NBQueryConfig
+	ConversationId  string
+	ParentAgentId   string
+	MessageId       string
+	History         []llms.MessageContent
+	Ctx             *security.RequestContext
+	ToolConfig      ToolConfig
+	ToolCallId      string
+	AccountContext  string
+	AccountPrompt   string
 	// Source is the conversation source this tool call belongs to, as a plain
 	// string so tools/core stays free of the agents/core import. Empty means
 	// unknown. Tools use it to tell a live user's request, where asking or
@@ -476,22 +482,50 @@ func NewNbToolContext(ctx *security.RequestContext, tool NBTool, accountId strin
 		}
 	}
 
+	targetAccountID := accountId
+	if target := queryConfig.DelegatedTarget; target != nil && target.AccountID != "" {
+		targetAccountID = target.AccountID
+	}
+
 	toolContext := NbToolContext{
-		AccountId:      accountId,
-		UserId:         userId,
-		Query:          query,
-		History:        history,
-		ConversationId: conversationId,
-		ParentAgentId:  agenId,
-		MessageId:      messageId,
-		QueryConfig:    queryConfig,
-		QueryContext:   queryContext,
-		Ctx:            ctx,
-		ToolConfig:     toolConfig,
-		ToolCallId:     toolCallId,
-		Source:         conversationSource,
+		AccountId:       accountId,
+		TargetAccountId: targetAccountID,
+		UserId:          userId,
+		Query:           query,
+		History:         history,
+		ConversationId:  conversationId,
+		ParentAgentId:   agenId,
+		MessageId:       messageId,
+		QueryConfig:     queryConfig,
+		QueryContext:    queryContext,
+		Ctx:             ctx,
+		ToolConfig:      toolConfig,
+		ToolCallId:      toolCallId,
+		Source:          conversationSource,
 	}
 	return toolContext
+}
+
+// DataAccountID is the account this call reads data from: the target when
+// the call is about another account, otherwise the conversation's own.
+// Contexts built without NewNbToolContext leave TargetAccountId empty.
+func (c NbToolContext) DataAccountID() string {
+	if c.TargetAccountId != "" {
+		return c.TargetAccountId
+	}
+	return c.AccountId
+}
+
+// ForTarget returns the context a follows-target tool reads data with: its
+// AccountId is the call's data account. Keep the original context for
+// anything that belongs to the conversation (workspace files, references to
+// the conversation). The executor has already resolved and access-checked
+// TargetAccountId.
+func (c NbToolContext) ForTarget() NbToolContext {
+	c.AccountId = c.DataAccountID()
+	c.TargetAccountId = c.AccountId
+	c.QueryConfig.DelegatedTarget = nil
+	return c
 }
 
 // updateMessageHistory updates the message history with the assistant's

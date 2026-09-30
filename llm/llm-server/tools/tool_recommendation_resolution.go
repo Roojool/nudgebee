@@ -81,7 +81,6 @@ func (m RecommendationResolutionExecuteTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "recommendation_resolution_view SQL Query to execute",
@@ -92,10 +91,7 @@ func (m RecommendationResolutionExecuteTool) InputSchema() core.ToolSchema {
 }
 
 func (m RecommendationResolutionExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	resp, _, err := sqlToolCall(nbRequestContext, input.Command, "recommendation_resolution_view", recommendationResolutionView, 10, nil)
 	if err == nil {
 		resp.References = []core.NBToolResponseReference{

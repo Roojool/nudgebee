@@ -88,33 +88,46 @@ func ResolveObservabilityTarget(ctx core.NbToolContext, input core.NBToolCallReq
 	return resolved, resolved.AccountID, nil
 }
 
-// TargetDataAccountID is the account a data query should read: the delegated
-// target's, re-validated for this caller, or the conversation's own account.
-// Workspace files stay on ctx.AccountId, which the parent agent can read.
-func TargetDataAccountID(ctx core.NbToolContext) (string, error) {
-	if ctx.QueryConfig.DelegatedTarget == nil {
-		return ctx.AccountId, nil
-	}
-	_, accountID, err := ResolveObservabilityTarget(ctx, core.NBToolCallRequest{})
-	return accountID, err
-}
-
-// targetDataContext returns ctx scoped to the account its data queries must
-// read. Only for tools that write nothing to the workspace: the copy's
-// AccountId is the target's.
-func targetDataContext(ctx core.NbToolContext) (core.NbToolContext, error) {
-	return callDataContext(ctx, core.NBToolCallRequest{})
-}
-
-// callDataContext is targetDataContext for tools that also take a per-call
-// "target" argument: an explicit target wins over the delegated one, and both
-// are validated for this caller.
-func callDataContext(ctx core.NbToolContext, input core.NBToolCallRequest) (core.NbToolContext, error) {
+// ResolveCallTarget sets ctx.TargetAccountId for one tool call: the call's
+// explicit "target" argument, else the target handed to the agent, else the
+// conversation's own account. The caller must be able to read the target, and
+// a handed target must still be the connection validated at handoff.
+func ResolveCallTarget(ctx core.NbToolContext, input core.NBToolCallRequest) (core.NbToolContext, error) {
 	_, accountID, err := ResolveObservabilityTarget(ctx, input)
 	if err != nil {
 		return ctx, err
 	}
-	ctx.AccountId = accountID
-	ctx.QueryConfig.DelegatedTarget = nil
+	ctx.TargetAccountId = accountID
+	return ctx, nil
+}
+
+// ResolveToolCallTarget decides, in one place, which account a tool call
+// reads. Every dispatch path uses it: the planner executor, custom planners
+// (core.CallTool) and watch polls.
+//
+// A follows-target tool gets TargetAccountId from the call's explicit target,
+// else the target handed to the agent, after the caller's access to it is
+// checked. Agent-tools and own-selector tools route a target themselves. Any
+// other tool given a target argument it does not define is refused rather
+// than silently answering for the conversation's own account.
+func ResolveToolCallTarget(ctx core.NbToolContext, tool core.NBTool, request core.NBToolCallRequest) (core.NbToolContext, error) {
+	if _, agentTool := tool.(core.DelegatedTargetSupport); agentTool {
+		return ctx, nil
+	}
+	if _, ownSelector := tool.(core.DelegatedTargetInputPreparer); ownSelector {
+		return ctx, nil
+	}
+	decl, _ := core.AccountScopeOf(tool.Name())
+	switch decl.Scope {
+	case core.AccountScopeFollowsTarget:
+		return ResolveCallTarget(ctx, request)
+	case core.AccountScopeIndependent:
+		return ctx, nil
+	}
+	if raw, given := request.Arguments["target"]; given && raw != nil {
+		if _, own := tool.InputSchema().Properties["target"]; !own {
+			return ctx, fmt.Errorf("%s cannot run on another cluster or account: it only covers this conversation's own account", tool.Name())
+		}
+	}
 	return ctx, nil
 }

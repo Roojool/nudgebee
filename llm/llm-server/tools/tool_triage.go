@@ -217,7 +217,6 @@ func (t TriageExplanationTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "UUID of the event to explain (events.id).",
@@ -232,10 +231,7 @@ func (t TriageExplanationTool) InferToolRequestType(_ *security.RequestContext, 
 }
 
 func (t TriageExplanationTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	eventID := stringArg(input, "event_id")
 	if eventID == "" {
 		return triageErrorResponse(errors.New("event_id is required")), nil
@@ -321,7 +317,6 @@ func (t TriageRulesTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"rule_type": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Optional filter by rule type.",
@@ -341,10 +336,7 @@ func (t TriageRulesTool) InferToolRequestType(_ *security.RequestContext, _, _ s
 }
 
 func (t TriageRulesTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	in := map[string]any{}
 	if nbCtx.AccountId != "" {
 		in["cloud_account_id"] = nbCtx.AccountId
@@ -390,7 +382,6 @@ func (t ThresholdSuggestionsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"source": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Optional filter by alert source (e.g. prometheus, pagerduty_webhook, GCP_Metric_Alert).",
@@ -414,10 +405,7 @@ func (t ThresholdSuggestionsTool) InferToolRequestType(_ *security.RequestContex
 }
 
 func (t ThresholdSuggestionsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	in := map[string]any{}
 	if nbCtx.AccountId != "" {
 		in["cloud_account_id"] = nbCtx.AccountId
@@ -469,7 +457,6 @@ func (t TriageDryRunTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target":             core.ToolTargetSchemaProperty(),
 			"rule_type":          {Type: core.ToolSchemaTypeString, Description: "Rule type.", Enum: []any{"suppression", "scoring", "classification"}},
 			"action":             str("Rule action, e.g. 'suppress', 'drop', 'adjust_score', 'auto_classify_duplicate', 'auto_classify_fp'."),
 			"match_source":       str("Optional: exact match on event source."),
@@ -491,10 +478,7 @@ func (t TriageDryRunTool) InferToolRequestType(_ *security.RequestContext, _, _ 
 }
 
 func (t TriageDryRunTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	if nbCtx.AccountId == "" {
 		return triageErrorResponse(errors.New("an account context is required to dry-run a triage rule")), nil
 	}
@@ -552,7 +536,6 @@ func (t EventClassificationTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "UUID of the event (events.id).",
@@ -567,10 +550,7 @@ func (t EventClassificationTool) InferToolRequestType(_ *security.RequestContext
 }
 
 func (t EventClassificationTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	eventID := stringArg(input, "event_id")
 	if eventID == "" {
 		return triageErrorResponse(errors.New("event_id is required")), nil
@@ -613,7 +593,6 @@ func (t TriageRuleEventsTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"rule_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "ID of the triage rule (from get_triage_rules).",
@@ -632,10 +611,7 @@ func (t TriageRuleEventsTool) InferToolRequestType(_ *security.RequestContext, _
 }
 
 func (t TriageRuleEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	ruleID := stringArg(input, "rule_id")
 	if ruleID == "" {
 		return triageErrorResponse(errors.New("rule_id is required")), nil
@@ -712,7 +688,6 @@ func (t IncidentAssemblyTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"event_id": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "UUID of the event to assemble the incident around (events.id).",
@@ -727,10 +702,7 @@ func (t IncidentAssemblyTool) InferToolRequestType(_ *security.RequestContext, _
 }
 
 func (t IncidentAssemblyTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return triageErrorResponse(targetErr), nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	eventID := stringArg(input, "event_id")
 	if eventID == "" {
 		return triageErrorResponse(errors.New("event_id is required")), nil

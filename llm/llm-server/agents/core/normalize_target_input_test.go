@@ -21,7 +21,6 @@ func TestPlainTextInputIgnoresObjectTargetProperty(t *testing.T) {
 		{tools.EventsExecuteTool{}, `SELECT * FROM events WHERE target=1 LIMIT 5`},
 		{tools.EventsExecuteTool{}, `<target>k8s-prod</target> SELECT 1`},
 	} {
-		require.Contains(t, tc.tool.InputSchema().Properties, "target")
 		var args map[string]any
 		require.NoError(t, json.Unmarshal([]byte(normalizeToolInputForTool(tc.tool, tc.input)), &args))
 		require.NotContains(t, args, "target", "%s: %q must not become a target argument", tc.tool.Name(), tc.input)

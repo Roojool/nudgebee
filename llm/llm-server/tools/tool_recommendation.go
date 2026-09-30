@@ -364,7 +364,6 @@ func (m RecommendationExecuteTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "recommendation_view SQL Query to execute",
 			},
-			"target": core.ToolTargetSchemaProperty(),
 		},
 		Required: []string{"command"},
 	}
@@ -405,17 +404,8 @@ func truncateRecommendationJSON(r map[string]any, _ int, _ int) map[string]any {
 	return r
 }
 
-// PrepareDelegatedTargetInput applies a targeted child's cluster or account;
-// an explicit "target" in the input wins.
-func (m RecommendationExecuteTool) PrepareDelegatedTargetInput(target *core.ExecutionTarget, input string) (string, error) {
-	return AddDelegatedTargetObject(input, target)
-}
-
 func (m RecommendationExecuteTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	resp, rows, err := sqlToolCall(nbRequestContext, input.Command, "recommendation_view", recommendationViewFor(nbRequestContext.AccountId), 10, truncateRecommendationJSON)
 	if err == nil {
 		if len(rows) == 0 {

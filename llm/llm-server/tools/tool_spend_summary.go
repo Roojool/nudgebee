@@ -40,7 +40,6 @@ func (t SpendSummaryTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"group_by": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "How to group spend data. 'cloud_account' for per-account breakdown, 'service' for per-service breakdown.",
@@ -71,10 +70,7 @@ func (t SpendSummaryTool) InferToolRequestType(_ *security.RequestContext, _, _ 
 }
 
 func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
-	nbCtx, targetErr := callDataContext(nbCtx, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbCtx = nbCtx.ForTarget()
 	groupBy := "cloud_account"
 	window := "30d"
 	accountId := ""

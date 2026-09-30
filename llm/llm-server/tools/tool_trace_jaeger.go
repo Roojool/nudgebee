@@ -37,7 +37,6 @@ func (m TracesExecuteJaegerTool) InputSchema() core.ToolSchema {
 	return core.ToolSchema{
 		Type: core.ToolSchemaTypeObject,
 		Properties: map[string]core.ToolSchemaProperty{
-			"target": core.ToolTargetSchemaProperty(),
 			"command": {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Jaeger JSON query to execute",
@@ -62,10 +61,7 @@ func (m TracesExecuteJaegerTool) InputSchema() core.ToolSchema {
 func (m TracesExecuteJaegerTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 	// A targeted child's call reads the target's account throughout (views,
 	// provider, routing), exactly as inside the metrics/traces sub-agents.
-	nbRequestContext, targetErr := callDataContext(nbRequestContext, input)
-	if targetErr != nil {
-		return core.NBToolResponse{Status: core.NBToolResponseStatusError, Data: targetErr.Error()}, nil
-	}
+	nbRequestContext = nbRequestContext.ForTarget()
 	nbRequestContext.Ctx.GetLogger().Info("traces: executing getTraces jaeger tool call")
 
 	queryBuilder, startTime, endTime, err := core.BuildTraceQueryBuilder(nbRequestContext, input.Command)

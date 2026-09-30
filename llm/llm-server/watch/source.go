@@ -18,6 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// ResolveToolCallTarget decides which account a polled tool call reads, as
+// the planner executor does for live calls. tools sets it (tools imports
+// watch, so watch cannot import tools).
+var ResolveToolCallTarget func(ctx toolcore.NbToolContext, tool toolcore.NBTool, request toolcore.NBToolCallRequest) (toolcore.NbToolContext, error)
+
 // Source observes a watched resource and produces an Observation. The
 // abstraction lets new kinds (sql, timer, listen, webhook, composite) plug
 // in without changing the executor or the persistence layer.
@@ -290,10 +295,14 @@ func (toolSource) Observe(ctx *security.RequestContext, w Watch) (Observation, e
 		}
 	}
 
-	resp, err := tool.Call(toolCtx, toolcore.NBToolCallRequest{
-		Command:   command,
-		Arguments: cfg.ToolInput,
-	})
+	request := toolcore.NBToolCallRequest{Command: command, Arguments: cfg.ToolInput}
+	if ResolveToolCallTarget != nil {
+		var targetErr error
+		if toolCtx, targetErr = ResolveToolCallTarget(toolCtx, tool, request); targetErr != nil {
+			return Observation{}, fmt.Errorf("tool source: tool %q: %w", cfg.ToolName, targetErr)
+		}
+	}
+	resp, err := tool.Call(toolCtx, request)
 	if err != nil {
 		return Observation{}, fmt.Errorf("tool source: tool %q invocation failed: %w", cfg.ToolName, err)
 	}
