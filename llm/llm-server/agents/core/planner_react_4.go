@@ -75,9 +75,10 @@ type NBReActPlanner4 struct {
 
 	// Notebook is the durable investigation state. It is derived at the start of
 	// every Plan() from the most recent update_notebook step in intermediateSteps
-	// (see refreshNotebookFromSteps) and injected into the human message so the
-	// model always sees current state. It is also serialized in Marshal so it
-	// survives a suspend/resume round-trip before the first replay rebuilds it.
+	// (see refreshNotebookFromSteps) and feeds persistence, critique and memory
+	// extraction. The human message shows only the turn-start snapshot
+	// (turnStartNotebook); in-turn updates stay in the replayed history. It is
+	// also serialized in Marshal so it survives a suspend/resume round-trip.
 	Notebook string
 	// notebookAgentID identifies the synthetic llm_conversation_agent row used
 	// to expose the evolving notebook in the UI. notebookUpdateCount is carried
@@ -91,13 +92,20 @@ type NBReActPlanner4 struct {
 	// this planner instance even when restored history already contains steps.
 	planCallCount int
 	// turnStartedAt is the timestamp rendered into the human message. It is
-	// captured once per planner instance (one turn) rather than on every Plan()
-	// call: the human message sits right after the system prompt, so a
+	// captured once per turn (and saved across a mid-turn suspend/resume) rather
+	// than on every Plan() call: the human message sits right after the system prompt, so a
 	// per-second clock there changed the prompt prefix on every tool step and
 	// defeated provider prefix caching for the whole tool loop (#39633). react_3
 	// already renders its human message once per turn. Time math is unaffected:
 	// the model is told to use [[Time:...]] macros, resolved at tool execution.
 	turnStartedAt time.Time
+	// turnStartNotebook is the notebook rendered into the human message: the
+	// state at the start of the turn, saved across a suspend/resume. In-turn
+	// update_notebook calls stay in the replayed history instead of rewriting
+	// this block, because the human message sits right after the system prompt
+	// and any change there cuts the provider's prefix cache for the whole tool
+	// history (#39633). nil until first captured.
+	turnStartNotebook *string
 
 	// enableCritique is the per-request critique override (request.EnableCritique).
 	// maxRefinementAttempts bounds the refine loop. Both are derived at
@@ -393,6 +401,11 @@ type react4PersistentState struct {
 	NotebookUpdateCount int                `json:"notebook_update_count,omitempty"`
 	PersistedNotebook   string             `json:"persisted_notebook,omitempty"`
 	RefinementData      []refinementRecord `json:"refinement_data,omitempty"`
+	// TurnStartedAt and TurnStartNotebook keep the human message identical
+	// across a mid-turn suspend/resume, so the resumed prompt still extends the
+	// pre-suspend one.
+	TurnStartedAt     time.Time `json:"turn_started_at,omitzero"`
+	TurnStartNotebook *string   `json:"turn_start_notebook,omitempty"`
 }
 
 func (o *NBReActPlanner4) Marshal() ([]byte, error) {
@@ -402,6 +415,8 @@ func (o *NBReActPlanner4) Marshal() ([]byte, error) {
 		NotebookUpdateCount: o.notebookUpdateCount,
 		PersistedNotebook:   o.persistedNotebook,
 		RefinementData:      o.refinementData,
+		TurnStartedAt:       o.turnStartedAt,
+		TurnStartNotebook:   o.turnStartNotebook,
 	})
 }
 
@@ -418,6 +433,8 @@ func (o *NBReActPlanner4) Unmarshal(data []byte) error {
 	o.notebookUpdateCount = state.NotebookUpdateCount
 	o.persistedNotebook = state.PersistedNotebook
 	o.refinementData = state.RefinementData
+	o.turnStartedAt = state.TurnStartedAt
+	o.turnStartNotebook = state.TurnStartNotebook
 	return nil
 }
 
@@ -441,13 +458,7 @@ func (o *NBReActPlanner4) Plan(
 	intermediateSteps []NBAgentPlannerToolActionStep,
 	input string,
 ) ([]NBAgentPlannerToolAction, *NBAgentPlannerFinishAction, error) {
-	// A fresh turn (no steps yet) must not inherit refinement carry from a prior
-	// turn restored by Unmarshal — that would resurrect a stale rejected-answer
-	// redirect and consume this turn's critique budget. Mid-turn (steps present,
-	// including a resume after write approval) it is preserved.
-	if len(intermediateSteps) == 0 {
-		o.refinementData = nil
-	}
+	o.resetTurnStateOnFreshTurn(intermediateSteps)
 	// Resume safety: stepCount is not marshaled, so a resumed conversation starts
 	// a fresh planner with stepCount == 0. Re-seed it from the prior step count so
 	// new DisplayIDs (E<n>) and synthesized tool-call IDs continue past the
@@ -1157,8 +1168,9 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 // buildMessages assembles the native message list: a stable system message, a
 // dynamic human message (context + notebook + question), and the reconstructed
 // tool-call history with any critique redirects spliced back into chronological
-// order. update_notebook steps are omitted from the reconstructed history
-// because the notebook is injected into the human message instead.
+// order. The human message carries the notebook as it was at turn start;
+// update_notebook calls made during the turn are replayed in the history like
+// any other tool call, so the prompt only ever grows at the end (#39633).
 //
 // Refinement redirects (rejected answer + feedback) are not in intermediateSteps,
 // so they are replayed here from refinementData. Each is inserted at its recorded
@@ -1284,7 +1296,7 @@ func (o *NBReActPlanner4) humanText(input string) string {
 		"evidence_index":           strings.TrimSpace(o.evidenceIndex),
 		"memory_context_block":     memoryContextBlock,
 		"channel_context_block":    channelContextBlock,
-		"notebook":                 strings.TrimSpace(o.Notebook),
+		"notebook":                 strings.TrimSpace(o.turnStartNotebookText()),
 		"input":                    input,
 	})
 	if err != nil {
@@ -1296,6 +1308,21 @@ func (o *NBReActPlanner4) humanText(input string) string {
 	return out
 }
 
+// resetTurnStateOnFreshTurn clears per-turn state restored by Unmarshal when a
+// new turn starts (no steps yet). Refinement carry from a prior turn would
+// resurrect a stale rejected-answer redirect and consume this turn's critique
+// budget; a prior turn's start time and notebook snapshot would show stale
+// values in the human message. Mid-turn (steps present, including a resume
+// after write approval) all of it is preserved.
+func (o *NBReActPlanner4) resetTurnStateOnFreshTurn(steps []NBAgentPlannerToolActionStep) {
+	if len(steps) > 0 {
+		return
+	}
+	o.refinementData = nil
+	o.turnStartedAt = time.Time{}
+	o.turnStartNotebook = nil
+}
+
 // turnStartTime returns the UTC time this planner instance first rendered its
 // human message, capturing it on first use. See turnStartedAt.
 func (o *NBReActPlanner4) turnStartTime() time.Time {
@@ -1305,11 +1332,22 @@ func (o *NBReActPlanner4) turnStartTime() time.Time {
 	return o.turnStartedAt
 }
 
+// turnStartNotebookText returns the notebook as it was when this planner first
+// rendered its human message, capturing it on first use. See turnStartNotebook.
+func (o *NBReActPlanner4) turnStartNotebookText() string {
+	if o.turnStartNotebook == nil {
+		nb := o.Notebook
+		o.turnStartNotebook = &nb
+	}
+	return *o.turnStartNotebook
+}
+
 // renderStepsToMessages reconstructs the native tool-calling history from the
-// executor's neutral steps. Each non-notebook step becomes one assistant turn
-// carrying the tool_use (with its original id/args) followed by one tool turn
-// carrying the matching tool_result — preserving the id pairing every provider
-// requires. Notebook steps are skipped (state is injected via the human message).
+// executor's neutral steps. Each step becomes one assistant turn carrying the
+// tool_use (with its original id/args) followed by one tool turn carrying the
+// matching tool_result — preserving the id pairing every provider requires.
+// update_notebook results are replayed as a short acknowledgement; the content
+// is already in the call's arguments.
 //
 // Tool-result content is window-gated compressed with the same policy react_3
 // applies to its text scratchpad: once the total observation bytes approach the
@@ -1367,27 +1405,19 @@ func turnGroup(steps []NBAgentPlannerToolActionStep, i int, claimed []bool) []in
 // reject replays of parallel batches, since only the first functionCall part of
 // a turn carries a thought signature.
 //
-// Notebook steps contribute nothing (their state rides on the human message);
-// a turn consisting only of notebook steps therefore yields no messages at all.
+// update_notebook steps are replayed like any other call: the human message only
+// carries the notebook as it was at the start of the turn, so in-turn updates
+// must stay in history, which keeps the prompt append-only (#39633).
 func (o *NBReActPlanner4) renderTurn(steps []NBAgentPlannerToolActionStep, group []int, totalSteps int, compressionActive bool, maxObs int) []llms.MessageContent {
 	assistantParts := make([]llms.ContentPart, 0, len(group)+1)
 	results := make([]llms.MessageContent, 0, len(group))
 
-	// A MULTI-call turn replays every member, notebook included. Skipping the
-	// notebook step is right for a turn of one (its state rides on the human
-	// message instead of bloating history), but inside a batch it is unsafe:
-	// signatures are assigned positionally, so when Gemini signs part 0 and that
-	// part is the update_notebook call — which the prompt explicitly allows
-	// alongside an investigation tool — dropping it discards the turn's only
-	// signature and the surviving first part replays unsigned, producing the same
-	// "...missing a thought_signature..., position N" rejection. Replaying a batch
-	// exactly as emitted keeps the signature attached to the call it belongs to.
-	replayNotebook := len(group) > 1
+	// Every member is replayed exactly as emitted, notebook calls included.
+	// Besides keeping the prompt append-only, this keeps Gemini's positional
+	// thought signature attached to the call it belongs to: Gemini signs only
+	// part 0, and that part may be the update_notebook call.
 	for _, idx := range group {
 		step := &steps[idx]
-		if isNotebookToolName(step.Action.Tool) && !replayNotebook {
-			continue
-		}
 		// The thought is shared by the whole batch (parseCompletion copies the
 		// same Log onto every sibling), so emit it once, ahead of the calls.
 		if len(assistantParts) == 0 {
@@ -1451,6 +1481,14 @@ func isStepRecent(stepIndex, totalSteps int, compressionActive bool) bool {
 // which caches the result on the step. SubAgentEvidence is appended uncompressed
 // so the distilled manifest always survives, mirroring react_3.
 func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, stepIndex, totalSteps int, compressionActive bool, maxObs int) string {
+	// A successful notebook update's content is already in the replayed call's
+	// arguments; echoing it again would double its cost in context.
+	if isNotebookToolName(step.Action.Tool) && step.Status == ToolStatusSuccess {
+		if _, appendEntry := extractNotebookUpdate(step.Action.ToolInput); appendEntry {
+			return notebookAppendedReplay
+		}
+		return notebookReplacedReplay
+	}
 	var obs string
 	if isStepRecent(stepIndex, totalSteps, compressionActive) {
 		obs = TruncateMiddle(step.Observation, maxObs/2, maxObs/2)
@@ -1462,6 +1500,12 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 	}
 	return obs
 }
+
+// Replayed results for successful update_notebook calls (see renderObservation).
+const (
+	notebookReplacedReplay = "Notebook updated. The content of this call is now the full notebook."
+	notebookAppendedReplay = "Notebook entry appended."
+)
 
 // refreshNotebookFromSteps applies the most recent successful update_notebook
 // step. Replacement remains the default. An append request adds a server-framed

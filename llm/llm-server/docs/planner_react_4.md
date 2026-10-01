@@ -127,7 +127,7 @@ assistant:  text("thought") + ToolCall(k8s, {...}) + ToolCall(logs, {...})
 tool:       ToolCallResponse(k8s, "<observation>")
 tool:       ToolCallResponse(logs, "<observation>")
 assistant:  text("reflection") + ToolCall(update_notebook, {...})
-tool:       ToolCallResponse(update_notebook, "ok")
+tool:       ToolCallResponse(update_notebook, "Notebook updated. …")
 assistant:  text("final answer")                 ← zero tool calls ⇒ terminal
 ```
 
@@ -184,10 +184,16 @@ dispatch-and-derive, not intercept-and-drop** — the cleaner of the two:
   pairing every provider requires is satisfied for free, and there is **no empty-turn edge case**
   (a turn that only updates the notebook still produces a real step).
 - At the start of every `Plan()`, `refreshNotebookFromSteps` scans `intermediateSteps` for the
-  most recent `update_notebook` step and sets `o.Notebook`; it is injected into the human
-  message as a `<notebook>` block. `renderStepsToMessages` **skips** notebook steps (both halves,
-  so nothing dangles) to keep the reconstructed tool history clean — the notebook lives in the
-  human block instead.
+  most recent `update_notebook` step and sets `o.Notebook` (the current state used for
+  persistence, critique and memory extraction).
+- The human message's `<notebook>` block shows the notebook **as it was at the start of the
+  turn** (`turnStartNotebook`), captured once and saved with the planner state (with the turn
+  start time) so a mid-turn resume shows the same block. In-turn `update_notebook` calls are
+  **replayed in the history** like any other tool call, with a short acknowledgement as the result (the content
+  is already in the call's arguments). The prompt therefore only grows at the end, so an update
+  no longer invalidates the provider's prefix cache for the whole tool history (#39633). Cost:
+  in-turn notebook versions stay in context — on dev ~720 tokens per run on average
+  (~2 updates of ~1.5k chars), about 2% of a typical prompt.
 
 > Rejected the intercept-and-drop variant (mutate state, don't dispatch): it creates a turn with
 > zero dispatchable actions when the model only updates the notebook, which collides with the

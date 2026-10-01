@@ -519,7 +519,7 @@ func TestReAct4_RefreshNotebookFromSteps_ReplacementAfterAppendStillReplacesWhol
 	assert.Equal(t, "consolidated state", o.Notebook)
 }
 
-func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
+func TestReAct4_RenderStepsToMessages_PairsAndReplaysNotebook(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
 		{
@@ -535,11 +535,15 @@ func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
 		{
 			Action:      NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"nb"}`, ToolID: "call_nb"},
 			Observation: "nb",
+			Status:      ToolStatusSuccess,
 		},
 	}
 	msgs := o.renderStepsToMessages(steps)
-	// One non-notebook step -> assistant(tool_use) + tool(tool_result). Notebook step skipped.
-	assert.Len(t, msgs, 2)
+	// Each step -> assistant(tool_use) + tool(tool_result); the notebook step is
+	// replayed too, with a short acknowledgement as its result.
+	assert.Len(t, msgs, 4)
+	assert.Equal(t, "call_nb", msgs[2].Parts[0].(llms.ToolCall).ID)
+	assert.Equal(t, notebookReplacedReplay, msgs[3].Parts[0].(llms.ToolCallResponse).Content)
 
 	assert.Equal(t, llms.ChatMessageTypeAI, msgs[0].Role)
 	// assistant parts: thought text + tool call
