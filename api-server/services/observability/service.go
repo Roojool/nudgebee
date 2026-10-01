@@ -3406,7 +3406,15 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		return OutputMetricQuery{}, err
 	}
 	if metricsProvider == "" {
-		return OutputMetricQuery{}, nil
+		// Still answer every key with a reason, and log: this path returns before the
+		// "utilisation served" line below is registered.
+		meta, err := parseRequestMetadata(req.Request)
+		if err != nil {
+			return OutputMetricQuery{}, err
+		}
+		ctx.GetLogger().Info("observability: utilisation has no metrics provider",
+			"account_id", req.AccountId, "keys", len(meta.RequestedMetrics))
+		return OutputMetricQuery{Results: completeUtilisationResults(nil, meta.RequestedMetrics, nil, "", esUtilisationScope(meta))}, nil
 	}
 
 	// One line per call naming the provider that served it and how long it took.
@@ -3460,6 +3468,15 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 
 	// The helper functions return a fully initialized map, so we don't need to allocate one here.
 	var queries map[string]string
+
+	// A defer so it covers the early-return arms too; it runs before the logging defer.
+	defer func() {
+		if retErr != nil {
+			return
+		}
+		result.Results = completeUtilisationResults(result.Results, meta.RequestedMetrics, queries, metricsProvider, esUtilisationScope(meta))
+	}()
+
 	// swRequest carries SolarWinds-specific filter/groupBy params passed as FetchMetricsRequest.Request.
 	// Nil for all other providers (safe — no other MetricSource reads req.Request).
 	var swRequest map[string]any
