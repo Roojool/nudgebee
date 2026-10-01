@@ -4747,7 +4747,7 @@ var table_metadata = map[string]TableDefinition{
 			},
 			"workload_count": {
 				Type: ColumnDefinitionTypeInt,
-				Def:  "workload_count",
+				Def:  "(SELECT COUNT(*) FROM k8s_workloads WHERE k8s_workloads.cloud_account_id = k8s_namespaces.cloud_account_id::uuid AND k8s_workloads.tenant_id = k8s_namespaces.tenant_id::uuid AND k8s_workloads.namespace = k8s_namespaces.name AND k8s_workloads.is_active = true)",
 			},
 			"pod_count": {
 				Type: ColumnDefinitionTypeInt,
