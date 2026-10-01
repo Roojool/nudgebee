@@ -21,19 +21,26 @@ WORKDIR /app
 
 COPY uv.lock pyproject.toml ./
 
-# Install dependencies using uv (with poetry.lock compatibility).
+# Install dependencies from uv.lock into the conda env via `uv sync`.
 # Cache mounts persist /root/.cache/{uv,pip} across builds via
 # BuildKit; the previous explicit `rm -rf` of those dirs is removed
 # because the cache mount itself keeps them out of the image layer.
+# UV_PROJECT_ENVIRONMENT points uv at the existing conda env instead of
+# creating its own .venv; --frozen trusts the committed uv.lock as-is
+# (no re-resolve); --no-install-project skips building/installing the
+# local rag-server package itself, matching the deps-only install this
+# replaced. --inexact keeps uv from removing the base image's preinstalled
+# conda/ML packages that aren't tracked in uv.lock.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     set -e; \
     (conda run -n myenv pip uninstall -y importlib-metadata || true); \
+    export UV_PROJECT_ENVIRONMENT=/opt/conda/envs/myenv; \
     success=0; \
     arch=$(uname -m); \
     for i in 1 2 3; do \
         echo "Attempt $i [arch=$arch]: Installing dependencies..."; \
-        if conda run -n myenv uv pip install --system --requirements uv.lock; then \
+        if conda run -n myenv uv sync --frozen --inexact --no-install-project; then \
             success=1; break; \
         else \
             echo "Attempt $i [arch=$arch] failed, retrying in $((i*5)) seconds..."; \
@@ -42,44 +49,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     done; \
     [ "$success" -eq 1 ] || exit 1; \
     conda clean --yes --all
-
-# Replace the CUDA build of torch with the CPU one.
-#
-# The ML base image ships torch built against CUDA, which drags in ~3.3GB of
-# nvidia/* and triton wheels. rag-server does inference on the CPU and is never
-# scheduled onto a GPU node, so none of that code can execute -- it is dead
-# weight in every layer, every pull and every pod's RSS.
-#
-# Measured on the dev image (linux/amd64): site-packages 5.5GB -> 1.8GB, pod
-# resident memory 896MB -> 527MB, with inference speed unchanged (0.448 -> 0.483
-# CPU-seconds per search, inside run-to-run variance). The pinned version is read
-# back from the installed build so this keeps whatever version the base image
-# settled on.
-#
-# arm64 is a no-op: there is no CUDA build of torch for linux/aarch64, so the
-# base image already ships a CPU one and there is nothing to strip. The case
-# below checks the actual build rather than the platform, so it stays correct if
-# the base image changes.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    set -e; \
-    TORCH_BUILD=$(conda run -n myenv python -c "import torch; print(torch.__version__)"); \
-    case "$TORCH_BUILD" in \
-      *+cu*) \
-        TORCH_VERSION=${TORCH_BUILD%%+*}; \
-        echo "Replacing torch ${TORCH_BUILD} with the CPU build"; \
-        conda run -n myenv python -m pip uninstall -y triton >/dev/null 2>&1 || true; \
-        conda run -n myenv python -m pip freeze | sed -n 's/^\(nvidia-[^=]*\)==.*/\1/p' \
-            | xargs -r conda run -n myenv python -m pip uninstall -y >/dev/null 2>&1 || true; \
-        conda run -n myenv python -m pip install --force-reinstall --no-cache-dir \
-            "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu; \
-        ;; \
-      *) \
-        echo "torch ${TORCH_BUILD} is already a CPU build (the arm64 case) - nothing to strip"; \
-        ;; \
-    esac; \
-    conda run -n myenv python -c "import torch; assert not torch.cuda.is_available(), 'expected a CPU-only torch build'; print('torch', torch.__version__)"; \
-    conda clean --yes --all
-
 
 # `production` image used for runtime
 FROM uv-base AS production
