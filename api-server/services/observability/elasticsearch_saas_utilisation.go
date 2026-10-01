@@ -438,10 +438,10 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 		memUsage = esNodeMemUsageSources()
 	}
 
-	switch key {
-	case "cpu_usage", "cpu_usage_pod", "cpu_real", "cpu_usage_trend":
+	switch UtilisationKey(key) {
+	case KeyCPUUsage, KeyCPUUsagePod, KeyCPUReal, KeyCPUUsageTrend:
 		return esUtilMetric{Sources: cpuUsage}, true
-	case "memory_usage", "mem_real", "mem_usage_trend":
+	case KeyMemoryUsage, KeyMemReal, KeyMemUsageTrend:
 		return esUtilMetric{Sources: memUsage}, true
 
 	// The nodes list asks for these and matches each returned series to a node row,
@@ -452,12 +452,12 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// Node filesystem, from the kubelet `node` metricset. These are node-level in
 	// the Prometheus builder too (node_filesystem_* selected by instance), so cluster
 	// scope sums across nodes and node scope narrows to the one.
-	case "disk_total":
+	case KeyDiskTotal:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.node.fs.capacity.bytes", Scale: esNoScale, Agg: "max",
 			GroupBy: []string{esECSFields.Node}, Fields: esECSFields,
 		}}}, true
-	case "disk_used":
+	case KeyDiskUsed:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.node.fs.used.bytes", Scale: esNoScale, Agg: "max",
 			GroupBy: []string{esECSFields.Node}, Fields: esECSFields,
@@ -476,22 +476,22 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// One series per claim rather than the sum below. The namespace level goes ABOVE
 	// the claim for the same reason it does for pods: a claim name is unique only
 	// within its namespace, and volume rightsizing keys on the pair.
-	case "pvc_used_by_claim":
+	case KeyPVCUsedByClaim:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.volume.fs.used.bytes", Scale: esNoScale, Agg: "max",
 			GroupBy: []string{esECSFields.Namespace, esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
 		}}, PerPod: true}, true
-	case "pvc_capacity_by_claim":
+	case KeyPVCCapacityByClaim:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.volume.fs.capacity.bytes", Scale: esNoScale, Agg: "max",
 			GroupBy: []string{esECSFields.Namespace, esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
 		}}, PerPod: true}, true
-	case "pvc_usage":
+	case KeyPVCUsage:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.volume.fs.used.bytes", Scale: esNoScale, Agg: "avg",
 			GroupBy: []string{esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
 		}}}, true
-	case "pvc_requests":
+	case KeyPVCRequests:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.volume.fs.capacity.bytes", Scale: esNoScale, Agg: "max",
 			GroupBy: []string{esECSFields.PVC}, Fields: esECSFields, PVCScoped: true,
@@ -500,29 +500,29 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// Replica counts describe the controller, so they come from kube-state-metrics
 	// rather than from any pod-level metricset. Field names verified against the same
 	// Elastic Kubernetes integration the customer runs, not inferred.
-	case "replica_defined":
+	case KeyReplicaDefined:
 		return esUtilMetric{Sources: esReplicaSources(
 			"kubernetes.deployment.replicas.desired", "kubernetes.replicaset.replicas.desired")}, true
-	case "replica_ready":
+	case KeyReplicaReady:
 		return esUtilMetric{Sources: esReplicaSources(
 			"kubernetes.deployment.replicas.available", "kubernetes.replicaset.replicas.ready")}, true
 
-	case "cpu_usage_line":
+	case KeyCPUUsageLine:
 		return esUtilMetric{Sources: esNodeOnlyUsageSources(esNodeCPUUsageSources()), Breakdown: true}, true
-	case "memory_usage_line":
+	case KeyMemoryUsageLine:
 		return esUtilMetric{Sources: esNodeOnlyUsageSources(esNodeMemUsageSources()), Breakdown: true}, true
 
-	case "p50_cpu":
+	case KeyP50CPU:
 		return esUtilMetric{Sources: cpuUsage, Reduce: esReduceP50}, true
-	case "p90_cpu":
+	case KeyP90CPU:
 		return esUtilMetric{Sources: cpuUsage, Reduce: esReduceP90}, true
-	case "max_usage_cpu":
+	case KeyMaxUsageCPU:
 		return esUtilMetric{Sources: cpuUsage, Reduce: esReduceMax}, true
-	case "p50_mem":
+	case KeyP50Mem:
 		return esUtilMetric{Sources: memUsage, Reduce: esReduceP50}, true
-	case "p90_mem":
+	case KeyP90Mem:
 		return esUtilMetric{Sources: memUsage, Reduce: esReduceP90}, true
-	case "max_usage_mem":
+	case KeyMaxUsageMem:
 		return esUtilMetric{Sources: memUsage, Reduce: esReduceMax}, true
 
 	// Per-pod companions to the summed usage metrics, mirroring the Prometheus
@@ -533,7 +533,7 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// Workload and pod scope only. These read GroupBy[0] of the usage sources, which
 	// is the pod there but the NODE at cluster and node scope — answering at those
 	// scopes would silently count nodes and call them pods.
-	case "pod_count":
+	case KeyPodCount:
 		if nodeScope {
 			return esUtilMetric{}, false
 		}
@@ -562,47 +562,47 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// The extra level only exists in the collapsed (aggregate) path. The histogram
 	// path groups at most twice, so a node-scoped request with no aggregate finds no
 	// usable source and comes back empty with a note rather than a merged answer.
-	case "container_cpu_usage_by_pod":
+	case KeyContainerCPUUsageByPod:
 		return esUtilMetric{Sources: perContainerCPU, PerPod: true}, true
-	case "container_memory_working_set_by_pod":
+	case KeyContainerMemoryWorkingSetByPod:
 		return esUtilMetric{Sources: perContainerMem, PerPod: true}, true
 
 	// Requests and limits in the same per-container shape as the usage keys, so a
 	// consumer can join the two on (pod, container) within a namespace.
-	case "container_cpu_request_by_pod":
+	case KeyContainerCPURequestByPod:
 		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request"), PerPod: true}, true
-	case "container_cpu_limit_by_pod":
+	case KeyContainerCPULimitByPod:
 		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.cpu.limit.cores", "k8s.container.cpu_limit"), PerPod: true}, true
-	case "container_memory_request_by_pod":
+	case KeyContainerMemoryRequestByPod:
 		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.memory.request.bytes", "k8s.container.memory_request"), PerPod: true}, true
-	case "container_memory_limit_by_pod":
+	case KeyContainerMemoryLimitByPod:
 		return esUtilMetric{Sources: perContainerSpec("kubernetes.container.memory.limit.bytes", "k8s.container.memory_limit"), PerPod: true}, true
 
-	case "cpu_usage_max_pod":
+	case KeyCPUUsageMaxPod:
 		if nodeScope {
 			return esUtilMetric{}, false
 		}
 		return esUtilMetric{Sources: cpuUsage, Series: esSeriesMax}, true
-	case "memory_usage_max_pod":
+	case KeyMemoryUsageMaxPod:
 		if nodeScope {
 			return esUtilMetric{}, false
 		}
 		return esUtilMetric{Sources: memUsage, Series: esSeriesMax}, true
 
-	case "cpu_request", "cpu_request_pod":
+	case KeyCPURequest, KeyCPURequestPod:
 		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.request.cores", "k8s.container.cpu_request")}, true
-	case "cpu_limit", "cpu_limit_pod":
+	case KeyCPULimit, KeyCPULimitPod:
 		return esUtilMetric{Sources: esSpecSources("kubernetes.container.cpu.limit.cores", "k8s.container.cpu_limit")}, true
-	case "memory_request":
+	case KeyMemoryRequest:
 		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.request.bytes", "k8s.container.memory_request")}, true
-	case "memory_limit":
+	case KeyMemoryLimit:
 		return esUtilMetric{Sources: esSpecSources("kubernetes.container.memory.limit.bytes", "k8s.container.memory_limit")}, true
 
-	case "cpu_total":
+	case KeyCPUTotal:
 		return esUtilMetric{Sources: esCapacitySource(
 			"kubernetes.node.cpu.allocatable.cores", "kubernetes.node.cpu.capacity.cores",
 			"k8s.node.allocatable_cpu")}, true
-	case "mem_total":
+	case KeyMemTotal:
 		return esUtilMetric{Sources: esCapacitySource(
 			"kubernetes.node.memory.allocatable.bytes", "kubernetes.node.memory.capacity.bytes",
 			"k8s.node.allocatable_memory")}, true
@@ -610,12 +610,12 @@ func esUtilisationMetric(key string, scope esUtilScope, containerNamed bool) (es
 	// Network counters feed the abandoned-workload scan, which averages the values
 	// as rates. Metricbeat ships cumulative byte counters, so they are differentiated
 	// per second before being summed across pods.
-	case "network_receive_packet":
+	case KeyNetworkReceivePacket:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.pod.network.rx.bytes", Scale: esNoScale, Agg: "max", Counter: true,
 			GroupBy: []string{esECSFields.Pod}, Fields: esECSFields,
 		}}}, true
-	case "network_transmit_packets":
+	case KeyNetworkTransmitPackets:
 		return esUtilMetric{Sources: []esMetricSource{{
 			Field: "kubernetes.pod.network.tx.bytes", Scale: esNoScale, Agg: "max", Counter: true,
 			GroupBy: []string{esECSFields.Pod}, Fields: esECSFields,

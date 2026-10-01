@@ -104,50 +104,50 @@ type splunkUtilisationSpec struct {
 // explicit unsupported error rather than falling through to the Prometheus builders --
 // those emit PromQL, which Splunk rejects at the validator with a message about
 // generating commands that says nothing about the real cause.
-var splunkUtilisationKeys = map[string]splunkUtilisationSpec{
-	"cpu_total":       {Role: seRoleCPUCapacity, Reducer: "latest"},
-	"cpu_real":        {Role: seRoleCPUUsage, Reducer: "avg"},
-	"p50_cpu":         {Role: seRoleCPUUsage, Reducer: "perc50"},
-	"p90_cpu":         {Role: seRoleCPUUsage, Reducer: "perc90"},
-	"max_usage_cpu":   {Role: seRoleCPUUsage, Reducer: "max"},
-	"cpu_usage_trend": {Role: seRoleCPUUsage, Reducer: ""},
-	"mem_total":       {Role: seRoleMemCapacity, Reducer: "latest"},
-	"mem_real":        {Role: seRoleMemUsage, Reducer: "latest"},
-	"p50_mem":         {Role: seRoleMemUsage, Reducer: "perc50"},
-	"p90_mem":         {Role: seRoleMemUsage, Reducer: "perc90"},
-	"max_usage_mem":   {Role: seRoleMemUsage, Reducer: "max"},
-	"mem_usage_trend": {Role: seRoleMemUsage, Reducer: ""},
-	"cpu_request":     {Role: seRoleCPURequest, Reducer: "latest"},
-	"cpu_limit":       {Role: seRoleCPULimit, Reducer: "latest"},
-	"memory_request":  {Role: seRoleMemRequest, Reducer: "latest"},
-	"memory_limit":    {Role: seRoleMemLimit, Reducer: "latest"},
+var splunkUtilisationKeys = map[UtilisationKey]splunkUtilisationSpec{
+	KeyCPUTotal:      {Role: seRoleCPUCapacity, Reducer: "latest"},
+	KeyCPUReal:       {Role: seRoleCPUUsage, Reducer: "avg"},
+	KeyP50CPU:        {Role: seRoleCPUUsage, Reducer: "perc50"},
+	KeyP90CPU:        {Role: seRoleCPUUsage, Reducer: "perc90"},
+	KeyMaxUsageCPU:   {Role: seRoleCPUUsage, Reducer: "max"},
+	KeyCPUUsageTrend: {Role: seRoleCPUUsage, Reducer: ""},
+	KeyMemTotal:      {Role: seRoleMemCapacity, Reducer: "latest"},
+	KeyMemReal:       {Role: seRoleMemUsage, Reducer: "latest"},
+	KeyP50Mem:        {Role: seRoleMemUsage, Reducer: "perc50"},
+	KeyP90Mem:        {Role: seRoleMemUsage, Reducer: "perc90"},
+	KeyMaxUsageMem:   {Role: seRoleMemUsage, Reducer: "max"},
+	KeyMemUsageTrend: {Role: seRoleMemUsage, Reducer: ""},
+	KeyCPURequest:    {Role: seRoleCPURequest, Reducer: "latest"},
+	KeyCPULimit:      {Role: seRoleCPULimit, Reducer: "latest"},
+	KeyMemoryRequest: {Role: seRoleMemRequest, Reducer: "latest"},
+	KeyMemoryLimit:   {Role: seRoleMemLimit, Reducer: "latest"},
 	// The Utilization page's usage lines. Gauges like the rest, so they follow the same
 	// instant-vs-range rule: one figure for an instant read, the series for a range.
-	"cpu_usage":    {Role: seRolePodCPUUsage, Reducer: "latest"},
-	"memory_usage": {Role: seRolePodMemUsage, Reducer: "latest"},
+	KeyCPUUsage:    {Role: seRolePodCPUUsage, Reducer: "latest"},
+	KeyMemoryUsage: {Role: seRolePodMemUsage, Reducer: "latest"},
 
 	// The per-container keys vertical rightsizing reads, in the Prometheus builder's
 	// shape: one series per (namespace, pod, container), labelled canonically, so usage
 	// joins against its spec on those three.
-	"container_cpu_usage_by_pod":          {Role: seRoleContainerCPUUsage, PerPod: true},
-	"container_memory_working_set_by_pod": {Role: seRoleContainerMemWorkingSet, PerPod: true},
-	"container_cpu_request_by_pod":        {Role: seRoleCPURequest, PerPod: true},
-	"container_cpu_limit_by_pod":          {Role: seRoleCPULimit, PerPod: true},
-	"container_memory_request_by_pod":     {Role: seRoleMemRequest, PerPod: true},
-	"container_memory_limit_by_pod":       {Role: seRoleMemLimit, PerPod: true},
+	KeyContainerCPUUsageByPod:         {Role: seRoleContainerCPUUsage, PerPod: true},
+	KeyContainerMemoryWorkingSetByPod: {Role: seRoleContainerMemWorkingSet, PerPod: true},
+	KeyContainerCPURequestByPod:       {Role: seRoleCPURequest, PerPod: true},
+	KeyContainerCPULimitByPod:         {Role: seRoleCPULimit, PerPod: true},
+	KeyContainerMemoryRequestByPod:    {Role: seRoleMemRequest, PerPod: true},
+	KeyContainerMemoryLimitByPod:      {Role: seRoleMemLimit, PerPod: true},
 }
 
 // splunkUtilisationRefusals are keys deliberately not served, with the reason. Answering
 // them from the nearest family would be worse than no answer, because rightsizing would
 // act on it.
-var splunkUtilisationRefusals = map[string]string{
+var splunkUtilisationRefusals = map[UtilisationKey]string{
 	// The cgroup high-water mark. The OTel collector's kubeletstats receiver reports
 	// usage and working set, not a max; substituting working set would set a memory
 	// limit below the peak it has to cover. Rightsizing treats this key as optional.
-	"container_memory_max_usage_by_pod": "splunk enterprise: no Splunk OTel metric carries the container memory high-water mark",
+	KeyContainerMemoryMaxUsageByPod: "splunk enterprise: no Splunk OTel metric carries the container memory high-water mark",
 	// Needs the limit joined against a per-container OOMKilled terminated reason; the
 	// k8s_cluster receiver publishes restarts but not the reason.
-	"container_oomkilled_limit_by_pod": "splunk enterprise: no Splunk OTel metric carries a container's OOMKilled termination reason",
+	KeyContainerOOMKilledLimitByPod: "splunk enterprise: no Splunk OTel metric carries a container's OOMKilled termination reason",
 }
 
 // splunkUtilisationSeriesColumn holds each series' per-bucket value before the series are
@@ -339,11 +339,11 @@ func fetchSplunkEnterpriseUtilisation(ctx *security.RequestContext, req GetUtili
 	results := make([]QueryResult, 0, len(meta.RequestedMetrics))
 
 	for _, key := range meta.RequestedMetrics {
-		if reason, refused := splunkUtilisationRefusals[key]; refused {
+		if reason, refused := splunkUtilisationRefusals[UtilisationKey(key)]; refused {
 			results = append(results, splunkUtilisationUnavailable(key, reason))
 			continue
 		}
-		spec, ok := splunkUtilisationKeys[key]
+		spec, ok := splunkUtilisationKeys[UtilisationKey(key)]
 		if !ok {
 			results = append(results, splunkUtilisationUnavailable(key,
 				fmt.Sprintf("splunk enterprise: utilisation key %q is not served by this provider", key)))

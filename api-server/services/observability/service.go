@@ -3412,6 +3412,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		if err != nil {
 			return OutputMetricQuery{}, err
 		}
+		logUnknownUtilisationKeys(ctx, req.AccountId, meta.RequestedMetrics)
 		ctx.GetLogger().Info("observability: utilisation has no metrics provider",
 			"account_id", req.AccountId, "keys", len(meta.RequestedMetrics))
 		return OutputMetricQuery{Results: completeUtilisationResults(nil, meta.RequestedMetrics, nil, "", esUtilisationScope(meta))}, nil
@@ -3439,6 +3440,7 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 	if err != nil {
 		return OutputMetricQuery{}, err
 	}
+	logUnknownUtilisationKeys(ctx, req.AccountId, meta.RequestedMetrics)
 
 	instant := false
 	if v, ok := req.Request["instant"].(bool); ok {
@@ -3598,10 +3600,10 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 		output.Results = datadogNoteUnanswerableKeys(output.Results, meta.RequestedMetrics)
 		percentileKeys := make(map[string]float64)
 		for _, m := range meta.RequestedMetrics {
-			switch m {
-			case "p90_mem", "p90_cpu":
+			switch UtilisationKey(m) {
+			case KeyP90Mem, KeyP90CPU:
 				percentileKeys[m] = 0.90
-			case "p50_mem", "p50_cpu":
+			case KeyP50Mem, KeyP50CPU:
 				percentileKeys[m] = 0.50
 			}
 		}
@@ -3622,12 +3624,12 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 			if len(qr.Payload) == 0 {
 				continue
 			}
-			switch qr.QueryKey {
-			case "p90_cpu", "p90_mem":
+			switch UtilisationKey(qr.QueryKey) {
+			case KeyP90CPU, KeyP90Mem:
 				output.Results[i].Payload = []Result{computePercentileFromSeries(qr.Payload, 0.90)}
-			case "p50_cpu", "p50_mem":
+			case KeyP50CPU, KeyP50Mem:
 				output.Results[i].Payload = []Result{computePercentileFromSeries(qr.Payload, 0.50)}
-			case "max_usage_cpu", "max_usage_mem":
+			case KeyMaxUsageCPU, KeyMaxUsageMem:
 				output.Results[i].Payload = []Result{computePercentileFromSeries(qr.Payload, 1.0)}
 			}
 		}

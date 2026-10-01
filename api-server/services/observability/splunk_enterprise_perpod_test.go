@@ -31,8 +31,8 @@ var splunkRightsizingKeys = []string{
 
 func TestSplunkPerPodKeysAreAllDecided(t *testing.T) {
 	for _, key := range splunkRightsizingKeys {
-		spec, served := splunkUtilisationKeys[key]
-		_, refused := splunkUtilisationRefusals[key]
+		spec, served := splunkUtilisationKeys[UtilisationKey(key)]
+		_, refused := splunkUtilisationRefusals[UtilisationKey(key)]
 		assert.True(t, served != refused, "%s must be exactly one of served or refused", key)
 		if served {
 			assert.True(t, spec.PerPod, "%s must return one series per pod and container", key)

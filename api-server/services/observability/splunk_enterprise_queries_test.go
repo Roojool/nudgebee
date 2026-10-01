@@ -154,7 +154,7 @@ func TestSplunkUtilisationCoversEveryCardKey(t *testing.T) {
 		"p50_cpu", "p90_cpu", "max_usage_cpu",
 		"p50_mem", "p90_mem", "max_usage_mem",
 	} {
-		_, ok := splunkUtilisationKeys[key]
+		_, ok := splunkUtilisationKeys[UtilisationKey(key)]
 		assert.True(t, ok, "%s is drawn by the Utilization & Health card and must be served", key)
 	}
 }
@@ -177,14 +177,14 @@ func TestSplunkUtilisationGaugesReturnSeriesOnRangeRequests(t *testing.T) {
 
 	// Everything the Trend popup plots must yield a series on a range request.
 	for _, key := range []string{"cpu_total", "cpu_request", "cpu_limit", "mem_total", "memory_request", "memory_limit"} {
-		q, err := buildSplunkUtilisationQuery("m", "idx", 60, splunkUtilisationReducer(splunkUtilisationKeys[key], ParsedAggregate{}, false), nil)
+		q, err := buildSplunkUtilisationQuery("m", "idx", 60, splunkUtilisationReducer(splunkUtilisationKeys[UtilisationKey(key)], ParsedAggregate{}, false), nil)
 		require.NoError(t, err)
 		assert.True(t, strings.HasSuffix(q, "| fields _time nb_value"), "%s must not reduce on a range request: %s", key, q)
 	}
 
 	// Window statistics describe the whole range by definition, so they stay reduced.
 	for _, key := range []string{"cpu_real", "p50_cpu", "p90_cpu", "max_usage_cpu", "p50_mem", "max_usage_mem"} {
-		spec := splunkUtilisationKeys[key]
+		spec := splunkUtilisationKeys[UtilisationKey(key)]
 		assert.Equal(t, spec.Reducer, splunkUtilisationReducer(spec, ParsedAggregate{}, false), "%s stays reduced on a range request", key)
 	}
 }
@@ -198,7 +198,7 @@ func TestSplunkUtilisationCountOverridesTheKeyReducer(t *testing.T) {
 	// A gauge whose reducer is "latest" and a trend key whose reducer is empty both have to
 	// answer a count with a count.
 	for _, key := range []string{"cpu_total", "mem_total", "cpu_usage_trend", "mem_usage_trend"} {
-		spec := splunkUtilisationKeys[key]
+		spec := splunkUtilisationKeys[UtilisationKey(key)]
 		assert.Equal(t, "count", splunkUtilisationReducer(spec, count, false),
 			"%s must answer a count request with count, not %q", key, spec.Reducer)
 
@@ -211,7 +211,7 @@ func TestSplunkUtilisationCountOverridesTheKeyReducer(t *testing.T) {
 	// Every other aggregate leaves the key's own statistic alone. Overriding it would answer
 	// p50_cpu with a mean, under a name that promises a median.
 	for _, key := range []string{"cpu_real", "p50_cpu", "p90_cpu", "max_usage_cpu"} {
-		spec := splunkUtilisationKeys[key]
+		spec := splunkUtilisationKeys[UtilisationKey(key)]
 		for _, agg := range []string{"avg", "max", "min"} {
 			assert.Equal(t, spec.Reducer, splunkUtilisationReducer(spec, ParsedAggregate{Name: agg}, false),
 				"%s must keep its own reducer under aggregate=%s", key, agg)
@@ -274,7 +274,7 @@ func TestSplunkUtilisationScopesToTheRequestedTarget(t *testing.T) {
 // draws limits with no usage line.
 func TestSplunkUtilisationServesTheUtilizationPageKeys(t *testing.T) {
 	for _, key := range []string{"cpu_usage", "memory_usage", "cpu_limit", "cpu_request", "memory_limit", "memory_request"} {
-		_, ok := splunkUtilisationKeys[key]
+		_, ok := splunkUtilisationKeys[UtilisationKey(key)]
 		assert.True(t, ok, "%s is requested by the Utilization page and must be served", key)
 	}
 }
