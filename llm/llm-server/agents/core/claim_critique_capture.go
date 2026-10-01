@@ -58,9 +58,19 @@ func claimHash(data []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// The actionable prompt asks for why/alternative/check on each weak claim; the
+// recorded PromptModule keeps audits from the two prompts distinguishable.
+func claimCritiquePromptModule() string {
+	if config.Config.ClaimCritiqueActionableFeedbackEnabled {
+		return nbprompts.PromptReactClaimCritiquerActionable
+	}
+	return nbprompts.PromptReactClaimCritiquer
+}
+
 func prepareClaimCapture(ctx *security.RequestContext, accountID, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) (claimCaptureDetail, string) {
 	packet, err := claimCritiquePacket(input, answer, notebook, steps)
-	detail := claimCaptureDetail{Version: claimCaptureVersion, PromptModule: nbprompts.PromptReactClaimCritiquer,
+	promptModule := claimCritiquePromptModule()
+	detail := claimCaptureDetail{Version: claimCaptureVersion, PromptModule: promptModule,
 		InputBytes: len(packet), InputSHA256: claimHash(packet)}
 	for _, step := range steps {
 		if !isNotebookToolName(step.Action.Tool) {
@@ -72,7 +82,7 @@ func prepareClaimCapture(ctx *security.RequestContext, accountID, input, answer,
 		return detail, "input_limit"
 	}
 	detail.InputPacket = packet
-	prompt, err := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReactClaimCritiquer, accountID)
+	prompt, err := nbprompts.GetPromptStrict(ctx.GetContext(), promptModule, accountID)
 	if err != nil {
 		detail.ErrorStage, detail.ErrorDetail = "prompt", TruncateHead(err.Error(), 2048)
 		return detail, "prompt_error"
