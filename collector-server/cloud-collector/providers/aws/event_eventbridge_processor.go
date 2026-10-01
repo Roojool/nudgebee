@@ -1706,12 +1706,17 @@ func resolveResourceIdentity(
 // services without a targeted fetch, ListResources falls back to a region scan
 // filtered by strings.Contains(resource.Arn, key) (main.go), so a name key like
 // "web" also returns "web-2". Taking Items[0] blindly would stamp the event — a
-// Delete included — onto that other resource. Accept only an item whose Id,
-// Name or Arn equals the key, or whose Arn the key qualifies (a Lambda
+// Delete included — onto that other resource. Accept only an item whose Id or
+// Arn equals the key, or whose Arn the key qualifies (a Lambda
 // "<function-arn>:PROD" resolved by GetFunction to the base function).
+//
+// Name is deliberately not a match. Every rule keys on the stored Id or the Arn,
+// and a Name can belong to a different resource: an Application Load Balancer is
+// stored under its ARN, so one named "web" would otherwise be adopted — and
+// marked Deleted — when a Classic Load Balancer "web" is deleted.
 func findLookupMatch(items []providers.Resource, key string) (providers.Resource, bool) {
 	for _, item := range items {
-		if item.Id == key || item.Name == key || item.Arn == key ||
+		if item.Id == key || item.Arn == key ||
 			(item.Arn != "" && strings.HasPrefix(key, item.Arn+":")) {
 			return item, true
 		}

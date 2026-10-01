@@ -514,6 +514,25 @@ func (a *awsProvider) QueryDatabasePerformance(ctx providers.CloudProviderContex
 	return rdsService.QueryDatabasePerformance(ctx, account, request)
 }
 
+// filterResourcesByIds keeps the resources a full GetResources scan returned that
+// match a requested id by Id, Name, Arn or an Arn substring. It is a no-op when no
+// ids were requested.
+func filterResourcesByIds(resources []providers.Resource, resourceIds []string) []providers.Resource {
+	if len(resourceIds) == 0 {
+		return resources
+	}
+	filteredResources := []providers.Resource{}
+	for _, resource := range resources {
+		for _, resourceId := range resourceIds {
+			if resource.Id == resourceId || resource.Name == resourceId || resource.Arn == resourceId || strings.Contains(resource.Arn, resourceId) {
+				filteredResources = append(filteredResources, resource)
+				break
+			}
+		}
+	}
+	return filteredResources
+}
+
 func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account providers.Account, query providers.ListResourceRequest) (providers.ListResourcesResponse, error) {
 	if query.ServiceName == "" {
 		return providers.ListResourcesResponse{
@@ -560,7 +579,9 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 	}
 
 	// When ResourceIds are specified, try targeted fetch first (avoids full service scan).
-	// Falls back to full GetResources + client-side filter if the service doesn't support it.
+	// Falls back to full GetResources + client-side filter if the service doesn't support
+	// it or the targeted call fails. The filter is applied wherever the full scan ran,
+	// per region: a failed targeted call must not hand back the whole region unfiltered.
 	useTargetedFetch := len(query.ResourceIds) > 0
 
 	// Global services (e.g., S3, IAM, CloudFront) expose a single account-wide listing
@@ -571,15 +592,19 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 		ctx.GetLogger().Info("fetching global resources", "service", query.ServiceName)
 		var serviceResources []providers.Resource
 		var err error
-		if useTargetedFetch {
+		targeted := useTargetedFetch
+		if targeted {
 			serviceResources, err = service.GetResourcesByIds(ctx, account, "", query.ResourceIds)
 			if errors.Is(err, errors.ErrUnsupported) {
 				err = nil
-				useTargetedFetch = false
+				targeted = false
 			}
 		}
-		if !useTargetedFetch || err != nil {
+		if !targeted || err != nil {
 			serviceResources, err = service.GetResources(ctx, account, "")
+			if err == nil {
+				serviceResources = filterResourcesByIds(serviceResources, query.ResourceIds)
+			}
 		}
 		if err != nil {
 			ctx.GetLogger().Error("failed to fetch global resources", "error", err, "service", query.ServiceName)
@@ -626,18 +651,23 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 			var serviceResources []providers.Resource
 			var err error
 
-			if useTargetedFetch {
+			// Per region: regions run concurrently, so this must not write the shared flag.
+			targeted := useTargetedFetch
+			if targeted {
 				serviceResources, err = service.GetResourcesByIds(ctx, account, regionName, query.ResourceIds)
 				if errors.Is(err, errors.ErrUnsupported) {
 					// Service doesn't support targeted fetch, fall back to full scan
 					err = nil
-					useTargetedFetch = false
+					targeted = false
 				}
 			}
 
-			if !useTargetedFetch || err != nil {
+			if !targeted || err != nil {
 				ctx.GetLogger().Info("fetching resources", "service", query.ServiceName, "region", regionName)
 				serviceResources, err = service.GetResources(ctx, account, regionName)
+				if err == nil {
+					serviceResources = filterResourcesByIds(serviceResources, query.ResourceIds)
+				}
 			}
 
 			if err != nil {
@@ -700,20 +730,6 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 	// exactly as it does when zero regions are queried.
 	if successCount == 0 && (unreachableCount > 0 || throttledCount > 0 || disabledCount > 0) {
 		allErrors = multierr.Append(allErrors, fmt.Errorf("all attempted region(s) failed for service %s (%d unreachable, %d throttled, %d disabled); refusing to report an empty result", query.ServiceName, unreachableCount, throttledCount, disabledCount))
-	}
-
-	// Client-side ResourceIds filter — only needed when we fell back to full GetResources
-	if len(query.ResourceIds) > 0 && !useTargetedFetch {
-		filteredResources := []providers.Resource{}
-		for _, resource := range resources {
-			for _, resourceId := range query.ResourceIds {
-				if resource.Id == resourceId || resource.Name == resourceId || resource.Arn == resourceId || strings.Contains(resource.Arn, resourceId) {
-					filteredResources = append(filteredResources, resource)
-					break
-				}
-			}
-		}
-		resources = filteredResources
 	}
 
 	if len(query.Labels) > 0 {
