@@ -33,13 +33,14 @@ func mockMetastore(t *testing.T) (*sqlx.DB, sqlmock.Sqlmock) {
 	return sqlxDB, mock
 }
 
-// expectToolQuery expects one tool query as sqlExecuteQuery runs it: inside a
-// read-only transaction that sets its timeout and work_mem, rolled back after.
+// expectToolQuery expects one tool query as sqlExecuteQuery runs it: prepared
+// inside a read-only transaction that sets its timeout and work_mem, rolled
+// back after.
 func expectToolQuery(mock sqlmock.Sqlmock, sqlRegex string) *sqlmock.ExpectedQuery {
 	mock.ExpectBegin()
 	mock.ExpectExec(`SET LOCAL statement_timeout`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`SET LOCAL work_mem`).WillReturnResult(sqlmock.NewResult(0, 0))
-	query := mock.ExpectQuery(sqlRegex)
+	query := mock.ExpectPrepare(sqlRegex).WillBeClosed().ExpectQuery()
 	mock.ExpectRollback()
 	return query
 }
@@ -411,7 +412,7 @@ func TestSqlExecuteQueryRunsReadOnlyWithTimeoutAndWorkMem(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta("SET LOCAL statement_timeout = 120000")).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("SET LOCAL work_mem = '32MB'")).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("select").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("evt-1"))
+	mock.ExpectPrepare("select").WillBeClosed().ExpectQuery().WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("evt-1"))
 	mock.ExpectRollback()
 
 	data, err := sqlExecuteQuery(ctx, "SELECT id FROM events", "550e8400-e29b-41d4-a716-446655440000", "events", "", 0)

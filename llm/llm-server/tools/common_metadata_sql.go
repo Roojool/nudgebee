@@ -275,7 +275,8 @@ func sqlExecuteQuery(ctx *security.RequestContext, query string, accountId strin
 	defer cancel()
 
 	// READ ONLY also rejects DML hidden in a CTE, which the prefix check in
-	// sqlValidateReadOnly does not see.
+	// sqlValidateReadOnly does not see. It holds only while the query is a
+	// single statement; see the Prepare below.
 	tx, err := dbManager.Db.BeginTxx(queryCtx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("sqlExecuteQuery: begin read-only transaction: %w", err)
@@ -296,7 +297,19 @@ func sqlExecuteQuery(ctx *security.RequestContext, query string, accountId strin
 		}
 	}
 
-	rows, err := tx.QueryxContext(queryCtx, finalQuery)
+	// Prepared, not sent as a plain query: Postgres refuses to prepare more
+	// than one statement, so "select ...; commit; delete ..." cannot end the
+	// read-only transaction and run the rest in autocommit.
+	stmt, err := tx.PreparexContext(queryCtx, finalQuery)
+	if err != nil {
+		return nil, toolQueryError(ctx, tableName, timeout, err)
+	}
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			ctx.GetLogger().Warn("sql: closing tool query statement failed", "error", err)
+		}
+	}()
+	rows, err := stmt.QueryxContext(queryCtx)
 	if err != nil {
 		return nil, toolQueryError(ctx, tableName, timeout, err)
 	}
