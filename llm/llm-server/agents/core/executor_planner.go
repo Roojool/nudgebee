@@ -4376,6 +4376,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// back to routine defaults (small tail, no error filter), missing rare-error
 	// clusters in long streams.
 	toolContext.OriginalQuery = agentRequest.OriginalQuery
+	toolContext.OriginalQueryFromUser = agentRequest.OriginalQueryFromUser
 	toolContext.FollowupAnswer = followupAnswer
 
 	// Every delegated agent performs its own account-wide search using the original

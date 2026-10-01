@@ -449,20 +449,23 @@ func buildFetchLogsDirectRequest(nbCtx toolcore.NbToolContext, input toolcore.NB
 		}
 	}
 	request := core.NBAgentRequest{
-		Query:            input.Command,
-		AccountId:        nbCtx.AccountId,
-		ConversationId:   nbCtx.ConversationId,
-		AgentId:          nbCtx.ParentAgentId,
-		ParentAgentId:    nbCtx.ParentAgentId,
-		MessageId:        nbCtx.MessageId,
-		UserId:           nbCtx.UserId,
-		QueryContext:     nbCtx.QueryContext,
-		QueryConfig:      nbCtx.QueryConfig,
-		SessionId:        nbCtx.SessionId,
-		OriginalQuery:    nbCtx.OriginalQuery,
-		AccountContext:   nbCtx.AccountContext,
-		AccountPrompt:    nbCtx.AccountPrompt,
-		KBPrestepContent: knowledge,
+		Query:          input.Command,
+		AccountId:      nbCtx.AccountId,
+		ConversationId: nbCtx.ConversationId,
+		AgentId:        nbCtx.ParentAgentId,
+		ParentAgentId:  nbCtx.ParentAgentId,
+		MessageId:      nbCtx.MessageId,
+		UserId:         nbCtx.UserId,
+		QueryContext:   nbCtx.QueryContext,
+		QueryConfig:    nbCtx.QueryConfig,
+		SessionId:      nbCtx.SessionId,
+		OriginalQuery:  nbCtx.OriginalQuery,
+		// Carried with OriginalQuery so the query plan knows whether the
+		// constraints in it are a person's.
+		OriginalQueryFromUser: nbCtx.OriginalQueryFromUser,
+		AccountContext:        nbCtx.AccountContext,
+		AccountPrompt:         nbCtx.AccountPrompt,
+		KBPrestepContent:      knowledge,
 	}
 	// Translators (including kubectl fallback) consume ConversationContext;
 	// retain QueryContext as well for downstream tool execution.

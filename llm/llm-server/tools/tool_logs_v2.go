@@ -128,29 +128,15 @@ func (t *NBLogToolV2) Call(nbRequestContext core.NbToolContext, input core.NBToo
 	if args == nil {
 		args = make(map[string]any)
 	}
-	if _, ok := args["range"]; !ok && queryBuilder.TimeRange != "" {
-		args["range"] = queryBuilder.TimeRange
-	}
-	if _, ok := args["start_time"]; !ok && queryBuilder.StartTime != "" {
-		args["start_time"] = queryBuilder.StartTime
-	}
-	if _, ok := args["end_time"]; !ok && queryBuilder.EndTime != "" {
-		args["end_time"] = queryBuilder.EndTime
-	}
-	// A window written into the filter (timestamp bounds) is still the window asked for;
-	// without this the search ran over the default last hour and missed it entirely.
-	if !hasWindowArgs(args) {
-		if from, to, ok := windowFromTimestampBounds(queryBuilder.Where, time.Now()); ok {
-			args["start_time"] = from.Format(time.RFC3339Nano)
-			args["end_time"] = to.Format(time.RFC3339Nano)
-		}
-	}
 
-	start := time.Now().Add(-1 * time.Hour)
-	end := time.Now()
-	if t1, t2, err := ExtractStartEndtimeFromLabels(nbRequestContext, args); err == nil {
-		start = t1
-		end = t2
+	// The query's own window, then the event's when this is an event-triggered
+	// conversation, then the last hour.
+	now := time.Now()
+	start, end := now.Add(-1*time.Hour), now
+	if window, ok := ResolveLogQueryWindow(queryBuilder, args, now); ok {
+		start, end = window.Start, window.End
+	} else if t1, t2, ok := resolveWindowFromLabelsAt(nbRequestContext.QueryConfig.Labels, now.UTC()); ok {
+		start, end = t1.UTC(), t2.UTC()
 	}
 	start, end = ExpandNarrowTimeWindow(nbRequestContext.Ctx.GetLogger(), start, end)
 

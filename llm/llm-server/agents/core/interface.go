@@ -119,6 +119,13 @@ type NBAgentRequest struct {
 	// executor entry and propagated unchanged through delegation. Empty means this
 	// is the top-level invocation; non-empty means we are running under a parent.
 	OriginalQuery string `json:"original_query,omitempty"`
+	// OriginalQueryFromUser says OriginalQuery is text a person typed, not a
+	// prompt this system generated (an event investigation, an automation, a
+	// notification). Set where OriginalQuery is, from the conversation's source,
+	// and carried with it. A reader that takes constraints from OriginalQuery —
+	// a time window, a limit — must check this first: a generated prompt contains
+	// phrases like "last 2h" that are instructions to the model, not a request.
+	OriginalQueryFromUser bool `json:"original_query_from_user,omitempty"`
 	// SelectedSkillIds is retained for custom code-analysis and compatibility
 	// paths. Account-wide runtime knowledge discovery does not use it.
 	SelectedSkillIds []string `json:"selected_skill_ids,omitempty"`

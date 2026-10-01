@@ -612,10 +612,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// Preserve the user's original question across delegation. Knowledge discovery
 	// combines it with each agent's delegated task, so every agent gets a fresh,
 	// task-specific account-wide search without losing the user's intent.
-	isTopLevelInvocation := request.OriginalQuery == ""
-	if isTopLevelInvocation {
-		request.OriginalQuery = request.Query
-	}
+	isTopLevelInvocation := seedOriginalQuery(&request)
 
 	kbChan := make(chan kbAssemblyResult, 1)
 	go func(prompt NBAgentPrompt) {

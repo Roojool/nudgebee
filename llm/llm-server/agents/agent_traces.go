@@ -253,6 +253,7 @@ func (f *fallbackTracesAgent) Execute(ctx *security.RequestContext, query core.N
 			// "traces" via its lazy <skill-lists> + load_skills flow.
 			InheritSkillsFromAgents: append(query.InheritSkillsFromAgents, f.GetName()),
 			OriginalQuery:           query.OriginalQuery,
+			OriginalQueryFromUser:   query.OriginalQueryFromUser,
 			SelectedSkillIds:        query.SelectedSkillIds,
 			KnowledgePolicy:         string(query.KnowledgePolicy),
 			KnowledgePolicyResolved: query.KnowledgePolicyResolved,

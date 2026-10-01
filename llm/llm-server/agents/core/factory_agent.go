@@ -581,6 +581,7 @@ func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent
 		// selection — re-running it against a mechanical sub-agent command (e.g.
 		// "fetch CPU for pod foo") would destroy relevance.
 		OriginalQuery:           nbRequestContext.OriginalQuery,
+		OriginalQueryFromUser:   nbRequestContext.OriginalQueryFromUser,
 		SelectedSkillIds:        nbRequestContext.SelectedSkillIds,
 		SessionId:               nbRequestContext.SessionId,
 		KBPrestepContent:        nbRequestContext.KBPrestepContent,

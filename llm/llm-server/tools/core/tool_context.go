@@ -406,6 +406,8 @@ type NbToolContext struct {
 	// selection across delegation. See NBAgentRequest field comments for semantics.
 	OriginalQuery    string
 	SelectedSkillIds []string
+	// OriginalQueryFromUser mirrors NBAgentRequest.OriginalQueryFromUser.
+	OriginalQueryFromUser bool
 	// FollowupAnswer is the user's answer to a question this tool's sub-agent
 	// asked. It is set only when a paused tool resumes after that question, so a
 	// tool that runs a sub-agent can hand the answer to it instead of treating it

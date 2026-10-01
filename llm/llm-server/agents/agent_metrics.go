@@ -126,6 +126,7 @@ func (f *metricsAgent) Execute(ctx *security.RequestContext, query core.NBAgentR
 		// <skill-lists> + load_skills flow.
 		InheritSkillsFromAgents: append(query.InheritSkillsFromAgents, f.GetName()),
 		OriginalQuery:           query.OriginalQuery,
+		OriginalQueryFromUser:   query.OriginalQueryFromUser,
 		SelectedSkillIds:        query.SelectedSkillIds,
 		KnowledgePolicy:         string(query.KnowledgePolicy),
 		KnowledgePolicyResolved: query.KnowledgePolicyResolved,
@@ -272,6 +273,7 @@ func (m *metricsQueryAgent) Execute(ctx *security.RequestContext, query core.NBA
 		UserId:                  query.UserId,
 		InheritSkillsFromAgents: append(query.InheritSkillsFromAgents, m.GetName()),
 		OriginalQuery:           query.OriginalQuery,
+		OriginalQueryFromUser:   query.OriginalQueryFromUser,
 		SelectedSkillIds:        query.SelectedSkillIds,
 		KnowledgePolicy:         string(query.KnowledgePolicy),
 		KnowledgePolicyResolved: query.KnowledgePolicyResolved,
