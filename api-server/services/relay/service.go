@@ -164,7 +164,11 @@ func ExecutePrometheusWithStep(accountId string, startTime time.Time, endTime ti
 	})
 
 	if err != nil {
-		slog.Error("relay: unable to process request", "error", err)
+		if err.Error() == errMsgAgentNotConnected {
+			slog.Warn("relay: agent not connected", "account_id", accountId, "error", err)
+		} else {
+			slog.Error("relay: unable to process request", "error", err)
+		}
 		return map[string]any{}, err
 	}
 
