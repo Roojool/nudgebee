@@ -49,6 +49,13 @@ type EventIncomingWebhook struct {
 	// row (see firingFindingIDFor); leave it empty when the source offers no such
 	// key, or when EventId is already per firing.
 	FiringKey string `json:"firing_key,omitempty"`
+	// LegacyFingerprint is the fingerprint this alert was stored under before its
+	// parser changed fingerprint format. A resolve closes events under it as well as
+	// under Investigation.Fingerprint, so events opened before the change still
+	// close. Empty when the format did not change for this alert. Transitional:
+	// remove once no open datadog_webhook event carries a "<monitorID>-"
+	// fingerprint (#39861).
+	LegacyFingerprint string `json:"legacy_fingerprint,omitempty"`
 	// PodNameCandidates are names that may be pods, from a parser whose payload
 	// cannot say which of its values is the pod (a Kibana group id is the group
 	// values joined together). ResolveSubjectFromPodCandidates looks each one up in
@@ -912,23 +919,19 @@ func resolveEvent(sc *security.RequestContext, tenantId, accountId string, sourc
 		return err
 	}
 	fingerPrint := resolveKey(source, event)
-	// The status guard in eventtypes.ResolveEventQuery makes repeated resolve webhooks no-ops,
-	// so only a genuine open→closed transition publishes the resolved notification.
-	rows, err := dbms.Query(eventtypes.ResolveEventQuery, tenantId, accountId, fingerPrint, string(eventtypes.EventStatusClosed), eventtypes.ResolveEndsAt(event.EventEndsAt))
+	resolvedIds, err := closeEventsByResolveKey(dbms, tenantId, accountId, fingerPrint, event.EventEndsAt)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = rows.Close() }()
-	var resolvedIds []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
+	// Events stored before the parser changed fingerprint format match nothing
+	// under the new key. Closing them here as well keeps them from staying open for
+	// good. A failure only logs, so the events closed above still notify.
+	if event.LegacyFingerprint != "" && event.LegacyFingerprint != fingerPrint {
+		legacyIds, err := closeEventsByResolveKey(dbms, tenantId, accountId, event.LegacyFingerprint, event.EventEndsAt)
+		if err != nil {
+			sc.GetLogger().Error("integrations: unable to resolve events under the legacy fingerprint", "error", err, "source", source, "legacy_fingerprint", event.LegacyFingerprint)
 		}
-		resolvedIds = append(resolvedIds, id)
-	}
-	if err := rows.Err(); err != nil {
-		return err
+		resolvedIds = append(resolvedIds, legacyIds...)
 	}
 	for _, id := range resolvedIds {
 		_ = common.MqPublish(
@@ -941,6 +944,29 @@ func resolveEvent(sc *security.RequestContext, tenantId, accountId string, sourc
 		)
 	}
 	return nil
+}
+
+// closeEventsByResolveKey closes the open events key names and returns their ids.
+// The status guard in eventtypes.ResolveEventQuery makes repeated resolve webhooks
+// no-ops, so only a genuine open→closed transition is returned, and notified.
+func closeEventsByResolveKey(dbms *database.DatabaseManager, tenantId, accountId, key string, endsAt time.Time) ([]string, error) {
+	rows, err := dbms.Query(eventtypes.ResolveEventQuery, tenantId, accountId, key, string(eventtypes.EventStatusClosed), eventtypes.ResolveEndsAt(endsAt))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var resolvedIds []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		resolvedIds = append(resolvedIds, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return resolvedIds, nil
 }
 
 func investigateWebhookEvent(sc *security.RequestContext, tenantId, accountId string, source string, event EventIncomingWebhook) error {

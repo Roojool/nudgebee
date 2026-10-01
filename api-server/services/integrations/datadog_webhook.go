@@ -16,6 +16,7 @@ import (
 	"nudgebee/services/security"
 	"nudgebee/services/tenant"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1263,6 +1264,9 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 	}
 
 	var eventURL, monitorID string
+	// Read here, from the webhook's own body: the Events API text that replaces
+	// p.Body below links the monitor by relative URL, which the regex never matches.
+	monitorGroup := datadogMonitorGroup(p.Body)
 	monitorURLMatches := datadogMonitorURLRegex.FindStringSubmatch(p.Body)
 	if len(monitorURLMatches) >= 2 {
 		eventURL = monitorURLMatches[0]
@@ -1970,10 +1974,21 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 	}
 
 	fingerprint := p.Event.AggregKey
+	legacyFingerprint := ""
 	findingId := p.ID
 	isIncident := false
 	if monitorID != "" && p.EventType != "notification" {
 		fingerprint = fmt.Sprintf("%s-%s", monitorID, p.Event.AggregKey)
+		// $AGGREG_KEY is already one per monitor group. A template without it left
+		// every group of a multi-alert monitor on "<monitorID>-", so one group's
+		// recovery closed them all; key on the group itself instead. Events opened
+		// under the old key still close through legacyFingerprint.
+		if p.Event.AggregKey == "" {
+			if group := firstNonEmpty(monitorGroup, datadogGroupKey(p.Alert.AlertScope)); group != "" {
+				legacyFingerprint = fingerprint
+				fingerprint = fmt.Sprintf("%s-%s", monitorID, group)
+			}
+		}
 	} else if p.Incident.IncidentPublicID != "" {
 		isIncident = true
 		findingId = p.Incident.IncidentUUID
@@ -2266,6 +2281,16 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		subjectOwnerKind = deploymentKind
 	}
 
+	// Only a recovery ends a monitor alert. Datadog sets last_updated to the
+	// notification's own time, equal to date on a firing delivery, and ends_at ==
+	// starts_at makes InsertEvent store the alert CLOSED on arrival (point-in-time).
+	// A one-shot delivery (no monitor, or event_type "notification") never gets a
+	// Recovered that could close it, so it keeps that point-in-time end.
+	var endsAt time.Time
+	if status == string(event.EventStatusResolved) || monitorID == "" || p.EventType == "notification" {
+		endsAt = updatedAt
+	}
+
 	event := core.EventIncomingWebhook{
 		WebhookId:             p.ID,
 		EventType:             p.EventType,
@@ -2274,7 +2299,7 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		EventStatus:           status,
 		EventPriority:         priority,
 		EventCreatedAt:        createdAt,
-		EventEndsAt:           updatedAt,
+		EventEndsAt:           endsAt,
 		EventTitle:            cleanTitle,
 		EventDescription:      p.Body,
 		EventTags:             allTags,
@@ -2286,8 +2311,41 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		AccountId:             accountId,
 		EventSubjectOwner:     subjectOwner,
 		EventSubjectOwnerKind: subjectOwnerKind,
+		LegacyFingerprint:     legacyFingerprint,
 	}
 	return []core.EventIncomingWebhook{event}, nil
+}
+
+// datadogMonitorGroup returns the group a monitor notification is about, read from
+// the group parameter of a monitor link in the body ("[[Monitor Status](…/monitors/
+// 123?group=host%3Aweb-1&…)]"), in datadogGroupKey form. Empty for a simple monitor,
+// whose links carry no group.
+func datadogMonitorGroup(body string) string {
+	for _, match := range datadogMonitorURLRegex.FindAllString(body, -1) {
+		link, err := url.Parse(match)
+		if err != nil {
+			continue
+		}
+		if group := datadogGroupKey(link.Query().Get("group")); group != "" {
+			return group
+		}
+	}
+	return ""
+}
+
+// datadogGroupKey is the canonical form of a Datadog monitor group
+// ("key:value,key:value"), so the monitor link's group and $ALERT_SCOPE name one
+// group the same way: tags trimmed and sorted, and the simple-monitor group "*"
+// read as no group.
+func datadogGroupKey(group string) string {
+	var tags []string
+	for _, tag := range strings.Split(group, ",") {
+		if tag = strings.TrimSpace(tag); tag != "" && tag != "*" {
+			tags = append(tags, tag)
+		}
+	}
+	sort.Strings(tags)
+	return strings.Join(tags, ",")
 }
 
 // datadogRuleID picks the event's rule id, which becomes its aggregation key
