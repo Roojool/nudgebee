@@ -1543,6 +1543,14 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			return
 		}
 
+		// Suggestions already stored on the message cost no LLM call, so serve them
+		// before the budget check — a tenant-month spend aggregate (~0.8 s) that
+		// every repeat request used to pay for nothing.
+		if stored, ok := core.StoredConversationSuggestions(agentContext, request, message); ok {
+			c.JSON(http.StatusOK, buildApiResponse(stored, nil))
+			return
+		}
+
 		// Check budget limits for tenant and account
 		if budget.CheckBudgetAndRespond(c, agentContext.GetSecurityContext().GetTenantId(), request.AccountId, budget.ModuleUserInvestigation, logger) {
 			return
