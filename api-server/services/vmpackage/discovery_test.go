@@ -1,9 +1,17 @@
 package vmpackage
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
+	"nudgebee/services/common"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -143,4 +151,87 @@ func TestDiscoverySweepResponse_RealShape(t *testing.T) {
 	assert.Equal(t, []int{22}, resp.Result.Hosts[0].OpenPorts)
 	assert.Equal(t, "172.31.0.12", resp.Result.Hosts[1].IP)
 	assert.Empty(t, resp.Result.Hosts[1].MAC)
+}
+
+const scanDatasourceID = "11111111-2222-4333-8444-555555555555"
+
+// TestResolveScanDatasource_ScopesThroughAccountLinkTable pins that account
+// scoping goes through integrations_cloud_accounts (own or discovery_target),
+// and that the relay is routed through the agent's own account rather than
+// the scanned one.
+func TestResolveScanDatasource_ScopesThroughAccountLinkTable(t *testing.T) {
+	mock := withMockDB(t)
+	rows := sqlmock.NewRows([]string{"datasource_key", "agent_account_id"}).
+		AddRow("forager-discovery", "agent-account")
+	mock.ExpectQuery(`JOIN integrations_cloud_accounts own ON own.integration_id = i.id AND own.link_role = 'own'(.|\n)*`+
+		`link.cloud_account_id = \$2\s+AND link.link_role IN \('own', 'discovery_target'\)`).
+		WithArgs(scanDatasourceID, "target-account", "tenant-1").
+		WillReturnRows(rows)
+
+	ds, err := resolveScanDatasource("target-account", "tenant-1", scanDatasourceID)
+	require.NoError(t, err)
+	assert.Equal(t, "forager-discovery", ds.Key)
+	assert.Equal(t, "agent-account", ds.AgentAccountID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestResolveScanDatasource_NotLinkedIsBadRequest: a datasource that isn't
+// linked to the account must fail with a clear 400, never fall back to the
+// integration id — forager only knows keys, so that fallback is what produced
+// "datasource <uuid> not found" for every single-VM scan.
+func TestResolveScanDatasource_NotLinkedIsBadRequest(t *testing.T) {
+	mock := withMockDB(t)
+	mock.ExpectQuery("SELECT icv.value AS datasource_key").
+		WithArgs(scanDatasourceID, "account-1", "tenant-1").
+		WillReturnError(sql.ErrNoRows)
+
+	ds, err := resolveScanDatasource("account-1", "tenant-1", scanDatasourceID)
+	require.Error(t, err)
+	var apiErr common.Error
+	require.True(t, errors.As(err, &apiErr))
+	assert.Equal(t, 400, apiErr.Code)
+	assert.Contains(t, err.Error(), "not an enabled discovery datasource linked to this account")
+	assert.Empty(t, ds.Key)
+}
+
+func TestResolveScanDatasource_DBErrorNotMaskedAsNotLinked(t *testing.T) {
+	mock := withMockDB(t)
+	mock.ExpectQuery("SELECT icv.value AS datasource_key").
+		WithArgs(scanDatasourceID, "account-1", "tenant-1").
+		WillReturnError(errors.New("connection reset by peer"))
+
+	_, err := resolveScanDatasource("account-1", "tenant-1", scanDatasourceID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connection reset by peer")
+	assert.NotContains(t, err.Error(), "linked to this account")
+}
+
+func TestResolveScanDatasource_NonUUIDIsAlreadyAKey(t *testing.T) {
+	mock := withMockDB(t)
+
+	ds, err := resolveScanDatasource("account-1", "tenant-1", "forager-discovery")
+	require.NoError(t, err)
+	assert.Equal(t, "forager-discovery", ds.Key)
+	assert.Equal(t, "account-1", ds.AgentAccountID)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestResolveScanDatasource_NoIntegrationsAccountIDColumn guards the root
+// cause of single-VM scans always failing: integrations.account_id was dropped in V573, so filtering
+// on it errors on every call — an error the old fallback swallowed.
+func TestResolveScanDatasource_NoIntegrationsAccountIDColumn(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(_, actual string) error {
+		if strings.Contains(actual, "i.account_id") {
+			return fmt.Errorf("query filters on dropped column integrations.account_id: %s", actual)
+		}
+		return nil
+	})))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	mockDBManager.Db = sqlx.NewDb(db, "postgres")
+	mock.ExpectQuery("").
+		WillReturnRows(sqlmock.NewRows([]string{"datasource_key", "agent_account_id"}).AddRow("k", "a"))
+
+	_, err = resolveScanDatasource("account-1", "tenant-1", scanDatasourceID)
+	require.NoError(t, err)
 }

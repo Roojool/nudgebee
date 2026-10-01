@@ -71,13 +71,11 @@ func eligibleDiscoveryLabels(raw string) (DiscoveryLabels, bool) {
 // actually serve discovery_sweep. There is no separate feature flag —
 // forager reporting a discovery-proxy datasource at all is the opt-in.
 //
-// Joins through integrations_cloud_accounts rather than filtering on
-// integrations.account_id: the relay's auto-registration
-// (UpsertAgentDatasources) never sets that scalar column for agent-sourced
-// integrations, only the tenant_id column and the integrations_cloud_accounts
-// mapping row — unlike vm_agent-style integrations created through the UI
-// config flow, which do set it. resolveDatasourceKey's i.account_id filter
-// would silently match nothing here.
+// Joins through integrations_cloud_accounts: integrations has no account_id
+// column (dropped in V573), so that mapping table is the only record of which
+// account an integration belongs to — the relay's auto-registration
+// (UpsertAgentDatasources) writes the tenant_id column and an
+// integrations_cloud_accounts row, nothing else.
 //
 // The join is split by link_role rather than left unfiltered: an integration
 // can carry two integrations_cloud_accounts rows (the agent's own account,
@@ -260,9 +258,9 @@ func GetDiscoveryDatasourceByID(dbms *database.DatabaseManager, integrationID, a
 // resolveDiscoveryDatasourceKey resolves a discovery integration's own id
 // (not an agent access_key or a caller-supplied datasource_id) to its
 // forager-side datasource_key — the same integration_config_values lookup
-// resolveDatasourceKey uses, minus the account_id/tenant_id filter that
-// column doesn't carry for these auto-registered rows (see
-// listDiscoveryDatasources).
+// resolveScanDatasource uses, minus its account/tenant scoping: the
+// integration id here comes from ListDiscoveryDatasources, already scoped,
+// not from a caller.
 func resolveDiscoveryDatasourceKey(dbms *database.DatabaseManager, integrationID string) (string, error) {
 	var datasourceKey string
 	err := dbms.Db.Get(&datasourceKey,

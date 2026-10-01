@@ -44,6 +44,14 @@ func ScanPackages(ctx *security.RequestContext, req ScanRequest) (ScanResponse, 
 		return ScanResponse{}, err
 	}
 
+	// Resolved before the ack, not inside the detached scan: a datasource
+	// that can't serve this account is a bad request the caller should see
+	// now, not a "started" ack followed by a failed row a second later.
+	ds, err := resolveScanDatasource(req.AccountId, a.Tenant, req.DatasourceId)
+	if err != nil {
+		return ScanResponse{}, err
+	}
+
 	attemptID := startScanAttempt(a.Tenant, req.AccountId, req.CloudResourceId)
 
 	detachedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), scanTimeout)
@@ -56,7 +64,7 @@ func ScanPackages(ctx *security.RequestContext, req ScanRequest) (ScanResponse, 
 				finishScanAttempt(req.CloudResourceId, attemptID, ScanStatusFailed, fmt.Errorf("scan panicked: %v", r), 0, 0)
 			}
 		}()
-		target, err := fetchDiscoveryInventory(scanCtx.GetLogger(), req.AccountId, a.Tenant, req.DatasourceId, ip)
+		target, err := fetchDiscoveryInventory(ds, ip)
 		if err != nil {
 			scanCtx.GetLogger().Error("vmpackage: discovery_inventory failed", "cloud_resource_id", req.CloudResourceId, "error", err)
 			finishScanAttempt(req.CloudResourceId, attemptID, ScanStatusFailed, err, 0, 0)
