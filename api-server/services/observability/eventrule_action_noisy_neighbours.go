@@ -63,6 +63,24 @@ var noisyNeighboursAggKeys = map[string]bool{
 const (
 	noisyNeighboursTopN            = 15
 	noisyNeighboursLookbackMinutes = 10
+
+	// nodeMemoryShortPct is the share of allocatable at which the node itself ran
+	// out of memory. The card's "peaked at N%" reading and oomCause's node verdict
+	// both key on it, so the insight and the verdict cannot disagree.
+	nodeMemoryShortPct = 85
+	// subjectAtOwnLimitPct is how close to its own limit a container must peak to
+	// count as having hit it. Below 100 because the peak is the last scrape before
+	// the kill, not the allocation that triggered it.
+	subjectAtOwnLimitPct = 90
+)
+
+// oom_cause values on the card for OOM-kill events. Incident grouping reads the
+// field (triage.oomCauseFromEvidence) to decide whether a kill belongs to its
+// node's incident, so a renamed value silently stops that grouping.
+const (
+	oomCauseNodeMemory   = "node_memory"
+	oomCauseOwnLimit     = "own_limit"
+	oomCauseUndetermined = "undetermined"
 )
 
 // Indirected so a test can exercise the card's ranking and payload without a live
@@ -130,8 +148,44 @@ func (a *noisyNeighboursAction) Execute(ctx playbooks.PlaybookActionContext, raw
 	// what hid the second victim in the case this was reported for. The events
 	// table is the only record that it happened. See #39083.
 	data.CoKilled = coLocatedOOMKills(ctx, nodeName, podName, end)
+	if isCoLocatedOOMKey(ctx.GetEvent().AggregationKey) {
+		data.OOMCause = oomCause(data)
+	}
 
 	return noisyNeighboursResponse(podName, namespace, rawParams, data)
+}
+
+// oomCause says whether the subject was killed because its node ran out of memory
+// or because one of its containers hit its own limit, and declines to guess
+// otherwise.
+//
+// own_limit wins whenever any of the subject's containers peaked near its own
+// limit: the card does not know which container the kernel killed, so a pod with
+// one container at its limit is never blamed on the node. node_memory needs
+// evidence on both sides — the pod was measured with no container near its
+// limit, and the node's containers peaked at nodeMemoryShortPct of allocatable.
+//
+// Other pods dying on the same node are deliberately not an input. Grouping reads
+// this verdict to decide whether those kills are one incident, so the verdict
+// cannot be derived from them.
+func oomCause(d *noisyNeighbourData) string {
+	for _, row := range d.Neighbours {
+		if row["is_subject"] != true {
+			continue
+		}
+		used, _ := row["memory_used"].(float64)
+		limit, _ := row["memory_limit"].(float64)
+		if limit > 0 && used >= limit*subjectAtOwnLimitPct/100 {
+			return oomCauseOwnLimit
+		}
+	}
+	if !d.SubjectMeasured || d.NodeAllocatable <= 0 {
+		return oomCauseUndetermined
+	}
+	if d.NodeUsed/d.NodeAllocatable*100 >= nodeMemoryShortPct {
+		return oomCauseNodeMemory
+	}
+	return oomCauseUndetermined
 }
 
 type noisyNeighbourData struct {
@@ -168,6 +222,9 @@ type noisyNeighbourData struct {
 	// CoKilled are the other pods this node killed in the same window, read from
 	// the events table because metrics cannot see them. See #39083.
 	CoKilled []coKilledPod
+
+	// OOMCause is oomCause's verdict, set only for OOM-kill events.
+	OOMCause string
 }
 
 // noisyNeighbourKeys are the two families the card ranks, each fetched with the
@@ -481,6 +538,9 @@ func noisyNeighboursResponse(podName, namespace string, rawParams map[string]any
 	if len(d.CoKilled) > 0 {
 		data["co_killed"] = coKilledPayload(d.CoKilled)
 	}
+	if d.OOMCause != "" {
+		data["oom_cause"] = d.OOMCause
+	}
 	// Only when we actually measured CPU. On a provider that cannot report it,
 	// omitting the keys says "unknown"; a zero would say "nothing is using CPU",
 	// which is a different and much more misleading claim.
@@ -540,7 +600,7 @@ func noisyNeighboursInsights(d *noisyNeighbourData) []playbooks.PlaybookActionRe
 		// on almost every node, so keying the claim on them alone put it on nearly every
 		// card — including nodes with memory to spare, where it told the reader, and the
 		// investigation agent, that oversubscription killed the pod.
-		nodeShort := usedPct >= 85 || len(d.CoKilled) > 0
+		nodeShort := usedPct >= nodeMemoryShortPct || len(d.CoKilled) > 0
 		switch {
 		// Oversubscribed beats every other reading once the node did run out: the
 		// pods on it are allowed to take more memory than it has, which is how it got
@@ -558,7 +618,7 @@ func noisyNeighboursInsights(d *noisyNeighbourData) []playbooks.PlaybookActionRe
 					requestedPct, formatBytesGiB(d.TotalRequested), formatBytesGiB(d.NodeAllocatable)),
 				Severity: "HIGH",
 			})
-		case usedPct >= 85:
+		case usedPct >= nodeMemoryShortPct:
 			insights = append(insights, playbooks.PlaybookActionResponseInsight{
 				Message: fmt.Sprintf("Node memory peaked at %.0f%% of allocatable (%s of %s) in the window before the kill.",
 					usedPct, formatBytesGiB(d.NodeUsed), formatBytesGiB(d.NodeAllocatable)),
