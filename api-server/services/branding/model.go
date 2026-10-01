@@ -103,6 +103,10 @@ var overridableKeys = map[string]overrideKind{
 	"theme":          kindTheme,
 	"colorTokens":    kindColorTokens,
 	"fontRemap":      kindFontRemap,
+
+	// Outbound email branding, read by notifications-server for the row whose
+	// host matches its BASE_URL. The web app ignores it.
+	"email": kindEmail,
 }
 
 type overrideKind int
@@ -114,6 +118,7 @@ const (
 	kindTheme
 	kindColorTokens
 	kindFontRemap
+	kindEmail
 )
 
 // rejectedKeys are theme.json fields that deliberately cannot be overridden,
@@ -124,8 +129,6 @@ var rejectedKeys = map[string]string{
 	"isWhiteLabel": "isWhiteLabel is derived, not stored: a host is white-label when its brand kit is a " +
 		"partner kit or when the override sets title or logoUrl; setting it directly would let a host " +
 		"claim or disclaim white-label independently of its brand and desynchronise the Nudgebee mascot suppression",
-	"email": "email branding is read from the mounted theme file by notifications-server at process " +
-		"start, which has no request host to key on; an override here would silently never apply",
 }
 
 // MaxOverrideBytes bounds the serialized override. The blob is read on every
@@ -248,6 +251,8 @@ func validateValue(key string, kind overrideKind, v any) error {
 		return validateColorTokens(v)
 	case kindFontRemap:
 		return validateFontRemap(v)
+	case kindEmail:
+		return validateEmail(v)
 	case kindTheme:
 		if _, ok := v.(map[string]any); !ok {
 			return fmt.Errorf("theme must be an object")
@@ -394,4 +399,69 @@ func validateFontRemap(v any) error {
 func stringOr(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// emailColor accepts the colour notations email clients render reliably. The
+// value is written into an inline style="…" attribute of the HTML email, so the
+// allow-list is deliberately narrower than colorTokens: no quotes, semicolons or
+// angle brackets can pass a hex, rgb()/rgba() or bare-keyword pattern.
+var emailColor = regexp.MustCompile(`^(#[0-9a-fA-F]{3,8}|rgba?\([0-9., %]+\)|[a-zA-Z]{3,20})$`)
+
+// emailAddress is a shape check, not RFC 5322: it rejects anything that could
+// break out of the mailto: link or the HTML it is rendered into.
+var emailAddress = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$`)
+
+// validateEmail checks the `email` block notifications-server applies to
+// outbound mail. Every field is optional; unknown fields are refused so a typo
+// fails the write instead of silently doing nothing.
+func validateEmail(v any) error {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return fmt.Errorf("email must be an object")
+	}
+	for k, raw := range m {
+		switch k {
+		case "logoUrl":
+			s, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("email.logoUrl must be a string")
+			}
+			// Root-relative like every other asset; notifications-server makes it
+			// absolute with its BASE_URL, which email clients require.
+			if err := validateAssetURL("email.logoUrl", s); err != nil {
+				return err
+			}
+		case "primaryColor", "headerBgColor", "footerBgColor", "footerLinkColor":
+			s, ok := raw.(string)
+			if !ok || !emailColor.MatchString(s) {
+				return fmt.Errorf("email.%s must be a hex (#0047AB), rgb()/rgba() or named colour", k)
+			}
+		case "supportEmail":
+			s, ok := raw.(string)
+			if !ok || (s != "" && (len(s) > maxStringLen || !emailAddress.MatchString(s))) {
+				return fmt.Errorf("email.supportEmail must be an email address, or \"\" to hide it")
+			}
+		case "address":
+			s, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("email.address must be a string")
+			}
+			if len(s) > maxStringLen {
+				return fmt.Errorf("email.address must be at most %d characters", maxStringLen)
+			}
+			// Rendered into the HTML footer without escaping.
+			if strings.ContainsAny(s, "<>\"'`") {
+				return fmt.Errorf("email.address must not contain < > \" ' or `")
+			}
+		case "copyrightStartYear":
+			f, ok := raw.(float64)
+			if !ok || f != float64(int(f)) || f < 1990 || f > 2100 {
+				return fmt.Errorf("email.copyrightStartYear must be a whole year between 1990 and 2100")
+			}
+		default:
+			return fmt.Errorf("email has unexpected field %q; allowed: address, copyrightStartYear, "+
+				"footerBgColor, footerLinkColor, headerBgColor, logoUrl, primaryColor, supportEmail", k)
+		}
+	}
+	return nil
 }

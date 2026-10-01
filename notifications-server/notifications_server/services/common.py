@@ -1211,8 +1211,10 @@ class CommonService:
                 raise ValueError("Unable to get user info. Please check your Slack app configuration and permissions.")
         return None
 
+    # No link previews by default: the bot's links point at the app, and Slack builds the
+    # preview from the page's build-time meta tags, which carry the default brand.
     def slack_reply_in_thread(
-        self, channel_id, team_id, message_ts, message, transform_to_markdown=True, unfurl_links=True
+        self, channel_id, team_id, message_ts, message, transform_to_markdown=True, unfurl_links=False
     ):
         bot = self.get_slack_installation(team_id)
         if transform_to_markdown:
@@ -2526,7 +2528,7 @@ class CommonService:
                 "discord": "Discord",
             }.get(platform, platform)
             test_message = (
-                f"This is a test notification from Nudgebee. "
+                f"This is a test notification from {settings.urls.branding_name}. "
                 f"Your {platform_display} integration is working correctly!"
             )
 

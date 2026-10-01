@@ -199,18 +199,57 @@ func TestValidateAssetURLAllowsEmptyToClear(t *testing.T) {
 	}
 }
 
-// isWhiteLabel and email look like ordinary theme.json fields, so a generic
-// "not overridable" would read as a typo. Each gets its own reason.
-func TestValidateOverridesRejectsDerivedAndEmailFields(t *testing.T) {
+// isWhiteLabel looks like an ordinary theme.json field, so a generic
+// "not overridable" would read as a typo. It gets its own reason.
+func TestValidateOverridesRejectsDerivedField(t *testing.T) {
 	if err := ValidateOverrides(map[string]any{"isWhiteLabel": false}); err == nil {
 		t.Fatal("expected isWhiteLabel to be refused")
 	} else if !strings.Contains(err.Error(), "derived") {
 		t.Errorf("isWhiteLabel rejection should explain it is derived, got: %v", err)
 	}
-	if err := ValidateOverrides(map[string]any{"email": map[string]any{"supportEmail": "x@y.com"}}); err == nil {
-		t.Fatal("expected email to be refused")
-	} else if !strings.Contains(err.Error(), "notifications-server") {
-		t.Errorf("email rejection should explain notifications-server reads the file, got: %v", err)
+}
+
+func TestValidateOverridesAcceptsEmailBlock(t *testing.T) {
+	ok := map[string]any{"email": map[string]any{
+		"logoUrl":            "/branding/acme/logo.png",
+		"supportEmail":       "support@acme.example.com",
+		"primaryColor":       "#0047AB",
+		"headerBgColor":      "rgb(0, 31, 77)",
+		"footerBgColor":      "navy",
+		"footerLinkColor":    "#fc0",
+		"address":            "1 Acme Way, Anytown",
+		"copyrightStartYear": float64(2024),
+	}}
+	if err := ValidateOverrides(ok); err != nil {
+		t.Fatalf("expected a well-formed email block to be accepted, got %v", err)
+	}
+	if err := ValidateOverrides(map[string]any{"email": map[string]any{"supportEmail": ""}}); err != nil {
+		t.Fatalf("expected an empty supportEmail to be accepted as 'hide it', got %v", err)
+	}
+}
+
+// The email block is rendered into HTML mail: colours into inline style
+// attributes, the address into the footer, the support address into a mailto.
+func TestValidateOverridesRejectsUnsafeEmailValues(t *testing.T) {
+	cases := map[string]map[string]any{
+		"style breakout colour": {"primaryColor": "#fff;background:url(https://evil.example/x)"},
+		"quote in colour":       {"headerBgColor": `red" onmouseover="x`},
+		"html in address":       {"address": "<img src=https://evil.example/p.gif>"},
+		"quote in address":      {"address": `a" style="display:none`},
+		"not an email":          {"supportEmail": "support at acme"},
+		"mailto breakout":       {"supportEmail": "a@b.com?bcc=evil@example.com"},
+		"absolute logo":         {"logoUrl": "https://evil.example/logo.png"},
+		"fractional year":       {"copyrightStartYear": float64(2024.5)},
+		"string year":           {"copyrightStartYear": "2024"},
+		"unknown field":         {"footerText": "hi"},
+	}
+	for name, email := range cases {
+		if err := ValidateOverrides(map[string]any{"email": email}); err == nil {
+			t.Errorf("%s: expected %v to be refused", name, email)
+		}
+	}
+	if err := ValidateOverrides(map[string]any{"email": "support@acme.example.com"}); err == nil {
+		t.Error("expected a non-object email value to be refused")
 	}
 }
 

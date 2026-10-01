@@ -81,11 +81,11 @@ LLM_BUSY_MESSAGES: List[str] = [
 ]
 
 LLM_OFFLINE_MESSAGES: List[str] = [
-    "Nubi's offline right now. Couldn't get a response. Try again in a sec!",
-    "Hmm, I couldn't reach Nubi. Mind trying again in a moment?",
-    "Looks like Nubi's taking a quick break. Give it another shot in a sec!",
-    "Nubi seems to be unavailable right now. Try again shortly!",
-    "Couldn't connect to Nubi at the moment. Please try again!",
+    "{assistant}'s offline right now. Couldn't get a response. Try again in a sec!",
+    "Hmm, I couldn't reach {assistant}. Mind trying again in a moment?",
+    "Looks like {assistant}'s taking a quick break. Give it another shot in a sec!",
+    "{assistant} seems to be unavailable right now. Try again shortly!",
+    "Couldn't connect to {assistant} at the moment. Please try again!",
 ]
 
 # Distinct from LLM_BUSY_MESSAGES: stalled on the user, not "still thinking".
@@ -116,12 +116,12 @@ ACCOUNT_NOT_ACCESSIBLE: List[str] = [
 SIGNUP_URL = f"{settings.base_url}/signup"
 
 USER_NOT_FOUND: List[str] = [
-    "It looks like you don't have a Nudgebee account yet! "
-    f"Sign up at {SIGNUP_URL} to get started, and I'll be ready to help once you're all set.",
-    "I couldn't find a Nudgebee account linked to your email. "
-    f"Head over to {SIGNUP_URL} to create one — it only takes a minute!",
+    "It looks like you don't have a {brand} account yet! "
+    "Sign up at {signup_url} to get started, and I'll be ready to help once you're all set.",
+    "I couldn't find a {brand} account linked to your email. "
+    "Head over to {signup_url} to create one — it only takes a minute!",
     "Hmm, I don't see you in our system yet. "
-    f"You can sign up for a free Nudgebee account at {SIGNUP_URL} and then come back and chat with me!",
+    "You can sign up for a free {brand} account at {signup_url} and then come back and chat with me!",
 ]
 
 
@@ -272,7 +272,7 @@ def get_llm_busy_message() -> str:
 
 def get_llm_offline_message() -> str:
     """Get a random message for when LLM is offline/unavailable."""
-    return get_random_message(LLM_OFFLINE_MESSAGES)
+    return get_random_message(LLM_OFFLINE_MESSAGES, assistant=settings.urls.assistant_name)
 
 
 def get_llm_pending_followup_message() -> str:
@@ -298,7 +298,7 @@ def get_account_not_accessible_message() -> str:
 
 def get_user_not_found_message() -> str:
     """Get a random 'user not found' message with sign-up instructions."""
-    return get_random_message(USER_NOT_FOUND)
+    return get_random_message(USER_NOT_FOUND, brand=settings.urls.branding_name, signup_url=SIGNUP_URL)
 
 
 def get_empty_message_response() -> str:

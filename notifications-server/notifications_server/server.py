@@ -12,6 +12,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from notifications_server import engine, sync_engine, slack_app, teams_app
 from notifications_server.configs import setup_logger, HealthCheckFilter, settings
+from notifications_server.configs.branding_overrides import build_refresher
 from notifications_server.processors.notification import NotificationProcessor
 from notifications_server.rabbitmq.message_consumer import Consumer
 from notifications_server.routers import tools, common, actions, llm_callbacks
@@ -67,16 +68,22 @@ async def lifespan(_: FastAPI):
     LOG.info("RabbitMQ consumer started as asyncio task")
     sweeper_task = asyncio.create_task(run_retention_sweeper())
     LOG.info("Channel retention sweeper started as asyncio task")
+    # Not awaited: a slow or unreachable services-server must not delay startup.
+    # Messages sent before the first refresh use the bundled branding.
+    branding_task = asyncio.create_task(build_refresher().run())
     try:
         yield
     finally:
         await consumer.stop()
         consumer_task.cancel()
         sweeper_task.cancel()
+        branding_task.cancel()
         with suppress(asyncio.CancelledError):
             await consumer_task
         with suppress(asyncio.CancelledError):
             await sweeper_task
+        with suppress(asyncio.CancelledError):
+            await branding_task
         LOG.info("RabbitMQ consumer and retention sweeper stopped")
 
 

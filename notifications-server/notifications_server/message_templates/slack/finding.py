@@ -316,6 +316,7 @@ def get_slack_finding_message(slack_app, installation, finding):
     )
 
     tenant_id = str(installation.tenant_id)
+    ask_nubi_text = f"Ask {settings.urls.assistant_name} to Analyse!"
     ask_nubi_value = ExternalActionRequestBuilder.create_for_func(
         CallbackChoice(
             action=Events.query_llm_server,
@@ -331,13 +332,13 @@ def get_slack_finding_message(slack_app, installation, finding):
                 tenant_id=tenant_id,
             ),
         ),
-        "Ask Nubi to Analyse!",
+        ask_nubi_text,
         SLACK_SIGNIN_SECRET,
     ).model_dump_json()
 
     actions = [
         {"type": "button", "text": "View Details", "url": investigate_url, "style": "primary"},
-        {"type": "button", "name": "ask_nubi", "text": "Ask Nubi to Analyse!", "value": ask_nubi_value},
+        {"type": "button", "name": "ask_nubi", "text": ask_nubi_text, "value": ask_nubi_value},
     ]
     suppress_action = _suppress_select_action(finding, tenant_id)
     if suppress_action:

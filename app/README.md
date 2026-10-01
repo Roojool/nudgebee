@@ -79,7 +79,7 @@ The app supports per-deployment white-labeling — logo, favicon, app title, AI 
 2. A per-host **runtime override** from the `tenant_branding_override` table is merged on top of that file — see [Runtime overrides](#runtime-overrides-no-deploy) below.
 3. On the client, [`useBrandingConfig`](src/hooks/useTenantBranding.js) fetches `/api/public/app_config` once per page load and caches it.
 4. [`useThemeProvider`](src/hooks/useThemeProvider.ts) applies `theme` to MUI and writes `colorTokens` to `:root` as CSS variables. Critical above-the-fold tokens are inlined during SSR to prevent FOUC.
-5. The notifications-server reads the **same** `TENANT_BRANDING_FILE` env to brand outbound emails — keep one file per partner, used by both services. Note it does **not** read runtime overrides (see below).
+5. The notifications-server brands every outbound notification from the `tenant_branding_override` row whose host matches its **`BASE_URL`** (`title`, plus the row's `email` block for email), over its bundled theme. It no longer reads `TENANT_BRANDING_FILE`.
 
 ### Onboarding a new partner
 
@@ -176,8 +176,6 @@ TENANT_BRANDING_FILE=branding/acme/theme.json
 TENANT_BRANDING_FILE=/etc/nudgebee/theme.json
 ```
 
-Set the same value on the notifications-server deployment so emails match the UI.
-
 **Inline overrides** (skip editing the file — useful for hot-patching a single field): set `TENANT_THEME_CONFIG` or `TENANT_COLOR_TOKENS` to a JSON-encoded object. These take precedence over the file's `theme` / `colorTokens` blocks respectively. Invalid JSON is silently ignored.
 
 ### Runtime overrides (no deploy)
@@ -212,8 +210,6 @@ Two fields are refused, each with its own reason in the error:
   its row sets `title` or `logoUrl` (a rename or re-logo is a different brand, so the Nudgebee
   mascots are suppressed). A colour-only row stays a retint. A row that could set the flag directly
   would desynchronise mascot suppression from the actual brand.
-- `email` — notifications-server reads `theme.email.*` from the mounted file at process start and has
-  no request host to key on, so an override would silently never apply.
 
 **Asset URLs must be same-origin root-relative paths** (`/branding/acme/logo.svg`, or `""` to clear
 back to the bundled default). Absolute and scheme-relative URLs are rejected: a stored row that could
@@ -243,9 +239,25 @@ what `branding_apply_previous_override` restores — moving a brand out of git c
 the ConfigMap kit gets for free, and audit rows do not close that gap because `audit.LogChange`
 skips super-admin actors.
 
-**Email branding is out of scope for this layer.** notifications-server reads `theme.email.*` from
-the file at process start and has no request host to key on, so overrides do not reach outbound
-email. A partner whose palette is changed at runtime will have emails that still match the kit.
+**Email and bot branding.** notifications-server has no request host, so it applies the row for its own
+**`BASE_URL`** hostname, refreshed every 60s ([`branding_overrides.py`](../notifications-server/notifications_server/configs/branding_overrides.py)).
+The row's `title` names the product in every notification (email, Slack, Teams, Discord, Google Chat); an
+optional `email` block restyles email:
+
+```jsonc
+"email": {
+  "logoUrl": "/branding/acme/logo.png",   // root-relative; made absolute with BASE_URL
+  "supportEmail": "support@acme.example.com",
+  "primaryColor": "#0047AB", "headerBgColor": "#001f4d", "footerBgColor": "#10264c", "footerLinkColor": "#ffcc00",
+  "address": "1 Acme Way, Anytown",
+  "copyrightStartYear": 2024
+}
+```
+
+Colours must be hex, `rgb()`/`rgba()` or a named colour, and `address` may not contain ` < > " ' \``
+— these values are written straight into HTML email. One deployment sends one brand: a deployment
+serving several partner hostnames under one  `BASE_URL` brands all of their notifications with that
+host's row.
 
 ### Local development
 
@@ -276,7 +288,7 @@ npm run dev
 - **The branding file is cached per path after a successful read** ([`loadBrandingFile.ts`](src/ee/branding/loadBrandingFile.ts)). Editing `theme.json` while the dev server runs requires a restart. Failed reads are not cached for an operator-configured path, so a transient miss self-heals.
 - **Runtime overrides are per-replica and eventually consistent.** `app` runs 2 replicas, each refreshing on its own 30s clock, so an edit can take up to ~30s to appear everywhere. That is why overrides are limited to presentation fields — the divergence is a colour, never a missing asset.
 - **MUI palette colors must be hex strings**, not CSS variable references — the MUI theme is built at module load, before CSS variables are applied.
-- **Keep email branding in sync** — `theme.email` is consumed by notifications-server. A partner with mismatched UI/email colors looks broken.
+- **Notifications follow `BASE_URL`, not the partner's hostname.** A row for `calsoft.example.com` only reaches notifications from a deployment whose `BASE_URL` is that host.
 - **Don't commit partner secrets** to the public branding folder. For customer-specific deployments, ship `theme.json` via a Helm value or a ConfigMap mounted at `TENANT_BRANDING_FILE`.
 
 ---

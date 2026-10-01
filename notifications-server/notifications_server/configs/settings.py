@@ -9,7 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _branding_logger = logging.getLogger(__name__)
 
 # Bundled branding file shipped in the image — mirrors app/public/branding/default/theme.json.
-# Keep the two files in sync; partners override at runtime via TENANT_BRANDING_FILE.
+# Keep the two files in sync. It is the fallback only: a deployment is branded by the
+# tenant_branding_override row for its BASE_URL host (configs/branding_overrides.py).
 _BUNDLED_BRANDING_FILE = str(Path(__file__).resolve().parents[1] / "branding" / "default" / "theme.json")
 
 
@@ -91,17 +92,12 @@ class URLSettings(BaseSettings):
     # Optional Calendly (or equivalent) URL surfaced in invite emails. Empty hides the P.S. block.
     calendly_url: str = Field("", validation_alias=AliasChoices("CALENDLY_URL", "calendly_url"))
 
-    # Path to theme.json — same env var name and JSON shape as the Next.js app's TENANT_BRANDING_FILE.
-    # Defaults to the bundled file shipped in the image (kept in sync with app/public/branding/default/theme.json).
-    tenant_branding_file: str = Field(
-        _BUNDLED_BRANDING_FILE,
-        validation_alias=AliasChoices("TENANT_BRANDING_FILE", "tenant_branding_file"),
-    )
-
     # Branding fields populated from theme.json by load_branding_from_theme_file().
-    # Operators provide values via TENANT_BRANDING_FILE; support_email is intentionally empty by default
+    # Fallback values from the bundled theme file; the BASE_URL host's database row is applied on top at
+    # runtime (configs/branding_overrides.py). support_email is intentionally empty by default
     # so OSS deployments don't leak the upstream Nudgebee support mailbox.
     branding_name: str = "Nudgebee"
+    assistant_name: str = "Nubi"
     branding_logo_url: str = "/branding/default/logo.png"
     branding_support_email: str = ""
     branding_primary_color: str = "#3470e9"
@@ -116,10 +112,10 @@ class URLSettings(BaseSettings):
     @model_validator(mode="after")
     def load_branding_from_theme_file(self):
         """Populate branding_* fields from theme.json; silently fall back to defaults if the file is missing."""
-        path = Path(self.tenant_branding_file)
+        path = Path(_BUNDLED_BRANDING_FILE)
         if not path.is_file():
             _branding_logger.info(
-                "Branding theme file not found at %s; using hardcoded defaults", self.tenant_branding_file
+                "Branding theme file not found at %s; using hardcoded defaults", _BUNDLED_BRANDING_FILE
             )
             return self
         try:
@@ -127,13 +123,15 @@ class URLSettings(BaseSettings):
         except (OSError, json.JSONDecodeError) as exc:
             _branding_logger.warning(
                 "Failed to load branding theme from %s: %s; using hardcoded defaults",
-                self.tenant_branding_file,
+                _BUNDLED_BRANDING_FILE,
                 exc,
             )
             return self
 
         if isinstance(theme.get("title"), str):
             self.branding_name = theme["title"]
+        if isinstance(theme.get("assistantName"), str):
+            self.assistant_name = theme["assistantName"]
         email = theme.get("email") or {}
         for json_key, attr in (
             ("logoUrl", "branding_logo_url"),
