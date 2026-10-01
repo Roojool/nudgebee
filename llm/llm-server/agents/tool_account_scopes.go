@@ -12,10 +12,12 @@ import toolcore "nudgebee/llm/tools/core"
 // conversation's account and is refused for a call about another account.
 func init() {
 	toolcore.DeclareAccountScope(toolcore.AccountScopeFollowsTarget,
+		"prometheus", "promql_query", "elastic_search_metrics", "splunk_enterprise_metrics",
 		"aws_observability", "delegate_agent", "event_summary", "events", "fetch_logs_direct", "finops",
 		"logs", "metrics", "nudgebee", "security", "service_dependency_graph", "traces",
 	)
 	toolcore.DeclareAccountScope(toolcore.AccountScopeIndependent,
+		"loganalysis",
 		"ask_clarification", "github", "gitlab", "prompt_refinement", "search_tools", "tickets",
 		"tickets_v2", "visualizer", "websearch",
 	)
@@ -29,7 +31,5 @@ func init() {
 		"datadog_traces", "mssql", "mysql", "oracle", "postgres",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundNotYetSupported,
-		"code_analyzer", "elastic_search_metrics", "evidenceinsightstool", "fetch_logs", "loganalysis",
-		"prometheus", "promql_query", "server", "splunk_enterprise_metrics",
-	)
+		"code_analyzer", "evidenceinsightstool", "fetch_logs", "server")
 }

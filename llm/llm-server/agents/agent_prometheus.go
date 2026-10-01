@@ -17,7 +17,7 @@ func init() {
 	toolInput := "Provide a question in natural language to retrieve, analyze, or visualize Prometheus metrics."
 	toolOutput := "Returns metric data, summaries, and visualizations for Prometheus queries."
 
-	core.RegisterNBAgentFactoryAndToolAndPrioritizeAgentResponseForTool(PrometheusAgentName, func(accountId string) (core.NBAgent, error) {
+	core.RegisterTargetAwareNBAgentFactoryAndTool(PrometheusAgentName, func(accountId string) (core.NBAgent, error) {
 		return PrometheusAgent{
 			accountId: accountId,
 		}, nil
@@ -30,6 +30,20 @@ func newPrometheusAgent(account string) PrometheusAgent {
 	return PrometheusAgent{
 		accountId: account,
 	}
+}
+
+// AcceptsExecutionTarget: its tools follow a handed target and re-resolve the
+// metrics provider and index for it, so the agent can run for another account.
+func (a PrometheusAgent) AcceptsExecutionTarget() {}
+
+// promptAccountID is the account an agent's prompt describes: the target it
+// was handed, else its own. Its tools re-resolve their backend for a target;
+// the prompt must name the same account's indices and hosts.
+func promptAccountID(query core.NBAgentRequest, own string) string {
+	if target := query.QueryConfig.DelegatedTarget; target != nil && target.AccountID != "" {
+		return target.AccountID
+	}
+	return own
 }
 
 type PrometheusAgent struct {

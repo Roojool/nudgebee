@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -116,4 +118,102 @@ func TestResolveToolCallTarget(t *testing.T) {
 	got, err = ResolveToolCallTarget(ctx, DatadogLogExecuteTool{}, core.NBToolCallRequest{Command: `{"target":{"provider":"aws","name":"x"}}`})
 	require.NoError(t, err, "a target key inside the command payload is not a target argument")
 	require.Equal(t, "origin-id", got.DataAccountID())
+}
+
+// The conversation view shows where each step ran; ExecutedTargetOf decides it.
+func TestExecutedTargetOf(t *testing.T) {
+	stubTargets(t)
+	ctx := core.NbToolContext{Ctx: security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"origin-id", "prod-id"}), AccountId: "origin-id"}
+
+	resolved, err := ResolveCallTarget(ctx, core.NBToolCallRequest{Arguments: map[string]any{"target": map[string]any{"provider": "kubernetes", "name": "k8s-prod"}}})
+	require.NoError(t, err)
+	require.Equal(t, &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod", AccountID: "prod-id"}, ExecutedTargetOf(RecommendationExecuteTool{}, resolved, ""))
+
+	resolved, err = ResolveCallTarget(ctx, core.NBToolCallRequest{})
+	require.NoError(t, err)
+	require.Nil(t, ExecutedTargetOf(RecommendationExecuteTool{}, resolved, ""), "nothing is recorded for the conversation's own account")
+
+	require.Equal(t, &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod"},
+		ExecutedTargetOf(KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods","cluster":"k8s-prod"}`))
+	require.Equal(t, &core.ExecutionTarget{Provider: "aws", Name: "aws-prod"},
+		ExecutedTargetOf(AwsCliTool{}, ctx, `{"command":"aws s3 ls","account":"aws-prod"}`))
+	require.Equal(t, &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod"},
+		ExecutedTargetOf(ShellTool{}, ctx, `{"command":"kubectl --context k8s-prod get pods"}`))
+	require.Nil(t, ExecutedTargetOf(KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods"}`), "no named cluster: the conversation's default")
+
+	details := core.WithExecutedTarget(nil, &core.ExecutionTarget{Provider: "aws", Name: "aws-prod", AccountID: "aws-id"})
+	require.Equal(t, map[string]any{"provider": "aws", "name": "aws-prod", "account_id": "aws-id"}, details[core.MetadataExecutedTarget])
+	require.Nil(t, core.WithExecutedTarget(nil, nil))
+}
+
+// Only a successful call that ran somewhere other than the conversation's own
+// account is stamped; the UI would otherwise say "ran on" for a typo.
+func TestStampExecutedTarget(t *testing.T) {
+	ctx := core.NbToolContext{AccountId: "origin-id", ToolConfig: core.ToolConfig{Name: "k8s-dev"}}
+	prod := `{"command":"kubectl get pods","cluster":"k8s-prod"}`
+	ok := core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}
+	accounts := map[string]string{"k8s-prod": "prod-id", "k8s-dev": "origin-id"}
+	restore := resolveStampTarget
+	t.Cleanup(func() { resolveStampTarget = restore })
+	resolveStampTarget = func(_ *security.RequestContext, _ string, target *core.ExecutionTarget) (*core.ExecutionTarget, error) {
+		id, found := accounts[strings.ToLower(target.Name)]
+		if !found {
+			return nil, errors.New("not connected")
+		}
+		return &core.ExecutionTarget{Provider: target.Provider, Name: target.Name, AccountID: id}, nil
+	}
+
+	got := StampExecutedTarget(ok, nil, KubectlExecuteTool{}, ctx, prod)
+	require.Contains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+
+	unnamed := ctx
+	unnamed.ToolConfig.Name = ""
+	got = StampExecutedTarget(ok, nil, KubectlExecuteTool{}, unnamed, `{"command":"kubectl get pods","cluster":"k8s-dev"}`)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "the own cluster by name, with no tool-config name, is still the own account")
+
+	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil, KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods","cluster":"typo"}`)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "a failed call did not run there")
+	got = StampExecutedTarget(ok, errors.New("boom"), KubectlExecuteTool{}, ctx, prod)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+
+	got = StampExecutedTarget(ok, nil, KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods","cluster":"K8S-DEV"}`)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "naming the conversation's own cluster is not another account")
+
+	same := ctx
+	same.ExecutedTarget = &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-dev", AccountID: "origin-id"}
+	got = StampExecutedTarget(ok, nil, RecommendationExecuteTool{}, same, "")
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+}
+
+// An agent called with a target (metrics, prometheus, delegate) is stamped
+// from its input once it has run: not when it failed or is waiting on the user.
+func TestStampExecutedTarget_AgentInput(t *testing.T) {
+	restore := resolveStampTarget
+	t.Cleanup(func() { resolveStampTarget = restore })
+	resolveStampTarget = func(_ *security.RequestContext, _ string, target *core.ExecutionTarget) (*core.ExecutionTarget, error) {
+		return &core.ExecutionTarget{Provider: target.Provider, Name: target.Name, AccountID: map[string]string{"k8s-prod": "prod-id", "k8s-dev": "origin-id"}[target.Name]}, nil
+	}
+	ctx := core.NbToolContext{AccountId: "origin-id"}
+	agent := RecommendationExecuteTool{} // any tool without a cluster argument of its own
+	prod := `{"command":"cpu trend","target":{"provider":"kubernetes","name":"k8s-prod"}}`
+
+	got := StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, agent, ctx, prod)
+	require.Equal(t, "prod-id", got.AdditionalDetails[core.MetadataExecutedTarget].(map[string]any)["account_id"])
+
+	for name, tc := range map[string]struct {
+		resp core.NBToolResponse
+		err  error
+	}{
+		"failed":  {core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil},
+		"errored": {core.NBToolResponse{}, errors.New("boom")},
+		"waiting": {core.NBToolResponse{Status: core.NBToolResponseStatusWaiting}, nil},
+	} {
+		got := StampExecutedTarget(tc.resp, tc.err, agent, ctx, prod)
+		require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, name)
+	}
+	own := `{"command":"cpu trend","target":{"provider":"kubernetes","name":"k8s-dev"}}`
+	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, agent, ctx, own)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "the conversation's own cluster")
+	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, agent, ctx, `{"command":"cpu trend"}`)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "no target")
 }

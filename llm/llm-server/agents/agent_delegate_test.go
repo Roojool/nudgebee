@@ -859,7 +859,8 @@ func TestFinOpsReadsFollowTheTargetWritesDoNot(t *testing.T) {
 // data; only writes, which await target-scoped approval, may be refused.
 func TestTargetAwareAgentsToolsFollowTheTarget(t *testing.T) {
 	writesAwaitingApproval := map[string]bool{tools.ToolTriggerImageScan: true, tools.ToolTriggerCisScan: true}
-	for _, agent := range []core.NBAgent{newEventsAgent("origin-id"), SecurityAgent{accountId: "origin-id"}, newServiceDependencyGraphAgent("origin-id"), newNudgebeeAgent("origin-id")} {
+	for _, agent := range []core.NBAgent{newEventsAgent("origin-id"), SecurityAgent{accountId: "origin-id"}, newServiceDependencyGraphAgent("origin-id"), newNudgebeeAgent("origin-id"),
+		newPrometheusAgent("origin-id"), ElasticSearchMetricsAgent{accountId: "origin-id"}, SplunkEnterpriseMetricsAgent{accountId: "origin-id"}, &PromqlAgent{accountId: "origin-id"}} {
 		_, aware := agent.(core.ExecutionTargetAwareAgent)
 		require.True(t, aware, agent.GetName())
 		for _, tool := range agent.GetSupportedTools(nil) {

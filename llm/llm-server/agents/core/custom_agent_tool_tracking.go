@@ -62,6 +62,7 @@ func CallTool(tc toolcore.NbToolContext, tool toolcore.NBTool, req toolcore.NBTo
 		callErr = nil
 	} else {
 		resp, callErr = tool.Call(tc, req)
+		resp = tools.StampExecutedTarget(resp, callErr, tool, tc, toolCallParameters(tc, req))
 	}
 	elapsed := time.Since(start)
 

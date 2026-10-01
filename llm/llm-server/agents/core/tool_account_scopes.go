@@ -7,12 +7,10 @@ import toolcore "nudgebee/llm/tools/core"
 // TestEveryToolDeclaresAnAccountScope fails.
 func init() {
 	toolcore.DeclareAccountScope(toolcore.AccountScopeIndependent,
+		"clarification",
 		"llm",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundConversationState,
 		"memory",
-	)
-	toolcore.DeclareOriginBound(toolcore.OriginBoundNotYetSupported,
-		"clarification",
 	)
 }

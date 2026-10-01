@@ -4491,6 +4491,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// copy can be stale, so reading it there misses exactly the calls most at
 	// risk — the ones resolved inside the tool rather than by the planner.
 	data.AdditionalDetails = withExecutedToolTarget(data.AdditionalDetails, toolContext.ToolConfig.Name)
+	data = tools.StampExecutedTarget(data, err, tool, toolContext, input)
 	latency := time.Since(t0).Seconds()
 	nbRequestContext.GetLogger().Info("tool execution time", "tool", tool.Name(), "time", latency, "input", input)
 	// Record tool latency metric

@@ -102,13 +102,23 @@ func registerAgentAliases(agentFactory func(accountId string) (NBAgent, error), 
 }
 
 func RegisterNBAgentFactoryAsTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string) {
+	registerNBAgentFactoryAsTool(agent, agentFactory, toolDescription, toolInput, toolOutput, false)
+}
+
+// RegisterTargetAwareNBAgentFactoryAsTool is RegisterNBAgentFactoryAsTool for
+// an agent that accepts a target (it implements ExecutionTargetAwareAgent).
+func RegisterTargetAwareNBAgentFactoryAsTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string) {
+	registerNBAgentFactoryAsTool(agent, agentFactory, toolDescription, toolInput, toolOutput, true)
+}
+
+func registerNBAgentFactoryAsTool(agent string, agentFactory func(accountId string) (NBAgent, error), toolDescription string, toolInput string, toolOutput string, targetSupported bool) {
 	slog.Info("registering agent as tool", "agent", agent)
 	if _, ok := nbSystemAgents[strings.ToLower(agent)]; ok {
 		slog.Warn("agent already registered", "agent", agent)
 	}
 	nbSystemAgents[strings.ToLower(agent)] = agentFactory
 	toolcore.RegisterNBToolFactory(agent, func(accountId string) (toolcore.NBTool, error) {
-		return &nbAgentTool{name: agent, description: toolDescription, input: toolInput, output: toolOutput, useResponseAlways: true, agent: nil, toolType: toolcore.NBToolTypeTool, accountId: accountId}, nil
+		return &nbAgentTool{name: agent, description: toolDescription, input: toolInput, output: toolOutput, useResponseAlways: true, agent: nil, toolType: toolcore.NBToolTypeTool, accountId: accountId, targetSupported: targetSupported}, nil
 	})
 }
 

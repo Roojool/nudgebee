@@ -26,6 +26,7 @@ import CodeBlock from '@ui/CodeBlock';
 import { Chip } from '@ui/Chip';
 import { convertToReadableFormat } from 'src/utils/common';
 import { executionBatchLabel, executionBatchTone, executionBatchTooltip, parseExecutionBatchMetadata } from './executionBatch';
+import ExecutedTargetChip, { parseExecutedTarget } from './ExecutedTargetChip';
 
 const FRIENDLY_TOOL_NAMES = {
   react_critique: 'Critique Feedback',
@@ -1152,6 +1153,7 @@ const ToolCallSection = ({ tc, index, accountId, reasoning, showExecutionBatch }
           {toolSourceSuffix(tc.metadata)}
         </Typography>
         <StatusBadge status={tcStatus} />
+        <ExecutedTargetChip metadata={tc.metadata} />
         {executionBatch && (
           <Tooltip title={executionBatchTooltip(executionBatch)} placement='top'>
             <Box component='span' sx={{ display: 'inline-flex' }}>
@@ -1358,6 +1360,16 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
       : null;
   })();
 
+  // A grouped task names a target in its header only when every call in it ran
+  // on the same one; otherwise each call's own section shows its target.
+  const headerTargetMetadata = (() => {
+    if (!hasMultipleToolCalls) {
+      return headerMetadata;
+    }
+    const names = toolCalls.map((t) => parseExecutedTarget(t.metadata)?.name ?? '');
+    return names[0] && names.every((name) => name === names[0]) ? toolCalls[0].metadata : null;
+  })();
+
   // Per-tool reasoning lookup: match a tool-call-like object's candidate ids against the
   // time-split reasoning map so each tool shows the thinking that produced it.
   const reasoningFor = (obj) => {
@@ -1442,6 +1454,7 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
           </Box>
         )}
         <StatusBadge status={status} />
+        <ExecutedTargetChip metadata={headerTargetMetadata} />
         {headerBatch && (
           <Tooltip title={executionBatchTooltip(headerBatch)} placement='top'>
             <Box component='span' sx={{ display: 'inline-flex' }}>

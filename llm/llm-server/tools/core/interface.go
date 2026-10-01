@@ -16,7 +16,27 @@ import (
 const (
 	MetadataResolvedTarget = "nb_resolved_target"
 	MetadataResolvedBy     = "nb_resolved_by"
+	// MetadataExecutedTarget records the cluster or account a call actually ran
+	// on, as {provider, name, account_id}, when that is not the conversation's
+	// own default. The conversation view shows it per step.
+	MetadataExecutedTarget = "nb_executed_target"
 )
+
+// WithExecutedTarget records where a call ran in its response details.
+func WithExecutedTarget(details map[string]any, target *ExecutionTarget) map[string]any {
+	if target == nil || target.Name == "" {
+		return details
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	ran := map[string]any{"provider": target.Provider, "name": target.Name}
+	if target.AccountID != "" {
+		ran["account_id"] = target.AccountID
+	}
+	details[MetadataExecutedTarget] = ran
+	return details
+}
 
 // ErrNoMatchingConfig means configs exist for this tool but none of them is the
 // system the question is about. Distinct from having no configuration at all:

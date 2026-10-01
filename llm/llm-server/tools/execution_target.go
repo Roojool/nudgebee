@@ -93,12 +93,100 @@ func ResolveObservabilityTarget(ctx core.NbToolContext, input core.NBToolCallReq
 // conversation's own account. The caller must be able to read the target, and
 // a handed target must still be the connection validated at handoff.
 func ResolveCallTarget(ctx core.NbToolContext, input core.NBToolCallRequest) (core.NbToolContext, error) {
-	_, accountID, err := ResolveObservabilityTarget(ctx, input)
+	target, accountID, err := ResolveObservabilityTarget(ctx, input)
 	if err != nil {
 		return ctx, err
 	}
 	ctx.TargetAccountId = accountID
+	if target != nil && accountID != ctx.AccountId {
+		ctx.ExecutedTarget = &core.ExecutionTarget{Provider: target.Provider, Name: target.Name, AccountID: accountID}
+	}
 	return ctx, nil
+}
+
+// ExecutedTargetOf reports where a tool call ran when that is not the
+// conversation's default: the resolved target of a follows-target tool, the
+// cluster/account an own-selector tool was asked for (it validates the name
+// and fails otherwise), or the target an agent called as a tool was given.
+func ExecutedTargetOf(tool core.NBTool, ctx core.NbToolContext, input string) *core.ExecutionTarget {
+	if ctx.ExecutedTarget != nil {
+		return ctx.ExecutedTarget
+	}
+	owner, requested := "", ""
+	if strings.EqualFold(tool.Name(), core.ToolExecuteShellCommand) {
+		owner, requested, _ = RequestedShellTargetFromInput(input)
+	} else if scoped, ok := tool.(core.PerCallTargetTool); ok {
+		owner = tool.Name()
+		requested, _ = scoped.RequestedTarget(input)
+	}
+	provider := providerOfTool(owner)
+	if requested == "" || provider == "" {
+		// Agents and sub-agent tools (metrics, prometheus, delegate) take
+		// their target in the input and resolve it themselves.
+		target, err := core.ParseExecutionTarget(core.NBToolCallRequest{Command: input})
+		if err != nil {
+			return nil
+		}
+		return target
+	}
+	if strings.EqualFold(requested, ctx.ToolConfig.Name) {
+		return nil // named the conversation's own connection
+	}
+	return &core.ExecutionTarget{Provider: provider, Name: requested}
+}
+
+// StampExecutedTarget records on a finished call where it ran, so the
+// conversation view can show it. Only successful calls that ran somewhere
+// other than the conversation's own account are stamped: a failed call (an
+// unknown cluster, a refused target) did not run there.
+func StampExecutedTarget(resp core.NBToolResponse, callErr error, tool core.NBTool, ctx core.NbToolContext, input string) core.NBToolResponse {
+	if !ranToCompletion(resp, callErr) {
+		return resp
+	}
+	if _, recorded := resp.AdditionalDetails[core.MetadataExecutedTarget]; recorded {
+		return resp
+	}
+	target := ExecutedTargetOf(tool, ctx, input)
+	if target == nil {
+		return resp
+	}
+	if target.AccountID == "" {
+		// An own-selector tool names a connection; the conversation's own
+		// cluster may be named even when its tool config carries no name.
+		resolved, err := resolveStampTarget(ctx.Ctx, ctx.AccountId, target)
+		if err != nil {
+			return resp
+		}
+		target = resolved
+	}
+	if target.AccountID == ctx.AccountId {
+		return resp
+	}
+	resp.AdditionalDetails = core.WithExecutedTarget(resp.AdditionalDetails, target)
+	return resp
+}
+
+// resolveStampTarget is replaced in tests, which have no connection store.
+var resolveStampTarget = ResolveAgentHandoffTarget
+
+// ranToCompletion: a failed call did not run there, and a call waiting on the
+// user has not run yet.
+func ranToCompletion(resp core.NBToolResponse, callErr error) bool {
+	return callErr == nil && resp.Status != core.NBToolResponseStatusError && resp.Status != core.NBToolResponseStatusWaiting
+}
+
+func providerOfTool(name string) string {
+	switch name {
+	case ToolExecuteKubectlCommand, ToolExecuteHelmCommand, ToolResourceSearch:
+		return "kubernetes"
+	case ToolExecuteAwsCliCommand:
+		return "aws"
+	case ToolExecuteGcpCliCommand:
+		return "gcp"
+	case ToolExecuteAzureCliCommand:
+		return "azure"
+	}
+	return ""
 }
 
 // ResolveToolCallTarget decides, in one place, which account a tool call

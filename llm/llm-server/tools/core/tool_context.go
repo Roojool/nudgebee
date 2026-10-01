@@ -367,19 +367,22 @@ type NbToolContext struct {
 	// AccountId unless the call is about another connected cluster or
 	// account. Read it through DataAccountID().
 	TargetAccountId string
-	UserId          string
-	Query           string
-	QueryContext    string
-	QueryConfig     NBQueryConfig
-	ConversationId  string
-	ParentAgentId   string
-	MessageId       string
-	History         []llms.MessageContent
-	Ctx             *security.RequestContext
-	ToolConfig      ToolConfig
-	ToolCallId      string
-	AccountContext  string
-	AccountPrompt   string
+	// ExecutedTarget is the resolved target when TargetAccountId is another
+	// account; it is recorded on the tool call (MetadataExecutedTarget).
+	ExecutedTarget *ExecutionTarget
+	UserId         string
+	Query          string
+	QueryContext   string
+	QueryConfig    NBQueryConfig
+	ConversationId string
+	ParentAgentId  string
+	MessageId      string
+	History        []llms.MessageContent
+	Ctx            *security.RequestContext
+	ToolConfig     ToolConfig
+	ToolCallId     string
+	AccountContext string
+	AccountPrompt  string
 	// Source is the conversation source this tool call belongs to, as a plain
 	// string so tools/core stays free of the agents/core import. Empty means
 	// unknown. Tools use it to tell a live user's request, where asking or
