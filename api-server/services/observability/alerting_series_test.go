@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"nudgebee/services/common"
 	"strings"
 	"testing"
 
@@ -86,5 +87,35 @@ func TestMarkAlertingSeries(t *testing.T) {
 		series := alertingTestSeries(map[string]any{"datname": "temporal"})
 		got := markAlertingSeries(series, map[string]string{"datname": "temporal"})
 		assert.False(t, isAlerting(got[0]))
+	})
+
+	t.Run("pod alert: the event's pod label is the workload, the kept pod marks the series", func(t *testing.T) {
+		series := alertingTestSeries(
+			map[string]any{"namespace": "shop", "pod": "cart-5d9f7c6b8-abcde"},
+			map[string]any{"namespace": "shop", "pod": "orders-86c5cc649d-xbdz4"},
+			map[string]any{"namespace": "billing", "pod": "orders-7f6d5c4b3-zzzzz"},
+		)
+		event := map[string]string{"namespace": "shop", "pod": "orders", "kind": "Deployment", common.AlertPodLabel: "orders-86c5cc649d-xbdz4"}
+
+		got := markAlertingSeries(series, event)
+		assert.False(t, isAlerting(got[0]), "without the kept pod the workload name matches no series")
+
+		got = markAlertingSeries(series, common.SeriesMatchLabels(event))
+		assert.Equal(t, "orders-86c5cc649d-xbdz4", seriesLabel(got[0], "pod"))
+		assert.True(t, isAlerting(got[0]))
+		assert.False(t, isAlerting(got[1]))
+		assert.False(t, isAlerting(got[2]))
+	})
+
+	t.Run("node alert: instance and the kept exporter pod both agree", func(t *testing.T) {
+		series := alertingTestSeries(
+			map[string]any{"instance": "192.0.2.119:9100", "pod": "node-exporter-2zs48", "job": "node-exporter"},
+			map[string]any{"instance": "192.0.2.27:9100", "pod": "node-exporter-mmxd8", "job": "node-exporter"},
+		)
+		event := map[string]string{"instance": "192.0.2.27:9100", "pod": "node-exporter", "kind": "DaemonSet", "job": "node-exporter", common.AlertPodLabel: "node-exporter-mmxd8"}
+		got := markAlertingSeries(series, common.SeriesMatchLabels(event))
+		assert.Equal(t, "192.0.2.27:9100", seriesLabel(got[0], "instance"))
+		assert.True(t, isAlerting(got[0]))
+		assert.False(t, isAlerting(got[1]))
 	})
 }

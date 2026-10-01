@@ -35,6 +35,9 @@ type metricSeries struct {
 	// alerting marks the series of the object the alert fired for, as the
 	// prometheus_enricher flags it; the rule's other breaching objects are not.
 	alerting bool
+	// apart holds the labels that tell this series from the others in its card,
+	// as k=v pairs (nameSeriesApart). It names an object in fewer bytes than name.
+	apart string
 	// key identifies the series across cards for dedupe.
 	key string
 }
@@ -63,10 +66,17 @@ type metricSeries struct {
 // apart within its card, and the series of the object the alert fired for is
 // tagged and listed first, with its card ahead of the rest, so the budget below
 // never cuts it and the model does not quote another object's number.
+//
+// In a card that holds the alerting object's series, the rule's other objects are
+// not listed one per line. They get one line under the card (otherObjectsNote):
+// how many there are, the first few names, and when they were first seen. Their
+// numbers are what the model quoted for the wrong object, and on a rule tracking
+// many objects they filled the whole budget. Their series stay in the evidence.
 func renderMetricDigest(ev events.InvestigateData) string {
 	type digestCard struct {
 		header   string
 		lines    []string
+		note     string
 		alerting bool
 	}
 	// The same series is often stored twice (grouped and flat), so dedupe it before
@@ -87,9 +97,26 @@ func renderMetricDigest(ev events.InvestigateData) string {
 		collected = append(collected, series)
 	}
 
+	// A series that shares a card with the alerting object's series is one of the
+	// rule's other objects wherever a copy of it sits, so it is counted once and
+	// never listed, not even by a card that holds it alone.
+	folded := make(map[string]bool)
+	for _, series := range collected {
+		holdsAlerting := false
+		for _, s := range series {
+			holdsAlerting = holdsAlerting || alertingKeys[s.key]
+		}
+		for _, s := range series {
+			if holdsAlerting && !alertingKeys[s.key] {
+				folded[s.key] = true
+			}
+		}
+	}
+
 	var cards []digestCard
 	total := 0
 	seen := make(map[string]bool)
+	noted := make(map[string]bool)
 	for i, card := range evidenceCards {
 		series := collected[i]
 		for j := range series {
@@ -98,14 +125,24 @@ func renderMetricDigest(ev events.InvestigateData) string {
 		nameSeriesApart(series)
 		sort.SliceStable(series, func(i, j int) bool { return series[i].alerting && !series[j].alerting })
 		c := digestCard{header: metricCardHeader(card)}
+		// After the sort an alerting series, when the card has one, is first.
+		c.alerting = len(series) > 0 && series[0].alerting
+		var others []metricSeries
 		for _, s := range series {
+			if folded[s.key] {
+				if c.alerting && !noted[s.key] {
+					noted[s.key] = true
+					others = append(others, s)
+				}
+				continue
+			}
 			if !seen[s.key] {
 				seen[s.key] = true
 				c.lines = append(c.lines, formatMetricSeries(s))
-				c.alerting = c.alerting || s.alerting
 			}
 		}
-		if len(c.lines) > 0 {
+		c.note = otherObjectsNote(others)
+		if len(c.lines) > 0 || c.note != "" {
 			cards = append(cards, c)
 			total += len(c.lines)
 		}
@@ -114,7 +151,7 @@ func renderMetricDigest(ev events.InvestigateData) string {
 
 	var b strings.Builder
 	rendered := 0
-	for _, c := range cards {
+	for ci, c := range cards {
 		indent := ""
 		if c.header != "" {
 			indent = "  "
@@ -126,13 +163,81 @@ func renderMetricDigest(ev events.InvestigateData) string {
 			}
 			if rendered == maxMetricDigestSeries || b.Len()+len(header)+len(indent)+len(line) > maxMetricDigestBytes {
 				fmt.Fprintf(&b, "- … %d more series in the structured evidence file\n", total-rendered)
+				// The cut drops series lines, not the count of other objects.
+				for _, rest := range cards[ci:] {
+					b.WriteString(rest.note)
+				}
 				return b.String()
 			}
 			b.WriteString(header + indent + line)
 			rendered++
 		}
+		// Not held to the budget: it is one bounded line, and the only place the
+		// prompt says other objects matched too.
+		if c.note != "" {
+			header := ""
+			if len(c.lines) == 0 {
+				header = c.header
+			}
+			b.WriteString(header + indent + c.note)
+		}
 	}
 	return b.String()
+}
+
+// Bounds on the other-objects line: how many objects it names, and how long a name
+// may be (a label value can be a whole log sample).
+const (
+	maxOtherObjectNames     = 5
+	maxOtherObjectNameBytes = 80
+)
+
+// otherObjectsNote is the line for the series in an alerting card that are not the
+// alert's own: how many objects there are, the first few names, and when they were
+// first seen in the window — several objects starting together points at a shared
+// cause. "" when there are none.
+func otherObjectsNote(others []metricSeries) string {
+	if len(others) == 0 {
+		return ""
+	}
+
+	var names []string
+	earliest, latest := others[0].points[0].at, others[0].points[0].at
+	for _, other := range others {
+		at := other.points[0].at
+		if at.Before(earliest) {
+			earliest = at
+		}
+		if at.After(latest) {
+			latest = at
+		}
+		if len(names) < maxOtherObjectNames {
+			// The labels that tell it apart say which object it is; the full name
+			// leads with what every object in the card shares.
+			name := other.apart
+			if name == "" {
+				name = other.name
+			}
+			if len(name) > maxOtherObjectNameBytes {
+				name = strings.ToValidUTF8(name[:maxOtherObjectNameBytes], "") + "…"
+			}
+			names = append(names, name)
+		}
+	}
+
+	noun := "objects"
+	if len(others) == 1 {
+		noun = "object"
+	}
+	line := fmt.Sprintf("- %d other %s also matched this alert's query (series in the structured evidence file): %s",
+		len(others), noun, strings.Join(names, ", "))
+	if more := len(others) - len(names); more > 0 {
+		line += fmt.Sprintf(", +%d more", more)
+	}
+	if earliest.Equal(latest) {
+		return line + " · first seen " + metricClock(earliest) + " UTC\n"
+	}
+	return line + " · first seen " + metricClock(earliest) + "→" + metricClock(latest) + " UTC\n"
 }
 
 // metricCardHeader is the line naming what a card's series measure, or "" when
@@ -265,7 +370,8 @@ const maxDistinguishingLabels = 3
 // across the card's series and are not in the name already. The name is built
 // from a fixed set of labels, which leaves out the one a per-object rule varies
 // by (datname, deployment, persistentvolumeclaim, queue), so two volumes in one
-// namespace came out under the same name with different numbers.
+// namespace came out under the same name with different numbers. The differing
+// labels are also kept on their own in apart.
 func nameSeriesApart(series []metricSeries) {
 	values := map[string]map[string]bool{}
 	for _, s := range series {
@@ -286,10 +392,16 @@ func nameSeriesApart(series []metricSeries) {
 	}
 	sort.Strings(keys)
 	for i := range series {
-		var extra []string
+		var extra, apart []string
 		for _, k := range keys {
 			v, _ := series[i].labels[k].(string)
-			if v == "" || strings.Contains(series[i].name, v) {
+			if v == "" {
+				continue
+			}
+			if len(apart) < maxDistinguishingLabels {
+				apart = append(apart, k+"="+v)
+			}
+			if strings.Contains(series[i].name, v) {
 				continue
 			}
 			if len(extra) == maxDistinguishingLabels {
@@ -297,6 +409,7 @@ func nameSeriesApart(series []metricSeries) {
 			}
 			extra = append(extra, k+"="+v)
 		}
+		series[i].apart = strings.Join(apart, " ")
 		if len(extra) > 0 {
 			series[i].name += " " + strings.Join(extra, " ")
 		}

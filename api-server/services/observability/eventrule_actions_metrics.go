@@ -92,7 +92,17 @@ func (a *prometheusAction) AutoExecute(ctx playbooks.PlaybookActionContext) (pla
 	}
 	if promResp, ok := resp.(playbooks.PrometheusActionResponse); ok {
 		if seriesList, ok := promResp.Data["series_list_result"].([]any); ok {
-			promResp.Data["series_list_result"] = markAlertingSeries(seriesList, ctx.GetEvent().Labels)
+			marked := markAlertingSeries(seriesList, common.SeriesMatchLabels(ctx.GetEvent().Labels))
+			promResp.Data["series_list_result"] = marked
+			// Readers show only the marked series when there is one; without a mark
+			// they show every object, so say when that happened.
+			if len(marked) > 1 {
+				first, _ := marked[0].(map[string]any)
+				if alerting, _ := first["alerting"].(bool); !alerting {
+					ctx.GetLogger().Info("prometheus auto action: could not tell the alert's series from the rule's other objects",
+						"alert", ctx.GetEvent().Name, "series", len(marked))
+				}
+			}
 		}
 	}
 	return resp, nil

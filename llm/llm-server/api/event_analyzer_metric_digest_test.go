@@ -194,7 +194,7 @@ func TestRenderMetricDigest_AlertingSeriesLeadsAndSeriesAreNamedApart(t *testing
 	got := renderMetricDigest(ev)
 	lines := strings.Split(strings.TrimSpace(got), "\n")
 	if len(lines) != 4 {
-		t.Fatalf("expected a query header and three series, got:\n%s", got)
+		t.Fatalf("expected a query header, the alerting series, the other-objects line and the pod series, got:\n%s", got)
 	}
 	if !strings.HasPrefix(lines[0], "- query `kubelet_volume_stats") {
 		t.Errorf("expected the card holding the alerting series first, got:\n%s", got)
@@ -202,8 +202,50 @@ func TestRenderMetricDigest_AlertingSeriesLeadsAndSeriesAreNamedApart(t *testing
 	if !strings.Contains(lines[1], "persistentvolumeclaim=data-postgresql-0 [the object this alert fired for]") || !strings.Contains(lines[1], "last 18.920") {
 		t.Errorf("expected the postgres volume first and tagged, got:\n%s", got)
 	}
-	if !strings.Contains(lines[2], "persistentvolumeclaim=data-elasticsearch-0:") || strings.Contains(lines[2], "fired for") {
-		t.Errorf("expected the elasticsearch volume named and untagged, got:\n%s", got)
+	// The other volume is named, but its number is what the model quoted as the
+	// postgres volume's: it is not in the digest.
+	if !strings.Contains(lines[2], "1 other object also matched this alert's query") || !strings.Contains(lines[2], "persistentvolumeclaim=data-elasticsearch-0") {
+		t.Errorf("expected the elasticsearch volume named on the other-objects line, got:\n%s", got)
+	}
+	if strings.Contains(got, "5.79") {
+		t.Errorf("expected the other volume's values left out, got:\n%s", got)
+	}
+}
+
+// On a rule tracking many objects the others used to fill the whole budget, cutting
+// the alerting workload's own metrics. They take one line now, whatever their number.
+func TestRenderMetricDigest_OtherObjectsTakeOneLine(t *testing.T) {
+	series := `{"alerting":true,"metric":{"namespace":"shop","deployment":"orders"},"values":["1"],"timestamps":[1789382040]}`
+	for i := 0; i < 14; i++ {
+		series += fmt.Sprintf(`,{"metric":{"namespace":"shop","deployment":"other-%02d"},"values":["1"],"timestamps":[%d]}`, i, 1789382040+60*(i%3))
+	}
+	ev := events.InvestigateData{
+		PodMetrics: []events.InvestigateDataInsight{{
+			Data: `{"series_list_result":[{"metric":{"__name__":"container_memory_working_set_bytes","pod":"orders-1"},"values":["1"],"timestamps":[1789382040]}]}`,
+		}},
+		MetricsData: []events.InvestigateDataInsight{{
+			Query: "kube_deployment_spec_replicas > kube_deployment_status_replicas_available",
+			Data:  `{"result_type":"matrix","series_list_result":[` + series + `]}`,
+		}},
+	}
+	got := renderMetricDigest(ev)
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected header, alerting series, one other-objects line and the pod series, got:\n%s", got)
+	}
+	if !strings.Contains(lines[1], "deployment=orders [the object this alert fired for]") {
+		t.Errorf("expected the alerting deployment first, got:\n%s", got)
+	}
+	note := lines[2]
+	if !strings.Contains(note, "14 other objects also matched this alert's query") || !strings.Contains(note, ": deployment=other-00, deployment=other-01,") ||
+		!strings.Contains(note, "deployment=other-04, +9 more") || strings.Contains(note, "deployment=other-05") {
+		t.Errorf("expected a count, the first five names and the rest counted, got:\n%s", note)
+	}
+	if !strings.Contains(note, "first seen 09-14 10:34→09-14 10:36 UTC") {
+		t.Errorf("expected when the other objects were first seen, got:\n%s", note)
+	}
+	if !strings.Contains(lines[3], "container_memory_working_set_bytes") || strings.Contains(got, "more series") {
+		t.Errorf("expected the workload's own metric still rendered, with nothing cut, got:\n%s", got)
 	}
 }
 
@@ -222,8 +264,43 @@ func TestRenderMetricDigest_SeriesInTwoCardsRenderedOnce(t *testing.T) {
 	}
 }
 
-// Two objects whose values match are still two series, and only the alerting
-// one is tagged.
+// One of the rule's other objects is counted once and never listed, wherever a copy
+// of its series sits: a card that holds it alone must not print its numbers.
+func TestRenderMetricDigest_OtherObjectIsNotListedByAnotherCard(t *testing.T) {
+	a := `{"alerting":true,"metric":{"namespace":"n","persistentvolumeclaim":"a"},"values":["1"],"timestamps":[1789382040]}`
+	b := `{"metric":{"namespace":"n","persistentvolumeclaim":"b"},"values":["2"],"timestamps":[1789382040]}`
+	for name, ev := range map[string]events.InvestigateData{
+		"lone copy first": {
+			PodMetrics:  []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + b + `]}`}},
+			MetricsData: []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + a + `,` + b + `]}`}},
+		},
+		"lone copy last": {
+			PodMetrics:  []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + a + `,` + b + `]}`}},
+			MetricsData: []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + b + `]}`}},
+		},
+	} {
+		got := renderMetricDigest(ev)
+		if strings.Count(got, "\n") != 2 || strings.Count(got, "persistentvolumeclaim=b") != 1 || !strings.Contains(got, "1 other object") || strings.Contains(got, "last 2.000") {
+			t.Errorf("%s: expected volume a listed and volume b counted once, got:\n%s", name, got)
+		}
+	}
+}
+
+// When the series budget cuts the digest, the count of other objects still gets
+// through: without it the prompt would not say that anything else matched.
+func TestRenderMetricDigest_OtherObjectsCountSurvivesTheCut(t *testing.T) {
+	series := `{"metric":{"namespace":"n","container":"other"},"values":["9"],"timestamps":[1789382040]}`
+	for i := 0; i < maxMetricDigestSeries+1; i++ {
+		series += fmt.Sprintf(`,{"alerting":true,"metric":{"namespace":"n","container":"c-%02d"},"values":["1"],"timestamps":[1789382040]}`, i)
+	}
+	got := renderMetricDigest(events.InvestigateData{MetricsData: []events.InvestigateDataInsight{{Data: `{"series_list_result":[` + series + `]}`}}})
+	if !strings.Contains(got, "… 1 more series in the structured evidence file") || !strings.Contains(got, "1 other object also matched this alert's query") {
+		t.Errorf("expected the cut note and the other-objects count, got:\n%s", got)
+	}
+}
+
+// Two objects whose values match are still two objects: only the alerting one is
+// tagged and rendered, and the other is counted, not merged into it.
 func TestRenderMetricDigest_SeriesWithEqualValuesStayApart(t *testing.T) {
 	ev := events.InvestigateData{MetricsData: []events.InvestigateDataInsight{{
 		Data: `{"series_list_result":[` +
@@ -231,7 +308,7 @@ func TestRenderMetricDigest_SeriesWithEqualValuesStayApart(t *testing.T) {
 			`{"metric":{"namespace":"n","persistentvolumeclaim":"b"},"values":["0"],"timestamps":[1789382040]}]}`,
 	}}}
 	got := renderMetricDigest(ev)
-	if strings.Count(got, "\n") != 2 || strings.Count(got, "fired for") != 1 || !strings.Contains(got, "persistentvolumeclaim=b:") {
-		t.Errorf("expected both volumes, only a tagged, got:\n%s", got)
+	if strings.Count(got, "\n") != 2 || strings.Count(got, "fired for") != 1 || !strings.Contains(got, "1 other object") || !strings.Contains(got, "persistentvolumeclaim=b") {
+		t.Errorf("expected volume a tagged and volume b counted as the other object, got:\n%s", got)
 	}
 }

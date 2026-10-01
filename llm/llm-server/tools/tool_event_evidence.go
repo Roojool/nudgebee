@@ -645,6 +645,11 @@ func (t GetEventEvidenceTool) summarizePrometheusMetrics(evidence any) (core.NBT
 				summary["first_timestamp"] = timestamps[0]
 				summary["last_timestamp"] = timestamps[len(timestamps)-1]
 			}
+			// The prometheus_enricher flags the series of the object the alert fired
+			// for; the rule's other objects share the list.
+			if alerting, _ := seriesMap["alerting"].(bool); alerting {
+				summary["alerting"] = true
+			}
 
 			summaries = append(summaries, summary)
 		}

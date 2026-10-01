@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"nudgebee/services/common"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/llm"
 	"nudgebee/services/security"
@@ -212,6 +213,7 @@ func MatchWorkloadAndEnrich(sc *security.RequestContext, e *EventIncomingWebhook
 		e.EventSubjectOwnerKind = kindLower
 	}
 
+	keepAlertPod(e.Investigation.Labels, workload.Name)
 	e.Investigation.Labels["pod"] = workload.Name
 	e.Investigation.Labels["kind"] = workload.Kind
 	e.Investigation.Labels["nb_matched_workload"] = "true"
@@ -222,6 +224,17 @@ func MatchWorkloadAndEnrich(sc *security.RequestContext, e *EventIncomingWebhook
 			e.Investigation.Labels["namespace"] = workload.Namespace
 		}
 		e.Investigation.Labels["cloud_resource_id"] = workload.CloudResourceId
+	}
+}
+
+// keepAlertPod records the pod the alert named, before the matched workload's name
+// replaces it in labels["pod"]. Metric series carry the pod, so it is what tells
+// this alert's series from the rule's other breaching objects
+// (common.SeriesMatchLabels). The first value kept wins: a second match must not
+// overwrite it with the workload name the first one wrote.
+func keepAlertPod(labels map[string]string, workloadName string) {
+	if pod := labels["pod"]; pod != "" && pod != workloadName && labels[common.AlertPodLabel] == "" {
+		labels[common.AlertPodLabel] = pod
 	}
 }
 
