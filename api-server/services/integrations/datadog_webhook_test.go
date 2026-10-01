@@ -822,3 +822,49 @@ func TestDatadogWebhook_SimpleMonitorKeepsMonitorFingerprint(t *testing.T) {
 	assert.Equal(t, "266155000-", e.Investigation.Fingerprint)
 	assert.Empty(t, e.LegacyFingerprint)
 }
+
+// $ID is new on every notification, re-notifications of a still-firing group
+// included. A monitor delivery therefore carries a FiringKey, which makes the
+// framework store it on its group's open event, if there is one, instead of
+// opening another (core.firingFindingIDFor).
+func TestDatadogWebhook_MonitorDeliveryCarriesAFiringKey(t *testing.T) {
+	noMetastore(t)
+	for _, tc := range []struct{ name, payload string }{
+		{"captured [Triggered] host monitor", datadogPayload},
+		{"captured [Triggered] error-tracking monitor", datadogPayload2},
+		{"[Triggered] with $AGGREG_KEY", datadogQueryAlertPayload},
+		{"[Re-Triggered] synthetics", datadogReTriggeredPayload},
+		{"[Warn] query alert", datadogWarnPayload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := parseDatadogDelivery(t, tc.payload)
+			require.NotEmpty(t, e.FiringKey)
+			assert.Equal(t, core.FiringKeyFromStart(e.Investigation.Fingerprint, e.EventCreatedAt), e.FiringKey)
+		})
+	}
+}
+
+// A one-shot "notification" delivery is stored closed on arrival and never
+// re-notified, so it keeps its own $ID and does not look for an open event.
+// A multi-alert monitor (its title names a group) whose delivery carries no
+// $AGGREG_KEY, no group in its monitor link and no alert_scope falls back to the
+// monitor-wide fingerprint shared by every group. Folding re-notifications into the
+// open event there would swallow every other group's alert into the first one, so
+// such a delivery keeps one event per notification (no FiringKey).
+func TestDatadogWebhook_UnidentifiedGroupGetsNoFiringKey(t *testing.T) {
+	noMetastore(t)
+	payload := strings.ReplaceAll(datadogPayload2, "?group=", "?grp=")
+	require.NotEqual(t, datadogPayload2, payload, "fixture must carry a monitor link group to remove")
+	e := parseDatadogDelivery(t, payload)
+	require.Equal(t, "8249055-", e.Investigation.Fingerprint, "no group is derivable, so the fingerprint is monitor-wide")
+	assert.Empty(t, e.FiringKey, "re-notifications must not fold different groups into one event")
+}
+
+func TestDatadogWebhook_OneShotNotificationHasNoFiringKey(t *testing.T) {
+	noMetastore(t)
+	payload := strings.Replace(datadogPayload, `\"event_type\": \"query_alert_monitor\"`, `\"event_type\": \"notification\"`, 1)
+	require.NotEqual(t, datadogPayload, payload, "fixture must contain the event_type being replaced")
+	e := parseDatadogDelivery(t, payload)
+	assert.Empty(t, e.FiringKey)
+	assert.Equal(t, "8166212983446713351", e.EventId)
+}

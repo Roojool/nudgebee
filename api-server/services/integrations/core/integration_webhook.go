@@ -47,7 +47,10 @@ type EventIncomingWebhook struct {
 	// FiringKey identifies one firing of the alert EventId names, for parsers whose
 	// EventId is stable across firings. Set it and each firing gets its own events
 	// row (see firingFindingIDFor); leave it empty when the source offers no such
-	// key, or when EventId is already per firing.
+	// key, or when EventId is already per firing. A parser whose EventId is new on
+	// every notification, re-notifications of one firing included (Datadog's $ID),
+	// sets it as well: a re-notification then lands on the alert's open row instead
+	// of opening another beside it.
 	FiringKey string `json:"firing_key,omitempty"`
 	// LegacyFingerprint is the fingerprint this alert was stored under before its
 	// parser changed fingerprint format. A resolve closes events under it as well as

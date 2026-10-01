@@ -47,7 +47,7 @@ var webhookFiringIdentity = map[string]firingIdentity{
 	IntegrationZendutyWebhook:       {perFiringEventId, "incident unique_id"},
 	IntegrationPagerdutyWebhook:     {perFiringEventId, "incident id"},
 	IntegrationGCPMonitoringWebhook: {perFiringEventId, "incident.incident_id"},
-	IntegrationDatadogWebhook:       {perFiringEventId, "event id ($ID) per notification; incident_uuid for incidents"},
+	IntegrationDatadogWebhook:       {perFiringEventId, "event id ($ID) per notification, with a FiringKey so a re-notification updates its group's open event; incident_uuid for incidents"},
 	IntegrationDynatraceWebhook:     {perFiringEventId, "problem id / davis event id"},
 	IntegrationAzureMonitorWebhook:  {perFiringEventId, "essentials.alertId (one per fired alert instance)"},
 	IntegrationNewRelicWebhook:      {perFiringEventId, "issue id / incident id"},

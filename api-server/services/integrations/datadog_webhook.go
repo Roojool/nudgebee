@@ -33,6 +33,10 @@ type DatadogWebhook struct {
 
 var datadogIssueIdRegex = regexp.MustCompile(`{issue.id:(\S+)}`)
 var datadogTitleRegex = regexp.MustCompile(`^(?:\[(P\d+)\]\s)?\[((?:Re-)?Triggered|Recovered|Alert|Warn|No Data)(?: on [^\]]+)?\]\s(.*)`)
+
+// datadogTitleGroupRegex matches a title that names the group a multi-alert
+// monitor fired for: "[Triggered on {host:web-1}] …".
+var datadogTitleGroupRegex = regexp.MustCompile(`\[(?:(?:Re-)?Triggered|Recovered|Alert|Warn|No Data) on [^\]]+\]`)
 var datadogMonitorURLRegex = regexp.MustCompile(`https(://[a-zA-Z0-9.-]+/monitors/(\d+)[^)]*)`)
 var datadogMonitorIDRegex = regexp.MustCompile(`monitor_id=(\d+)`)
 var datadogTagsRegex = regexp.MustCompile(`tags=([^&)]+)`)
@@ -1975,6 +1979,7 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 
 	fingerprint := p.Event.AggregKey
 	legacyFingerprint := ""
+	firingKey := ""
 	findingId := p.ID
 	isIncident := false
 	if monitorID != "" && p.EventType != "notification" {
@@ -1988,6 +1993,19 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 				legacyFingerprint = fingerprint
 				fingerprint = fmt.Sprintf("%s-%s", monitorID, group)
 			}
+		}
+		// $ID is new on every notification, so a re-notification of a group that is
+		// still firing ([Re-Triggered], or [Warn] escalating to [Triggered]) opened
+		// an event of its own beside the open one. With a FiringKey it updates the
+		// group's open event instead, and a new event opens only when none is open
+		// (core.firingFindingIDFor). The payload carries no key for one alert from
+		// trigger to recovery, so the delivery's own time stands in: on the
+		// notification that opens an event, that is when the alert began.
+		// A multi-alert monitor whose group could not be derived is still on the
+		// monitor-wide "<monitorID>-", shared by all its groups; folding there would
+		// hide every group but the first, so it keeps one event per notification.
+		if p.Event.AggregKey != "" || legacyFingerprint != "" || !datadogTitleGroupRegex.MatchString(p.Title) {
+			firingKey = core.FiringKeyFromStart(fingerprint, createdAt)
 		}
 	} else if p.Incident.IncidentPublicID != "" {
 		isIncident = true
@@ -2311,6 +2329,7 @@ func (m DatadogWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 		AccountId:             accountId,
 		EventSubjectOwner:     subjectOwner,
 		EventSubjectOwnerKind: subjectOwnerKind,
+		FiringKey:             firingKey,
 		LegacyFingerprint:     legacyFingerprint,
 	}
 	return []core.EventIncomingWebhook{event}, nil
