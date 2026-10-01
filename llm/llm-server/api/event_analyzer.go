@@ -3333,6 +3333,25 @@ func validateCodeChangePlan(plan *codeChangePlan) string {
 	return ""
 }
 
+// defaultCodeFixMaxEvidenceAgeDays is how old an event may be before a change
+// plan built on its stored evidence is declined (#39104). Log retention is not
+// known to this service, so the cutoff is configurable per deployment via
+// EVENT_CODE_FIX_MAX_EVIDENCE_AGE_DAYS; 0 or a negative value disables it.
+const defaultCodeFixMaxEvidenceAgeDays = 7
+
+// staleEvidenceReason declines a change plan when the event fired longer ago
+// than maxAge. A re-analysis of such an event works from evidence collected
+// back then (event eab45d8f: mislabelled "error" lines from months earlier led
+// to a fix for a warning the alert never counted) and the live logs for the
+// incident window are usually gone, so nothing can correct it. Returns "" when
+// the evidence is fresh enough, the cutoff is disabled, or the start is unknown.
+func staleEvidenceReason(startsAt *time.Time, now time.Time, maxAge time.Duration) string {
+	if maxAge <= 0 || startsAt == nil || now.Sub(*startsAt) <= maxAge {
+		return ""
+	}
+	return fmt.Sprintf("skipped - event fired %d days ago; its stored evidence is too old to base a code change on", int(now.Sub(*startsAt).Hours()/24))
+}
+
 // stripChangePlanBlock removes the <change_plan> block (and trailing blank
 // space) from investigation text before it is stored in the investigation row,
 // fed to synthesis, or shown in the UI. No-op when the block is absent.
@@ -3743,6 +3762,10 @@ func runCodeFixStage(ctx *security.RequestContext, request EventAnalysisRequest,
 		"auto_raise_pr_enabled", raisePR)
 
 	if reason := validateCodeChangePlan(plan); reason != "" {
+		return skipCodeFix(reason)
+	}
+	if reason := staleEvidenceReason(eventData.StartsAt, time.Now(), time.Duration(config.Config.GetInt("event_code_fix_max_evidence_age_days", defaultCodeFixMaxEvidenceAgeDays))*24*time.Hour); reason != "" {
+		ctx.GetLogger().Info("analyzer: declining change plan built on stale evidence", "event_id", request.EventId, "reason", reason)
 		return skipCodeFix(reason)
 	}
 	if !isGitIntegrationConfigured(request.AccountId) {
