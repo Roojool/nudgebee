@@ -223,8 +223,21 @@ func inferAPIRequestType(tokens []string) core.ToolRequestType {
 	return classifyHTTPMethod(method)
 }
 
+// redisCommandAsRun returns the shell command the Redis tool runs: the input
+// as given when it starts with redis-cli, else the input as redis-cli's
+// arguments. The classifier reads this same string. A redis-cli anywhere else
+// in the input does not count: "command bash -c 'id' redis-cli" used to run
+// as given, so bash ran it, while the classifier read Redis COMMAND.
+func redisCommandAsRun(command string) string {
+	command = strings.TrimSpace(command)
+	if fields := strings.Fields(command); len(fields) > 0 && fields[0] == "redis-cli" {
+		return command
+	}
+	return "redis-cli " + command
+}
+
 func inferRedisRequestType(input string) core.ToolRequestType {
-	tokens, ok := staticCLIArgs(input, true, "redis-cli", "redis")
+	tokens, ok := staticCLIArgs(redisCommandAsRun(extractCommandFromToolInput(input)), false, "redis-cli")
 	if !ok {
 		return ""
 	}
@@ -261,9 +274,52 @@ func inferRabbitRequestType(input string) core.ToolRequestType {
 	}
 	commandTokens, err := shlex.Split(command)
 	if err == nil && len(commandTokens) > 0 && strings.EqualFold(filepath.Base(commandTokens[0]), "rabbitmq-api") {
-		return classifyHTTPMethod(tokens[0])
+		requestType := classifyHTTPMethod(tokens[0])
+		// Words after the path go to curl unquoted, after the broker
+		// credentials: "-X DELETE" overrides the method (curl uses the last
+		// -X) and another URL receives the credentials. Only a bare
+		// `rabbitmq-api GET /path` is a read.
+		if requestType == core.ToolRequestTypeRead && len(tokens) != 2 {
+			return core.ToolRequestTypeUpdate
+		}
+		return requestType
 	}
-	return classifyAction(tokens[0], rabbitReadActions, rabbitCreateActions, rabbitUpdateActions, rabbitDeleteActions)
+	requestType := classifyAction(tokens[0], rabbitReadActions, rabbitCreateActions, rabbitUpdateActions, rabbitDeleteActions)
+	if requestType == core.ToolRequestTypeRead && strings.EqualFold(tokens[0], "get") && rabbitGetDropsMessages(tokens[1:]) {
+		return core.ToolRequestTypeUpdate
+	}
+	return requestType
+}
+
+// rabbitGetDropsMessages reports a rabbitmqadmin `get` that takes messages off
+// the queue for good. `get` fetches messages and, by default, puts them back
+// (ackmode=ack_requeue_true); any other ack mode, or requeue=false, removes
+// them.
+func rabbitGetDropsMessages(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		key, value, hasValue := strings.Cut(strings.ToLower(arg), "=")
+		key = strings.TrimLeft(key, "-")
+		// `--flag value`: the value is consumed so it is not read again as a
+		// setting (`--queue requeue` names a queue). A word that is itself a
+		// setting (has `=`) or a flag is never consumed, so it is still checked.
+		if !hasValue && strings.HasPrefix(arg, "--") && i+1 < len(args) &&
+			!strings.HasPrefix(args[i+1], "-") && !strings.Contains(args[i+1], "=") {
+			i++
+			value = strings.ToLower(args[i])
+		}
+		switch key {
+		case "ackmode", "ack-mode", "ack_mode":
+			if value != "ack_requeue_true" && value != "reject_requeue_true" {
+				return true
+			}
+		case "requeue":
+			if value != "true" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func extractRabbitCommand(input string) string {
