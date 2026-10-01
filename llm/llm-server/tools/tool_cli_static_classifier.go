@@ -37,19 +37,55 @@ func staticCLIArgs(input string, allowBare bool, executables ...string) ([]strin
 	return tokens, true
 }
 
+// expandEscapedNewlines turns a literal `\n` into a newline, as the gh and glab
+// tools do before running a command. Their classifiers must read the command
+// in that form: a newline outside quotes starts a second shell command.
+func expandEscapedNewlines(command string) string {
+	return strings.ReplaceAll(command, "\\n", "\n")
+}
+
 func helpOrVersion(tokens []string) bool {
 	if len(tokens) == 0 {
 		return false
 	}
-	for _, token := range tokens {
-		switch strings.ToLower(token) {
-		case "-h", "--help":
-			return true
-		}
+	if isHelpRequest(tokens) {
+		return true
+	}
+	return isHelpOrVersionCommand(tokens)
+}
+
+// isHelpOrVersionCommand reports `<cli> help ...` / `<cli> version ...`.
+func isHelpOrVersionCommand(tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
 	}
 	first := strings.ToLower(tokens[0])
 	return first == "help" || first == "version" ||
 		(len(tokens) == 1 && (first == "-v" || first == "--version"))
+}
+
+// isHelpRequest reports a command that only asks for help: the help flag is
+// the last token and no flag comes before it, as in `<cli> [command words]
+// --help`. A help flag anywhere else proves nothing. A flag before it can take
+// it as its value (`helm uninstall rel --description -h` uninstalls), and a
+// shell comment or another command can hide it from what actually runs.
+func isHelpRequest(tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	last := tokens[len(tokens)-1] // case-sensitive: `-H` is not `-h`
+	if last == "--version" && len(tokens) == 1 {
+		return true
+	}
+	if last != "-h" && last != "--help" {
+		return false
+	}
+	for _, token := range tokens[:len(tokens)-1] {
+		if strings.HasPrefix(token, "-") {
+			return false
+		}
+	}
+	return true
 }
 
 func classifyAction(action string, reads, creates, updates, deletes map[string]struct{}) core.ToolRequestType {
@@ -201,7 +237,9 @@ func inferRedisRequestType(input string) core.ToolRequestType {
 		}
 		return ""
 	}
-	if helpOrVersion(tokens) {
+	// Words after a Redis command are its arguments (`DEL key --help` deletes
+	// two keys), so only the client's own help command counts.
+	if isHelpOrVersionCommand(tokens) {
 		return core.ToolRequestTypeRead
 	}
 	return classifyAction(tokens[0], redisReadActions, redisCreateActions, redisUpdateActions, redisDeleteActions)
@@ -213,7 +251,9 @@ func inferRabbitRequestType(input string) core.ToolRequestType {
 	if !ok {
 		return ""
 	}
-	if helpOrVersion(tokens) {
+	// rabbitmq-api passes its trailing words to curl, so a trailing help flag
+	// is not proof of a help request; only the help command counts.
+	if isHelpOrVersionCommand(tokens) {
 		return core.ToolRequestTypeRead
 	}
 	if strings.HasPrefix(tokens[0], "-") {

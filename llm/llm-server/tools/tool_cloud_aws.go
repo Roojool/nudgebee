@@ -320,6 +320,11 @@ func classifyAwsVerb(verb string) core.ToolRequestType {
 // inferAwsVerbType classifies an AWS CLI command by its verb prefix.
 // Returns empty string if the verb is not recognized (caller should fall back to LLM).
 func inferAwsVerbType(command string) core.ToolRequestType {
+	// The command runs through a shell, so one verb cannot speak for a chain,
+	// a substitution or a comment.
+	if hasUnquotedShellSyntax(command) {
+		return ""
+	}
 	parts := strings.Fields(strings.TrimSpace(command))
 
 	if result := isCloudCLIInfoFlag(parts); result != "" {

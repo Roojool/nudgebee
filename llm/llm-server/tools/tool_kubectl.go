@@ -1269,15 +1269,8 @@ func InferKubectlVerbType(command string) core.ToolRequestType {
 	if len(parts) == 0 {
 		return ""
 	}
-	// Help/version flags before a `--` separator describe kubectl itself and
-	// cannot mutate the cluster. Anything after `--` belongs to an exec payload.
-	for _, part := range parts {
-		if part == "--" {
-			break
-		}
-		if part == "--help" || part == "-h" || part == "--version" {
-			return core.ToolRequestTypeRead
-		}
+	if isHelpRequest(parts) {
+		return core.ToolRequestTypeRead
 	}
 
 	// Global flags can precede the verb. Only skip forms whose boundary is
@@ -1285,7 +1278,7 @@ func InferKubectlVerbType(command string) core.ToolRequestType {
 	for len(parts) > 0 && strings.HasPrefix(parts[0], "-") {
 		flag := parts[0]
 		parts = parts[1:]
-		if strings.Contains(flag, "=") || flag == "--help" || flag == "-h" || flag == "--version" {
+		if strings.Contains(flag, "=") {
 			continue
 		}
 		if !kubectlGlobalFlagsWithValue[flag] || len(parts) == 0 {
@@ -1371,6 +1364,11 @@ func hasUnquotedShellSyntax(command string) bool {
 			return true
 		}
 		if !doubleQuoted && strings.ContainsRune("|&;<>\n\r(){}", rune(char)) {
+			return true
+		}
+		// An unquoted '#' that starts a word comments out the rest of the line,
+		// so the CLI never sees what the classifier read after it.
+		if !doubleQuoted && char == '#' && (i == 0 || command[i-1] == ' ' || command[i-1] == '\t') {
 			return true
 		}
 	}

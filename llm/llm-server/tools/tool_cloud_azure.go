@@ -267,6 +267,11 @@ func classifyAzureVerb(verb string) core.ToolRequestType {
 // inferAzureVerbType classifies an Azure CLI command by its verb.
 // Returns empty string if the verb is not recognized (caller should fall back to LLM).
 func inferAzureVerbType(command string) core.ToolRequestType {
+	// The command runs through a shell, so one verb cannot speak for a chain,
+	// a substitution or a comment.
+	if hasUnquotedShellSyntax(command) {
+		return ""
+	}
 	parts := strings.Fields(strings.TrimSpace(command))
 
 	if result := isCloudCLIInfoFlag(parts); result != "" {
