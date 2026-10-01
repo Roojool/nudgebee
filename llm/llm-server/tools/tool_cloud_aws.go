@@ -370,7 +370,11 @@ func inferAwsVerbType(command string) core.ToolRequestType {
 }
 
 func (t AwsCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
-	requestType := inferAwsVerbType(extractCommandFromToolInput(input))
+	command := extractCommandFromToolInput(input)
+	requestType := inferAwsVerbType(command)
+	if requestType == "" {
+		requestType = classifyOwnCLIChain(ctx, command, inferAwsVerbType, "aws")
+	}
 	if requestType != "" {
 		return requestType, nil
 	}

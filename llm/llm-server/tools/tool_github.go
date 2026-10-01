@@ -255,7 +255,11 @@ func (m GithubCliTool) InferToolRequestTypePrompt(ctx *security.RequestContext, 
 }
 
 func (m GithubCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
-	requestType := inferNestedCLIRequestType(expandEscapedNewlines(extractCommandFromToolInput(input)), "gh", githubReadActions, githubCreateActions, githubUpdateActions, githubDeleteActions)
+	command := expandEscapedNewlines(extractCommandFromToolInput(input))
+	requestType := inferGithubRequestType(command)
+	if requestType == "" {
+		requestType = classifyOwnCLIChain(ctx, command, inferGithubRequestType, "gh")
+	}
 	if requestType == "" {
 		ctx.GetLogger().Warn("github: action not recognized by heuristic, falling through to LLM classification", "input", input)
 	}

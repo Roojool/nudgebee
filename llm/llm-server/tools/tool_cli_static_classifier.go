@@ -166,6 +166,21 @@ func inferHelmRequestType(input string) core.ToolRequestType {
 	return classifyAction(tokens[0], helmReadActions, helmCreateActions, helmUpdateActions, helmDeleteActions)
 }
 
+// githubSearchTypes are the `gh search` subcommands. GitHub search only reads.
+var githubSearchTypes = wordSet("code", "commits", "issues", "prs", "repos")
+
+// inferGithubRequestType classifies one gh command: `gh search <type>` is a
+// read, everything else goes through the shared nested-CLI rules.
+func inferGithubRequestType(command string) core.ToolRequestType {
+	if tokens, ok := staticCLIArgs(command, false, "gh"); ok && len(tokens) >= 2 && strings.EqualFold(tokens[0], "search") {
+		if _, known := githubSearchTypes[strings.ToLower(tokens[1])]; known {
+			return core.ToolRequestTypeRead
+		}
+		return ""
+	}
+	return inferNestedCLIRequestType(command, "gh", githubReadActions, githubCreateActions, githubUpdateActions, githubDeleteActions)
+}
+
 func inferNestedCLIRequestType(
 	input string,
 	executable string,

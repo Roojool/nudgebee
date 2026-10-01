@@ -747,7 +747,11 @@ func inferGcpVerbType(command string) core.ToolRequestType {
 }
 
 func (t GcpCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
-	requestType := inferGcpVerbType(extractCommandFromToolInput(input))
+	command := extractCommandFromToolInput(input)
+	requestType := inferGcpVerbType(command)
+	if requestType == "" {
+		requestType = classifyOwnCLIChain(ctx, command, inferGcpVerbType, "gcloud", "gsutil", "bq")
+	}
 	if requestType != "" {
 		return requestType, nil
 	}

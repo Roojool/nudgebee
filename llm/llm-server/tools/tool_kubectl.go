@@ -1376,7 +1376,14 @@ func hasUnquotedShellSyntax(command string) bool {
 }
 
 func (m KubectlExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
-	requestType := InferKubectlVerbType(extractCommandFromToolInput(input))
+	command := extractCommandFromToolInput(input)
+	requestType := InferKubectlVerbType(command)
+	// Only this tool's approval check classifies chains; InferKubectlVerbType
+	// itself stays single-command, because the workspace proxy uses it to
+	// decide the access a command needs.
+	if requestType == "" {
+		requestType = classifyOwnCLIChain(ctx, command, InferKubectlVerbType, "kubectl")
+	}
 	if requestType != "" {
 		return requestType, nil
 	}

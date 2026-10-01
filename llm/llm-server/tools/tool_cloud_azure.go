@@ -317,7 +317,11 @@ func inferAzureVerbType(command string) core.ToolRequestType {
 }
 
 func (t AzureCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
-	requestType := inferAzureVerbType(extractCommandFromToolInput(input))
+	command := extractCommandFromToolInput(input)
+	requestType := inferAzureVerbType(command)
+	if requestType == "" {
+		requestType = classifyOwnCLIChain(ctx, command, inferAzureVerbType, "az")
+	}
 	if requestType != "" {
 		return requestType, nil
 	}
@@ -360,7 +364,7 @@ func (t AzureCliTool) InferToolRequestTypePrompt(ctx *security.RequestContext, t
 	answer: read
 
 	input: az vm run-command invoke --command-id RunPowerShellScript --name MyVM --resource-group MyRG --scripts "Get-Process"
-	answer: read
+	answer: create
 
 	input: az vm run-command invoke --command-id RunPowerShellScript --name MyVM --resource-group MyRG --scripts "New-Item -Path C:\temp\test.txt -ItemType File"
 	answer: create
