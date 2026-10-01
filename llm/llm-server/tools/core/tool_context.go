@@ -41,6 +41,10 @@ type NBQueryConfig struct {
 	// Observability/event context
 	EventId          string `json:"event_id,omitempty"`
 	RecommendationId string `json:"recommendation_id,omitempty"`
+	// KnowledgeHints are short identifiers of the subject (e.g. an event's
+	// title, category, finding type) that knowledge discovery adds to its search
+	// query. The investigation prompt itself is too long to search with.
+	KnowledgeHints []string `json:"knowledge_hints,omitempty"`
 
 	// Kubernetes resource context
 	Namespace string `json:"namespace,omitempty"`
@@ -133,7 +137,7 @@ type NBQueryConfig struct {
 
 // IsEmpty returns true when the config has no meaningful values set.
 func (q NBQueryConfig) IsEmpty() bool {
-	return q.EventId == "" && q.RecommendationId == "" && q.Namespace == "" &&
+	return q.EventId == "" && q.RecommendationId == "" && len(q.KnowledgeHints) == 0 && q.Namespace == "" &&
 		q.Workload == "" && q.GitRepo == "" && q.AccountId == "" &&
 		q.WorkflowId == "" && q.ExecutionId == "" && len(q.WorkflowDefinition) == 0 && len(q.Labels) == 0 &&
 		q.CurrentCluster == "" && q.CurrentClusterId == "" && q.K8sOrchestratorMode == "" &&
@@ -246,6 +250,9 @@ func (q *NBQueryConfig) MergeFrom(src NBQueryConfig) {
 	}
 	if q.RecommendationId == "" {
 		q.RecommendationId = src.RecommendationId
+	}
+	if q.KnowledgeHints == nil {
+		q.KnowledgeHints = src.KnowledgeHints
 	}
 	if q.Namespace == "" {
 		q.Namespace = src.Namespace

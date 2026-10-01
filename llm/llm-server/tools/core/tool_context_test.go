@@ -200,3 +200,19 @@ func TestNBQueryConfig_DiscoveredTools(t *testing.T) {
 		t.Fatalf("unexpected DiscoveredTools contents: %v", dst.DiscoveredTools)
 	}
 }
+
+func TestNBQueryConfig_KnowledgeHints(t *testing.T) {
+	if (NBQueryConfig{KnowledgeHints: []string{"ci"}}).IsEmpty() {
+		t.Fatal("IsEmpty: config with KnowledgeHints should not be empty")
+	}
+	dst := NBQueryConfig{}
+	dst.MergeFrom(NBQueryConfig{KnowledgeHints: []string{"ci"}})
+	if len(dst.KnowledgeHints) != 1 || dst.KnowledgeHints[0] != "ci" {
+		t.Fatalf("MergeFrom: expected hints copied, got %v", dst.KnowledgeHints)
+	}
+	keep := NBQueryConfig{KnowledgeHints: []string{"keep"}}
+	keep.MergeFrom(NBQueryConfig{KnowledgeHints: []string{"other"}})
+	if keep.KnowledgeHints[0] != "keep" {
+		t.Fatalf("MergeFrom: existing hints must be preserved, got %v", keep.KnowledgeHints)
+	}
+}
