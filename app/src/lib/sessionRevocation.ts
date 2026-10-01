@@ -51,26 +51,10 @@ export async function revokeAllUserSessions(userId: string, expiresAtSec: number
 }
 
 /**
- * Revoke exactly one token by its jti. Used by POST /api/auth/revoke for
- * Bearer callers (nbctl, automation) that know which token to kill without
- * touching the user's browser session. `expiresAtSec` should be the token's
- * own `exp` claim — the row becomes purgeable when the token would have
- * expired anyway.
- */
-export async function revokeBearerSession(userId: string, jti: string, expiresAtSec: number): Promise<void> {
-  const response = await queryGraphQL(REVOKE_MUTATION, 'AuthDeleteSession', {
-    object: { user_id: userId, jti, expires_at: expiresAtSec },
-  });
-  if (response?.data?.errors?.length) {
-    console.error('[sessionRevocation] revokeBearerSession failed', JSON.stringify(response.data.errors));
-  }
-}
-
-/**
  * Check the denylist for a decoded JWT. Returns true iff the token is
  * revoked. Called from decodeSessionJWT after signature/expiry verification
- * (Bearer flow) and from authenticateRequest after the cookie's hasuraIdToken
- * is extracted. Failing closed on errors would lock everyone out if the DB
+ * (relay-proxy bearer flow) and from authenticateRequest for the cookie
+ * session. Failing closed on errors would lock everyone out if the DB
  * blips, so a backend error logs and returns false — the existing
  * signature+expiry checks remain authoritative.
  *

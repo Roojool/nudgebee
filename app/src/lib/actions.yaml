@@ -5738,7 +5738,7 @@ actions:
         - name: X-ACTION-TOKEN
           value_from_env: ACTION_API_SERVER_TOKEN
   # Session revocation actions are server-only — invoked by NextAuth signOut /
-  # /api/auth/revoke / authenticateRequest via bypassGraphQLAsServer (which
+  # authenticateRequest via bypassGraphQLAsServer (which
   # synthesises super_admin). No `permissions` block by design: a frontend
   # caller must never be able to forge a revocation for another user, and the
   # cookie-flow denylist check would loop if it required user auth.

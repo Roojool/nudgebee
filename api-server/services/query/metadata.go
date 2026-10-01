@@ -10828,6 +10828,7 @@ var table_metadata = map[string]TableDefinition{
 			SELECT
 				ua.id::text as auth_id,
 				ua.credential as credential,
+				ua.token_sha256 as token_sha256,
 				ua.tenant_id::text as auth_tenant_id,
 				ua.expires_at as expires_at,
 				ua.kind::text as kind,
@@ -10891,6 +10892,7 @@ var table_metadata = map[string]TableDefinition{
 		Columns: map[string]ColumnDefinition{
 			"auth_id":        {Type: ColumnDefinitionTypeString, Def: "auth_id"},
 			"credential":     {Type: ColumnDefinitionTypeString, Def: "credential"},
+			"token_sha256":   {Type: ColumnDefinitionTypeString, Def: "token_sha256"},
 			"auth_tenant_id": {Type: ColumnDefinitionTypeString, Def: "auth_tenant_id"},
 			"expires_at":     {Type: ColumnDefinitionTypeDatetime, Def: "expires_at"},
 			"kind":           {Type: ColumnDefinitionTypeString, Def: "kind"},
