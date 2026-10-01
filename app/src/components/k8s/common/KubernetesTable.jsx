@@ -2632,7 +2632,7 @@ const KubernetesTable = ({
           defaultQuery={query}
           enableFilters={false}
           tableColumns={[
-            { name: 'Severity', width: '10%' },
+            { name: 'Source Severity', width: '10%' },
             { name: 'Subject Name', width: '20%' },
             { name: 'Message', width: '40%' },
             { name: 'Alert Status', width: '4%' },
@@ -2647,7 +2647,7 @@ const KubernetesTable = ({
           defaultQuery={query}
           enableFilters={false}
           tableColumns={[
-            { name: 'Severity', width: '10%' },
+            { name: 'Source Severity', width: '10%' },
             { name: 'Message', width: '40%' },
             { name: 'Alert Status', width: '4%' },
             { name: 'Error Type', width: '20%' },

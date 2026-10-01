@@ -16,8 +16,7 @@ import { Label } from '@ui/Label';
 import { Button } from '@ui/Button';
 import { Link } from '@ui/Link';
 import NBStatusBadge from '@shared/widgets/NBStatusBadge';
-import ScoreDisplay from '@shared/widgets/ScoreDisplay';
-import PriorityPinControl from '@shared/widgets/PriorityPinControl';
+import TriageScore from '@shared/widgets/TriageScore';
 import InvestigateDropdown from '@components/k8s/investigate/InvestigateDropdown';
 import { EventOccurrenceRows, EventStateRows, useEventOccurrence } from '@components/k8s/investigate/EventStateRows';
 import k8sApi from '@api1/kubernetes';
@@ -465,31 +464,30 @@ function InvestigateSidebar({
             closedEvidenceUrl={closedEvidenceUrl}
             onToggleStatus={handleToggleAlertStatus}
           />
-          <Row label='Severity'>
+          <Row label='Source Severity'>
             <Label text={row?.priority || '-'} margin='0' />
           </Row>
-          <Row label='Triage'>
-            {row?.computed_score !== null && row?.computed_score !== undefined && (
-              <ScoreDisplay
+          {row?.computed_score !== null && row?.computed_score !== undefined && (
+            <Row label='Triage'>
+              <TriageScore
+                layout='inline'
                 score={row?.computed_score}
                 priority={row?.computed_priority}
                 scoreFactors={row?.score_factors}
                 confidence={row?.score_confidence}
-              >
-                <PriorityPinControl
-                  eventId={row?.id}
-                  accountId={row?.cloud_account_id || router.query.accountId}
-                  currentPriority={row?.computed_priority}
-                  currentScore={row?.computed_score}
-                  currentScoreFactors={row?.score_factors}
-                  canWrite={hasWriteAccess(router.query.accountId)}
-                  onChanged={(newPriority, newScore, newFactors) => {
-                    onRowChange?.((prev) => ({ ...prev, computed_priority: newPriority, computed_score: newScore, score_factors: newFactors }));
-                  }}
-                  align='end'
-                />
-              </ScoreDisplay>
-            )}
+                eventId={row?.id}
+                accountId={row?.cloud_account_id || router.query.accountId}
+                canWrite={hasWriteAccess(router.query.accountId)}
+                onChanged={(newPriority, newScore, newFactors) => {
+                  onRowChange?.((prev) => ({ ...prev, computed_priority: newPriority, computed_score: newScore, score_factors: newFactors }));
+                }}
+                align='end'
+              />
+            </Row>
+          )}
+          {/* The triage-status dropdown is its own field, not part of the score — split
+              out of the Triage row per the triage-score design handoff. */}
+          <Row label='Status'>
             <NBStatusBadge
               eventId={row?.id}
               currentStatus={row?.nb_status || 'OPEN'}

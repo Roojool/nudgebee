@@ -19,8 +19,7 @@ import Tooltip from '@ui/Tooltip';
 // DS v2 / component-new
 import NBStatusBadge from '@shared/widgets/NBStatusBadge';
 import Chip from '@ui/Chip';
-import ScoreDisplay from '@shared/widgets/ScoreDisplay';
-import PriorityPinControl from '@shared/widgets/PriorityPinControl';
+import TriageScore from '@shared/widgets/TriageScore';
 import TicketLink from '@shared/links/TicketLink';
 import ThreeDotsMenu from '@ui/ThreeDotsMenu';
 import { snackbar } from '@shared/snackbarService';
@@ -199,6 +198,20 @@ const transformTableData = (
       return [
         {
           component: (
+            <TriageScore
+              score={item.latest_computed_score}
+              priority={item.latest_computed_priority}
+              scoreFactors={item.latest_score_factors}
+              confidence={item.latest_score_confidence}
+              eventId={item.latest_event_id}
+              accountId={item.account_id}
+              canWrite={canWrite}
+              onChanged={(newPriority, newScore, newFactors) => onPriorityChange?.(item.latest_event_id, newPriority, newScore, newFactors)}
+            />
+          ),
+        },
+        {
+          component: (
             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0px' }}>
               <SeverityIcon level={toSeverityLevel(severity)} aria-label={`${severity || 'unknown'}`} />
               <Datetime value={item.max_created_at} sx={{ fontSize: 'var(--ds-text-caption)' }} />
@@ -268,27 +281,6 @@ const transformTableData = (
               <Text showAutoEllipsis value={item.event_count ?? item.fingerprint_event_count} data-testid='inbox-event-count' />
               {/* A run of 1 is just this firing, so it adds nothing to the Count; shown from 2 up. */}
               {runCount >= 2 && <Text secondaryText showAutoEllipsis value={`run of ${runCount}`} data-testid='inbox-run-count' />}
-            </Box>
-          ),
-        },
-        {
-          component: (
-            <Box display='flex' alignItems='center' gap={ds.space[1]}>
-              <ScoreDisplay
-                score={item.latest_computed_score}
-                priority={item.latest_computed_priority}
-                scoreFactors={item.latest_score_factors}
-                confidence={item.latest_score_confidence}
-              />
-              <PriorityPinControl
-                eventId={item.latest_event_id}
-                accountId={item.account_id}
-                currentPriority={item.latest_computed_priority}
-                currentScore={item.latest_computed_score}
-                currentScoreFactors={item.latest_score_factors}
-                canWrite={canWrite}
-                onChanged={(newPriority, newScore, newFactors) => onPriorityChange?.(item.latest_event_id, newPriority, newScore, newFactors)}
-              />
             </Box>
           ),
         },
@@ -755,9 +747,15 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     if (groupEventType === 'fingerprint') {
       return [
         {
-          name: 'Severity',
+          name: 'Triage Score',
           width: '10%',
-          info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
+          sortable: true,
+          info: TRIAGE_SCORE_INFO,
+        },
+        {
+          name: 'Source Severity',
+          width: '10%',
+          info: "The original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
           infoPlacement: 'top',
         },
         {
@@ -776,12 +774,6 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
           sortable: true,
           info: 'Number of events in the selected time range. The "run of N" line is how many times this issue has fired in its current run, which continues while it re-fires within 24 hours of the previous firing and so can begin before the selected range.',
         },
-        {
-          name: 'Triage Score',
-          width: '10%',
-          sortable: true,
-          info: TRIAGE_SCORE_INFO,
-        },
         triageStatusHeader,
         {
           name: 'Alert Status',
@@ -795,9 +787,9 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     if (groupEventType === 'app') {
       return [
         {
-          name: 'Severity',
+          name: 'Source Severity',
           width: '12%',
-          info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
+          info: "The original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
           infoPlacement: 'top-start',
         },
         {
@@ -829,9 +821,9 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     if (groupEventType === 'event_type') {
       return [
         {
-          name: 'Severity',
+          name: 'Source Severity',
           width: '12%',
-          info: "Severity is the original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
+          info: "The original urgency level assigned by the source monitoring/alerting system, based on that tool's built-in rules or your configured thresholds",
           infoPlacement: 'top',
         },
         {
@@ -1241,7 +1233,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
               setSelectedPriority(e.target.value);
               setCurrentPage(1);
             },
-            label: 'Severity',
+            label: 'Source Severity',
             value: selectedPriority,
           },
           {
@@ -1371,7 +1363,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
             pageNumber={currentPage}
             sort={sortConfig}
             onSortChange={handleSortChange}
-            tableHeadingCenter={['Severity']}
+            tableHeadingCenter={['Source Severity']}
             showExpandable
             expandable={{
               // Per-row tab order: rows in an alert group open on Grouped
