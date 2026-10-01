@@ -154,6 +154,8 @@ func TestLogAgent_SystemPrompt_ReusesResolvedPodsAndExplainsArtifactFormat(t *te
 	assert.Contains(t, body, "logs_format_hint")
 	assert.Contains(t, body, "never JSON-decode the whole file")
 	assert.Contains(t, body, "kubectl_disclosure")
+	assert.Contains(t, body, "read_coverage")
+	assert.Contains(t, body, "all fetched lines are shown above", "the prompt quotes the marker the fetch response emits")
 }
 
 // TestLogAgent_FastPathAppAnchor_RoutineOnly pins that the app-anchor

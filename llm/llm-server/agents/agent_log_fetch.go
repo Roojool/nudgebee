@@ -189,6 +189,43 @@ func kubectlDisclosureNote(intent kubectlLogQuery, podCount int, usedPod string)
 	return strings.Join(parts, "; ")
 }
 
+// logReadCoverageNote says that a backend log read stopped at its line limit
+// and what it did cover, in words the caller can repeat. Empty when the read
+// did not reach the limit it asked for, or the payload carries no coverage
+// (kubectl text).
+//
+// Empty is not a claim that the read is whole: a backend that lowers the limit
+// on its own leaves no sign here.
+//
+// It states facts and leaves what to do to the agent's instructions. This text
+// is the last thing in the tool result, and a read can reach its limit for
+// reasons that call for nothing more — the user asked for that many lines, or
+// the mode allows one fetch.
+func logReadCoverageNote(logs string) string {
+	// Most reads do not reach their limit and carry no coverage. Decoding the
+	// payload to find that out would parse a multi-MB string on every fetch.
+	if !strings.Contains(logs, `"coverage"`) {
+		return ""
+	}
+	var doc struct {
+		Coverage *toolcore.ObservabilityLogCoverage `json:"coverage"`
+	}
+	if err := json.Unmarshal([]byte(logs), &doc); err != nil || doc.Coverage == nil {
+		return ""
+	}
+	coverage := doc.Coverage
+	var b strings.Builder
+	fmt.Fprintf(&b, "partial read: the read stopped at its limit of %d lines, so the window may hold more lines than were read", coverage.Limit)
+	if coverage.Oldest != "" && coverage.Newest != "" {
+		fmt.Fprintf(&b, "; the lines returned span %s to %s", coverage.Oldest, coverage.Newest)
+	}
+	if coverage.RequestedStart != "" && coverage.RequestedEnd != "" {
+		fmt.Fprintf(&b, "; the window asked for was %s to %s", coverage.RequestedStart, coverage.RequestedEnd)
+	}
+	b.WriteString("; lines in the window outside the returned span were not read, and nothing can be concluded about them; reading them takes a narrower window or filter")
+	return b.String()
+}
+
 func withKubectlDisclosure(resp core.NBAgentResponse, note string) core.NBAgentResponse {
 	if note == "" || len(resp.Response) == 0 {
 		return resp
@@ -864,6 +901,7 @@ func makeFetchResponse(agentName, query, logs, flattened, fileRef, bundleSignal 
 	}
 	inlineLogs := previewSource
 	format := logsLayout(logs, previewSource)
+	coverageNote := logReadCoverageNote(logs)
 	logsComplete := true
 	if fileRef != "" && len(previewSource) > logInlinePreviewBytes {
 		logsComplete = false
@@ -871,7 +909,7 @@ func makeFetchResponse(agentName, query, logs, flattened, fileRef, bundleSignal 
 		inlineLogs = strings.ToValidUTF8(previewSource[:logInlinePreviewBytes], "") + fmt.Sprintf(
 			"\n\n[... %d more bytes truncated — full logs saved to file_ref %q, in EXACTLY this same line format; use shell_execute to filter it ...]",
 			len(previewSource)-logInlinePreviewBytes, fileRef)
-	} else if fileRef != "" && strings.TrimSpace(inlineLogs) != "" {
+	} else if fileRef != "" && strings.TrimSpace(inlineLogs) != "" && coverageNote == "" {
 		// Only when a file actually exists — with no file_ref there is nothing to
 		// be tempted to read, and "file_ref holds nothing further" would name an
 		// artifact that was never produced.
@@ -880,7 +918,14 @@ func makeFetchResponse(agentName, query, logs, flattened, fileRef, bundleSignal 
 		// model reads and acts on a bracketed marker at the end of `logs`, so
 		// the complete case states its conclusion the same way rather than
 		// leaving it to be inferred from a flag.
-		inlineLogs += "\n\n[... complete — all matching lines are shown above; file_ref holds nothing further, so no shell_execute is needed ...]"
+		// "Fetched", not "matching": this knows the inline text is the whole
+		// saved file, not that the backend returned every line that matched.
+		inlineLogs += "\n\n[... complete — all fetched lines are shown above; file_ref holds nothing further, so no shell_execute is needed ...]"
+	}
+	if coverageNote != "" {
+		// A read that stopped at its limit is never marked complete, however
+		// short its preview: what was fetched is part of the window.
+		inlineLogs += "\n\n[... " + coverageNote + " ...]"
 	}
 	envelope := map[string]any{
 		"query":         query,
@@ -893,8 +938,10 @@ func makeFetchResponse(agentName, query, logs, flattened, fileRef, bundleSignal 
 		// json.load(file_ref), inspecting its head, then rewriting the parser.
 		"logs_format":      format,
 		"logs_format_hint": logsFormatHint(format),
-		// logs_complete=true means every matching line is already inline and
+		// logs_complete=true means every fetched line is already inline and
 		// file_ref holds nothing extra — shelling out to read it is pure cost.
+		// It says nothing about whether the fetch got the whole window; that
+		// is read_coverage below.
 		// Signalled explicitly because the previous "absence of a truncation
 		// marker" was too weak a cue: measured over 14 days, 57.7% of fetches
 		// returned the logs complete inline, yet the agent still spent turns
@@ -902,6 +949,9 @@ func makeFetchResponse(agentName, query, logs, flattened, fileRef, bundleSignal 
 		// which in an envelope of nouns reads as "the fetch completed" (status)
 		// rather than "the log content is entire".
 		"logs_complete": logsComplete,
+	}
+	if coverageNote != "" {
+		envelope["read_coverage"] = coverageNote
 	}
 	body, err := common.MarshalJson(envelope)
 	if err != nil {
