@@ -762,6 +762,19 @@ export const formatCurrency = (amount: number | null | undefined) => {
 
 export const formatCount = (n: number | null | undefined) => (n != null ? n.toLocaleString() : '0');
 
+// formatServiceMapRequests renders a service-map link's RequestCount. The
+// eBPF map reports requests per second; the OTel map reports the number of
+// calls in the selected window.
+export const formatServiceMapRequests = (value: number | null | undefined, perSecond: boolean) => {
+  if (!value || isNaN(value)) {
+    return '-';
+  }
+  if (perSecond) {
+    return `${value.toLocaleString(undefined, { maximumSignificantDigits: 3 })} req/s`;
+  }
+  return `${Math.round(value).toLocaleString()} req`;
+};
+
 export const formatActionNameForAuditMessage = (actionName: string) => {
   if (!actionName) return '';
   let formattedName = actionName
