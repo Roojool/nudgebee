@@ -74,8 +74,8 @@ type NBReActPlanner4 struct {
 	humanPrompt      prompts.PromptTemplate
 
 	// Notebook is the durable investigation state. It is derived at the start of
-	// every Plan() from the most recent update_notebook step in intermediateSteps
-	// (see refreshNotebookFromSteps) and feeds persistence, critique and memory
+	// every Plan() from the update_notebook steps in intermediateSteps (see
+	// refreshNotebookFromSteps) and feeds persistence, critique and memory
 	// extraction. The human message shows only the turn-start snapshot
 	// (turnStartNotebook); in-turn updates stay in the replayed history. It is
 	// also serialized in Marshal so it survives a suspend/resume round-trip.
@@ -86,6 +86,10 @@ type NBReActPlanner4 struct {
 	notebookAgentID     string
 	notebookUpdateCount int
 	persistedNotebook   string
+	// notebookReplaceKey identifies the full-replacement update_notebook call
+	// already applied to Notebook, so later Plan calls build on it instead of
+	// resetting to it and re-appending the entries that followed.
+	notebookReplaceKey string
 
 	stepCount int
 	// planCallCount is transient and identifies the first Plan invocation for
@@ -401,6 +405,7 @@ type react4PersistentState struct {
 	NotebookUpdateCount int                `json:"notebook_update_count,omitempty"`
 	PersistedNotebook   string             `json:"persisted_notebook,omitempty"`
 	RefinementData      []refinementRecord `json:"refinement_data,omitempty"`
+	NotebookReplaceKey  string             `json:"notebook_replace_key,omitempty"`
 	// TurnStartedAt and TurnStartNotebook keep the human message identical
 	// across a mid-turn suspend/resume, so the resumed prompt still extends the
 	// pre-suspend one.
@@ -415,6 +420,7 @@ func (o *NBReActPlanner4) Marshal() ([]byte, error) {
 		NotebookUpdateCount: o.notebookUpdateCount,
 		PersistedNotebook:   o.persistedNotebook,
 		RefinementData:      o.refinementData,
+		NotebookReplaceKey:  o.notebookReplaceKey,
 		TurnStartedAt:       o.turnStartedAt,
 		TurnStartNotebook:   o.turnStartNotebook,
 	})
@@ -433,6 +439,7 @@ func (o *NBReActPlanner4) Unmarshal(data []byte) error {
 	o.notebookUpdateCount = state.NotebookUpdateCount
 	o.persistedNotebook = state.PersistedNotebook
 	o.refinementData = state.RefinementData
+	o.notebookReplaceKey = state.NotebookReplaceKey
 	o.turnStartedAt = state.TurnStartedAt
 	o.turnStartNotebook = state.TurnStartNotebook
 	return nil
@@ -1312,8 +1319,9 @@ func (o *NBReActPlanner4) humanText(input string) string {
 // new turn starts (no steps yet). Refinement carry from a prior turn would
 // resurrect a stale rejected-answer redirect and consume this turn's critique
 // budget; a prior turn's start time and notebook snapshot would show stale
-// values in the human message. Mid-turn (steps present, including a resume
-// after write approval) all of it is preserved.
+// values in the human message; a prior turn's applied-replacement key could
+// match a new call without a tool ID. Mid-turn (steps present, including a
+// resume after write approval) all of it is preserved.
 func (o *NBReActPlanner4) resetTurnStateOnFreshTurn(steps []NBAgentPlannerToolActionStep) {
 	if len(steps) > 0 {
 		return
@@ -1321,6 +1329,7 @@ func (o *NBReActPlanner4) resetTurnStateOnFreshTurn(steps []NBAgentPlannerToolAc
 	o.refinementData = nil
 	o.turnStartedAt = time.Time{}
 	o.turnStartNotebook = nil
+	o.notebookReplaceKey = ""
 }
 
 // turnStartTime returns the UTC time this planner instance first rendered its
@@ -1507,43 +1516,83 @@ const (
 	notebookAppendedReplay = "Notebook entry appended."
 )
 
-// refreshNotebookFromSteps applies the most recent successful update_notebook
-// step. Replacement remains the default. An append request adds a server-framed
-// journal entry; its stable marker prevents replay after persistence retries or
-// suspend/resume from duplicating the entry.
+// refreshNotebookFromSteps applies every successful update_notebook step since
+// the latest full replacement, in order, so several updates in one batch all
+// land. Replacement remains the default. An append request adds a
+// server-framed journal entry; its stable marker prevents replay after
+// persistence retries or suspend/resume from duplicating the entry.
 func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolActionStep) {
-	for i := len(steps) - 1; i >= 0; i-- {
-		step := &steps[i]
-		if !isNotebookToolName(step.Action.Tool) || step.Status != ToolStatusSuccess {
+	lastReplace, last := -1, -1
+	for i := range steps {
+		content, appendEntry, ok := successfulNotebookUpdate(&steps[i])
+		if !ok || content == "" {
 			continue
 		}
-		content, appendEntry := extractNotebookUpdate(step.Action.ToolInput)
-		if content == "" {
-			return
+		last = i
+		if !appendEntry {
+			lastReplace = i
 		}
-		if appendEntry {
-			content = o.appendNotebookJournalEntry(content, step.Action, i)
-		}
-		if content != o.Notebook {
-			o.Notebook = content
-			o.notebookUpdateCount++
-		}
-		if content != o.persistedNotebook && o.persistNotebook(content, i, analyzeNotebook(content)) {
-			o.persistedNotebook = content
-		}
+	}
+	if last < 0 {
 		return
+	}
+
+	notebook := o.Notebook
+	from := 0
+	if lastReplace >= 0 {
+		content, _, _ := successfulNotebookUpdate(&steps[lastReplace])
+		// A replacement already applied by an earlier Plan call is the base the
+		// current notebook was built on; resetting to it would drop the entries
+		// appended after it.
+		if key := notebookStepKey(steps[lastReplace].Action, lastReplace, content); key != o.notebookReplaceKey {
+			notebook = content
+			o.notebookReplaceKey = key
+		}
+		from = lastReplace + 1
+	}
+	for i := from; i <= last; i++ {
+		content, appendEntry, ok := successfulNotebookUpdate(&steps[i])
+		if !ok || content == "" || !appendEntry {
+			continue
+		}
+		notebook = appendNotebookJournalEntry(notebook, content, steps[i].Action, i)
+	}
+
+	if notebook != o.Notebook {
+		o.Notebook = notebook
+		o.notebookUpdateCount++
+	}
+	if notebook != o.persistedNotebook && o.persistNotebook(notebook, last, analyzeNotebook(notebook)) {
+		o.persistedNotebook = notebook
 	}
 }
 
-func (o *NBReActPlanner4) appendNotebookJournalEntry(content string, action NBAgentPlannerToolAction, stepIndex int) string {
-	entryID := action.ToolID
-	if entryID == "" {
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", action.PlannerIteration, stepIndex, content)))
-		entryID = fmt.Sprintf("%x", sum[:8])
+// successfulNotebookUpdate returns the content and mode of a successful
+// update_notebook step; ok is false for any other step.
+func successfulNotebookUpdate(step *NBAgentPlannerToolActionStep) (content string, appendEntry, ok bool) {
+	if !isNotebookToolName(step.Action.Tool) || step.Status != ToolStatusSuccess {
+		return "", false, false
 	}
-	marker := fmt.Sprintf("<!-- notebook-entry:%s -->", entryID)
-	if strings.Contains(o.Notebook, marker) {
-		return o.Notebook
+	content, appendEntry = extractNotebookUpdate(step.Action.ToolInput)
+	return content, appendEntry, true
+}
+
+// notebookStepKey identifies one update_notebook call: its tool-call ID, or
+// its position and content when the provider supplied no ID.
+func notebookStepKey(action NBAgentPlannerToolAction, stepIndex int, content string) string {
+	if action.ToolID != "" {
+		return action.ToolID
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", action.PlannerIteration, stepIndex, content)))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+// appendNotebookJournalEntry returns notebook with the entry appended, or
+// notebook unchanged when the entry's marker is already present.
+func appendNotebookJournalEntry(notebook, content string, action NBAgentPlannerToolAction, stepIndex int) string {
+	marker := fmt.Sprintf("<!-- notebook-entry:%s -->", notebookStepKey(action, stepIndex, content))
+	if strings.Contains(notebook, marker) {
+		return notebook
 	}
 
 	iteration := action.PlannerIteration
@@ -1554,10 +1603,10 @@ func (o *NBReActPlanner4) appendNotebookJournalEntry(content string, action NBAg
 		"## Journal entry — %s · Iteration %d\n%s\n\n%s",
 		time.Now().UTC().Format(time.RFC3339), iteration, marker, strings.TrimSpace(content),
 	)
-	if strings.TrimSpace(o.Notebook) == "" {
+	if strings.TrimSpace(notebook) == "" {
 		return entry
 	}
-	return strings.TrimRight(o.Notebook, "\n") + "\n\n" + entry
+	return strings.TrimRight(notebook, "\n") + "\n\n" + entry
 }
 
 // persistNotebook mirrors ReAct3's notebook visibility contract without

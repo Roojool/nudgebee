@@ -183,8 +183,9 @@ dispatch-and-derive, not intercept-and-drop** — the cleaner of the two:
   validates and echoes the content back as the observation. This means the tool_use/tool_result
   pairing every provider requires is satisfied for free, and there is **no empty-turn edge case**
   (a turn that only updates the notebook still produces a real step).
-- At the start of every `Plan()`, `refreshNotebookFromSteps` scans `intermediateSteps` for the
-  most recent `update_notebook` step and sets `o.Notebook` (the current state used for
+- At the start of every `Plan()`, `refreshNotebookFromSteps` applies the successful
+  `update_notebook` steps in `intermediateSteps` since the latest full replacement, in order
+  (so several updates in one batch all land), and sets `o.Notebook` (the current state used for
   persistence, critique and memory extraction).
 - The human message's `<notebook>` block shows the notebook **as it was at the start of the
   turn** (`turnStartNotebook`), captured once and saved with the planner state (with the turn
