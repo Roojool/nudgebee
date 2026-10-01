@@ -14,7 +14,6 @@ import (
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
-	"reflect"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -2175,6 +2174,18 @@ func unresolvedTargetMessage(ctx *security.RequestContext, tool toolcore.NBTool,
 	}
 	return fmt.Sprintf("%s: none of the configured targets for %s (%s) is %s — name one explicitly, or reach it where it runs",
 		toolcore.ErrNoMatchingConfig, tool.Name(), strings.Join(names, ", "), subject)
+}
+
+// missingToolConfig reports a configurable tool call with nothing to run
+// against: no conversation default and no target named in the call. A call
+// that names its own target resolves and access-checks it in Call; the
+// pre-resolve step validated it with the same actionRequestedTarget and
+// recorded no default, so a later call naming none does not inherit it.
+func missingToolConfig(tool toolcore.NBTool, input string, config toolcore.ToolConfig) bool {
+	if requested, _ := actionRequestedTarget(tool, NBAgentPlannerToolAction{Tool: tool.Name(), ToolInput: input}); requested != "" {
+		return false
+	}
+	return config.Name == ""
 }
 
 // subjectOfRequest is the resource the question is about, as the event pipeline
@@ -4378,8 +4389,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// Check if this tool requires configuration
 	if _, ok := tool.(toolcore.NBToolConfig); ok {
 		// Check if we have a valid tool config
-		config := toolContext.ToolConfig
-		if !reflect.ValueOf(config).IsValid() || config.Name == "" {
+		if missingToolConfig(tool, input, toolContext.ToolConfig) {
 			// "None configured" and "several configured, none is the subject"
 			// are different answers and lead somewhere different: the second
 			// should send the agent to reach the system where it runs. Ask the
