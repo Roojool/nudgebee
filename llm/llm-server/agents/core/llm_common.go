@@ -1723,7 +1723,8 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 	armTTFTWatchdog()
 	armSustainedGenWatchdog()
 
-	rc.ctx.GetLogger().Info("LLM GenerateContent call starting", "model", rc.currentModel, "provider", rc.currentProvider, "conversationId", rc.conversationId, "messages", len(messagesToSend), "ttft_watchdog_seconds", watchdogSeconds, "sustained_gen_watchdog_seconds", sustainedGenSeconds)
+	fingerprint := fingerprintPrompt(messagesToSend, optionsToSend)
+	rc.ctx.GetLogger().Info("LLM GenerateContent call starting", "model", rc.currentModel, "provider", rc.currentProvider, "conversationId", rc.conversationId, "agent", rc.agentName, "agentId", rc.agentId, "messages", len(messagesToSend), "cacheMode", cacheModeOf(&LLMCallMetadata{CacheInfo: rc.lastCacheInfo}), "toolsHash", fingerprint.Tools, "messageHashes", fingerprint.Messages, "ttft_watchdog_seconds", watchdogSeconds, "sustained_gen_watchdog_seconds", sustainedGenSeconds)
 	completion, err := rc.llm.GenerateContent(ctx, messagesToSend, optionsToSend...)
 	// done must be set before Stop(), which doesn't wait for an in-flight callback.
 	done.Store(true)
