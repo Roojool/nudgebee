@@ -550,7 +550,9 @@ const maxTotalEvidenceChars = 50000
 // downstream consumers read their Data as a map/[]any respectively, so
 // replacing it with a plain string would corrupt that shape. Both are
 // already small (bounded to maxEvidenceInsightEntries items), so excluding
-// them from dropping costs little.
+// them from dropping costs little. LogPatternBreakdown is treated the same
+// way: the investigation prompt decodes its Data as a structure, and its
+// producer bounds it to a handful of patterns with length-capped examples.
 func capTotalEvidenceSize(id *events.InvestigateData) {
 	type field struct {
 		size int
@@ -585,7 +587,7 @@ func capTotalEvidenceSize(id *events.InvestigateData) {
 		{insightSize(id.ServiceMap), func() { id.ServiceMap = evidenceOmittedInsight("all") }},
 	}
 
-	total := insightSize(id.Traces) + insightSize(id.AlertLabels)
+	total := insightSize(id.Traces) + insightSize(id.AlertLabels) + insightSize(id.LogPatternBreakdown)
 	for _, f := range fields {
 		total += f.size
 	}

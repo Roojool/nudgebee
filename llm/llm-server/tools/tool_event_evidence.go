@@ -59,7 +59,7 @@ func (t GetEventEvidenceTool) Description() string {
 - summary: aggregated stats — metrics: min/max/avg per series; traces: span count, errors, slow spans; logs: line count, top error patterns
 - filter: for logs, returns lines matching pattern with context lines. For array types, applies offset/limit pagination.
 Use offset/limit for pagination on large evidence sets.
-Evidence types: logs, pod_metrics, node_metrics, container_metrics, traces, deployment, pod_events, node_events, pod_data, alert_labels, noisy_neighbours, related_events, api_failures, metrics_data, job_information, job_events, user_actions, rdbms_query_response, alert_data, markdowns, all`
+Evidence types: logs, pod_metrics, node_metrics, container_metrics, traces, deployment, pod_events, node_events, pod_data, alert_labels, noisy_neighbours, related_events, api_failures, metrics_data, job_information, job_events, user_actions, rdbms_query_response, alert_data, markdowns, log_pattern_breakdown, all`
 }
 
 func (t GetEventEvidenceTool) InputSchema() core.ToolSchema {
@@ -72,7 +72,7 @@ func (t GetEventEvidenceTool) InputSchema() core.ToolSchema {
 			},
 			"evidence_type": {
 				Type:        core.ToolSchemaTypeString,
-				Description: "Optional evidence type filter: logs, pod_metrics, node_metrics, container_metrics, traces, deployment, pod_events, node_events, pod_data, alert_labels, noisy_neighbours, related_events, api_failures, metrics_data, job_information, job_events, user_actions, rdbms_query_response, alert_data, markdowns, all. If omitted, returns all evidence.",
+				Description: "Optional evidence type filter: logs, pod_metrics, node_metrics, container_metrics, traces, deployment, pod_events, node_events, pod_data, alert_labels, noisy_neighbours, related_events, api_failures, metrics_data, job_information, job_events, user_actions, rdbms_query_response, alert_data, markdowns, log_pattern_breakdown, all. If omitted, returns all evidence.",
 			},
 			"query_mode": {
 				Type:        core.ToolSchemaTypeString,
@@ -408,6 +408,11 @@ func extractEvidenceByType(data events.InvestigateData, evidenceType string) any
 			return nil
 		}
 		return data.Markdowns
+	case "log_pattern_breakdown":
+		if data.LogPatternBreakdown.Data == nil {
+			return nil
+		}
+		return data.LogPatternBreakdown
 	default:
 		return nil
 	}

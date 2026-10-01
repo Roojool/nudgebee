@@ -1713,6 +1713,7 @@ const maxErrorLogLinesBytes = 4096
 // Reserve space for observations even when enrichment produces verbose insights.
 const maxEvidenceInsightBytes = 2000
 const maxEvidencePatternBytes = 1500
+const maxLogCoverageNoteBytes = 400
 const maxInlineRawLogBytes = 1000
 
 // maxLogPatternCount bounds how many enricher log-pattern templates are
@@ -1764,12 +1765,29 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 		b.WriteString("\n")
 	}
 
+	// 1b. Error-log-spike alerts: which log patterns rose against normal.
+	if breakdown := renderLogPatternBreakdown(ev); breakdown != "" {
+		b.WriteString("### Error Patterns Against Normal\n")
+		b.WriteString(breakdown)
+		b.WriteString("\n")
+	}
+
 	// 2. Metric values: one line per series with its span, first/min/max/last.
 	// Insight messages name the metric fetch but carry none of its numbers.
 	if digest := renderMetricDigest(ev); digest != "" {
 		b.WriteString("### Metric Values\n")
 		b.WriteString(digest)
 		b.WriteString("\n")
+	}
+
+	// What the collected logs below cover. A log card holds a fixed number of
+	// lines, so on a busy workload it is the newest part of the window; the
+	// sections below must not read as the whole of it.
+	hasLogEvidence := ev.LogSummary != nil || len(ev.ErrorLogData) > 0 || strings.TrimSpace(ev.LogData) != ""
+	if note := strings.TrimSpace(ev.LogCoverageNote); note != "" && hasLogEvidence {
+		b.WriteString("### Log Coverage\n")
+		b.WriteString(core.TruncateHead(note, maxLogCoverageNoteBytes))
+		b.WriteString("\n\n")
 	}
 
 	// 3. The log enricher's pattern digest: top templates with counts plus
@@ -1784,8 +1802,12 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// tool). Middle-truncated so the start and end of the window both survive.
 	if len(ev.ErrorLogData) > 0 {
 		if errText := strings.TrimSpace(strings.Join(ev.ErrorLogData, "\n")); errText != "" {
+			// The sections above have their own budgets; when they are all
+			// full, what is left decides this one, so the block's final cap
+			// never cuts the last errors off the end.
+			errBudget := min(maxErrorLogLinesBytes, maxInvestigationEvidenceBytes-b.Len()-128)
 			b.WriteString("### Error Log Lines\n```\n")
-			b.WriteString(core.TruncateMiddle(errText, maxErrorLogLinesBytes/2, maxErrorLogLinesBytes/2))
+			b.WriteString(core.TruncateMiddle(errText, errBudget/2, errBudget/2))
 			b.WriteString("\n```\n\n")
 		}
 	}
@@ -1844,7 +1866,11 @@ func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessio
 	if hasWindow {
 		windowNote = fmt.Sprintf(" for the incident window (%s → %s)", window.startString(), window.endString())
 	}
-	return fmt.Sprintf("## Stored Log Evidence\nThe full logs already collected%s are saved in your workspace at `%s` (one log line per row). Grep this file first (e.g. `grep -iE \"error|timeout|fail\" %s | head -40`) before fetching live logs — logs fetched live at analysis time include activity from after the incident window.", windowNote, filename, filename)
+	note := fmt.Sprintf("## Stored Log Evidence\nThe full logs already collected%s are saved in your workspace at `%s` (one log line per row). Grep this file first (e.g. `grep -iE \"error|timeout|fail\" %s | head -40`) before fetching live logs — logs fetched live at analysis time include activity from after the incident window.", windowNote, filename, filename)
+	if coverage := strings.TrimSpace(event.Evidences.LogCoverageNote); coverage != "" {
+		note += " What this file covers: " + core.TruncateHead(coverage, maxLogCoverageNoteBytes)
+	}
+	return note
 }
 
 // structuredEvidenceForWorkspace returns the event's structured evidence (metric
@@ -2040,7 +2066,7 @@ func collectEvidenceInsights(ev events.InvestigateData) []string {
 	for _, d := range []events.InvestigateDataInsight{
 		ev.PodData, ev.NodeData, ev.Deployment, ev.AlertLabels, ev.JobInformation,
 		ev.JobEvents, ev.JobPodEvents, ev.RelatedEvents, ev.ContainerMetrics,
-		ev.Traces, ev.AlertData, ev.ServiceMap,
+		ev.Traces, ev.AlertData, ev.ServiceMap, ev.LogPatternBreakdown,
 	} {
 		add(d.Insight)
 	}

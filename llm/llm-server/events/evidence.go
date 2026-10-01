@@ -186,6 +186,14 @@ type InvestigateData struct {
 	MetricsData      []InvestigateDataInsight `json:"metrics_queries_data"`
 	ServiceMap       InvestigateDataInsight   `json:"service_map_data"`
 	Others           []InvestigateDataInsight `json:"others"`
+
+	// LogCoverageNote says what span the collected logs cover and, when the
+	// log card could not hold its whole window, what it kept instead. Without
+	// it a full card reads as the whole window.
+	LogCoverageNote string `json:"log_coverage_note,omitempty"`
+	// LogPatternBreakdown is the error-log-spike alert's card: which log
+	// patterns rose against normal (Data decodes with DecodeLogPatternBreakdown).
+	LogPatternBreakdown InvestigateDataInsight `json:"log_pattern_breakdown"`
 }
 
 // UnmarshalJSON on InvestigateData exists to tolerate upstream producers

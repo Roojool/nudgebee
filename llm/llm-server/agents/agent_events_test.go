@@ -349,3 +349,25 @@ func TestReduceEventData_CappedEvidenceDoesNotPanic(t *testing.T) {
 		})
 	})
 }
+
+// The summary step reduces the event before the model sees it. The
+// error-log-spike breakdown and the log card's coverage note must come through.
+func TestReduceEventData_KeepsLogSpikeEvidence(t *testing.T) {
+	breakdown := events.InvestigateDataInsight{
+		Data: map[string]any{"pattern_breakdown": map[string]any{"patterns_seen": float64(3)}},
+	}
+	result := reduceEventData(events.Event{
+		Title: "test event",
+		Evidences: events.InvestigateData{
+			LogPatternBreakdown: breakdown,
+			LogData:             "discovery failed",
+			LogCoverageNote:     "The collected log lines span 10:14 to 10:20.",
+		},
+	})
+	assert.Equal(t, breakdown, result["log_pattern_breakdown"])
+	assert.Equal(t, "The collected log lines span 10:14 to 10:20.", result["log_coverage_note"])
+
+	bare := reduceEventData(events.Event{Title: "test event"})
+	assert.NotContains(t, bare, "log_pattern_breakdown")
+	assert.NotContains(t, bare, "log_coverage_note")
+}

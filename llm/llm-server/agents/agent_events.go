@@ -684,6 +684,9 @@ func reduceEventData(event events.Event) map[string]any {
 	}
 	if logData != "" {
 		eventData["logs"] = logData
+		if event.Evidences.LogCoverageNote != "" {
+			eventData["log_coverage_note"] = event.Evidences.LogCoverageNote
+		}
 	}
 
 	if labelsData, ok := event.Evidences.AlertLabels.Data.([]any); ok && len(labelsData) > 0 {
@@ -819,6 +822,10 @@ func reduceEventData(event events.Event) map[string]any {
 				eventData["traces"] = traces
 			}
 		}
+	}
+
+	if event.Evidences.LogPatternBreakdown.Data != nil {
+		eventData["log_pattern_breakdown"] = event.Evidences.LogPatternBreakdown
 	}
 
 	if len(event.Evidences.Others) > 0 {
