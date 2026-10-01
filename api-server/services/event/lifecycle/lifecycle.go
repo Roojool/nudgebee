@@ -159,12 +159,20 @@ func PublishToWorkflows(ctx *security.RequestContext, phase Phase, event map[str
 	}
 }
 
+// SilencedByTriage reports whether triage told us not to surface an event:
+// SUPPRESSED by a suppress rule, or DROPPED by a drop rule (which hides the
+// event completely, a stronger action). Every gate that keeps such events from
+// paging, being investigated or starting workflows uses this one check.
+func SilencedByTriage(nbStatus string) bool {
+	return strings.EqualFold(nbStatus, "SUPPRESSED") || strings.EqualFold(nbStatus, "DROPPED")
+}
+
 // publishToWorkflows mirrors the legacy workflow.ProcessEvent publish: it skips
-// SUPPRESSED events and strips evidences (multi-MB, not needed for matching;
+// events triage silenced and strips evidences (multi-MB, not needed for matching;
 // runbook-server refetches the full event from DB if a workflow needs them),
 // then publishes to the runbook event exchange.
 func publishToWorkflows(ctx *security.RequestContext, phase Phase, event map[string]any) {
-	if nbStatus, _ := event["nb_status"].(string); strings.EqualFold(nbStatus, "SUPPRESSED") {
+	if nbStatus, _ := event["nb_status"].(string); SilencedByTriage(nbStatus) {
 		return
 	}
 	// Guard both missing (type-assertion fail) and empty: runbook-server refetches
