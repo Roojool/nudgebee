@@ -2698,9 +2698,32 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 	// as the event recurs).
 	linkK8sCloudResourceId(sc, dbms, tenantId, &webhookEvent)
 
+	// A RESOLVED/CLOSED closes the event it names and never reopens one. A
+	// RESOLVED that names no event of its own sender closes by fingerprint
+	// instead of creating a closed row (issue #39585).
+	isResolve := isCloseStatus(webhookEvent.Status)
+	if webhookEvent.FindingId == "" && IsResolveByFingerprint(webhookEvent) {
+		// The sender does not know which firing ended, only the alert's identity.
+		return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
+	}
+
 	var existingEventId string
-	var existingSubjectName sql.NullString
-	err = dbms.Db.QueryRowx("SELECT id, subject_name FROM events WHERE tenant = $1 AND cloud_account_id = $2 AND finding_id = $3", tenantId, accountId, webhookEvent.FindingId).Scan(&existingEventId, &existingSubjectName)
+	var existingSubjectName, existingSource sql.NullString
+	err = dbms.Db.QueryRowx("SELECT id, subject_name, source FROM events WHERE tenant = $1 AND cloud_account_id = $2 AND finding_id = $3", tenantId, accountId, webhookEvent.FindingId).Scan(&existingEventId, &existingSubjectName, &existingSource)
+
+	if err == nil && isResolve && existingSource.String != webhookEvent.Source {
+		// finding_id is sender-chosen, so this one belongs to another integration's
+		// event and is not this sender's to close. Treat it as matching nothing —
+		// and do not fall through to the insert, whose upsert on the same finding_id
+		// would overwrite that event.
+		sc.GetLogger().Warn("event: resolve names an event from another source, leaving it untouched",
+			"event_id", existingEventId, "finding_id", webhookEvent.FindingId,
+			"event_source", existingSource.String, "resolve_source", webhookEvent.Source)
+		if resolvesUnmatchedByFingerprint(webhookEvent) {
+			return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
+		}
+		return "", nil
+	}
 
 	switch err {
 	case nil: // event exists
@@ -2722,6 +2745,17 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			return "", err
 		}
 
+		// Honour close transitions only: a FIRING on a CLOSED event leaves it
+		// CLOSED, and a new firing must arrive with a new finding_id.
+		if isResolve {
+			closed, err := closeEventById(dbms, existingEventId, webhookEvent.Source, resolveEndsAt(webhookEvent))
+			if err != nil {
+				sc.GetLogger().Error("event: failed to close resolved event", "error", err, "event_id", existingEventId)
+				return "", err
+			}
+			publishResolved(sc.GetContext(), closed)
+		}
+
 		oldSubjectEmpty := !existingSubjectName.Valid || existingSubjectName.String == ""
 		newSubjectResolved := webhookEvent.SubjectName != ""
 		if oldSubjectEmpty && newSubjectResolved {
@@ -2737,6 +2771,9 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 
 		return existingEventId, nil
 	case sql.ErrNoRows: // event does not exist, so process it
+		if resolvesUnmatchedByFingerprint(webhookEvent) {
+			return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
+		}
 		// Resolve subject/namespace/cluster from the webhook's own labels before
 		// anything else. These fallbacks only ever consult labels that arrived in
 		// the payload, so they need nothing the playbook produces, and running them

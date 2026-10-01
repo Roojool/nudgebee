@@ -783,42 +783,6 @@ func convertSliceAnyToSliceInterface(evidences []eventtypes.EventEvidence) []any
 	return s
 }
 
-// resolveEventQuery closes the event a resolve delivery refers to.
-//
-// It matches finding_id as well as fingerprint. convertWebhookEventToEvent writes
-// FindingId from EventId, so the triggering delivery always leaves the event
-// findable by the id its own resolve delivery carries — whereas fingerprint is
-// whatever the producing integration chose. PagerDuty overwrites
-// Investigation.Fingerprint with the CEF dedup_key, which is stable across every
-// incident for the same alert and so never equals the incident id a resolve
-// carries: the fingerprint predicate alone matched nothing and PagerDuty resolves
-// closed no events at all. That went unnoticed because the k8s-collector's
-// resource reconciliation bulk-closes events later, so they did eventually clear.
-//
-// Tenant-scoped so the finding_id predicate can use events_cloudaccount_findingid,
-// whose leading column is tenant. Verified on a real dataset: both predicates
-// resolve through a BitmapOr of index scans, no sequential scan.
-//
-// ends_at is written alongside status. Closing without it leaves a row that is
-// CLOSED but open-ended, and every consumer that measures how long an alert ran
-// counts only `ends_at IS NOT NULL AND ends_at > starts_at` — so such rows read
-// as "never resolved". triage.computeAlertQuality then scores the rule
-// resolution_rate = 0 and classifies it "broken", which is how a healthy
-// webhook-sourced alert ends up recommended for manual review. COALESCE keeps
-// any end time the ingest path already recorded.
-const resolveEventQuery = `update events set status = $4, ends_at = COALESCE(ends_at, $5) where tenant = $1 and cloud_account_id = $2 and (fingerprint = $3 or finding_id = $3) and status != $4 returning id`
-
-// resolveEndsAt is the end time to stamp on an event a resolve delivery closes:
-// the end time the integration reported, or the delivery time when it reported
-// none (PagerDuty's incident.resolved, ServiceNow, and the generic webhook all
-// leave EventEndsAt zero).
-func resolveEndsAt(reported time.Time) time.Time {
-	if !reported.IsZero() {
-		return reported
-	}
-	return time.Now().UTC()
-}
-
 func resolveEvent(sc *security.RequestContext, tenantId, accountId string, source string, event EventIncomingWebhook) error {
 	if accountId == "" || accountId == uuid.Nil.String() {
 		sc.GetLogger().Info("integrations: skipping event resolution — no cloud account linked", "source", source, "event_id", event.EventId)
@@ -833,9 +797,9 @@ func resolveEvent(sc *security.RequestContext, tenantId, accountId string, sourc
 	if source == "datadog_webhook" || source == "gcp_monitoring_webhook" {
 		fingerPrint = event.Investigation.Fingerprint
 	}
-	// The status guard in resolveEventQuery makes repeated resolve webhooks no-ops,
+	// The status guard in eventtypes.ResolveEventQuery makes repeated resolve webhooks no-ops,
 	// so only a genuine open→closed transition publishes the resolved notification.
-	rows, err := dbms.Query(resolveEventQuery, tenantId, accountId, fingerPrint, "CLOSED", resolveEndsAt(event.EventEndsAt))
+	rows, err := dbms.Query(eventtypes.ResolveEventQuery, tenantId, accountId, fingerPrint, string(eventtypes.EventStatusClosed), eventtypes.ResolveEndsAt(event.EventEndsAt))
 	if err != nil {
 		return err
 	}

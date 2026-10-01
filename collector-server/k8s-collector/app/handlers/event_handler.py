@@ -10,7 +10,7 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 
 import requests
 from cachetools import TTLCache
@@ -589,6 +589,96 @@ def _call_trigger_investigation(tenant: str, events: list) -> dict:
         raise
 
 
+def _agent_raw_alert(evidence) -> Dict[str, Any]:
+    """Return the Alertmanager alert the Go agent carries as a `json` evidence block, or {}."""
+    for envelope in evidence or []:
+        blocks = envelope
+        if isinstance(envelope, dict) and isinstance(envelope.get("data"), str):
+            try:
+                blocks = json.loads(envelope["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "json" or not isinstance(block.get("data"), str):
+                continue
+            try:
+                raw_alert = json.loads(block["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(raw_alert, dict):
+                return raw_alert
+    return {}
+
+
+def _agent_alert_resolution(finding: dict, evidence) -> Tuple[bool, Optional[str]]:
+    """Whether a Go-agent prometheus finding reports its alert resolved, and when it ended.
+
+    The Go agent forwards every alert of an Alertmanager notification as a finding,
+    firing or resolved, with the same title and no RESOLVED marker. The alert's own
+    `status`, carried verbatim in the evidence, is the only place a resolve is
+    recorded. The end time comes back as an ISO-8601 UTC string, or None when the
+    alert has none (Alertmanager's zero time) or it cannot be parsed.
+    """
+    if finding.get("source") != "prometheus":
+        return False, None
+    raw_alert = _agent_raw_alert(evidence)
+    if str(raw_alert.get("status", "")).lower() != "resolved":
+        return False, None
+    ends_at = _as_naive_utc(raw_alert.get("endsAt"))
+    if ends_at is None or ends_at.year <= 1:
+        return True, None
+    return True, ends_at.isoformat() + "Z"
+
+
+def _forward_agent_resolve(
+    finding: dict, evidence, alert_labels: dict, cloud_account_name: str, cloud_account_id: str, tenant: str
+) -> bool:
+    """Send a resolved Go-agent alert to trigger_investigation as a RESOLVED.
+
+    Returns False when the finding is not a resolve, so the caller goes on to store
+    it as a firing. Storing a resolve that way would open a new event that nothing
+    ever closes.
+
+    A RESOLVED whose finding_id names no stored event closes every open event of the
+    same fingerprint, source and account, and stores nothing — so the payload carries
+    only what identifies the alert, not the enrichment a firing needs.
+    """
+    resolved, ends_at = _agent_alert_resolution(finding, evidence)
+    if not resolved:
+        return False
+    if not finding.get("fingerprint"):
+        logging.warning("Resolved alert %s carries no fingerprint, nothing to close it by", finding["id"])
+        return True
+    event = {
+        "finding_id": finding["id"],
+        "aggregation_key": finding["aggregation_key"],
+        "title": finding["title"],
+        "source": finding["source"],
+        "finding_type": finding["finding_type"],
+        "priority": finding["priority"],
+        "subject_type": finding["subject_type"],
+        "subject_name": finding["subject_name"],
+        "subject_namespace": finding["subject_namespace"],
+        "cluster": cloud_account_name,
+        "status": "RESOLVED",
+        "starts_at": finding["starts_at"],
+        "fingerprint": finding["fingerprint"],
+        "account_id": cloud_account_id,
+        "tenant": tenant,
+        "labels": alert_labels,
+    }
+    if ends_at:
+        event["ends_at"] = ends_at
+    try:
+        _call_trigger_investigation(tenant, [event])
+    except Exception:
+        logging.exception("Failed to call trigger_investigation API for resolved alert %s", finding["id"])
+        raise
+    return True
+
+
 def run_event_handler_async(content: str | dict) -> None:
     if isinstance(content, dict):
         data = content
@@ -643,6 +733,9 @@ def run_event_handler_async(content: str | dict) -> None:
         _resolve_prometheus_subject(finding, alert_labels, tenant, cloud_account_id)
 
     _enrich_and_normalize_fingerprint(finding, tenant, cloud_account_id)
+
+    if _forward_agent_resolve(finding, data["evidence"], alert_labels, cloud_account_name, cloud_account_id, tenant):
+        return
 
     resource_key, resources_data = get_resource_info(cloud_account_id, finding, tenant)
     if "RESOLVED" in finding["title"]:
