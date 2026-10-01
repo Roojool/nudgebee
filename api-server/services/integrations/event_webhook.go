@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 	"unicode"
@@ -218,6 +219,14 @@ func validateEventWebhookItem(index int, item *eventWebhookItem) []core.WebhookV
 	}
 	if !item.startsAt.IsZero() && !item.endsAt.IsZero() && item.endsAt.Before(item.startsAt) {
 		add("ends_at", "must not be before starts_at")
+	}
+
+	// The url becomes the alert's link in the UI, so only plain web links pass:
+	// a javascript: or data: URL must never be rendered as a clickable link.
+	if item.Url != "" {
+		if u, err := url.Parse(item.Url); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			add("url", "must be an http or https URL")
+		}
 	}
 
 	for k := range item.Labels {

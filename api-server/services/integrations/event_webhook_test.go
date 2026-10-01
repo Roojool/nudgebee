@@ -190,6 +190,9 @@ func TestEventWebhook_Validation(t *testing.T) {
 		{"starts_at without offset", map[string]string{"starts_at": `"2026-09-29T10:00:00"`}, "starts_at"},
 		{"bad ends_at", map[string]string{"ends_at": `"yesterday"`}, "ends_at"},
 		{"ends_at before starts_at", map[string]string{"starts_at": `"2026-09-29T10:00:00Z"`, "ends_at": `"2026-09-29T09:59:59Z"`}, "ends_at"},
+		{"javascript url", map[string]string{"url": `"javascript:alert(1)"`}, "url"},
+		{"data url", map[string]string{"url": `"data:text/html,x"`}, "url"},
+		{"url without host", map[string]string{"url": `"https://"`}, "url"},
 		{"reserved label", map[string]string{"labels": `{"nb_skip_workload_match":"true"}`}, "labels.nb_skip_workload_match"},
 		{"non-string label", map[string]string{"labels": `{"n":1}`}, "payload"},
 	}
@@ -204,6 +207,7 @@ func TestEventWebhook_Validation(t *testing.T) {
 	}
 
 	assert.NoError(t, EventWebhook{}.ValidateWebhookPayload(build(nil)))
+	assert.NoError(t, EventWebhook{}.ValidateWebhookPayload(build(map[string]string{"url": `"http://site24x7.example.com/alert/1"`})))
 	assert.NoError(t, EventWebhook{}.ValidateWebhookPayload(build(map[string]string{
 		"starts_at": `"2026-09-29T10:00:00Z"`, "ends_at": `"2026-09-29T10:00:00Z"`})), "an instant alert may end when it starts")
 	assert.NoError(t, EventWebhook{}.ValidateWebhookPayload(build(map[string]string{"id": `"` + strings.Repeat("x", 256) + `"`})))
