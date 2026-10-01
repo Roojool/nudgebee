@@ -54,6 +54,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "services-server.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.initCheckEnabled | default true }}
@@ -100,7 +101,7 @@ spec:
             httpGet:
               path: /health
               port: http
-          {{- with ($worker.lifecycle | default .Values.lifecycle) }}
+          {{- with (hasKey $worker "lifecycle" | ternary $worker.lifecycle .Values.lifecycle) }}
           lifecycle:
             {{- toYaml . | nindent 12 }}
           {{- end }}
