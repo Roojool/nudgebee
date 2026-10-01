@@ -2079,6 +2079,13 @@ type Query {
 }
 
 type Query {
+  spend_currency_v2(
+    where: SpendCurrencyWhereRequest
+    limit: Int
+  ): SpendCurrencyResponse
+}
+
+type Query {
   spend_summary_windows_v2(
     where: SpendGroupingsWhereRequest
     columns: [String]
@@ -3359,6 +3366,15 @@ input SpendGroupingsWhereRequest {
   spend_date: QueryWhereDatetimeRequest
   exclude_aggregate: QueryWhereBooleanRequest
   amount: QueryWhereFloatRequest
+}
+
+input SpendCurrencyWhereRequest {
+  _and: [SpendCurrencyWhereRequest]
+  _or: [SpendCurrencyWhereRequest]
+  _not: SpendCurrencyWhereRequest
+  tenant_id: QueryWhereStringRequest
+  account_id: QueryWhereStringRequest
+  exclude_aggregate: QueryWhereBooleanRequest
 }
 
 input resource_filter_request {
@@ -6927,6 +6943,16 @@ type SpendsRowResponse {
 
 type SpendGroupingsResponse {
   rows: [SpendGroupingsRowResponse]
+}
+
+type SpendCurrencyResponse {
+  rows: [SpendCurrencyRowResponse]
+}
+
+type SpendCurrencyRowResponse {
+  tenant_id: String
+  account_id: String
+  currency_type: String
 }
 
 type SpendSummaryWindowsResponse {

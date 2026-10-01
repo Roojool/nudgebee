@@ -1028,6 +1028,34 @@ func TestSQLGen_RealTable_SpendGroupings(t *testing.T) {
 	assert.Contains(t, sql, "GROUP BY")
 }
 
+// The currency lookup must stop at the first spend row. Through
+// spend_groupings_v2 it was GROUP BY unit, which reads the account's whole
+// spend history before LIMIT applies.
+func TestSQLGen_RealTable_SpendCurrency(t *testing.T) {
+	td, ok := GetTableMetadata("spend_currency_v2")
+	require.True(t, ok)
+
+	req := QueryRequest{
+		Table:   "spend_currency_v2",
+		Columns: cols("currency_type"),
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"account_id":        {Eq: "a1"},
+				"exclude_aggregate": {Eq: false},
+			},
+		},
+		Limit: 1,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "AS currency_type FROM spends")
+	assert.Contains(t, sql, "cloud_account = 'a1'")
+	assert.Contains(t, sql, "exclude_aggregate = false")
+	assert.NotContains(t, sql, "GROUP BY")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(sql), "LIMIT 1"), sql)
+}
+
 func TestSQLGen_RealTable_TicketGroupings(t *testing.T) {
 	td, ok := GetTableMetadata("ticket_groupings_v2")
 	require.True(t, ok)

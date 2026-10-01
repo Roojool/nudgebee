@@ -4918,6 +4918,20 @@ actions:
       - role: account_admin
       - role: tenant_admin_readonly
       - role: tenant_admin
+  - name: spend_currency_v2
+    comment: Currency of one cloud account's spend, read from its first spend row
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
   - name: spend_summary_windows_v2
     comment: This-month / last-month / year-to-date spend (net, gross, credits) for one account in a single query
     definition:

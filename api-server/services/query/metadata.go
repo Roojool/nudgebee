@@ -2658,6 +2658,38 @@ var table_metadata = map[string]TableDefinition{
 			},
 		},
 	},
+	// An account's currency, for the currency symbol next to every cost figure.
+	// Asked through spend_groupings_v2 this was `GROUP BY unit LIMIT 1`, and the
+	// LIMIT only applies after grouping the account's whole spend history
+	// (seconds on a large account). A Normal table has no GROUP BY, so
+	// `limit: 1` stops at the first matching row. An account's spend rows all
+	// carry the same unit.
+	"spend_currency_v2": {
+		PermissionModule:    "spend",
+		Type:                Normal,
+		Source:              database.Metastore,
+		Def:                 "spends",
+		Name:                "spend_currency_v2",
+		TenantIdColumnName:  "tenant_id",
+		AccountIdColumnName: "account_id",
+		Columns: map[string]ColumnDefinition{
+			"tenant_id": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "tenant",
+			},
+			"account_id": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "cloud_account",
+			},
+			"exclude_aggregate": {
+				Type: ColumnDefinitionTypeBoolean,
+			},
+			"currency_type": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "unit",
+			},
+		},
+	},
 	// The account / EC2 cost-summary cards need this-month, last-month and
 	// year-to-date spend, each split into net / gross / credits. The frontend
 	// used to ask for that as 8 near-identical spend_groupings_v2 calls per page
