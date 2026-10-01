@@ -333,7 +333,7 @@ const CustomNode = memo(({ data, selected }) => {
                               paddingRight: 'var(--ds-space-3)',
                             }}
                           >
-                            {formatServiceMapRequests(item.RequestCount, data.requestsPerSecond)}
+                            {formatServiceMapRequests(item.RequestCount, data?.requestsPerSecond)}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -462,7 +462,7 @@ const CustomNode = memo(({ data, selected }) => {
                               paddingRight: 'var(--ds-space-3)',
                             }}
                           >
-                            {formatServiceMapRequests(item.RequestCount, data.requestsPerSecond)}
+                            {formatServiceMapRequests(item.RequestCount, data?.requestsPerSecond)}
                           </TableCell>
                         </TableRow>
                       ))}
