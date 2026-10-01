@@ -1166,6 +1166,7 @@ type IncidentAssembly {
   cause: AssemblyCause
   impact: [AssemblyItem]
   chronic: [AssemblyItem]
+  same_node: [AssemblyItem]
   window: AssemblyWindow
   truncated: Boolean
   seed_occurrences: Int

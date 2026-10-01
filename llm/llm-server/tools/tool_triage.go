@@ -652,6 +652,12 @@ const assemblyCaveat = "Alerts grouped around this event by timing and topology.
 	"them when the cause tiers are empty: they are often the rest of the same outage (a host " +
 	"terminated, a dependency down) on an account whose service map has no edge between them."
 
+// assemblySameNodeNote is appended to the caveat only when the output holds
+// same_node entries. An investigation without any reads nothing about the lane.
+// It says what the lane is, not which resource ran short: the entries show that.
+const assemblySameNodeNote = " 'same_node' entries are other alerts tied to the same node-level " +
+	"resource shortage as this one; each is backed by evidence on that alert rather than by timing alone."
+
 // assemblyEmptyCaveat replaces it when the window holds nothing besides the
 // seed, so the model states the absence instead of inventing related alerts.
 const assemblyEmptyCaveat = "No other alerts were recorded around this event in its incident window. " +
@@ -727,6 +733,7 @@ type incidentAssemblyPayload struct {
 	Cause            assemblyCauseTiers `json:"cause"`
 	Impact           []any              `json:"impact"`
 	Chronic          []any              `json:"chronic"`
+	SameNode         []any              `json:"same_node,omitempty"`
 	CoFiring         []any              `json:"co_firing"`
 	Window           any                `json:"window,omitempty"`
 	Truncated        map[string]any     `json:"truncated,omitempty"`
@@ -759,6 +766,7 @@ func boundIncidentAssembly(data string) string {
 		SameIncident:     capTier("same_incident", assembly["same_incident"], trunc),
 		Impact:           capTier("impact", assembly["impact"], trunc),
 		Chronic:          capTier("chronic", assembly["chronic"], trunc),
+		SameNode:         capTier("same_node", assembly["same_node"], trunc),
 		CoFiring:         capTier("co_firing", assembly["co_firing"], trunc),
 		Window:           assembly["window"],
 	}
@@ -782,10 +790,13 @@ func boundIncidentAssembly(data string) string {
 	}
 
 	if len(out.SameIncident)+len(out.Cause.ConfigChanges)+len(out.Cause.Upstream)+
-		len(out.Impact)+len(out.Chronic)+len(out.CoFiring) == 0 {
+		len(out.Impact)+len(out.Chronic)+len(out.SameNode)+len(out.CoFiring) == 0 {
 		out.Note = assemblyEmptyCaveat
 	} else {
 		out.Note = assemblyCaveat
+	}
+	if len(out.SameNode) > 0 {
+		out.Note += assemblySameNodeNote
 	}
 
 	b, err := json.Marshal(out)
