@@ -1091,8 +1091,13 @@ func processTaskLoop(
 			updatedDependsOn := false
 			for j, depID := range task.DependsOn {
 				if replacements, ok := matrixReplacements[depID]; ok {
-					// replace this dependency with all its expanded counterparts
-					newDeps := append(task.DependsOn[:j], replacements...)
+					// replace this dependency with all its expanded counterparts.
+					// Build into a fresh slice: appending onto task.DependsOn[:j]
+					// writes into the backing array still being read below, which
+					// overwrote the deps after j (e.g. a core.approval gate).
+					newDeps := make([]string, 0, len(task.DependsOn)-1+len(replacements))
+					newDeps = append(newDeps, task.DependsOn[:j]...)
+					newDeps = append(newDeps, replacements...)
 					newDeps = append(newDeps, task.DependsOn[j+1:]...)
 					task.DependsOn = newDeps
 					updatedDependsOn = true
