@@ -44,9 +44,9 @@ func ParseExecutionTarget(input NBToolCallRequest) (*ExecutionTarget, error) {
 		return nil, fmt.Errorf("target provider cannot be empty")
 	}
 	switch provider {
-	case "kubernetes", "aws", "gcp", "azure":
+	case "kubernetes", "aws", "gcp", "azure", "vm":
 	default:
-		return nil, fmt.Errorf("target provider must be kubernetes, aws, gcp, or azure")
+		return nil, fmt.Errorf("target provider must be kubernetes, aws, gcp, azure, or vm")
 	}
 	rawName, found := value["name"]
 	if !found {
@@ -69,15 +69,35 @@ func ParseExecutionTarget(input NBToolCallRequest) (*ExecutionTarget, error) {
 func ToolTargetSchemaProperty() ToolSchemaProperty {
 	return ToolSchemaProperty{
 		Type:        ToolSchemaTypeObject,
-		Description: "Optional connected cluster or cloud account to query instead of the conversation's own: {provider: kubernetes|aws|gcp|azure, name: exact connected name}. Use it when the question names another cluster or account; omit it otherwise. This does not grant access.",
+		Description: "Optional connected cluster or cloud account to query instead of the conversation's own: {provider: kubernetes|aws|gcp|azure|vm, name: exact connected name}. Use it when the question names another cluster or account; omit it otherwise. This does not grant access.",
 	}
 }
 
 func AgentTargetSchemaProperty() ToolSchemaProperty {
 	return ToolSchemaProperty{
 		Type:        ToolSchemaTypeObject,
-		Description: "Optional target for this sub-agent: {provider: kubernetes|aws|gcp|azure, name: exact connected cluster/account name}. Split work naming multiple connected accounts into separate targeted child calls. Omit only for discovery without a named connection. This does not grant access.",
+		Description: "Optional target for this sub-agent: {provider: kubernetes|aws|gcp|azure|vm, name: exact connected cluster/account name}. Split work naming multiple connected accounts into separate targeted child calls. Omit only for discovery without a named connection. This does not grant access.",
 	}
+}
+
+// AccountTargetProvider is the target provider of a connected account: the
+// same classification the router uses to pick an orchestrator. account_type
+// says what is managed and wins over cloud_provider, which says who runs it,
+// so a VM fleet in an AWS VPC is a "vm" target, never an "aws" one. Empty for
+// accounts that are not execution targets (e.g. Slack).
+func AccountTargetProvider(cloudProvider, accountType string) string {
+	if strings.EqualFold(accountType, "vm") {
+		return "vm"
+	}
+	for _, provider := range []string{"aws", "gcp", "azure"} {
+		if strings.EqualFold(cloudProvider, provider) {
+			return provider
+		}
+	}
+	if strings.EqualFold(cloudProvider, "k8s") {
+		return "kubernetes"
+	}
+	return ""
 }
 
 // Kind names what a target is, for prompt text.
@@ -91,6 +111,8 @@ func (t ExecutionTarget) Kind() string {
 		return "GCP account"
 	case "azure":
 		return "Azure account"
+	case "vm":
+		return "VM account"
 	}
 	return "connected account"
 }

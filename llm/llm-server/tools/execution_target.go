@@ -28,6 +28,8 @@ func ResolveAgentHandoffTarget(ctx *security.RequestContext, accountID string, t
 		selected, err = AccountTargetByName(ctx, accountID, ToolExecuteGcpCliCommand, target.Name)
 	case "azure":
 		selected, err = AccountTargetByName(ctx, accountID, ToolExecuteAzureCliCommand, target.Name)
+	case "vm":
+		selected, err = VMAccountTargetByName(ctx, accountID, target.Name)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", target.Provider)
 	}

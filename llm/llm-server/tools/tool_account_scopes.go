@@ -61,7 +61,8 @@ func init() {
 		"workflow_validate",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundNotYetSupported,
-		"server_command_executor", "vm_execute",
-		"vm_list_execute",
+		"server_command_executor",
 	)
+	// VM tools read and run on the target's VM account (provider "vm").
+	toolcore.DeclareAccountScope(toolcore.AccountScopeFollowsTarget, "vm_execute", "vm_list_execute")
 }

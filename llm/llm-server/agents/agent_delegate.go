@@ -67,7 +67,7 @@ func (t *delegateAgentTool) GetType() toolcore.NBToolType { return toolcore.NBTo
 
 func (t *delegateAgentTool) Description() string {
 	return `Spawn a scoped specialist sub-investigator with its own prompt, tool list, and iteration budget.
-Input: {"prompt": <brief>, "tools": [<tool names>], "max_iterations": <int>, "target": {"provider": "kubernetes|aws|gcp|azure", "name": <connected account name>}} — "tools" is required; omitting it leaves the sub-agent LLM-only, which is almost always misuse. max_iterations defaults to 5, minimum 2, maximum 15.
+Input: {"prompt": <brief>, "tools": [<tool names>], "max_iterations": <int>, "target": {"provider": "kubernetes|aws|gcp|azure|vm", "name": <connected account name>}} — "tools" is required; omitting it leaves the sub-agent LLM-only, which is almost always misuse. max_iterations defaults to 5, minimum 2, maximum 15.
 When the work names a cluster or cloud account, pass its exact connected name in target. Split work spanning several accounts into separately targeted calls. Omit target only for discovery that does not name a connected account.
 USE when a specific sub-question needs 3+ tool calls to answer and would otherwise pollute your own scratchpad with serial discovery (e.g. "investigate DNS for service X", "check egress firewall for namespace Y").
 DO NOT use when 1-2 tool calls suffice — call the tool directly.

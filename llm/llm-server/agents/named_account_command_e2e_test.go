@@ -42,3 +42,23 @@ func TestNaturalQuestion_CommandInNamedAwsAccount(t *testing.T) {
 	assert.NotZero(t, ranThere, "an aws command must run in %s", target)
 	assert.Contains(t, conversationAnswer(t, resp.ConversationId), expected, "the answer must give %s's account number", target)
 }
+
+// TestNaturalQuestion_VMsInAnotherAccount (#39894): from a k8s cluster
+// conversation, a question about the VMs of a connected VM account must reach
+// the VM tools on that account, not the conversation's own cluster.
+func TestNaturalQuestion_VMsInAnotherAccount(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	target := delegateE2ETarget("TEST_DELEGATE_VM_TARGET", "vulnerable-vms-test")
+	resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(os.Getenv("TEST_ACCOUNT")), "natural-vms-other-account",
+		"List the VMs in the "+target+" VM account and run uptime on one of them.")
+	calls := fetchConversationToolCalls(t, resp.ConversationId)
+	logRoute(t, calls)
+	var onTarget int
+	for _, c := range calls {
+		if (c.ToolName == tools.ToolVMList || c.ToolName == tools.ToolVMExecute) && c.Status == "success" {
+			onTarget++
+		}
+	}
+	assert.NotZero(t, onTarget, "a VM tool must run on %s", target)
+	assert.Contains(t, conversationAnswer(t, resp.ConversationId), "load average", "the answer must include uptime from a VM in %s", target)
+}

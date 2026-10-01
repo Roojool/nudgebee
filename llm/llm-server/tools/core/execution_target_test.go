@@ -52,3 +52,28 @@ func TestParseExecutionTarget(t *testing.T) {
 		})
 	}
 }
+
+// One classification for the router and for targets: account_type "vm" wins
+// over the cloud provider that hosts the fleet.
+func TestAccountTargetProvider(t *testing.T) {
+	for _, tc := range []struct{ cloudProvider, accountType, want string }{
+		{"SelfHosted", "vm", "vm"},
+		{"AWS", "vm", "vm"},
+		{"AWS", "cloud", "aws"},
+		{"GCP", "cloud", "gcp"},
+		{"Azure", "cloud", "azure"},
+		{"K8s", "kubernetes", "kubernetes"},
+		{"Slack", "slack", ""},
+	} {
+		if got := AccountTargetProvider(tc.cloudProvider, tc.accountType); got != tc.want {
+			t.Errorf("AccountTargetProvider(%q, %q) = %q, want %q", tc.cloudProvider, tc.accountType, got, tc.want)
+		}
+	}
+}
+
+func TestParseExecutionTarget_VM(t *testing.T) {
+	target, err := ParseExecutionTarget(NBToolCallRequest{Arguments: map[string]any{"target": map[string]any{"provider": "VM", "name": "vulnerable-vms-test"}}})
+	if err != nil || target == nil || target.Provider != "vm" || target.Kind() != "VM account" {
+		t.Fatalf("got %+v, %v", target, err)
+	}
+}
