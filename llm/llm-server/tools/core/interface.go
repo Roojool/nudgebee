@@ -462,6 +462,13 @@ type ToolConfigValue struct {
 	IsEncrypted bool   `json:"is_encrypted"`
 }
 
+// Placeholder config names. They stand for "no config" and "this account's
+// agent" and name no integration, so they are never recorded as one.
+const (
+	ToolConfigNameNone         = "NoConfigToolsFound"
+	ToolConfigNameAccountAgent = "Agent"
+)
+
 type ToolConfig struct {
 	Id     string            `json:"id"`
 	Values []ToolConfigValue `json:"values"`

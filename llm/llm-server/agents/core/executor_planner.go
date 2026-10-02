@@ -2151,19 +2151,6 @@ func writeConfirmationRequired(tool toolcore.NBTool, requestType *toolcore.ToolR
 	}
 }
 
-// withExecutedToolTarget records the configured target a tool call actually ran
-// against. Empty for tools that need no configuration.
-func withExecutedToolTarget(additionalDetails map[string]any, configName string) map[string]any {
-	if configName == "" {
-		return additionalDetails
-	}
-	if additionalDetails == nil {
-		additionalDetails = map[string]any{}
-	}
-	additionalDetails[toolcore.MetadataResolvedTarget] = configName
-	return additionalDetails
-}
-
 // unresolvedTargetMessage explains why a configured tool could not run. "None
 // configured" and "several configured, none is the subject" lead somewhere
 // different: the second should send the agent to reach the system where it
@@ -4588,7 +4575,6 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// request's ToolConfigs map is resolved per agent and a parent orchestrator's
 	// copy can be stale, so reading it there misses exactly the calls most at
 	// risk — the ones resolved inside the tool rather than by the planner.
-	data.AdditionalDetails = withExecutedToolTarget(data.AdditionalDetails, toolContext.ToolConfig.Name)
 	data = tools.StampExecutedTarget(data, err, tool, toolContext, input)
 	latency := time.Since(t0).Seconds()
 	nbRequestContext.GetLogger().Info("tool execution time", "tool", tool.Name(), "time", latency, "input", input)

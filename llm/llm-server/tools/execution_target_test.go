@@ -146,9 +146,32 @@ func TestExecutedTargetOf(t *testing.T) {
 	require.Nil(t, core.WithExecutedTarget(nil, nil))
 }
 
-// Only a successful call that ran somewhere other than the conversation's own
-// account is stamped; the UI would otherwise say "ran on" for a typo.
+// stubStampAccounts stands in for the conversation and account stores: every
+// call's conversation belongs to origin-id, and prod-id is k8s-prod.
+func stubStampAccounts(t *testing.T) {
+	t.Helper()
+	conv, describe := conversationAccountOf, describeAccount
+	t.Cleanup(func() { conversationAccountOf, describeAccount = conv, describe })
+	conversationAccountOf = func(core.NbToolContext) string { return "origin-id" }
+	describeAccount = func(id string) *core.ExecutionTarget {
+		if id != "prod-id" {
+			return nil
+		}
+		return &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod", AccountID: id}
+	}
+}
+
+func ranOnAccount(resp core.NBToolResponse) string {
+	target, _ := resp.AdditionalDetails[core.MetadataExecutedTarget].(map[string]any)
+	id, _ := target["account_id"].(string)
+	return id
+}
+
+// A call that ran somewhere other than the conversation's own account is
+// stamped with that account, whether it succeeded or failed; the UI would
+// otherwise say "ran on" for a typo, so a name that is not connected is not.
 func TestStampExecutedTarget(t *testing.T) {
+	stubStampAccounts(t)
 	ctx := core.NbToolContext{AccountId: "origin-id", ToolConfig: core.ToolConfig{Name: "k8s-dev"}}
 	prod := `{"command":"kubectl get pods","cluster":"k8s-prod"}`
 	ok := core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}
@@ -164,7 +187,8 @@ func TestStampExecutedTarget(t *testing.T) {
 	}
 
 	got := StampExecutedTarget(ok, nil, KubectlExecuteTool{}, ctx, prod)
-	require.Contains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+	require.Equal(t, "prod-id", ranOnAccount(got))
+	require.NotContains(t, got.AdditionalDetails, core.MetadataResolvedTarget, "k8s-dev's config is not what ran on k8s-prod")
 
 	unnamed := ctx
 	unnamed.ToolConfig.Name = ""
@@ -172,12 +196,15 @@ func TestStampExecutedTarget(t *testing.T) {
 	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "the own cluster by name, with no tool-config name, is still the own account")
 
 	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil, KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods","cluster":"typo"}`)
-	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "a failed call did not run there")
+	require.Empty(t, got.AdditionalDetails, "a name that is not connected ran nowhere, with no integration either")
+	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil, KubectlExecuteTool{}, ctx, prod)
+	require.Equal(t, "prod-id", ranOnAccount(got), "a call that failed on k8s-prod is about k8s-prod")
 	got = StampExecutedTarget(ok, errors.New("boom"), KubectlExecuteTool{}, ctx, prod)
-	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+	require.Equal(t, "prod-id", ranOnAccount(got))
 
 	got = StampExecutedTarget(ok, nil, KubectlExecuteTool{}, ctx, `{"command":"kubectl get pods","cluster":"K8S-DEV"}`)
 	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "naming the conversation's own cluster is not another account")
+	require.Equal(t, "k8s-dev", got.AdditionalDetails[core.MetadataResolvedTarget], "the conversation's own config ran")
 
 	same := ctx
 	same.ExecutedTarget = &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-dev", AccountID: "origin-id"}
@@ -185,9 +212,51 @@ func TestStampExecutedTarget(t *testing.T) {
 	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
 }
 
+// Sub-agents started as another account (metrics, traces) and tools their
+// agent points at it (logs) carry no target of their own; their calls still
+// say where they ran, relative to the conversation's account.
+func TestStampExecutedTarget_CallUnderAnotherAccount(t *testing.T) {
+	stubStampAccounts(t)
+	asProd := core.NbToolContext{AccountId: "prod-id", ConversationId: "conv", ToolConfig: core.ToolConfig{Name: "prometheus-prod"}}
+	for _, resp := range []core.NBToolResponse{{Status: core.NBToolResponseStatusSuccess}, {Status: core.NBToolResponseStatusError}} {
+		got := StampExecutedTarget(resp, nil, RecommendationExecuteTool{}, asProd, `{"command":"up"}`)
+		require.Equal(t, map[string]any{"provider": "kubernetes", "name": "k8s-prod", "account_id": "prod-id"}, got.AdditionalDetails[core.MetadataExecutedTarget], resp.Status)
+		require.Equal(t, "prometheus-prod", got.AdditionalDetails[core.MetadataResolvedTarget], "its config was listed on k8s-prod, where it ran")
+	}
+	waiting := StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusWaiting}, nil, RecommendationExecuteTool{}, asProd, "")
+	require.Empty(t, waiting.AdditionalDetails, "a call waiting on the user has not run")
+
+	// In a child handed k8s-prod, a workspace tool still runs on the
+	// conversation's account.
+	child := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "prod-id", ConversationId: "conv"}
+	got := StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, RecommendationExecuteTool{}, child, "")
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget)
+}
+
+// The integration field names only a real integration the call ran with.
+func TestStampExecutedTarget_Integration(t *testing.T) {
+	stubStampAccounts(t)
+	ok := core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}
+	for _, placeholder := range []string{core.ToolConfigNameNone, core.ToolConfigNameAccountAgent} {
+		got := StampExecutedTarget(ok, nil, RecommendationExecuteTool{}, core.NbToolContext{AccountId: "origin-id", ToolConfig: core.ToolConfig{Name: placeholder}}, "")
+		require.NotContains(t, got.AdditionalDetails, core.MetadataResolvedTarget, placeholder)
+	}
+	// A follows-target tool keeps the conversation's config when it reads
+	// another account; that config is not what it ran with.
+	resolved := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "prod-id", ToolConfig: core.ToolConfig{Name: "k8s-dev"},
+		ExecutedTarget: &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod", AccountID: "prod-id"}}
+	got := StampExecutedTarget(ok, nil, RecommendationExecuteTool{}, resolved, "")
+	require.Equal(t, "prod-id", ranOnAccount(got))
+	require.NotContains(t, got.AdditionalDetails, core.MetadataResolvedTarget)
+	got = StampExecutedTarget(ok, nil, RecommendationExecuteTool{}, core.NbToolContext{AccountId: "origin-id", ToolConfig: core.ToolConfig{Name: "dev-pg"}}, "")
+	require.Equal(t, "dev-pg", got.AdditionalDetails[core.MetadataResolvedTarget])
+}
+
 // An agent called with a target (metrics, prometheus, delegate) is stamped
-// from its input once it has run: not when it failed or is waiting on the user.
+// from its input, whether it succeeded or failed, but not while it is waiting
+// on the user.
 func TestStampExecutedTarget_AgentInput(t *testing.T) {
+	stubStampAccounts(t)
 	restore := resolveStampTarget
 	t.Cleanup(func() { resolveStampTarget = restore })
 	resolveStampTarget = func(_ *security.RequestContext, _ string, target *core.ExecutionTarget) (*core.ExecutionTarget, error) {
@@ -197,20 +266,19 @@ func TestStampExecutedTarget_AgentInput(t *testing.T) {
 	agent := RecommendationExecuteTool{} // any tool without a cluster argument of its own
 	prod := `{"command":"cpu trend","target":{"provider":"kubernetes","name":"k8s-prod"}}`
 
-	got := StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, agent, ctx, prod)
-	require.Equal(t, "prod-id", got.AdditionalDetails[core.MetadataExecutedTarget].(map[string]any)["account_id"])
-
 	for name, tc := range map[string]struct {
 		resp core.NBToolResponse
 		err  error
 	}{
-		"failed":  {core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil},
-		"errored": {core.NBToolResponse{}, errors.New("boom")},
-		"waiting": {core.NBToolResponse{Status: core.NBToolResponseStatusWaiting}, nil},
+		"succeeded": {core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil},
+		"failed":    {core.NBToolResponse{Status: core.NBToolResponseStatusError}, nil},
+		"errored":   {core.NBToolResponse{}, errors.New("boom")},
 	} {
 		got := StampExecutedTarget(tc.resp, tc.err, agent, ctx, prod)
-		require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, name)
+		require.Equal(t, "prod-id", ranOnAccount(got), name)
 	}
+	got := StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusWaiting}, nil, agent, ctx, prod)
+	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "waiting")
 	own := `{"command":"cpu trend","target":{"provider":"kubernetes","name":"k8s-dev"}}`
 	got = StampExecutedTarget(core.NBToolResponse{Status: core.NBToolResponseStatusSuccess}, nil, agent, ctx, own)
 	require.NotContains(t, got.AdditionalDetails, core.MetadataExecutedTarget, "the conversation's own cluster")

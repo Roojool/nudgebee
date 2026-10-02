@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"nudgebee/llm/agents/core"
+	"nudgebee/llm/common"
 	"os"
 	"strings"
 	"testing"
@@ -105,4 +106,44 @@ func TestNaturalQuestion_PickTargetIntegration(t *testing.T) {
 		}
 	}
 	assert.NotZero(t, onPick, "the query must run on k8s-prod's prod database after the pick")
+}
+
+// TestNaturalQuestion_StepsSayWhereTheyRan (#38588): metrics and logs about
+// another cluster run in sub-agents and tools under that cluster's account.
+// Every such step, succeeded or failed, says which account it ran on unless it
+// named the conversation's own cluster, and the integration it names is one it
+// ran with.
+func TestNaturalQuestion_StepsSayWhereTheyRan(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	resp := runPreservedE2EConversation(t, tenantWideE2EContext(), newK8sOrchestratorAgent(os.Getenv("TEST_ACCOUNT")), "steps-say-where-they-ran",
+		"On "+target+", how much CPU did the pods in kube-system use over the last hour, and were there any error logs from them?")
+
+	dbm, err := common.GetDatabaseManager(common.Metastore)
+	require.NoError(t, err)
+	rows, err := dbm.Db.Query(`
+		SELECT t.tool_name, COALESCE(t.status, ''),
+		       -- Run under the target's account, and not aimed back at the conversation's own cluster.
+		       t.account_id::text <> c.account_id::text
+		         AND position(lower(own.account_name) in lower(COALESCE(NULLIF(t.params_sql, ''), t.parameters, ''))) = 0,
+		       COALESCE(t.metadata->'nb_executed_target'->>'name', ''), COALESCE(t.metadata->>'nb_resolved_target', '')
+		FROM llm_conversation_tool_calls t JOIN llm_conversations c ON c.id = t.conversation_id
+		JOIN cloud_accounts own ON own.id::text = c.account_id::text
+		WHERE t.conversation_id = $1 AND COALESCE(t.status, '') NOT IN ('in_progress', 'waiting')`, resp.ConversationId)
+	require.NoError(t, err)
+	defer rows.Close()
+	var elsewhere int
+	for rows.Next() {
+		var tool, status, ranOn, integration string
+		var underOther bool
+		require.NoError(t, rows.Scan(&tool, &status, &underOther, &ranOn, &integration))
+		t.Logf("%s status=%s under_other_account=%v ran_on=%q integration=%q", tool, status, underOther, ranOn, integration)
+		assert.NotContains(t, []string{"NoConfigToolsFound", "Agent"}, integration, "%s names a placeholder as its integration", tool)
+		if underOther {
+			elsewhere++
+			assert.Equal(t, target, ranOn, "%s ran under %s's account but does not say so", tool, target)
+		}
+	}
+	require.NoError(t, rows.Err())
+	assert.NotZero(t, elsewhere, "metrics or logs for %s run under its account", target)
 }

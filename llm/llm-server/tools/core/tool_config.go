@@ -446,7 +446,7 @@ func ListToolConfigs(context *security.RequestContext, accountId string, tool NB
 				Values: []ToolConfigValue{},
 				Tags:   map[string]string{},
 				Schema: toolConfigSchema,
-				Name:   "NoConfigToolsFound",
+				Name:   ToolConfigNameNone,
 			})
 		} else if foundToolWithConfig && isConfigAvailable {
 			toolConfigNames = lo.Uniq(toolConfigNames)
@@ -459,7 +459,7 @@ func ListToolConfigs(context *security.RequestContext, accountId string, tool NB
 				},
 				Tags:   map[string]string{},
 				Schema: toolConfigSchema,
-				Name:   "NoConfigToolsFound",
+				Name:   ToolConfigNameNone,
 			})
 		}
 
@@ -481,7 +481,7 @@ func ListToolConfigs(context *security.RequestContext, accountId string, tool NB
 					Values: []ToolConfigValue{},
 					Tags:   map[string]string{},
 					Schema: toolConfigSchema,
-					Name:   "Agent",
+					Name:   ToolConfigNameAccountAgent,
 				},
 			}
 		}

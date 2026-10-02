@@ -3,9 +3,14 @@ package tools
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
+
+	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 )
 
 // ResolveAgentHandoffTarget validates a child agent's named connection. The
@@ -137,44 +142,149 @@ func ExecutedTargetOf(tool core.NBTool, ctx core.NbToolContext, input string) *c
 	return &core.ExecutionTarget{Provider: provider, Name: requested}
 }
 
-// StampExecutedTarget records on a finished call where it ran, so the
-// conversation view can show it. Only successful calls that ran somewhere
-// other than the conversation's own account are stamped: a failed call (an
-// unknown cluster, a refused target) did not run there.
+// StampExecutedTarget records on a call where it ran and with which
+// integration, so the conversation view can show both. A call is stamped with
+// the account it ran on whenever that is not the conversation's own, whether
+// it succeeded or failed: a failure there is still an answer about that
+// account. Calls that never reached an account (an unknown cluster, a refused
+// target) and calls still waiting on the user are not stamped.
 func StampExecutedTarget(resp core.NBToolResponse, callErr error, tool core.NBTool, ctx core.NbToolContext, input string) core.NBToolResponse {
-	if !ranToCompletion(resp, callErr) {
+	if callErr == nil && resp.Status == core.NBToolResponseStatusWaiting {
 		return resp
 	}
-	if _, recorded := resp.AdditionalDetails[core.MetadataExecutedTarget]; recorded {
-		return resp
-	}
-	target := ExecutedTargetOf(tool, ctx, input)
-	if target == nil {
-		return resp
-	}
-	if target.AccountID == "" {
-		// An own-selector tool names a connection; the conversation's own
-		// cluster may be named even when its tool config carries no name.
-		resolved, err := resolveStampTarget(ctx.Ctx, ctx.AccountId, target)
-		if err != nil {
-			return resp
+	origin := conversationAccountOf(ctx)
+	ranOn := origin
+	if recorded, ok := resp.AdditionalDetails[core.MetadataExecutedTarget].(map[string]any); ok {
+		if id, _ := recorded["account_id"].(string); id != "" {
+			ranOn = id
 		}
-		target = resolved
+	} else if target, known := executedTarget(tool, ctx, input, origin); !known {
+		return resp // named somewhere that is not connected: it ran nowhere
+	} else if target != nil {
+		resp.AdditionalDetails = core.WithExecutedTarget(resp.AdditionalDetails, target)
+		ranOn = target.AccountID
 	}
-	if target.AccountID == ctx.AccountId {
-		return resp
+	if name := usedIntegration(tool, ctx, ranOn); name != "" {
+		if resp.AdditionalDetails == nil {
+			resp.AdditionalDetails = map[string]any{}
+		}
+		resp.AdditionalDetails[core.MetadataResolvedTarget] = name
 	}
-	resp.AdditionalDetails = core.WithExecutedTarget(resp.AdditionalDetails, target)
 	return resp
 }
 
-// resolveStampTarget is replaced in tests, which have no connection store.
-var resolveStampTarget = ResolveAgentHandoffTarget
+// executedTarget is the account a call ran on, when not origin (the
+// conversation's account). A call names it, or was handed it; or it runs in a
+// sub-agent started as that account (metrics, traces), or was pointed at it by
+// its agent (logs), and then carries no target of its own. known is false
+// when the call named a connection that does not resolve.
+func executedTarget(tool core.NBTool, ctx core.NbToolContext, input, origin string) (target *core.ExecutionTarget, known bool) {
+	if target := ExecutedTargetOf(tool, ctx, input); target != nil {
+		if target.AccountID == "" {
+			// An own-selector tool names a connection; the conversation's own
+			// cluster may be named even when its tool config carries no name.
+			resolved, err := resolveStampTarget(ctx.Ctx, ctx.AccountId, target)
+			if err != nil {
+				return nil, false
+			}
+			target = resolved
+		}
+		if target.AccountID == origin {
+			return nil, true
+		}
+		return target, true
+	}
+	// The account the call runs under, which its record is saved with. Not
+	// DataAccountID: a delegated child's origin-bound tools (workspace files)
+	// carry the child's target there but run on the conversation's account.
+	if ctx.AccountId == "" || ctx.AccountId == origin {
+		return nil, true
+	}
+	return describeAccount(ctx.AccountId), true
+}
 
-// ranToCompletion: a failed call did not run there, and a call waiting on the
-// user has not run yet.
-func ranToCompletion(resp core.NBToolResponse, callErr error) bool {
-	return callErr == nil && resp.Status != core.NBToolResponseStatusError && resp.Status != core.NBToolResponseStatusWaiting
+// usedIntegration is the integration a call ran with, or "" when that is not
+// known: the context's config was listed on the call's own account, or picked
+// on the target for an integration tool, and names the integration only when
+// that is the account the call ran on. A config of the conversation's account
+// is not what a call on another cluster ran with, and placeholders name none.
+func usedIntegration(tool core.NBTool, ctx core.NbToolContext, ranOn string) string {
+	name := ctx.ToolConfig.Name
+	if name == "" || name == core.ToolConfigNameNone || name == core.ToolConfigNameAccountAgent {
+		return ""
+	}
+	listedOn := ctx.AccountId
+	if IsTargetedIntegrationTool(ctx.Ctx, tool) {
+		listedOn = ctx.DataAccountID()
+	}
+	if listedOn != ranOn {
+		return ""
+	}
+	return name
+}
+
+// resolveStampTarget, conversationAccountOf and describeAccount are replaced in
+// tests, which have no connection store.
+var (
+	resolveStampTarget    = ResolveAgentHandoffTarget
+	conversationAccountOf = lookupConversationAccount
+	describeAccount       = lookupAccountTarget
+)
+
+// A conversation's account never changes, so it is looked up once. Every call
+// of a sub-agent running as another account names it, so names are cached too.
+var (
+	conversationAccounts, _ = lru.New[string, string](4096)
+	accountTargets          = expirable.NewLRU[string, core.ExecutionTarget](1024, nil, 10*time.Minute)
+)
+
+// lookupConversationAccount is the account the call's conversation belongs
+// to. A sub-agent may run as another account, so the context's own AccountId
+// is the fallback only when the conversation cannot be read.
+func lookupConversationAccount(ctx core.NbToolContext) string {
+	if ctx.ConversationId == "" {
+		return ctx.AccountId
+	}
+	if account, ok := conversationAccounts.Get(ctx.ConversationId); ok {
+		return account
+	}
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return ctx.AccountId
+	}
+	row, err := dbms.QueryRow("select account_id::text from llm_conversations where id = $1", ctx.ConversationId)
+	if err != nil {
+		return ctx.AccountId
+	}
+	var account string
+	if err := row.Scan(&account); err != nil || account == "" {
+		return ctx.AccountId
+	}
+	conversationAccounts.Add(ctx.ConversationId, account)
+	return account
+}
+
+// lookupAccountTarget names a connected account as a target, for a call that
+// ran on it without naming it.
+func lookupAccountTarget(accountID string) *core.ExecutionTarget {
+	if cached, ok := accountTargets.Get(accountID); ok {
+		return &cached
+	}
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return nil
+	}
+	row, err := dbms.QueryRow("select coalesce(account_name, ''), coalesce(cloud_provider, ''), coalesce(account_type, '') from cloud_accounts where id = $1", accountID)
+	if err != nil {
+		return nil
+	}
+	var name, cloudProvider, accountType string
+	if err := row.Scan(&name, &cloudProvider, &accountType); err != nil {
+		return nil
+	}
+	target := core.ExecutionTarget{Provider: core.AccountTargetProvider(cloudProvider, accountType), Name: name, AccountID: accountID}
+	accountTargets.Add(accountID, target)
+	return &target
 }
 
 func providerOfTool(name string) string {
