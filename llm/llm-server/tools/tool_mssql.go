@@ -119,13 +119,7 @@ func (m MSSQLExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 	wm := workspace.NewWorkspaceManager()
 	// Wrap query in sqlcmd command so the workspace shim can intercept it.
 	// Same pattern as Postgres (psql -c "query") and other DB tools.
-	sqlcmdFlags := ""
-	if database != "" {
-		escapedDb := strings.ReplaceAll(database, `"`, `\"`)
-		sqlcmdFlags = fmt.Sprintf(` -d "%s"`, escapedDb)
-	}
-	escapedQuery := strings.ReplaceAll(query, `"`, `\"`)
-	wsQuery := fmt.Sprintf(`sqlcmd%s -Q "%s" -s "	" -W`, sqlcmdFlags, escapedQuery)
+	wsQuery := mssqlWorkspaceShellCommand(database, query)
 	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, wsQuery, map[string]string{
 		"MSSQL_DATABASE":                  database,
 		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
@@ -168,4 +162,26 @@ func (m MSSQLExecuteTool) ConfigSchema(ctx *security.RequestContext) core.ToolCo
 			},
 		},
 	}
+}
+
+// mssqlWorkspaceShellCommand builds the sqlcmd command the workspace pod's shell
+// runs. Values are single-quoted: inside double quotes, $( ), backticks and
+// $VAR in the query would run in the workspace pod.
+func mssqlWorkspaceShellCommand(database, query string) string {
+	flags := ""
+	if database != "" {
+		flags = " -d " + common.ShellEscape(database)
+	}
+	return fmt.Sprintf(`sqlcmd%s -Q %s -s "	" -W`, flags, common.ShellEscape(query))
+}
+
+// InferToolRequestType classifies the query with the static SQL rules; ""
+// leaves an unclear query to InferToolRequestTypePrompt.
+func (m MSSQLExecuteTool) InferToolRequestType(_ *security.RequestContext, _, input string) (core.ToolRequestType, error) {
+	return inferSQLRequestType(input), nil
+}
+
+// InferToolRequestTypePrompt classifies queries the static SQL rules cannot.
+func (m MSSQLExecuteTool) InferToolRequestTypePrompt(_ *security.RequestContext, _, _ string) (string, error) {
+	return sqlRequestTypePrompt("SQL Server"), nil
 }

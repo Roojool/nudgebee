@@ -144,12 +144,12 @@ func (m PostgresExecuteTool) Call(nbRequestContext core.NbToolContext, input cor
 
 	explainQuery := false
 	if (strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "explain ")) || (strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "explain analyze")) {
-		query = fmt.Sprintf(`psql %s -c "%s"`, pgFlags, query)
+		query = postgresWorkspaceShellCommand(pgFlags, query)
 		explainQuery = true
 	} else {
 		query = strings.TrimSpace(query)
 		query = strings.TrimSuffix(query, ";")
-		query = fmt.Sprintf(`psql %s -c "\copy (%s) TO stdout WITH CSV HEADER"`, pgFlags, query)
+		query = postgresWorkspaceShellCommand(pgFlags, `\copy (`+query+`) TO stdout WITH CSV HEADER`)
 	}
 
 	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, query, map[string]string{
@@ -372,4 +372,22 @@ func (m PostgresExecuteTool) ConfigSchema(ctx *security.RequestContext) core.Too
 			},
 		},
 	}
+}
+
+// postgresWorkspaceShellCommand builds the psql command the workspace pod's shell
+// runs. The SQL is single-quoted: inside double quotes, $( ), backticks and
+// $VAR in it would run in the workspace pod before psql saw the query.
+func postgresWorkspaceShellCommand(pgFlags, sql string) string {
+	return fmt.Sprintf(`psql %s -c %s`, pgFlags, common.ShellEscape(sql))
+}
+
+// InferToolRequestType classifies the query with the static SQL rules; ""
+// leaves an unclear query to InferToolRequestTypePrompt.
+func (m PostgresExecuteTool) InferToolRequestType(_ *security.RequestContext, _, input string) (core.ToolRequestType, error) {
+	return inferSQLRequestType(input), nil
+}
+
+// InferToolRequestTypePrompt classifies queries the static SQL rules cannot.
+func (m PostgresExecuteTool) InferToolRequestTypePrompt(_ *security.RequestContext, _, _ string) (string, error) {
+	return sqlRequestTypePrompt("PostgreSQL"), nil
 }
