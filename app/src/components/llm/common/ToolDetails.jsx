@@ -1154,7 +1154,7 @@ const ToolCallSection = ({ tc, index, accountId, reasoning, showExecutionBatch }
           {toolSourceSuffix(tc.metadata)}
         </Typography>
         <StatusBadge status={tcStatus} />
-        <ExecutedTargetChip metadata={tc.metadata} />
+        <ExecutedTargetChip metadata={tc.metadata} status={tcStatus} />
         {executionBatch && (
           <Tooltip title={executionBatchTooltip(executionBatch)} placement='top'>
             <Box component='span' sx={{ display: 'inline-flex' }}>
@@ -1456,7 +1456,7 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
           </Box>
         )}
         <StatusBadge status={status} />
-        <ExecutedTargetChip metadata={headerTargetMetadata} />
+        <ExecutedTargetChip metadata={headerTargetMetadata} status={status} />
         {headerBatch && (
           <Tooltip title={executionBatchTooltip(headerBatch)} placement='top'>
             <Box component='span' sx={{ display: 'inline-flex' }}>

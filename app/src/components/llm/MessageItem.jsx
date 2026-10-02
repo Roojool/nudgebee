@@ -542,7 +542,7 @@ const MessageItem = ({
                       }
                       sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)', fontFamily: ds.font.sans, flex: 1, minWidth: 0 }}
                     />
-                    <ExecutedTargetChip metadata={message.metadata} />
+                    <ExecutedTargetChip metadata={message.metadata} status={message.response_status} />
                     {parsedReferences.length > 0 && (
                       <Box
                         onMouseEnter={(e) => setReferencesAnchorEl(e.currentTarget)}

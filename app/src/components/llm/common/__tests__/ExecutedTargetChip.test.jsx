@@ -77,3 +77,35 @@ describe('target with integration', () => {
     expect(targetKey({ nb_resolved_target: 'Agent' })).toBe('');
   });
 });
+
+describe('target wording', () => {
+  const hoverText = async (ui) => {
+    const user = userEvent.setup();
+    render(ui);
+    await user.hover(screen.getByTestId('executed-target-chip'));
+    return (await screen.findByRole('tooltip')).textContent;
+  };
+
+  it('names a VM account as such', async () => {
+    const metadata = { nb_executed_target: { provider: 'vm', name: 'vulnerable-vms-test' } };
+    expect(await hoverText(<ExecutedTargetChip metadata={metadata} />)).toContain('Ran on the VM account vulnerable-vms-test');
+  });
+
+  it('says "Tried on" for a failed step', async () => {
+    const metadata = { nb_executed_target: { provider: 'kubernetes', name: 'k8s-prod' }, nb_resolved_target: 'prod-pg' };
+    expect(await hoverText(<ExecutedTargetChip metadata={metadata} status='error' />)).toContain(
+      'Tried on the cluster k8s-prod, using the prod-pg integration'
+    );
+  });
+
+  it('says "Tried" for a failed own-account step', async () => {
+    expect(await hoverText(<ExecutedTargetChip metadata={{ nb_resolved_target: 'dev-pg' }} status='FAILED' />)).toContain(
+      'Tried the dev-pg integration'
+    );
+  });
+
+  it('keeps "Ran on" for a step that succeeded or partly succeeded', async () => {
+    const metadata = { nb_executed_target: { provider: 'kubernetes', name: 'k8s-prod' } };
+    expect(await hoverText(<ExecutedTargetChip metadata={metadata} status='completed_with_errors' />)).toContain('Ran on the cluster k8s-prod');
+  });
+});

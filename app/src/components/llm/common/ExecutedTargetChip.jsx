@@ -9,7 +9,11 @@ const TARGET_KIND = {
   aws: 'AWS account',
   gcp: 'GCP account',
   azure: 'Azure account',
+  vm: 'VM account',
 };
+
+// Step statuses that mean the call did not complete, so it "tried" rather than "ran".
+const FAILED_STATUSES = ['error', 'fail', 'failed'];
 
 /**
  * Where a tool call ran, from its persisted metadata (`nb_executed_target`).
@@ -76,7 +80,7 @@ export const targetKey = (metadata) => {
  * the conversation's own) and the integration it used, e.g. `k8s-prod · prod`.
  * An own-account step shows the integration alone, in neutral grey.
  */
-const ExecutedTargetChip = ({ metadata }) => {
+const ExecutedTargetChip = ({ metadata, status }) => {
   const parsed = React.useMemo(() => parseMetadataOnce(metadata), [metadata]);
   const target = parseExecutedTarget(parsed);
   const resolved = parseResolvedIntegration(parsed);
@@ -86,11 +90,16 @@ const ExecutedTargetChip = ({ metadata }) => {
     return null;
   }
   const kind = target ? TARGET_KIND[target.provider] || 'account' : null;
-  let title = `Ran on the ${kind} ${target?.name}`;
-  if (target && integration) {
-    title += `, using the ${integration} integration`;
-  } else if (!target) {
-    title = `Used the ${integration} integration`;
+  // Failed steps carry their target too (#39951); don't claim they ran there.
+  const failed = typeof status === 'string' && FAILED_STATUSES.includes(status.toLowerCase());
+  let title;
+  if (target) {
+    title = `${failed ? 'Tried on' : 'Ran on'} the ${kind} ${target.name}`;
+    if (integration) {
+      title += `, using the ${integration} integration`;
+    }
+  } else {
+    title = `${failed ? 'Tried' : 'Used'} the ${integration} integration`;
   }
   const resolvedBy = integration ? RESOLVED_BY[parsed?.nb_resolved_by] : null;
   if (resolvedBy) {
@@ -113,6 +122,8 @@ const ExecutedTargetChip = ({ metadata }) => {
 
 ExecutedTargetChip.propTypes = {
   metadata: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
+  // The step's status; a failed step's tooltip says "Tried on" instead of "Ran on".
+  status: PropTypes.string,
 };
 
 export default ExecutedTargetChip;
