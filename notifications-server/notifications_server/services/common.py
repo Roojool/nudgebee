@@ -34,6 +34,7 @@ from notifications_server.services.cache import Cache
 from notifications_server.services.messaging_installations import (
     load_installation,
     load_installation_by_team,
+    load_ms_teams_installation_by_aad_tenant,
     load_installations,
     persist_messaging_token,
 )
@@ -2220,8 +2221,11 @@ class CommonService:
         app_password = os.environ.get("MS_TEAMS_CLIENT_SECRET")
         if app_id and app_password:
             LOG.debug(f"Initializing Bot Framework adapter with App ID: {app_id[:8]}...")
-            settings = BotFrameworkAdapterSettings(app_id, app_password, channel_auth_tenant)
-            self.teams_adapter = BotFrameworkAdapter(settings)
+            # A SingleTenant bot must take its Bot Connector token from its own
+            # home tenant; without that setting keep the caller's tenant.
+            channel_auth_tenant = settings.ms_teams.bot_tenant_id or channel_auth_tenant
+            adapter_settings = BotFrameworkAdapterSettings(app_id, app_password, channel_auth_tenant)
+            self.teams_adapter = BotFrameworkAdapter(adapter_settings)
             self.teams_app_id = app_id
             LOG.debug("Bot Framework adapter initialized for Teams messaging")
         else:
@@ -2235,7 +2239,7 @@ class CommonService:
                 LOG.warning("No AAD user ID provided")
                 return None
 
-            messaging_platform = load_installation_by_team(self.session, teams_account_id, "ms_teams", contains=True)
+            messaging_platform = load_ms_teams_installation_by_aad_tenant(self.session, teams_account_id)
 
             if not messaging_platform:
                 LOG.debug(f"No Teams messaging platform found for teams account {teams_account_id}")

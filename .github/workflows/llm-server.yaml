@@ -173,7 +173,10 @@ jobs:
         # triage/eventrule: which suppression rows a mute owns is decided in SQL over
         # jsonb tags and nullable match columns (alert-rule mute, epic #38553). All
         # but CascadePipeline, the one triage _DB test that needs a migrated database.
+        # integrations/core: the ms_teams rename migration must not collide with
+        # integrations' unique key, which would abort the post-upgrade hook.
         run: |
           go test ./account/adapter/ ./observability/ ./event/ ./recommendation/ ./query/ ./reports/ ./insight/ -run '_DB$' -v
           go test ./triage/ ./eventrule/ -run '_DB$' -skip 'CascadePipeline' -v
           go test ./account/ -run 'NotificationRule.*_DB$' -v
+          go test ./integrations/core/ -run 'MsTeams.*_DB$' -v

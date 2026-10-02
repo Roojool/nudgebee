@@ -35,6 +35,7 @@ from notifications_server.services.channel_ingest import ChannelIngestService
 from notifications_server.services.common import CommonService
 from notifications_server.services.events import Events, event_cache
 from notifications_server.services.messaging_installations import load_installation, load_installation_by_team
+from notifications_server.services.ms_teams.bot_installations import record_team_installations
 from notifications_server.services.bot_messages import get_bot_joined_message
 from notifications_server.utils.action_requests import ActionRequestBody, verify_action_request
 from notifications_server.utils.transformer import SLACK_SIGNIN_SECRET, Transformer
@@ -1441,12 +1442,19 @@ class MsTeamsEventsService(SlackActionsBaseService):
 
             activity_type = activity.type
 
-            if activity_type == ActivityTypes.message:
-                await self.event_service.handle_message_event(activity)
-            elif activity_type == ActivityTypes.conversation_update:
-                await self.event_service.handle_conversation_update(activity)
-            else:
-                LOG.debug(f"Unhandled activity type: {activity_type}")
+            try:
+                if activity_type == ActivityTypes.message:
+                    await self.event_service.handle_message_event(activity)
+                elif activity_type == ActivityTypes.conversation_update:
+                    await self.event_service.handle_conversation_update(activity)
+                else:
+                    LOG.debug(f"Unhandled activity type: {activity_type}")
+            finally:
+                # After the handlers, so recording never holds up a reply or the welcome card.
+                try:
+                    await record_team_installations(activity, self.engine)
+                except Exception as e:
+                    LOG.exception(f"Error recording Teams bot installation: {e}")
 
         except Exception as e:
             LOG.exception(f"Error processing Teams event {e}")

@@ -516,6 +516,11 @@ class MSTeamsSettings(BaseSettings):
         "",
         validation_alias=AliasChoices("MS_TEAMS_BOT_ENDPOINT", "ms_teams_bot_endpoint"),
     )
+    # Home tenant of a SingleTenant Azure Bot. Empty for a MultiTenant bot.
+    bot_tenant_id: str = Field(
+        "",
+        validation_alias=AliasChoices("MS_TEAMS_BOT_TENANT_ID", "ms_teams_bot_tenant_id"),
+    )
     # Path matches the Next.js callback route at /api/integrations/ms-teams/callback
     redirect_path: str = "/api/integrations/ms-teams/callback"
     scopes: List[str] = [
