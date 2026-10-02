@@ -113,6 +113,7 @@ Each service has its own CLAUDE.md where one exists — **always read it before 
 
 Subsystem guides that live under `docs/` rather than beside their code:
 - [`docs/ownership.md`](docs/ownership.md) — Resource ownership (manual assignments + lazily-evaluated rules)
+- [`docs/mcp-sessions.md`](docs/mcp-sessions.md) — MCP sessions: how chats and automation runs get their own session on a customer's MCP server, across relay pods
 
 ## Key Files & Locations
 

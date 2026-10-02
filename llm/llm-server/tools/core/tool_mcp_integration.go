@@ -411,6 +411,9 @@ func executeMCPViaRelay(ctx context.Context, accountID string, cfg mcpIntegratio
 
 	if cfg.ConnectionMode == "direct" {
 		actionParams["connection_mode"] = "direct"
+		// Lets any relay pod reload credentials to end this session later
+		// (docs/mcp-sessions.md).
+		actionParams["integration_id"] = cfg.IntegrationID
 		actionParams["url"] = cfg.URL
 		actionParams["auth_type"] = cfg.AuthType
 		if cfg.AuthType == "none" {

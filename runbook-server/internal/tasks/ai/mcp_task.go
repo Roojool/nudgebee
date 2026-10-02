@@ -773,6 +773,9 @@ func (t *MCPTask) executeViaIntegration(taskCtx types.TaskContext, integrationID
 
 	if connectionMode == "direct" {
 		actionParams["connection_mode"] = "direct"
+		// Lets any relay pod reload credentials to end this session later
+		// (docs/mcp-sessions.md).
+		actionParams["integration_id"] = integrationID
 		actionParams["url"] = configMap["url"]
 		actionParams["auth_type"] = configMap["auth_type"]
 

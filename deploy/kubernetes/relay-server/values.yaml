@@ -3,6 +3,9 @@
 # Declare variables to be passed into your templates.
 
 replicaCount: 1
+# With more than one replica, also set env.MCP_SESSION_STORE=redis so relay pods
+# share direct-mode MCP sessions (docs/mcp-sessions.md); otherwise a chat's calls
+# can land on different pods and lose state on stateful MCP servers.
 
 # Ed25519 signing of requests forwarded to native k8s agents, so agents can
 # authorize UI-triggered workload mutations. Additive + backward-compatible
