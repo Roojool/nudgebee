@@ -17,6 +17,19 @@ import (
 // explicit target, so each invocation's own --profile or the default applies.
 var ErrAmbiguousShellTarget = errors.New("aws shell target requires an aws-led command; run other shell steps separately")
 
+// variableShellTarget is an ErrAmbiguousShellTarget for a target chosen by a
+// shell variable (`for c in a b; do kubectl --context $c ...`). The command
+// text names no target. Reads run like a Python script that switches
+// contexts: the workspace proxy authorizes each invocation with the value the
+// shell expanded. Writes are refused, since no single target can be approved.
+type variableShellTarget struct{ flag string }
+
+func (e variableShellTarget) Error() string {
+	return fmt.Sprintf("%s is set through a shell variable, so a write cannot be approved for one target; run each write as a single command with a literal %s", e.flag, e.flag)
+}
+
+func (variableShellTarget) Is(target error) bool { return target == ErrAmbiguousShellTarget }
+
 // ShellConfigToolName uses the existing detector; script/AST detection is separate work.
 func ShellConfigToolName(input string) string {
 	_, owner := detectCloudCLI(extractCommandFromToolInput(input))
@@ -217,6 +230,9 @@ func requestedTarget(command string, args map[string]any, argName, flag, noun st
 	fromFlag := ""
 	values, _ := scanValueFlags(command, flag)
 	for _, value := range values {
+		if strings.ContainsAny(value, "$`") {
+			return "", variableShellTarget{flag: flag}
+		}
 		if flag == "--profile" {
 			// One aws invocation uses its last --profile, as the CLI does. Across
 			// several invocations, approving the last profile would let an earlier

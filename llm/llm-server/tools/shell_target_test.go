@@ -264,3 +264,33 @@ func TestDelegatedShellTargetDoesNotOverrideOtherProvider(t *testing.T) {
 		})
 	}
 }
+
+// Found in #38588 testing: a loop over clusters was refused with
+// `cluster "$c" is not connected`. A variable selects no cluster in the
+// script text; reads run per invocation, writes are refused before approval.
+func TestRequestedShellTarget_VariableContext(t *testing.T) {
+	for _, command := range []string{
+		`for c in k8s-dev k8s-prod; do kubectl --context $c get ns; done`,
+		`for c in k8s-dev k8s-prod; do kubectl --context "$c" get ns; done`,
+		"kubectl --context=${CLUSTER} get pods",
+		"kubectl --context `cat ctx` get pods",
+	} {
+		input := fmt.Sprintf(`{"command":%q}`, command)
+		owner, requested, err := RequestedShellTargetFromInput(input)
+		require.ErrorIs(t, err, ErrAmbiguousShellTarget, command)
+		require.Equal(t, ToolExecuteKubectlCommand, owner, command)
+		require.Empty(t, requested, command)
+		require.ErrorContains(t, ShellTool{}.ValidateWriteTargetInput(input), "shell variable", command)
+	}
+	_, err := RequestedHelmCluster("helm list --kube-context $c", nil)
+	require.ErrorIs(t, err, ErrAmbiguousShellTarget)
+
+	// The same for an aws --profile: a read runs per invocation, a write is
+	// refused before approval.
+	input := `{"command":"aws --profile $p s3 ls"}`
+	owner, requested, err := RequestedShellTargetFromInput(input)
+	require.ErrorIs(t, err, ErrAmbiguousShellTarget)
+	require.Equal(t, ToolExecuteAwsCliCommand, owner)
+	require.Empty(t, requested)
+	require.ErrorContains(t, ShellTool{}.ValidateWriteTargetInput(`{"command":"aws --profile $p s3 rm s3://bucket/key"}`), "--profile is set through a shell variable")
+}

@@ -82,6 +82,17 @@ func TestCallNbTool_IntegrationOnAnotherAccount(t *testing.T) {
 		assert.NotEqual(t, own.Data, other.Data, "k8s-prod's prod is a different database from k8s-dev's dev-pg")
 	})
 
+	// An account with a single Postgres integration: it is used without
+	// naming it.
+	t.Run("postgres, the target's only integration", func(t *testing.T) {
+		only := map[string]any{"provider": "kubernetes", "name": envOr("TEST_SINGLE_PG_TARGET", "k8s-rs-prod")}
+		resp := call(t, tools.ToolExecutePostgresQuery, map[string]any{"query": where, "target": only})
+		requireDeployedProxy(t, resp)
+		require.Equal(t, toolcore.NBToolResponseStatusSuccess, resp.Status)
+		assert.Equal(t, only["name"], ranOn(resp))
+		assert.Equal(t, envOr("TEST_SINGLE_PG_NAME", "rackspace-pg"), resp.AdditionalDetails[toolcore.MetadataResolvedTarget], "the step names the integration it used")
+	})
+
 	t.Run("redis", func(t *testing.T) {
 		resp := call(t, tools.ToolExecuteRedisCommand, map[string]any{"command": "INFO server", "instance": "prod-redis", "target": prod})
 		requireDeployedProxy(t, resp)

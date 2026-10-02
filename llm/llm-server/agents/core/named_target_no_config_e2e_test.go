@@ -96,4 +96,18 @@ func TestCallNbTool_NamedCloudAccountFromClusterConversation(t *testing.T) {
 		assert.NotEqual(t, toolcore.NBToolResponseStatusError, resp.Status)
 		assert.Contains(t, fmt.Sprint(resp.Data), project)
 	})
+
+	// Azure's dev credentials may be invalid. Whatever Azure says, the command
+	// must reach the named subscription: not be refused as unconfigured, not
+	// answered from the conversation's own account, and labelled with where
+	// it ran.
+	t.Run("azure", func(t *testing.T) {
+		target := envOr("TEST_DELEGATE_AZURE_TARGET", "nudgebee-azure")
+		resp := call(t, tools.ToolExecuteAzureCliCommand, fmt.Sprintf(`{"account":%q,"command":"az account show --query id -o tsv"}`, target))
+		assert.NotContains(t, fmt.Sprint(resp.Data), "requires configuration")
+		assert.NotContains(t, fmt.Sprint(resp.Data), "not connected or you do not have access")
+		ranOn, _ := resp.AdditionalDetails[toolcore.MetadataExecutedTarget].(map[string]any)
+		assert.Equal(t, "azure", ranOn["provider"], "the step must say it ran on the Azure account")
+		assert.Equal(t, target, ranOn["name"])
+	})
 }
