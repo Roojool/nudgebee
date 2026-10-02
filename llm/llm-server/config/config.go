@@ -231,8 +231,8 @@ type appConfig struct {
 	// LlmServerCacheProTTLMinutes defines TTL for Pro models under Conversation scope (default 10m).
 	LlmServerCacheProTTLMinutes int `mapstructure:"llm_server_cache_pro_ttl_minutes"`
 	// LlmServerGeminiCacheStrategy selects how Global/Account-scope Gemini caches are used (#39633):
-	//   "explicit" (default) - reference the CachedContent whenever it applies.
-	//   "hybrid"             - reference it only while it covers at least
+	//   "explicit"           - reference the CachedContent whenever it applies (rollback value).
+	//   "hybrid" (default)   - in a tool loop, reference it only while it covers at least
 	//                          LlmServerGeminiCacheHybridMinCoverage of the prompt (first calls, short
 	//                          loops); otherwise send the full prompt so Gemini's implicit prefix caching
 	//                          can cover the growing tool history. A request that references a
@@ -1270,7 +1270,7 @@ func init() {
 	viper.SetDefault("llm_cache_ttl_minutes", 10)
 	viper.SetDefault("llm_enable_caching", true)
 	viper.SetDefault("llm_server_async_cache_creation", true)
-	viper.SetDefault("llm_server_gemini_cache_strategy", "explicit")
+	viper.SetDefault("llm_server_gemini_cache_strategy", "hybrid")
 	viper.SetDefault("llm_server_gemini_cache_hybrid_min_coverage", 0.65)
 	viper.SetDefault("llm_server_cache_flash_ttl_minutes", 30)
 	viper.SetDefault("llm_server_cache_pro_ttl_minutes", 10)

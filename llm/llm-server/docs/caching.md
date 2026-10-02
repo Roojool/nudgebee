@@ -54,10 +54,10 @@ Global/Account-scope `CachedContent` is the only cache that survives a long idle
 
 | Value | Behavior |
 |---|---|
-| `explicit` (default) | Reference the live cache on every call |
-| `hybrid` | In a tool loop, reference it only while it covers at least `LLM_SERVER_GEMINI_CACHE_HYBRID_MIN_COVERAGE` (default 0.65) of the prompt's tokens; otherwise send the full prompt so implicit caching covers the longer prefix. A request with no tool calls or results (a one-shot helper) always keeps the cache: it never repeats, so implicit caching cannot help it |
+| `explicit` | Reference the live cache on every call (rollback value) |
+| `hybrid` (default) | In a tool loop, reference it only while it covers at least `LLM_SERVER_GEMINI_CACHE_HYBRID_MIN_COVERAGE` (default 0.65) of the prompt's tokens; otherwise send the full prompt so implicit caching covers the longer prefix. A request with no tool calls or results (a one-shot helper) always keeps the cache: it never repeats, so implicit caching cannot help it |
 
-Coverage = cached tokens / (cached tokens + rest of the prompt). The cached side is the entry's exact size, as reported by Gemini when it was created (tools included); the rest is estimated from its characters at ~3 characters per token. Because the prompt only grows within a run, a run switches from explicit to implicit at most once. Skipped calls log `hybrid_low_coverage` with the coverage value.
+Coverage = cached tokens / (cached tokens + rest of the prompt). The cached side is the entry's exact size, as reported by Gemini when it was created (tools included); the rest is estimated from its characters at ~3 characters per token. Because the prompt only grows within a run, a run normally switches from explicit to implicit once (on dev, 1 of 93 runs switched back, e.g. after compression shrank the prompt). Skipped calls log `hybrid_low_coverage` with the coverage value.
 
 ## Google AI Provider: System Message Handling
 
