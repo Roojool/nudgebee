@@ -351,3 +351,14 @@ func TestUtilisationKeys_EveryConstantIsInTheRegistry(t *testing.T) {
 	}
 	assert.Equal(t, len(utilisationKeys), constants, "utilisationKeys and the const block differ in size")
 }
+
+// Mean latency divides the duration sum's rate by the request count's rate.
+// With no requests in the window the count's rate is exactly 0 while a stored
+// float sum can wobble by an ulp, so an unguarded divisor yields +Inf seconds.
+func TestPrometheusQueries_HTTPLatencyMeanGuardsZeroCount(t *testing.T) {
+	meta := RequestMetadata{Namespace: "shop", Name: "api", Kind: "Deployment", ContainerName: "app"}
+	key := string(KeyContainerHTTPLatencyMean)
+	q := buildPrometheusWorkloadQueries(meta, []string{key})[key]
+	assert.Contains(t, q, "/ (sum(rate(container_http_requests_duration_seconds_total_count{", "divisor must be the count's rate")
+	assert.True(t, strings.HasSuffix(q, "[1h])) > 0)"), "count's rate must be filtered to > 0: %s", q)
+}

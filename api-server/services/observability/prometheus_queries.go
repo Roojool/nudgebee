@@ -744,7 +744,10 @@ func buildPrometheusWorkloadQueries(meta RequestMetadata, metrics []string) map[
 		case KeyContainerHTTPLatencyP50:
 			queries[metricKey] = fmt.Sprintf(`histogram_quantile(0.50, sum(rate(container_http_requests_duration_seconds_total_bucket{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) by (le))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case KeyContainerHTTPLatencyMean:
-			queries[metricKey] = fmt.Sprintf(`sum(rate(container_http_requests_duration_seconds_total_sum{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) / sum(rate(container_http_requests_duration_seconds_total_count{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h]))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName), promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
+			// Divide only where requests were counted: with none, the count's
+			// rate is 0 while a stored float _sum can wobble by an ulp, and
+			// the ratio comes out +Inf instead of empty.
+			queries[metricKey] = fmt.Sprintf(`sum(rate(container_http_requests_duration_seconds_total_sum{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) / (sum(rate(container_http_requests_duration_seconds_total_count{ __CLUSTER__ %s, destination_workload_namespace!="external", destination_workload_namespace!=""}[1h])) > 0)`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName), promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case KeyContainerHTTPRequestCount:
 			queries[metricKey] = fmt.Sprintf(`sum(increase(container_http_requests_total{ __CLUSTER__ %s}[1h]))`, promContainerIDPath(safeMeta.Kind, safeMeta.Namespace, safeMeta.Name, safeMeta.ContainerName))
 		case KeyContainerHTTPErrorStatusCount:
