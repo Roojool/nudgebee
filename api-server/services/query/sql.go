@@ -1043,6 +1043,14 @@ func generateSqlQuery(ctx *security.RequestContext, accountId string, request Qu
 		queryBuilder.WriteString(strings.ReplaceAll(tabelDefString, "@traceId", dialect.QuoteLiteral(traceId)))
 		queryBuilder.WriteString(")")
 	} else {
+		// Late projection: pick the page first, project it after. The page is a
+		// subquery that selects the def's rows as they are, with every filter,
+		// the ordering and the limit inside it, and the select list above runs
+		// on the rows it returns.
+		projectLate := canProjectLate(request, tableDef, accountId, ctx)
+		if projectLate {
+			queryBuilder.WriteString("(SELECT * FROM ")
+		}
 		if tabelDefString != "" {
 			queryBuilder.WriteString(tabelDefString)
 		} else {
@@ -1105,9 +1113,60 @@ func generateSqlQuery(ctx *security.RequestContext, accountId string, request Qu
 		if limitStr != "" {
 			queryBuilder.WriteString(limitStr)
 		}
+		if projectLate {
+			// A subquery's row order is not guaranteed to survive, so the
+			// ordering is repeated on the page.
+			queryBuilder.WriteString(") AS ")
+			queryBuilder.WriteString(tableDef.LateProjectionAlias)
+			queryBuilder.WriteString(" ORDER BY ")
+			queryBuilder.WriteString(sortStr)
+		}
 
 	}
 	return queryBuilder.String(), nil
+}
+
+// canProjectLate reports whether request can be answered by selecting its page
+// of rows first and applying the select list to that page (see
+// TableDefinition.LateProjectionAlias).
+//
+// It holds only for a plain list: no aggregates, and an ORDER BY whose columns
+// all sort on the bare column. ORDER BY names the output column, so a column
+// the select list wraps (a string cast, a Def, a date truncation) orders by the
+// wrapped value; inside the page there is only the bare column, and ordering
+// by it could pick different rows.
+func canProjectLate(request QueryRequest, tableDef TableDefinition, accountId string, ctx *security.RequestContext) bool {
+	if tableDef.LateProjectionAlias == "" || tableDef.Type != Normal || len(request.OrderBy) == 0 || hasFilters(request.Having) {
+		return false
+	}
+	selected := make(map[string]QueryColumn, len(request.Columns))
+	for _, column := range request.Columns {
+		if tableDef.Columns[column.Name].IsAggregated {
+			return false
+		}
+		selected[column.Name] = column
+	}
+	if len(request.Columns) == 0 {
+		for _, columnDef := range tableDef.Columns {
+			if columnDef.IsAggregated {
+				return false
+			}
+		}
+	}
+	for _, sortBy := range request.OrderBy {
+		columnDef, ok := tableDef.Columns[sortBy.Column]
+		if !ok {
+			return false
+		}
+		column, ok := selected[sortBy.Column]
+		if !ok {
+			column = QueryColumn{Name: sortBy.Column}
+		}
+		if generateColumnExpression(columnDef, column, tableDef, accountId, ctx) != sortBy.Column {
+			return false
+		}
+	}
+	return true
 }
 
 // sqlQueryContext bounds a single RPC query, covering both the wait for a pool
