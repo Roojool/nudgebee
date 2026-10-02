@@ -391,6 +391,8 @@ const parseConversationMessages = (conversationMessages, accountId) => {
               type: 'followup-question',
               tool: 'followup-question',
               ack_message: fMsg.ack_message,
+              asked_at: fMsg.created_at,
+              last_updated_at: fMsg.updated_at,
               response: {
                 type: 'followup-response',
                 text: fMsg.response,
@@ -541,6 +543,8 @@ const parseConversationMessages = (conversationMessages, accountId) => {
           type: 'followup-question',
           tool: 'followup-question',
           ack_message: fMsg.ack_message,
+          asked_at: fMsg.created_at,
+          last_updated_at: fMsg.updated_at,
           response: {
             type: 'followup-response',
             text: fMsg.response,

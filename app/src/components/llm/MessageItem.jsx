@@ -251,11 +251,13 @@ const MessageItem = ({
         memoryCount={responseMeta.memoryCount}
         channelCount={responseMeta.channelCount}
         watchCount={responseMeta.watchCount}
+        followups={responseMeta.followups}
         onOpenTasks={responseMeta.onOpenTasks}
         onOpenContexts={responseMeta.onOpenContexts}
         onOpenMemories={responseMeta.onOpenMemories}
         onOpenChannels={responseMeta.onOpenChannels}
         onOpenWatches={responseMeta.onOpenWatches}
+        onOpenFollowups={responseMeta.onOpenFollowups}
         messageTokenData={responseMeta.messageTokenData}
         onTokenUsageHover={responseMeta.onTokenUsageHover}
         isFetchingTokenData={responseMeta.isFetchingTokenData}
@@ -717,10 +719,12 @@ MessageItem.propTypes = {
     contextCount: PropTypes.number,
     memoryCount: PropTypes.number,
     watchCount: PropTypes.number,
+    followups: PropTypes.object,
     onOpenTasks: PropTypes.func,
     onOpenContexts: PropTypes.func,
     onOpenMemories: PropTypes.func,
     onOpenWatches: PropTypes.func,
+    onOpenFollowups: PropTypes.func,
     messageTokenData: PropTypes.any,
     onTokenUsageHover: PropTypes.func,
     isFetchingTokenData: PropTypes.bool,
