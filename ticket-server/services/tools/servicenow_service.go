@@ -290,7 +290,7 @@ func getRecordStringValue(record *tableapi.TableRecord, key string) (string, err
 // newServiceNowTableBuilder creates a ServiceNow client and table request builder.
 func newServiceNowTableBuilder(config models.TicketConfigurations, tableName string) (*tableapi.TableRequestBuilder2[*tableapi.TableRecord], error) {
 	cred := credentials.NewBasicProvider(config.Username, config.Password)
-	baseURL := "https://" + strings.TrimPrefix(config.URL, "https://")
+	baseURL := utils.NormalizeServiceNowBaseURL(config.URL)
 	// Start from kiota's default client so its retry and redirect middleware stay; a bare
 	// http.Client would drop them. Only the per-request timeout is set.
 	httpClient := nethttplibrary.GetDefaultClient()
