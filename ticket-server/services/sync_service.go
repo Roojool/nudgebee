@@ -3,19 +3,20 @@ package services
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"nudgebee/tickets-server/clients"
 	"nudgebee/tickets-server/common"
 	"nudgebee/tickets-server/database"
 	"nudgebee/tickets-server/models"
+	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/services/tools"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/andygrunwald/go-jira"
+	"github.com/gin-gonic/gin"
 )
 
 // fetchConfigurationList loads all enabled ticketing integrations with their
@@ -227,15 +228,6 @@ func SyncTickets() {
 	}
 
 	for _, configuration := range configurations {
-		if configuration.Tool != "jira" {
-			continue
-		}
-
-		if configuration.URL == "" || configuration.Password == "" {
-			slog.Debug("Skipping ticket sync for incompletely configured integration", "configuration_id", configuration.ID)
-			continue
-		}
-
 		tickets, err := ListTickets(configuration.ID, updatedBefore)
 		if err != nil {
 			slog.Error("Unable to list tickets", "error", err, "configuration_id", configuration.ID)
@@ -246,67 +238,187 @@ func SyncTickets() {
 			continue
 		}
 
-		jiraClient, err := clients.CreateJiraClient(configuration.AuthType, configuration.Username, configuration.Password, configuration.URL)
-		if err != nil {
-			slog.Error("Unable to create Jira client", "error", err, "configuration_id", configuration.ID)
+		if configuration.Tool == "jira" {
+			if configuration.URL == "" || configuration.Password == "" {
+				slog.Debug("Skipping ticket sync for incompletely configured integration", "configuration_id", configuration.ID)
+				continue
+			}
+			syncJiraTickets(dbManager, configuration, tickets)
 			continue
 		}
 
-		consecutiveFailures := 0
-		for _, ticket := range tickets {
-			issue, err := tools.FetchFullIssueDetails(jiraClient, ticket.TicketID)
-			if err != nil {
-				var jiraErr *jira.Error
-				if errors.As(err, &jiraErr) && jiraErr.HTTPError != nil && strings.Contains(jiraErr.HTTPError.Error(), "Status code: 404") {
-					slog.Debug("Ticket not found or inaccessible, skipping", "ticketID", ticket.TicketID)
-					continue
-				}
-				consecutiveFailures++
-				if consecutiveFailures >= consecutiveFetchFailureLimit {
-					slog.Warn("Aborting ticket sync for integration after repeated fetch failures", "configuration_id", configuration.ID, "error", slog.AnyValue(err))
-					break
-				}
-				slog.Error("Error fetching ticket details", "ticketID", ticket.TicketID, "error", slog.AnyValue(err))
-				continue
-			}
-			consecutiveFailures = 0
-
-			if issue == nil || issue.Fields == nil {
-				slog.Error("Issue or its fields are empty", "ticketID", ticket.TicketID)
-				continue
-			}
-			update := false
-			updateFields := models.UpdateFields{}
-			if issue.Fields.Status != nil && ticket.Status != issue.Fields.Status.Name {
-				updateFields.Status = issue.Fields.Status.Name
-				update = true
-			}
-			if issue.Fields.Priority != nil && ticket.Severity != issue.Fields.Priority.Name {
-				updateFields.Severity = issue.Fields.Priority.Name
-				update = true
-			}
-			if issue.Fields.Assignee != nil && ticket.Assignee != issue.Fields.Assignee.DisplayName {
-				updateFields.Assignee = issue.Fields.Assignee.DisplayName
-				update = true
-			}
-
-			if update {
-				slog.Debug("Updating ticket fields", "ticketID", ticket.TicketID, "updateFields", updateFields)
-				setClauses, args := buildUpdateClauses(updateFields)
-				if len(setClauses) > 0 {
-					argIdx := len(args) + 1
-					query := fmt.Sprintf("UPDATE tickets SET %s WHERE id = $%d",
-						strings.Join(setClauses, ", "), argIdx)
-					args = append(args, ticket.ID)
-					_, err = dbManager.Exec(query, args...)
-					if err != nil {
-						slog.Info("Unable to update ticket:", "error", slog.AnyValue(err))
-					}
-				}
-			}
-		}
+		syncTicketsViaManager(dbManager, configuration, tickets)
 	}
 
+}
+
+// normalizeJiraKey makes a Jira issue key comparable regardless of case or
+// incidental whitespace, since Jira keys are case-insensitive but Go map
+// lookups are not.
+func normalizeJiraKey(key string) string {
+	return strings.ToUpper(strings.TrimSpace(key))
+}
+
+// syncJiraTickets refreshes status/severity/assignee for a Jira
+// configuration's still-open tickets via batched "key in (...)" JQL searches
+// instead of one GET per ticket (tools.FetchIssuesByKeys), which is the
+// per-GET pattern Jira Cloud rate-limits under load.
+func syncJiraTickets(dbManager *database.DatabaseManager, configuration models.TicketConfigurations, tickets []models.Ticket) {
+	jiraClient, err := clients.CreateJiraClient(configuration.AuthType, configuration.Username, configuration.Password, configuration.URL)
+	if err != nil {
+		slog.Error("Unable to create Jira client", "error", err, "configuration_id", configuration.ID)
+		return
+	}
+
+	// Keyed by normalized key: Jira issue keys are case-insensitive, and the
+	// batch search below returns Jira's own canonical-case key, which isn't
+	// guaranteed to match a stored ticket_id byte-for-byte.
+	byKey := make(map[string]models.Ticket, len(tickets))
+	keys := make([]string, 0, len(tickets))
+	for _, t := range tickets {
+		byKey[normalizeJiraKey(t.TicketID)] = t
+		keys = append(keys, t.TicketID)
+	}
+
+	issues, err := tools.FetchIssuesByKeys(context.Background(), jiraClient, keys)
+	if err != nil {
+		slog.Warn("Jira ticket batch sync incomplete", "configuration_id", configuration.ID, "error", slog.AnyValue(err), "fetched", len(issues), "requested", len(keys))
+	}
+
+	for _, issue := range issues {
+		t, ok := byKey[normalizeJiraKey(issue.Key)]
+		if !ok || issue.Fields == nil {
+			continue
+		}
+
+		update := false
+		updateFields := models.UpdateFields{}
+		if issue.Fields.Status != nil && t.Status != issue.Fields.Status.Name {
+			updateFields.Status = issue.Fields.Status.Name
+			update = true
+		}
+		if issue.Fields.Priority != nil && t.Severity != issue.Fields.Priority.Name {
+			updateFields.Severity = issue.Fields.Priority.Name
+			update = true
+		}
+		if issue.Fields.Assignee != nil && t.Assignee != issue.Fields.Assignee.DisplayName {
+			updateFields.Assignee = issue.Fields.Assignee.DisplayName
+			update = true
+		}
+		if !update {
+			continue
+		}
+
+		slog.Debug("Updating ticket fields", "ticketID", t.TicketID, "updateFields", updateFields)
+		applyTicketUpdate(dbManager, t.ID, updateFields)
+	}
+}
+
+// ticketUpdate pairs a tickets row id with the fields a sync pass decided to
+// write for it.
+type ticketUpdate struct {
+	rowID  string
+	fields models.UpdateFields
+}
+
+// diffTicketUpdate reports the fields that differ between a ticket's stored
+// row and what the source platform currently reports. A field the platform
+// left blank (e.g. GitHub/GitLab never report severity, an unassigned ticket
+// has no assignee) means "unknown", not "cleared" — it never overwrites a
+// stored value, mirroring the nil-field guards the Jira path uses on
+// issue.Fields.
+func diffTicketUpdate(stored, current models.Ticket) (models.UpdateFields, bool) {
+	update := false
+	fields := models.UpdateFields{}
+	if current.Status != "" && stored.Status != current.Status {
+		fields.Status = current.Status
+		update = true
+	}
+	if current.Severity != "" && stored.Severity != current.Severity {
+		fields.Severity = current.Severity
+		update = true
+	}
+	if current.Assignee != "" && stored.Assignee != current.Assignee {
+		fields.Assignee = current.Assignee
+		update = true
+	}
+	return fields, update
+}
+
+// collectManagerUpdates calls manager.Get for each ticket and returns the
+// rows whose fields differ from what is stored, aborting early after
+// consecutiveFetchFailureLimit consecutive fetch errors (the same guard the
+// Jira path's old per-ticket loop used).
+func collectManagerUpdates(ctx *gin.Context, manager ticket.TicketManager, configuration models.TicketConfigurations, tickets []models.Ticket) []ticketUpdate {
+	var updates []ticketUpdate
+	consecutiveFailures := 0
+	for _, t := range tickets {
+		current, err := manager.Get(ctx, configuration, t.TicketID)
+		if err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= consecutiveFetchFailureLimit {
+				slog.Warn("Aborting ticket sync for integration after repeated fetch failures", "configuration_id", configuration.ID, "tool", configuration.Tool, "error", slog.AnyValue(err))
+				break
+			}
+			slog.Error("Error fetching ticket details", "ticketID", t.TicketID, "tool", configuration.Tool, "error", slog.AnyValue(err))
+			continue
+		}
+		consecutiveFailures = 0
+		if current == nil {
+			continue
+		}
+
+		fields, update := diffTicketUpdate(t, *current)
+		if !update {
+			continue
+		}
+		slog.Debug("Updating ticket fields", "ticketID", t.TicketID, "tool", configuration.Tool, "updateFields", fields)
+		updates = append(updates, ticketUpdate{rowID: t.ID, fields: fields})
+	}
+	return updates
+}
+
+// newSafeGinContext builds a *gin.Context usable outside any HTTP request,
+// for the ctx argument TicketManager implementations take. Its
+// context.Context methods (Done/Err/Deadline) are no-ops either way (gin only
+// wires them up once a request's own context is attached), but a non-nil
+// Request also means gin.Context methods a future TicketManager
+// implementation might call directly - GetHeader, ClientIP, and the like,
+// none of which any current implementation uses - read an empty request
+// instead of dereferencing a nil one.
+func newSafeGinContext() *gin.Context {
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	return &gin.Context{Request: req}
+}
+
+// syncTicketsViaManager refreshes status/severity/assignee for every
+// non-Jira tool by dispatching to its registered ticket.TicketManager.Get,
+// one call per ticket.
+func syncTicketsViaManager(dbManager *database.DatabaseManager, configuration models.TicketConfigurations, tickets []models.Ticket) {
+	manager, ok := ticket.GetTicketManager(configuration.Tool)
+	if !ok {
+		slog.Debug("No ticket manager registered for tool; skipping sync", "tool", configuration.Tool, "configuration_id", configuration.ID)
+		return
+	}
+
+	for _, u := range collectManagerUpdates(newSafeGinContext(), manager, configuration, tickets) {
+		applyTicketUpdate(dbManager, u.rowID, u.fields)
+	}
+}
+
+// applyTicketUpdate writes a ticket's diffed fields. Shared by the Jira batch
+// path and the generic per-tool path.
+func applyTicketUpdate(dbManager *database.DatabaseManager, ticketRowID string, fields models.UpdateFields) {
+	setClauses, args := buildUpdateClauses(fields)
+	if len(setClauses) == 0 {
+		return
+	}
+	argIdx := len(args) + 1
+	query := fmt.Sprintf("UPDATE tickets SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argIdx)
+	args = append(args, ticketRowID)
+	if _, err := dbManager.Exec(query, args...); err != nil {
+		slog.Info("Unable to update ticket:", "error", slog.AnyValue(err))
+	}
 }
 
 // SyncConfigurations refreshes metadata for all enabled ticketing integrations.

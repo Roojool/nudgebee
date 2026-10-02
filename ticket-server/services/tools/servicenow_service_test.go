@@ -448,6 +448,21 @@ func TestGetNudgebeeSeverity(t *testing.T) {
 	}
 }
 
+// Get/List read an existing incident's priority, so a blank reading (field
+// absent, or hidden by the service account's ACL) must surface as "unknown"
+// (""), not getNudgebeeSeverity's own caller-omitted-value default of "Low" —
+// otherwise the ticket-status sync job (which treats any non-blank Severity
+// as authoritative) would silently downgrade a correctly stored severity to
+// "Low" every time ServiceNow's priority field can't be read.
+func TestSeverityFromExistingRecord_BlankPriorityIsUnknownNotLow(t *testing.T) {
+	if got := severityFromExistingRecord(""); got != "" {
+		t.Errorf("severityFromExistingRecord(\"\") = %q, want \"\" (unknown)", got)
+	}
+	if got := severityFromExistingRecord("3"); got != "Medium" {
+		t.Errorf("severityFromExistingRecord(\"3\") = %q, want Medium", got)
+	}
+}
+
 func TestAddServiceNowIncidentComment_RejectsInvalidID(t *testing.T) {
 	cfg := models.TicketConfigurations{URL: "https://example.invalid", Username: "u", Password: "p"}
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

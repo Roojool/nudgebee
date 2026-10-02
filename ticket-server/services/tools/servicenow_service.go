@@ -361,7 +361,7 @@ func (s *ServiceNowService) Get(ctx *gin.Context, config models.TicketConfigurat
 		Title:       shortDesc,
 		Description: description,
 		Status:      mapServiceNowState(state),
-		Severity:    getNudgebeeSeverity(priority),
+		Severity:    severityFromExistingRecord(priority),
 		Assignee:    assignedTo,
 		Assignees:   assignees,
 		Reporter:    openedBy,
@@ -788,7 +788,7 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 			TicketID:  number,
 			Title:     shortDesc,
 			Status:    mapServiceNowState(state),
-			Severity:  getNudgebeeSeverity(priority),
+			Severity:  severityFromExistingRecord(priority),
 			Platform:  "servicenow",
 			URL:       fmt.Sprintf("https://%s/incident.do?sys_id=%s", host, sysID),
 			CreatedAt: createdAt,
@@ -971,7 +971,10 @@ func getServiceNowPriorityLevel(severity string) string {
 
 // getNudgebeeSeverity maps ServiceNow's 1-5 Priority (Critical, High, Moderate,
 // Low, Planning) one-to-one onto Nudgebee's five severity tiers. Unknown or
-// missing values fall back to "Low", as before.
+// missing values fall back to "Low", as before — callers that derive a
+// default severity for a value the caller never specified (e.g.
+// serviceNowSeverityFromLevels, when Impact/Urgency are both blank) rely on
+// this to mean "use Low", not "unknown".
 func getNudgebeeSeverity(priority string) string {
 	switch priority {
 	case "1":
@@ -987,6 +990,21 @@ func getNudgebeeSeverity(priority string) string {
 	default:
 		return "Low"
 	}
+}
+
+// severityFromExistingRecord maps an already-stored incident's raw priority
+// to a Nudgebee severity, treating a blank priority (field absent, or hidden
+// by the service account's ACL) as unknown rather than falling back to "Low"
+// the way getNudgebeeSeverity does for a caller-omitted value. Get/List read
+// an existing record, so a blank reading here means "couldn't tell", and
+// sync's diffTicketUpdate treats any non-blank Severity as an authoritative
+// platform value — without this guard, an unreadable priority would silently
+// downgrade a correctly stored severity to "Low" on every sync pass.
+func severityFromExistingRecord(priority string) string {
+	if priority == "" {
+		return ""
+	}
+	return getNudgebeeSeverity(priority)
 }
 
 var (
