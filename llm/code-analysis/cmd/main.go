@@ -247,13 +247,14 @@ func main() {
 	// shared bare-repo mirror's git worktree registration dangling (the
 	// directory is gone but git still thinks it's checked out, which fails
 	// every subsequent repo_clone for that conversation with "missing but
-	// already registered worktree"). Use the same age threshold as the
-	// periodic sweep instead of an unconditional one.
-	startupMaxAge := cfg.Analysis.MaxProcessingTime + time.Hour
-	if startupMaxAge < 2*time.Hour {
-		startupMaxAge = 2 * time.Hour
+	// already registered worktree"). So checkouts are removed by age, not
+	// unconditionally: once nothing inside one has changed for longer than any
+	// run can last, and only while the workspace is idle.
+	abandonedRunMaxAge := cfg.Analysis.MaxProcessingTime + time.Hour
+	if abandonedRunMaxAge < 2*time.Hour {
+		abandonedRunMaxAge = 2 * time.Hour
 	}
-	handlers.SweepOrphanedAnalysisWorkspaces(startupMaxAge)
+	handlers.RegisterWorkspaceLeftovers(cfg, abandonedRunMaxAge)
 	if reclaimed, err := handlers.CollectWorkspaceGarbage(cfg.Analysis.WorkspaceDir); err != nil {
 		log.Printf("WARN: workspace cache cleanup failed: %v", err)
 	} else if reclaimed > 0 {
@@ -274,11 +275,6 @@ func main() {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			maxAge := cfg.Analysis.MaxProcessingTime + time.Hour
-			if maxAge < 2*time.Hour {
-				maxAge = 2 * time.Hour
-			}
-			handlers.SweepOrphanedAnalysisWorkspaces(maxAge)
 			if reclaimed, err := handlers.CollectWorkspaceGarbage(cfg.Analysis.WorkspaceDir); err != nil {
 				log.Printf("WARN: periodic workspace cache cleanup failed: %v", err)
 			} else if reclaimed > 0 {

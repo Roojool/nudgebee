@@ -79,34 +79,6 @@ func NewAgenticAnalyzeHandler(cfg *config.Config, gitClient *git.GitClient, cred
 	}, nil
 }
 
-// cleanupOrphanedAnalysisWorkspaces removes only the temporary directories
-// created by the remote-repository analysis path. Execution workspaces and
-// caller-provided local repositories are deliberately outside this sweep.
-// SweepOrphanedAnalysisWorkspaces removes abandoned remote-repository analysis
-// directories. maxAge==0 is used at process startup; a positive age allows a
-// live workspace pod to sweep old folders without touching an active run.
-func SweepOrphanedAnalysisWorkspaces(maxAge time.Duration) {
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		log.Printf("WARN: cannot scan temporary directory for orphaned analyses: %v", err)
-		return
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "code-analysis-") {
-			continue
-		}
-		if maxAge > 0 {
-			info, infoErr := entry.Info()
-			if infoErr != nil || time.Since(info.ModTime()) <= maxAge {
-				continue
-			}
-		}
-		if err := os.RemoveAll(filepath.Join(os.TempDir(), entry.Name())); err != nil {
-			log.Printf("WARN: failed to remove orphaned analysis workspace %s: %v", entry.Name(), err)
-		}
-	}
-}
-
 type GitRepository struct {
 	URL    string `json:"url" binding:"required_without=LocalPath"`
 	Branch string `json:"branch,omitempty"`
@@ -889,9 +861,8 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 	// per-conversation workspace (see above), and deleting it at the end of
 	// every single request defeated that persistence, forcing every followup
 	// turn to re-clone and re-derive its fix from scratch. Reclaimed instead by
-	// the age-based SweepOrphanedAnalysisWorkspaces sweep (startup + periodic
-	// ticker in cmd/main.go), which already tolerates an actively-reused
-	// workspace via its ModTime-based maxAge check.
+	// the workspace cleanup (RegisterWorkspaceLeftovers), once nothing inside it
+	// has changed for longer than a run can last and the workspace is idle.
 	// Log analysis start
 	logger.AnalysisStart(req.GitRepository.URL, len(req.Logs))
 

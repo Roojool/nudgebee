@@ -559,6 +559,13 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 
 		statusBytes, err := pollWm.CallAPI(ctx, agentRequest.AccountId, "GET", statusEndpoint, nil, nil)
 		if err != nil {
+			if errors.Is(err, workspace.ErrWorkspaceRunLost) {
+				// The pod that owned this analysis is confirmed gone, so more
+				// polls cannot bring it back and there is nothing to cancel.
+				// Return now so the caller can redispatch instead of waiting
+				// out the consecutive-error budget.
+				return codeAnalysisResult{}, fmt.Errorf("analysis lost with its workspace pod: %w", err)
+			}
 			consecutiveErrors++
 			logger.Warn("code: failed to poll analysis status", "error", err, "analysis_id", analysisID,
 				"consecutive_errors", consecutiveErrors, "max_consecutive_errors", maxConsecutiveErrors)
@@ -3306,6 +3313,11 @@ func (l CodeAgent2) executeFollowup(ctx *security.RequestContext, query core.NBA
 
 		statusBytes, err := pollWm.CallAPI(ctx, query.AccountId, "GET", statusEndpoint, nil, nil)
 		if err != nil {
+			if errors.Is(err, workspace.ErrWorkspaceRunLost) {
+				// Same as the analysis poll: the pod is confirmed gone, so stop
+				// here instead of waiting out the consecutive-error budget.
+				return core.NBAgentResponse{}, fmt.Errorf("followup lost with its workspace pod: %w", err)
+			}
 			consecutiveErrors++
 			logger.Warn("code followup: failed to poll status", "error", err, "analysis_id", analysisID,
 				"consecutive_errors", consecutiveErrors, "max_consecutive_errors", maxConsecutiveErrors)
