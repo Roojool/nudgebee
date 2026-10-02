@@ -1051,10 +1051,10 @@ type appConfig struct {
 	// explicit prefs, session) is injected. Default false — the ambient core is
 	// the baseline; the heavier query-dependent layers are opt-in per env.
 	MemoryInjectEnabled bool `mapstructure:"llm_memory_inject_enabled"`
-	// MemoryToolEnabled is path B: when on, the on-demand `memory` tool is enabled
-	// so agents can search memory via keywords (plain DB fetch, no RAG/rerank).
-	// Independent of MemoryInjectEnabled — either, both, or neither. Default off.
-	MemoryToolEnabled            bool `mapstructure:"llm_memory_tool_enabled"`
+	// MemoryToolsEnabled turns on the filter-based memory_read and typed
+	// memory_write NBTools. When on, orchestrators expose them via
+	// appendMemoryToolName. See llm/llm-server/ee/memory/docs/memory-tools-plan.md.
+	MemoryToolsEnabled           bool `mapstructure:"llm_memory_tools_enabled"`
 	MemoryRagProjectorBatchSize  int  `mapstructure:"llm_memory_rag_projector_batch_size"`
 	MemoryRagProjectorIntervalMs int  `mapstructure:"llm_memory_rag_projector_interval_ms"`
 	MemoryRagProjectorWorkers    int  `mapstructure:"llm_memory_rag_projector_workers"`
@@ -1067,7 +1067,7 @@ type appConfig struct {
 	// MemoryPatternsPerKindLimit caps how many rows of a single pattern_kind
 	// reach Compose. Without it one chatty kind (e.g. lots of
 	// frequent_service rows) can crowd out frequent_namespace /
-	// preferred_diagnostic_flow / etc. Within each kind the rows are
+	// diagnostic_playbook / etc. Within each kind the rows are
 	// ordered by last_seen_at DESC (most recent first); pinned rows still
 	// bypass this cap because pinning is an explicit "always show me this"
 	// signal. Set to 0 to disable.
@@ -1626,7 +1626,7 @@ func init() {
 	viper.SetDefault("llm_memory_rerank_w_decay", 0.20)
 	viper.SetDefault("llm_memory_rerank_threshold", 0.6)
 	viper.SetDefault("llm_memory_inject_enabled", false)
-	viper.SetDefault("llm_memory_tool_enabled", false)
+	viper.SetDefault("llm_memory_tools_enabled", false)
 	viper.SetDefault("llm_memory_rag_timeout_ms", 800)
 	viper.SetDefault("llm_memory_rag_overfetch_multiplier", 3)
 	viper.SetDefault("llm_memory_rag_projector_batch_size", 50)

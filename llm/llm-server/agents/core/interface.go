@@ -402,7 +402,7 @@ type MemoryFact struct {
 	// human can verify why the memory was inferred.
 	EvidenceQuote string `json:"evidence_quote,omitempty"`
 	// PatternKind is the snake_case category the extractor assigns to a
-	// pattern record (e.g. frequent_namespace, preferred_diagnostic_flow).
+	// pattern record (e.g. frequent_namespace, diagnostic_playbook).
 	// Required when IsPattern is true — without it the projection step
 	// falls back to a single default kind and every pattern row collapses
 	// to the same value, defeating the per-kind diversity cap downstream.

@@ -11,6 +11,7 @@ func init() {
 		"llm",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundConversationState,
-		"memory",
+		"memory_read",
+		"memory_write",
 	)
 }
