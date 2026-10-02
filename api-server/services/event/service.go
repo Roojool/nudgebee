@@ -2674,14 +2674,7 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 		// resolved notification only (notify_resolved); the upsert can't see the
 		// prior status, so repeated resolve webhooks re-publish and
 		// notifications-server dedupes per delivered thread.
-		_ = common.MqPublish(
-			config.Config.RabbitMqEventPostProcessExchange,
-			config.Config.RabbitMqEventPostProcessQueue,
-			map[string]any{"event_id": id, "notify_resolved": true},
-			common.MqPublishWithExpiration(1*time.Hour),
-			common.MqPublishWithBackgroundRetry(),
-			common.MqPublishWithContext(cfg.publishCtx),
-		)
+		publishResolved(cfg.publishCtx, []string{id})
 	}
 
 	return id, nil
