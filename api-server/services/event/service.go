@@ -237,6 +237,17 @@ const podCloudResourceSQL = `
 	LIMIT 1
 `
 
+// nodeCloudResourceSQL resolves a node-subject event to the node's own
+// cloud_resource_id. Nodes are cluster-scoped, so the match is by name within
+// the account. k8s_nodes has no last_seen; updated_at stands in for it.
+const nodeCloudResourceSQL = `
+	SELECT cloud_resource_id
+	FROM k8s_nodes
+	WHERE tenant_id = $1 AND cloud_account_id = $2 AND name = $3
+	ORDER BY is_active DESC, updated_at DESC NULLS LAST
+	LIMIT 1
+`
+
 // sqlLikeEscaper escapes SQL LIKE wildcards in a subject name before it is used
 // as a prefix pattern ($4 of podOwnerLookupSQL). Package-level: lookupPodOwner
 // runs on the per-event hot path, so the replacer must not be rebuilt per call.
@@ -2964,7 +2975,7 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		// with. applySubjectFallbacks also leaves Labels non-nil, which the label
 		// merge in repeatDeliveryUpdateSQL needs: a nil map marshals to null.
 		applySubjectFallbacks(&webhookEvent)
-		applyNodeSubjectCorrection(sc, &webhookEvent)
+		applyNodeSubjectCorrection(sc, dbms, tenantId, &webhookEvent)
 		// The correction can miss on a repeat where the first delivery resolved it
 		// (the exporter pod was rescheduled and its row is gone). The delivery then
 		// still names the exporter pod, and writing that would move a corrected
@@ -3034,7 +3045,7 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		// the label it resolves from is both present in the payload and later
 		// rewritten by an enricher.
 		applySubjectFallbacks(&webhookEvent)
-		applyNodeSubjectCorrection(sc, &webhookEvent)
+		applyNodeSubjectCorrection(sc, dbms, tenantId, &webhookEvent)
 
 		if webhookEvent.CreatedAt == nil {
 			webhookEvent.CreatedAt = &start
@@ -3170,7 +3181,11 @@ func applySubjectFallbacks(webhookEvent *Event) {
 //
 // Runs for a repeat delivery as well as a new event. The repeat names the
 // exporter pod again, and would otherwise point the stored event back at it.
-func applyNodeSubjectCorrection(sc *security.RequestContext, webhookEvent *Event) {
+//
+// The resource link is part of the identity being replaced: by the time this
+// runs, linkK8sCloudResourceId has linked the exporter pod, so the link is
+// resolved again for the node.
+func applyNodeSubjectCorrection(sc *security.RequestContext, dbms *database.DatabaseManager, tenantId string, webhookEvent *Event) {
 	alertName := webhookEvent.AggregationKey
 	if v := webhookEvent.Labels["nb_alert_name"]; v != "" {
 		alertName = v
@@ -3204,6 +3219,7 @@ func applyNodeSubjectCorrection(sc *security.RequestContext, webhookEvent *Event
 	webhookEvent.SubjectOwnerKind = ""
 	webhookEvent.ServiceKey = ""
 	webhookEvent.CloudResourceId = ""
+	linkK8sCloudResourceId(sc, dbms, tenantId, webhookEvent)
 }
 
 // runPlaybookEnrichment executes the event's playbook and applies every
@@ -3833,12 +3849,33 @@ func isNonWorkloadDatastoreSubject(subjectType string) bool {
 //     match the workload by (tenant, account, namespace, subject_name).
 //   - pod-subject events: prefer the owning workload (SubjectOwner, enriched
 //     upstream in InvestigateEvent); fall back to the pod's own resource.
+//   - node-subject events: match the node by (tenant, account, subject_name).
 //
 // Best-effort: a miss leaves cloud_resource_id NULL and never blocks ingestion.
-// k8s_workloads.cloud_resource_id and k8s_pods.cloud_resource_id are valid
-// cloud_resourses.id values, so the events FK is satisfied.
+// k8s_workloads.cloud_resource_id, k8s_pods.cloud_resource_id and
+// k8s_nodes.cloud_resource_id are valid cloud_resourses.id values, so the
+// events FK is satisfied.
 func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.DatabaseManager, tenantId string, webhookEvent *Event) {
 	if webhookEvent.CloudResourceId != "" || webhookEvent.AccountId == "" || tenantId == "" {
+		return
+	}
+	// Nodes are cluster-scoped, so this runs before the namespace gate below. A
+	// node event has no namespace of its own: an automation leaves it empty and
+	// a prometheus alert carries the namespace of the exporter that reported
+	// it, which would send the node's name to the k8s_workloads match. A node
+	// is not a workload, so a miss stays unlinked rather than falling through.
+	if strings.EqualFold(webhookEvent.SubjectType, "node") {
+		if webhookEvent.SubjectName == "" {
+			return
+		}
+		var crid string
+		err := dbms.Db.QueryRowxContext(sc.GetContext(), nodeCloudResourceSQL, tenantId, webhookEvent.AccountId, webhookEvent.SubjectName).Scan(&crid)
+		switch {
+		case err == nil && crid != "":
+			webhookEvent.CloudResourceId = crid
+		case err != nil && err != sql.ErrNoRows:
+			sc.GetLogger().Warn("link_k8s_cloud_resource: node lookup failed", "error", err, "node", webhookEvent.SubjectName)
+		}
 		return
 	}
 	// SubjectNamespace / SubjectName are empty on the struct for some emitters

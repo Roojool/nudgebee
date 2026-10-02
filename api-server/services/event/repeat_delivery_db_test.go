@@ -24,6 +24,7 @@ const (
 	repeatNode             = "gke-pool-1-node-7f3a"
 	repeatExporterResource = "aaaaaaaa-0000-4000-8000-000000000001"
 	repeatLinkedResource   = "bbbbbbbb-0000-4000-8000-000000000002"
+	repeatNodeResource     = "cccccccc-0000-4000-8000-000000000003"
 )
 
 // repeatRow is the part of an event a repeat delivery writes. An empty
@@ -56,11 +57,15 @@ func repeatDeliveryTestDB(t *testing.T) *sqlx.DB {
 			cloud_resource_id uuid, is_active boolean, last_seen timestamp);
 		CREATE TABLE k8s_pods (tenant_id uuid, cloud_account_id uuid, namespace text, name text, workload_name text,
 			workload_type text, node_name text, cloud_resource_id uuid, is_active boolean, last_seen timestamp);
+		CREATE TABLE k8s_nodes (tenant_id uuid, cloud_account_id uuid, name text, cloud_resource_id uuid,
+			is_active boolean, updated_at timestamp);
 		INSERT INTO cloud_accounts VALUES ('` + resolveTestAccount + `', 'active');
 		INSERT INTO k8s_workloads VALUES ('` + resolveTestTenant + `', '` + resolveTestAccount + `', 'monitoring',
 			'victoria-prometheus-node-exporter', 'DaemonSet', '` + repeatExporterResource + `', true, now());
 		INSERT INTO k8s_pods VALUES ('` + resolveTestTenant + `', '` + resolveTestAccount + `', 'monitoring',
-			'` + repeatExporterPod + `', 'victoria-prometheus-node-exporter', 'DaemonSet', '` + repeatNode + `', NULL, true, now());`)
+			'` + repeatExporterPod + `', 'victoria-prometheus-node-exporter', 'DaemonSet', '` + repeatNode + `', NULL, true, now());
+		INSERT INTO k8s_nodes VALUES ('` + resolveTestTenant + `', '` + resolveTestAccount + `', '` + repeatNode + `',
+			'` + repeatNodeResource + `', true, now());`)
 	require.NoError(t, err)
 
 	database.RegisterDatabaseManagerHook(database.Metastore, func() (*database.DatabaseManager, error) {
@@ -133,13 +138,14 @@ func nodeAlertRepeat(findingId string) Event {
 	return e
 }
 
-// What the first delivery of nodeAlertRepeat stores: the node, with the
-// namespace, owner and resource that described the exporter pod cleared.
+// What the first delivery of nodeAlertRepeat stores: the node and its resource,
+// with the namespace and owner that described the exporter pod cleared.
 var nodeSubjectRow = repeatRow{
-	Labels:      `{"alertname":"NodeCPUHighUsage","job":"node-exporter","instance":"10.0.0.5:9100","pod":"` + repeatExporterPod + `","namespace":"monitoring"}`,
-	Priority:    "HIGH",
-	SubjectType: "node",
-	SubjectName: repeatNode,
+	Labels:          `{"alertname":"NodeCPUHighUsage","job":"node-exporter","instance":"10.0.0.5:9100","pod":"` + repeatExporterPod + `","namespace":"monitoring"}`,
+	Priority:        "HIGH",
+	SubjectType:     "node",
+	SubjectName:     repeatNode,
+	CloudResourceId: repeatNodeResource,
 }
 
 // The insert repoints a node alert from the node-exporter pod to the node. The

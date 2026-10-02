@@ -15,8 +15,8 @@ import (
 // then does with them.
 
 // The delivery names the node-exporter pod and resolves that pod's resource. The
-// UPDATE carries the node instead, with the pod's namespace, owner and resource
-// cleared — exactly what the insert stores.
+// UPDATE carries the node instead, with the pod's namespace and owner cleared
+// and the node's resource in place of the pod's — exactly what the insert stores.
 func TestInvestigateEvent_RepeatCarriesTheNodeSubject(t *testing.T) {
 	mock, _ := setupResolveTest(t)
 	e := automationEvent(EventStatusFiring, "node-cpu-1", "")
@@ -33,8 +33,11 @@ func TestInvestigateEvent_RepeatCarriesTheNodeSubject(t *testing.T) {
 		WithArgs(resolveTestTenant, resolveTestAccount, "monitoring", "victoria-prometheus-node-exporter").
 		WillReturnRows(sqlmock.NewRows([]string{"cloud_resource_id"}).AddRow("aaaaaaaa-0000-4000-8000-000000000001"))
 	mock.ExpectQuery(findingLookupSQL).WillReturnRows(existingRow("prometheus"))
+	mock.ExpectQuery(regexp.QuoteMeta(nodeCloudResourceSQL)).
+		WithArgs(resolveTestTenant, resolveTestAccount, "gke-pool-1-node-7f3a").
+		WillReturnRows(sqlmock.NewRows([]string{"cloud_resource_id"}).AddRow("cccccccc-0000-4000-8000-000000000003"))
 	mock.ExpectExec(labelUpdateSQL).
-		WithArgs(sqlmock.AnyArg(), resolveTestEventID, sqlmock.AnyArg(), "HIGH", "gke-pool-1-node-7f3a", "", "node", nil, "", "").
+		WithArgs(sqlmock.AnyArg(), resolveTestEventID, sqlmock.AnyArg(), "HIGH", "gke-pool-1-node-7f3a", "", "node", "cccccccc-0000-4000-8000-000000000003", "", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	id, err := InvestigateEvent(resolveTestContext(), e, "")
