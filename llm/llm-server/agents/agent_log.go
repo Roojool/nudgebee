@@ -229,12 +229,6 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	instructions = append(instructions,
 		fmt.Sprintf("**MODE = %s** (set deterministically from the user's verbatim question; workflow below is narrowed to this mode only).", logModeName(mode)),
 	)
-	if orig := strings.TrimSpace(query.OriginalQuery); orig != "" && orig != strings.TrimSpace(query.Query) {
-		instructions = append(instructions,
-			fmt.Sprintf("**Original user question:** %q", orig),
-		)
-	}
-
 	instructions = append(instructions, sharedHeaderAndWorkflow()...)
 
 	switch mode {
@@ -247,6 +241,15 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	}
 
 	instructions = append(instructions, outputFormatInstructions(mode)...)
+	// The original question is per-request text (for an event investigation it
+	// carries the whole event payload). It goes last so everything above it is
+	// identical across requests in the same mode and stays in the provider's
+	// prompt cache across runs (#39633).
+	if orig := strings.TrimSpace(query.OriginalQuery); orig != "" && orig != strings.TrimSpace(query.Query) {
+		instructions = append(instructions,
+			fmt.Sprintf("**Original user question:** %q", orig),
+		)
+	}
 
 	return core.NBAgentPrompt{
 		Role:         "an SRE expert that investigates logs across multiple backends",
