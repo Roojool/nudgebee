@@ -48,3 +48,23 @@ func TestResolveEventAlsoClosesLegacyFingerprint(t *testing.T) {
 	require.NoError(t, resolveEvent(security.NewRequestContextForSuperAdmin(nil, nil, nil), tenant, account, "datadog_webhook", e))
 	assert.NoError(t, mock.ExpectationsWereMet(), "the recovery must close under its group key and under the legacy key")
 }
+
+// A parser reports the end of an alert as RESOLVED or as CLOSED: ServiceNow sends
+// CLOSED for an incident that is Closed or Canceled and for a closed em_event,
+// OpenObserve for a templated status of "closed". Either one closes the event the
+// delivery names. CLOSED used to reach "unknown event status" and close nothing.
+func TestRouteWebhookEventClosesOnResolvedAndClosed(t *testing.T) {
+	const tenant, account = "7a1d0c3e-0000-4000-8000-000000000001", "7a1d0c3e-0000-4000-8000-0000000000a1"
+
+	for _, status := range []string{"resolved", "RESOLVED", "closed", "CLOSED"} {
+		t.Run(status, func(t *testing.T) {
+			pkgMock.ExpectQuery(`update events set status`).
+				WithArgs(tenant, account, "INC0010001", "CLOSED", sqlmock.AnyArg()).
+				WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+			routeWebhookEvent(security.NewRequestContextForSuperAdmin(nil, nil, nil), tenant, account, "servicenow_webhook",
+				EventIncomingWebhook{EventId: "INC0010001", EventStatus: status})
+			assert.NoError(t, pkgMock.ExpectationsWereMet(), "a %s delivery must close the event it names", status)
+		})
+	}
+}

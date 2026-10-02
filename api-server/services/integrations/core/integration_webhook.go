@@ -620,7 +620,10 @@ func ProcessStoredWebhook(sc *security.RequestContext, webhookRowID string) erro
 // routeWebhookEvent routes a parsed webhook event to investigation or resolution.
 func routeWebhookEvent(sc *security.RequestContext, tenantId, accountId, source string, e EventIncomingWebhook) {
 	switch strings.ToLower(e.EventStatus) {
-	case "resolved":
+	// "closed" is how a parser reports an alert its source ended without resolving
+	// it (a ServiceNow incident Closed or Canceled, a closed em_event). It ends the
+	// event as "resolved" does, as event.InvestigateEvent already treats the two.
+	case "resolved", "closed":
 		if err := resolveEvent(sc, tenantId, accountId, source, e); err != nil {
 			sc.GetLogger().Error("integrations: unable to resolve request", "error", err)
 		}
