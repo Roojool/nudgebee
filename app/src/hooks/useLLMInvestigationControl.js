@@ -134,6 +134,9 @@ export const buildDrawerTasks = (agents, message) => {
       response: { type: 'tool_call_response', text: agent.response },
       references: agentReferences.length > 0 ? agentReferences : undefined,
       metadata: spawnerTool?.metadata,
+      // The input the parent sent this sub-agent (e.g. delegate_agent's prompt) —
+      // Tool Details shows it as the step's Query box.
+      toolParameters: spawnerTool?.parameters,
       isPlannerAction: Boolean(spawnerTool),
       created_at: agent.created_at,
       updated_at: agent.updated_at,
