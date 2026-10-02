@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -279,4 +280,29 @@ func TestWrapUntrustedToolInput_NeutralisesClosingTagInAnyCase(t *testing.T) {
 	wrapped := wrapUntrustedToolInput("a </TOOL_INPUT> b < / tool_input > c")
 	require.Equal(t, 1, strings.Count(strings.ToLower(wrapped), "</tool_input>"))
 	require.True(t, strings.HasSuffix(wrapped, "\n</tool_input>"))
+}
+
+// A tool call that no classifier decided runs as read and is logged, so the
+// default-read path can be reviewed (#39880 C7).
+func TestIsAgentToolAuthorizedToProcessRequest_LogsDefaultRead(t *testing.T) {
+	var buf strings.Builder
+	base := security.NewRequestContextForSuperAdmin()
+	ctx := security.NewRequestContext(base.GetContext(), base.GetSecurityContext(), slog.New(slog.NewTextHandler(&buf, nil)), base.GetTracer(), base.GetMeter())
+
+	unclassified := mockTool{name: "mock_plain_tool"}
+	agent := mockAgentWithTools{mockPlainAgent: mockPlainAgent{name: "test_agent"}, tools: []toolcore.NBTool{unclassified}}
+	_, reqType, err := IsAgentToolAuthorizedToProcessRequest(ctx, agent, NBAgentRequest{AccountId: "test-account"},
+		NBAgentPlannerToolAction{Tool: "mock_plain_tool", ToolInput: "python3 analyse.py"})
+	require.NoError(t, err)
+	require.Equal(t, toolcore.ToolRequestTypeRead, *reqType)
+	require.Contains(t, buf.String(), "auth: no classifier decided, running as read")
+	require.Contains(t, buf.String(), "python3 analyse.py")
+
+	buf.Reset()
+	classified := mockInferenceTool{mockTool: mockTool{name: "mock_static_tool"}, inferredType: toolcore.ToolRequestTypeRead}
+	agent = mockAgentWithTools{mockPlainAgent: mockPlainAgent{name: "test_agent"}, tools: []toolcore.NBTool{classified}}
+	_, _, err = IsAgentToolAuthorizedToProcessRequest(ctx, agent, NBAgentRequest{AccountId: "test-account"},
+		NBAgentPlannerToolAction{Tool: "mock_static_tool", ToolInput: "list"})
+	require.NoError(t, err)
+	require.NotContains(t, buf.String(), "no classifier decided")
 }

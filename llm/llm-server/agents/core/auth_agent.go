@@ -169,6 +169,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 				requestType = llmReqType
 			}
 		}
+		// Neither the static rules nor an LLM prompt decided: the call runs as
+		// a read below. Logged so these calls can be reviewed (#39880 C7).
+		if requestType == "" {
+			ctx.GetLogger().Info("auth: no classifier decided, running as read", "tool", toolName, "input", TruncateHead(action.ToolInput, 500), "agent", agent.GetName())
+		}
 
 		// Enforce write access check on confirmed mutations
 		if requestType != "" && requestType != toolcore.ToolRequestTypeRead {
