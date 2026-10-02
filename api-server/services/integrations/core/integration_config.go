@@ -2743,8 +2743,7 @@ func GetIntegrationByType(
 }
 
 // HasAccountSourceIntegration reports whether an integration of the given type
-// and source is linked to the account at all, regardless of status or the
-// per-account default-provider flag.
+// and source is linked to the account.
 func HasAccountSourceIntegration(
 	context *security.RequestContext,
 	accountId string,
@@ -2760,8 +2759,7 @@ func HasAccountSourceIntegration(
 		return false, err
 	}
 
-	var exists bool
-	err = dbms.Db.Get(&exists, `
+	query := `
 		SELECT EXISTS (
 			SELECT 1
 			FROM integrations i
@@ -2770,10 +2768,63 @@ func HasAccountSourceIntegration(
 			  AND i.tenant_id = $2
 			  AND i.type = $3
 			  AND i.source = $4
-		)
-	`, accountId, context.GetSecurityContext().GetTenantId(), integrationType, source)
+		)`
+	args := []any{accountId, context.GetSecurityContext().GetTenantId(), integrationType, source}
+
+	var exists bool
+	err = dbms.Db.Get(&exists, query, args...)
 	if err != nil {
 		context.GetLogger().Error("integrations: failed to check account-source integration existence",
+			"account_id", accountId, "type", integrationType, "source", source, "error", err)
+		return false, err
+	}
+	return exists, nil
+}
+
+// HasOnlyDisabledAccountSourceIntegration reports whether an integration of the given type
+// and source is linked to the account with status = 'disabled' and NO active (non-disabled)
+// counterpart exists.
+func HasOnlyDisabledAccountSourceIntegration(
+	context *security.RequestContext,
+	accountId string,
+	integrationType string,
+	source string,
+) (bool, error) {
+	if context == nil || context.GetSecurityContext() == nil {
+		return false, errors.New("integrations: request context and security context are required")
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return false, err
+	}
+
+	query := `
+		SELECT EXISTS (
+			SELECT 1
+			FROM integrations i
+			JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
+			WHERE ica.cloud_account_id = $1
+			  AND i.tenant_id = $2
+			  AND i.type = $3
+			  AND i.source = $4
+			  AND i.status = 'disabled'
+		) AND NOT EXISTS (
+			SELECT 1
+			FROM integrations i
+			JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
+			WHERE ica.cloud_account_id = $1
+			  AND i.tenant_id = $2
+			  AND i.type = $3
+			  AND i.source = $4
+			  AND i.status != 'disabled'
+		)`
+	args := []any{accountId, context.GetSecurityContext().GetTenantId(), integrationType, source}
+
+	var exists bool
+	err = dbms.Db.Get(&exists, query, args...)
+	if err != nil {
+		context.GetLogger().Error("integrations: failed to check only-disabled account-source integration existence",
 			"account_id", accountId, "type", integrationType, "source", source, "error", err)
 		return false, err
 	}

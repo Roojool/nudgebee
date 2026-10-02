@@ -520,6 +520,23 @@ func getMetricsSource(provider, integrationSource string) (MetricSource, error) 
 	}
 }
 
+// isSupportedTelemetryProvider checks if a provider and source pair is valid for the given telemetry kind.
+func isSupportedTelemetryProvider(provider, source, providerType string) bool {
+	switch providerType {
+	case "metrics":
+		_, err := getMetricsSource(provider, source)
+		return err == nil
+	case "logs":
+		_, err := getLogSource(provider, source)
+		return err == nil
+	case "traces":
+		_, err := getTraceSource(provider, source)
+		return err == nil
+	default:
+		return false
+	}
+}
+
 // ErrNoTenantContext is returned when a provider lookup is attempted with a
 // request context that carries no security context. Background callers build
 // theirs with security.NewRequestContextForTenantAdmin, which leaves the
@@ -649,21 +666,9 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 			defaultSource = integrationDto.Source
 			matchedIntegration = integrationDto
 		} else {
+			// 1. Try resolving to the connected agent's own provider (guarded against explicitly disabled integrations).
 			agentDetails, err := account.GetAgentConnectionDetails(accountId)
-			if err != nil {
-				// GCP cloud accounts have no agent; their traces come from Cloud Trace.
-				// Resolve them to the gcp trace source before treating the missing agent
-				// as an error — this is the only trace path for a GCP cloud account.
-				if providerType == "traces" {
-					if cp, cErr := cloud.GetCloudAccountProvider(accountId, ctx.GetSecurityContext().GetTenantId()); cErr == nil && strings.EqualFold(cp, "gcp") {
-						return "gcp", "user", nil, nil
-					}
-				}
-				logAgentLookupFailure(ctx.GetLogger(), accountId, err)
-				return "", "", nil, err
-			}
-			// Agent-reported features go stale once it disconnects; only trust them while live.
-			if agentDetails.Status == "CONNECTED" {
+			if err == nil && agentDetails.Status == "CONNECTED" {
 				candidateProvider := ""
 				switch {
 				case providerType == "logs" && agentDetails.Features.LogsConnectionProvider != nil:
@@ -683,18 +688,66 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 				}
 
 				if candidateProvider != "" {
-					// Don't resurrect a provider the account has an explicit (possibly disabled) record for.
-					// Fail closed on lookup error — silently continuing here is exactly the bug this guards against.
-					hasExistingRecord, hErr := core.HasAccountSourceIntegration(ctx, accountId, candidateProvider, "agent")
+					hasDisabledRecord, hErr := core.HasOnlyDisabledAccountSourceIntegration(ctx, accountId, candidateProvider, "agent")
 					if hErr != nil {
 						ctx.GetLogger().Error("getLogsMetricsTracesProviderWithIntegration: failed to check for a disabled account-level record",
 							"account_id", accountId, "provider", candidateProvider, "error", hErr)
 						return "", "", nil, hErr
 					}
-					if !hasExistingRecord {
+					if !hasDisabledRecord {
 						defaultProvider = candidateProvider
 						defaultSource = "agent"
 					}
+				}
+			}
+
+			// 2. Only if no connected agent provider was resolved: check active metastore integrations.
+			if defaultProvider == "" {
+				var candidates []*core.IntegrationDto
+				if activeIntegrations, aErr := core.ListActiveIntegrationsForAccount(ctx, accountId); aErr == nil {
+					for i := range activeIntegrations {
+						dto := &activeIntegrations[i]
+						if isSupportedTelemetryProvider(dto.Type, dto.Source, providerType) {
+							candidates = append(candidates, dto)
+						}
+					}
+				}
+
+				switch len(candidates) {
+				case 1:
+					defaultProvider = candidates[0].Type
+					defaultSource = candidates[0].Source
+					matchedIntegration = candidates[0]
+				case 0:
+					// GCP cloud accounts have no agent; their traces come from Cloud Trace.
+					if providerType == "traces" {
+						if cp, cErr := cloud.GetCloudAccountProvider(accountId, ctx.GetSecurityContext().GetTenantId()); cErr == nil && strings.EqualFold(cp, "gcp") {
+							return "gcp", "user", nil, nil
+						}
+					}
+					if err != nil {
+						logAgentLookupFailure(ctx.GetLogger(), accountId, err)
+						return "", "", nil, err
+					}
+				default:
+					// Multiple enabled integrations without default -> prompt the user to choose.
+					var names []string
+					for _, c := range candidates {
+						if c.Name != "" {
+							names = append(names, c.Name)
+						} else {
+							names = append(names, c.Type)
+						}
+					}
+					sort.Strings(names)
+					paramName := providerType
+					switch providerType {
+					case "logs":
+						paramName = "log"
+					case "traces":
+						paramName = "trace"
+					}
+					return "", "", nil, fmt.Errorf("observability: multiple %s providers are configured (%s), but none is marked as default; please specify %s_provider or choose a default in Settings", providerType, strings.Join(names, ", "), paramName)
 				}
 			}
 		}
