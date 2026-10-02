@@ -25,6 +25,7 @@ import (
 	"nudgebee/llm/workspace"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -502,7 +503,8 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 		return
 	}
 
-	plan, trace, err := generateRemediationPlan(ctx, request, remediationLLM(ctx, sc.GetUserId(), request.AccountId))
+	conversationId := remediationConversationID(ctx, request.AccountId, request.EventId)
+	plan, trace, err := generateRemediationPlan(ctx, request, remediationLLM(ctx, sc.GetUserId(), request.AccountId, conversationId))
 	if err != nil {
 		var input errRemediationInput
 		if errors.As(err, &input) {
@@ -530,10 +532,75 @@ func respondWithStoredPlan(c *gin.Context, logger *slog.Logger, plan Remediation
 	c.JSON(200, buildApiResponse(plan, nil))
 }
 
+// remediationPlannerAgent names the plan-generation call in token usage, which
+// otherwise records it with an empty agent name.
+const remediationPlannerAgent = "remediation_planner"
+
+// remediationEventFingerprint and remediationConversationBySession are the
+// lookups remediationConversationID needs; vars so tests can stub them.
+var remediationEventFingerprint = func(ctx *security.RequestContext, accountId, eventId string) (string, bool, error) {
+	dbManager, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return "", false, fmt.Errorf("database: %w", err)
+	}
+	info, err := events.NewEventAnalysisRepository(dbManager).GetEventInfo(ctx, eventId, accountId)
+	if err != nil {
+		return "", false, fmt.Errorf("event: %w", err)
+	}
+	if info == nil {
+		return "", false, nil
+	}
+	return info.Fingerprint, true, nil
+}
+
+var remediationConversationBySession = func(accountId, sessionId string) (agentcore.Conversation, error) {
+	dao := agentcore.GetConversationDao()
+	if dao == nil {
+		return agentcore.Conversation{}, errors.New("conversation dao unavailable")
+	}
+	return dao.GetConversationBySession(accountId, sessionId)
+}
+
+// remediationConversationID returns the event's investigation conversation, so
+// plan generation counts against the same budget as the investigation it
+// builds on. The investigation's session is keyed on the event fingerprint (see
+// event_analyzer.go), falling back to the event id when there is none. Best
+// effort: on any miss the call is recorded unattributed, as before.
+func remediationConversationID(ctx *security.RequestContext, accountId, eventId string) string {
+	if eventId == "" {
+		return ""
+	}
+	logMiss := func(err error) string {
+		ctx.GetLogger().Warn("remediation_generate: usage not attributed to a conversation",
+			"event_id", eventId, "account_id", accountId, "error", err)
+		return ""
+	}
+	fingerprint, found, err := remediationEventFingerprint(ctx, accountId, eventId)
+	if err != nil {
+		return logMiss(err)
+	}
+	if !found {
+		return ""
+	}
+	if fingerprint == "" {
+		fingerprint = eventId
+	}
+	conversation, err := remediationConversationBySession(accountId, events.SessionIdPrefixEvent+fingerprint)
+	if err != nil {
+		return logMiss(fmt.Errorf("conversation: %w", err))
+	}
+	if conversation.ID == uuid.Nil {
+		return "" // no investigation conversation for this event
+	}
+	return conversation.ID.String()
+}
+
 // remediationLLM is the production model call for plan generation.
-func remediationLLM(ctx *security.RequestContext, userId, accountId string) func(system, human string) (string, error) {
+func remediationLLM(ctx *security.RequestContext, userId, accountId, conversationId string) func(system, human string) (string, error) {
 	return func(system, human string) (string, error) {
-		resp, err := agentcore.GenerateAndTrackLLMContent(ctx, userId, accountId, "", "", "", false, []llms.MessageContent{
+		// conversationId only bills the call; a one-shot plan prompt must not
+		// create a conversation cache entry.
+		resp, err := agentcore.GenerateAndTrackLLMContent(toolcore.WithPromptCachingDisabled(ctx), userId, accountId, conversationId, "", remediationPlannerAgent, false, []llms.MessageContent{
 			{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextContent{Text: system}}},
 			{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: human}}},
 		}, true)

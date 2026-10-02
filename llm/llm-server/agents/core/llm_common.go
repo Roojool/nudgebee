@@ -192,6 +192,10 @@ func InvalidateLLMIntegrationConfigCache(accountId string) {
 
 type LLMContextKey string
 
+// ContextKeyDisableCaching is defined in tools/core so tools can set it; see
+// toolcore.ContextKeyDisableCaching.
+const ContextKeyDisableCaching = toolcore.ContextKeyDisableCaching
+
 const (
 	ContextKeyLlmProviderOverride LLMContextKey = "llm_provider_override"
 	ContextKeyLlmModelOverride    LLMContextKey = "llm_model_override"
@@ -213,13 +217,7 @@ const (
 	// slot. Value type: string, format {layer}:{scope}[:{name}] — see
 	// NBQueryConfig.LlmConfigSource for the schema.
 	ContextKeyLlmConfigSourceOverride LLMContextKey = "llm_config_source_override"
-	// ContextKeyDisableCaching disables provider-level prompt caching for the current
-	// request subtree. Set to true for AgentPlannerTypeCustom agents whose LLM calls
-	// embed dynamic content (query text, log data) directly in the system message,
-	// making caching wasteful. Individual custom agents that know a specific call has
-	// a stable system prompt can create a sub-context that overrides this to false.
-	ContextKeyDisableCaching LLMContextKey = "disable_caching"
-	ContextKeyCacheScope     LLMContextKey = "cache_scope"
+	ContextKeyCacheScope              LLMContextKey = "cache_scope"
 	// ContextKeyCapabilities carries the request's AgentCapabilities into the LLM call
 	// stack so the cache layer can fingerprint capability-constrained requests and give
 	// them distinct Google AI CachedContent slots.

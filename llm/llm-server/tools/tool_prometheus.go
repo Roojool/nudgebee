@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/tmc/langchaingo/llms"
 )
@@ -948,6 +949,44 @@ func (m MetricsListTool) Call(nbRequestContext core.NbToolContext, input core.NB
 	return result, nil
 }
 
+// prometheusMetricFilterAgent names the metric-filter LLM call in token usage,
+// which otherwise records it with an empty agent name.
+const prometheusMetricFilterAgent = "prometheus_metric_filter"
+
+// conversationMessageExists reports whether the conversation and message rows
+// exist; a var so tests can stub it.
+var conversationMessageExists = func(conversationId, messageId string) (bool, error) {
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return false, fmt.Errorf("conversationMessageExists: %w", err)
+	}
+	var exists bool
+	err = dbms.Db.Get(&exists, `SELECT EXISTS (SELECT 1 FROM llm_conversation_messages WHERE id = $1 AND conversation_id = $2)`, messageId, conversationId)
+	if err != nil {
+		return false, fmt.Errorf("conversationMessageExists: %w", err)
+	}
+	return exists, nil
+}
+
+// metricFilterUsageIDs returns the conversation and message to bill the
+// metric-filter call to, or empty ids when they are not real rows. Token usage
+// references both by foreign key, and some tool contexts carry synthetic ids
+// (a watch source uses its watch id for both, see watch/source.go); billing to
+// those would fail the insert and lose the usage row it records today.
+func metricFilterUsageIDs(conversationId, messageId string) (string, string) {
+	if _, err := uuid.Parse(conversationId); err != nil {
+		return "", ""
+	}
+	if _, err := uuid.Parse(messageId); err != nil {
+		return "", ""
+	}
+	exists, err := conversationMessageExists(conversationId, messageId)
+	if err != nil || !exists {
+		return "", ""
+	}
+	return conversationId, messageId
+}
+
 // filterMetricsWithLLM uses LLM to intelligently filter metrics based on user's question
 func filterMetricsWithLLM(nbRequestContext core.NbToolContext, userQuery string, allMetrics []core.ObservabilityMetricsSeries) ([]core.ObservabilityMetricsSeries, error) {
 	if len(allMetrics) == 0 {
@@ -975,13 +1014,18 @@ func filterMetricsWithLLM(nbRequestContext core.NbToolContext, userQuery string,
 		return nil, errors.New("llm client not initialized")
 	}
 
+	conversationId, messageId := metricFilterUsageIDs(nbRequestContext.ConversationId, nbRequestContext.MessageId)
 	response, err := llmClient.GenerateContent(
-		nbRequestContext.Ctx,
+		// The conversation id below only bills the call; a one-shot filter
+		// prompt must not create a conversation cache entry.
+		core.WithPromptCachingDisabled(nbRequestContext.Ctx),
 		nbRequestContext.UserId,
 		nbRequestContext.AccountId,
-		"",    // conversationId
-		"",    // messageId
-		"",    // agentId
+		// Attribute the call to the conversation that ran the tool so it
+		// counts against that conversation's budget.
+		conversationId,
+		messageId,
+		prometheusMetricFilterAgent,
 		false, // trackContent
 		[]llms.MessageContent{
 			llms.TextParts(llms.ChatMessageTypeHuman, prompt),
