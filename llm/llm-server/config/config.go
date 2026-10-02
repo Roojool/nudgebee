@@ -649,9 +649,10 @@ type appConfig struct {
 	OrchestratorGroundingEnabled bool `mapstructure:"llm_orchestrator_grounding_enabled"`
 	// ClaimCritiqueFeedbackEnabled lets captured claim gaps use the existing refinement budget.
 	ClaimCritiqueFeedbackEnabled bool `mapstructure:"llm_claim_critique_feedback_enabled"`
-	// ClaimCritiqueActionableFeedbackEnabled switches the claim critique to the prompt that
-	// returns why_weak/alternative/discriminating_check per weak claim, so the planner is
-	// told what to check instead of only being asked to label hypotheses (#39803).
+	// ClaimCritiqueActionableFeedbackEnabled adds a second step to the claim critique: when the
+	// audit rejects an answer, a guidance call writes why each flagged claim is weak, a competing
+	// explanation and one discriminating check, replacing the "label hypotheses" template. The
+	// audit and its accept/refine verdict are unchanged (#39803).
 	ClaimCritiqueActionableFeedbackEnabled bool `mapstructure:"llm_claim_critique_actionable_feedback_enabled"`
 	// PremiseVerificationEnabled gates the "confirm the symptom before diagnosing it"
 	// discipline in the answer critiquer. When on, the top-level investigation must

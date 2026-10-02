@@ -17,7 +17,6 @@ import (
 
 const claimCritiqueInputLimit = 256 * 1024
 const claimCritiqueTimeout = 20 * time.Second
-const claimGuidanceLimit = 2000
 
 type critiqueClaim struct {
 	Claim          string `json:"claim"`
@@ -25,12 +24,6 @@ type critiqueClaim struct {
 	AssertedAsFact *bool  `json:"asserted_as_fact"`
 	Material       *bool  `json:"material"`
 	EvidenceRefs   []int  `json:"evidence_refs"`
-	// Optional reviewer guidance for a weak claim (actionable prompt only):
-	// what conflicts or is missing, the competing explanation, and the one
-	// read that tells them apart. Rendered into the planner feedback.
-	WhyWeak             string `json:"why_weak,omitempty"`
-	Alternative         string `json:"alternative,omitempty"`
-	DiscriminatingCheck string `json:"discriminating_check,omitempty"`
 }
 
 type claimAudit struct {
@@ -107,8 +100,7 @@ func claimJSONValue(dec *json.Decoder, depth int) error {
 				return fmt.Errorf("invalid or duplicate JSON key")
 			}
 			switch name {
-			case "claims", "missing_required", "claim", "support", "asserted_as_fact", "material", "evidence_refs",
-				"why_weak", "alternative", "discriminating_check":
+			case "claims", "missing_required", "claim", "support", "asserted_as_fact", "material", "evidence_refs":
 			default:
 				return fmt.Errorf("unknown claim audit field")
 			}
@@ -183,39 +175,24 @@ func parseClaimAudit(content string, observationCount int) (claimAudit, error) {
 	return audit, nil
 }
 
-// The rejection rule is the same with or without reviewer guidance; only the
-// feedback text changes. Label-only feedback ("label hypotheses") made the
-// planner re-word the same answer about half the time, while feedback naming
-// what to check made it gather new evidence (#39803).
+// isClaimGap is the rejection rule: a material claim that is contradicted, or
+// asserted as fact without being observed. Step-2 guidance is written for
+// exactly these claims, so both steps share this predicate.
+func isClaimGap(c critiqueClaim) bool {
+	return *c.Material && (c.Support == "contradicted" ||
+		(*c.AssertedAsFact && (c.Support == "unsupported" || c.Support == "inferred")))
+}
+
 func (a claimAudit) decision() (string, string) {
 	var gaps []string
-	guided := false
-	// Guidance is only rendered for the actionable prompt; a model volunteering
-	// these fields under the base prompt must not change legacy feedback.
-	withGuidance := config.Config.ClaimCritiqueActionableFeedbackEnabled
-	guidance := func(label, text string) string {
-		text = strings.TrimSpace(text)
-		if !withGuidance || text == "" {
-			return ""
-		}
-		guided = true
-		// Truncate rather than reject: a verbose field must not discard a valid verdict.
-		return "\n  " + label + ": " + TruncateHead(text, claimGuidanceLimit)
-	}
 	for _, c := range a.Claims {
-		if *c.Material && (c.Support == "contradicted" ||
-			(*c.AssertedAsFact && (c.Support == "unsupported" || c.Support == "inferred"))) {
-			gap := c.Support + ": " + c.Claim +
-				guidance("why", c.WhyWeak) + guidance("alternative", c.Alternative) + guidance("check", c.DiscriminatingCheck)
-			gaps = append(gaps, gap)
+		if isClaimGap(c) {
+			gaps = append(gaps, c.Support+": "+c.Claim)
 		}
 	}
 	gaps = append(gaps, a.MissingRequired...)
 	if len(gaps) == 0 {
 		return "accept", ""
-	}
-	if guided {
-		return "refine", "Review of your root-cause analysis. For each weak point: why it is weak, the competing explanation, and the one check that tells them apart. Run the most decisive of these checks (one permitted discriminating read), or revise the answer to what the evidence supports; do not repeat denied evidence paths.\n- " + strings.Join(gaps, "\n- ")
 	}
 	return "refine", "Correct these material evidence gaps using existing observations, or one permitted discriminating read. Clearly label hypotheses; do not repeat denied evidence paths.\n- " + strings.Join(gaps, "\n- ")
 }
@@ -305,6 +282,15 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 		auditCtx = security.NewRequestContext(context.WithValue(bounded, contextKeyClaimUsageID, record.TokenUsageID),
 			ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 		result = generateClaimShadow(auditCtx, request, record.Detail)
+	}
+	// Step 2: explain the rejected claims. The verdict is already fixed; guidance
+	// only replaces the feedback text, and any failure keeps the legacy text.
+	if config.Config.ClaimCritiqueActionableFeedbackEnabled && result.Status == "ok" && result.Decision == "refine" && result.Audit != nil {
+		guided, capture := claimGuidanceFeedback(ctx, request, record.Detail, *result.Audit)
+		record.Detail.Guidance = capture
+		if guided != "" {
+			result.Feedback = guided
+		}
 	}
 	record.Status, record.Decision = result.Status, result.Decision
 	if result.ErrorStage != "" {
