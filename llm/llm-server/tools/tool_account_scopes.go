@@ -47,7 +47,12 @@ func init() {
 		"mongodb_server_status_get", "mssql_query_execute", "mysql_query_execute",
 		"newrelic_apm_services_execute", "newrelic_infrastructure_containers_execute",
 		"newrelic_infrastructure_hosts_execute", "newrelic_resource_search_execute",
-		"oracle_query_execute", "postgres_query_execute", "rabbit_execute", "redis_command_executer",
+		"oracle_query_execute",
+	)
+	// Run against the target account's own integration, picked by
+	// ResolveToolCallTarget.
+	toolcore.DeclareAccountScope(toolcore.AccountScopeFollowsTarget,
+		"postgres_query_execute", "rabbit_execute", "redis_command_executer",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundConversationState,
 		"watch_list", "watch_status", "workflow_config_delete", "workflow_config_get",

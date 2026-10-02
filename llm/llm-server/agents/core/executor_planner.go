@@ -1072,6 +1072,16 @@ func (e *plannerExecutor) doIteration(
 			if _, configurable := tool.(toolcore.NBToolConfig); !configurable {
 				continue
 			}
+			// A call on another account that names no integration may ask the
+			// user to pick one of the target's (followupForTargetIntegration).
+			if tools.IsTargetedIntegrationTool(e.ctx, tool) && tools.CallHasTarget(action.ToolInput, e.agentRequest.QueryConfig.DelegatedTarget, e.agentRequest.AccountId) {
+				if tools.RequestedInstance(toolcore.NBToolCallRequest{Command: action.ToolInput}) == "" {
+					needsSequential = true
+					sequentialFallbackReason = "unresolved_target_integration"
+					break
+				}
+				continue
+			}
 			if e.agentRequest.QueryConfig.ToolConfigs != nil && e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] != "" {
 				continue
 			}
@@ -2500,6 +2510,19 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		}
 	}
 
+	// Likewise an integration tool's write on another account (same classifier
+	// and approval as on the conversation's own) needs write access there.
+	if tools.IsTargetedIntegrationTool(e.ctx, tool) && (requestType == nil || *requestType != toolcore.ToolRequestTypeRead) {
+		callCtx := toolcore.NbToolContext{Ctx: e.ctx, AccountId: e.agentRequest.AccountId, QueryConfig: e.agentRequest.QueryConfig}
+		_, account, targetErr := tools.ResolveObservabilityTarget(callCtx, toolcore.NBToolCallRequest{Command: action.ToolInput})
+		if targetErr != nil {
+			return NBAgentPlannerToolActionStep{}, nil, targetErr
+		}
+		if account != "" && account != e.agentRequest.AccountId && !e.ctx.GetSecurityContext().HasAccountAccess(account, security.SecurityAccessTypeCreate) {
+			return NBAgentPlannerToolActionStep{}, nil, fmt.Errorf("%s: write access to the target account is required", tool.Name())
+		}
+	}
+
 	// confirmation if tehre is write operation
 	if tool.GetType() == toolcore.NBToolTypeTool {
 		if writeConfirmationRequired(tool, requestType, action) {
@@ -3268,6 +3291,13 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		action = prepared
 	}
 
+	// An integration tool's call about another account runs against one of
+	// the target's integrations, picked by ResolveToolCallTarget; the
+	// conversation's own integrations are not a choice for it.
+	if tools.IsTargetedIntegrationTool(e.ctx, tool) && tools.CallHasTarget(action.ToolInput, e.agentRequest.QueryConfig.DelegatedTarget, e.agentRequest.AccountId) {
+		return e.followupForTargetIntegration(tool, action)
+	}
+
 	// If the action explicitly named a target, resolve it with the tenant list
 	// filtered by read access. An explicit target must never fall back to an account picker.
 	if requested, reqErr := actionRequestedTarget(tool, action); reqErr != nil {
@@ -3642,6 +3672,60 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 		return steps, finish, nil
 	}
 	return nil, nil, nil
+}
+
+// followupForTargetIntegration asks the user to pick among another account's
+// integrations when a call about that account names none and it has several:
+// the same question the conversation's own account gets, for the target's
+// integrations. One, none, a named one or an earlier pick is left to
+// ResolveToolCallTarget, which also refuses a name shared by two.
+func (e *plannerExecutor) followupForTargetIntegration(tool toolcore.NBTool, action NBAgentPlannerToolAction) ([]NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
+	request := toolcore.NBToolCallRequest{Command: action.ToolInput}
+	if tools.RequestedInstance(request) != "" {
+		return nil, nil, nil
+	}
+	callCtx := toolcore.NbToolContext{Ctx: e.ctx, AccountId: e.agentRequest.AccountId, QueryConfig: e.agentRequest.QueryConfig}
+	target, account, err := tools.ResolveObservabilityTarget(callCtx, request)
+	if err != nil || target == nil || account == "" || account == e.agentRequest.AccountId {
+		return nil, nil, nil // refused or not another account: the resolver says why
+	}
+	key := tools.TargetIntegrationChoiceKey(tool.Name(), account)
+	if e.resolvedToolConfig(key) != "" {
+		return nil, nil, nil
+	}
+	configs, err := toolcore.ListToolConfigs(e.ctx, account, tool)
+	if err != nil {
+		return nil, nil, nil
+	}
+	names := tools.UniqueConfigNames(configs)
+	if len(names) < 2 {
+		return nil, nil, nil
+	}
+	followupRequest := FollowupRequest{
+		Question:        fmt.Sprintf("%s %s has several integrations for %s. Which one should be used?", target.Kind(), target.Name, tool.Name()),
+		FollowupType:    FollowupTypeToolConfig,
+		FollowupOptions: names,
+		AgentName:       e.agent.GetName(),
+		AgentId:         uuid.MustParse(e.agentRequest.AgentId),
+		ToolName:        key,
+		ToolId:          action.ToolID,
+	}
+	followupId, err := GenerateFollowup(e.ctx, e.agentRequest, followupRequest)
+	if err != nil {
+		e.ctx.GetLogger().Error(logErrUnableToGenerateFup, "error", err)
+		return nil, nil, err
+	}
+	return []NBAgentPlannerToolActionStep{{
+			Action:      action,
+			Observation: followupRequest.Question,
+			Status:      ToolStatusWaiting,
+			Followup:    &followupRequest,
+		}}, &NBAgentPlannerFinishAction{
+			Data:              followupRequest.Question,
+			Status:            ConversationStatusWaiting,
+			Followup:          followupRequest,
+			AdditionalDetails: map[string]any{"followupId": followupId},
+		}, nil
 }
 
 // isToolConfigResolved checks whether any tool config or project selection was just
@@ -4390,7 +4474,10 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// Check if this tool requires configuration
 	if _, ok := tool.(toolcore.NBToolConfig); ok {
 		// Check if we have a valid tool config
-		if missingToolConfig(tool, input, toolContext.ToolConfig) {
+		// An integration tool's call about another account picks the target's
+		// integration in ResolveToolCallTarget, below.
+		targeted := tools.IsTargetedIntegrationTool(nbRequestContext, tool) && tools.CallHasTarget(input, agentRequest.QueryConfig.DelegatedTarget, agentRequest.AccountId)
+		if !targeted && missingToolConfig(tool, input, toolContext.ToolConfig) {
 			// "None configured" and "several configured, none is the subject"
 			// are different answers and lead somewhere different: the second
 			// should send the agent to reach the system where it runs. Ask the

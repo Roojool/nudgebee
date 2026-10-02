@@ -152,10 +152,9 @@ func (m PostgresExecuteTool) Call(nbRequestContext core.NbToolContext, input cor
 		query = postgresWorkspaceShellCommand(pgFlags, `\copy (`+query+`) TO stdout WITH CSV HEADER`)
 	}
 
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, query, map[string]string{
-		"PGDATABASE":                      database,
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, query, IntegrationWorkspaceEnv(nbRequestContext, map[string]string{
+		"PGDATABASE": database,
+	}))
 
 	if explainQuery {
 		response = fmt.Sprintf(`[{"plan": %s}]`, response)

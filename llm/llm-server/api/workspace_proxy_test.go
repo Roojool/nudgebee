@@ -968,3 +968,42 @@ func TestWorkspaceExecuteAuditUsesResolvedTargetAndOutcome(t *testing.T) {
 	failure := workspaceExecuteAudit(ctx, req, "kubectl", "target", false).Audits[0]
 	require.Equal(t, audit.EventStatusFailure, failure.EventStatus)
 }
+
+// A database, cache or broker command bound to another account uses that
+// account's integration of the same name and is relayed there; anything else
+// keeps the workspace's own account.
+func TestWorkspaceBoundIntegration(t *testing.T) {
+	restore := integrationConfigByName
+	t.Cleanup(func() { integrationConfigByName = restore })
+	integrationConfigByName = func(_ *security.RequestContext, account string, _ core.NBTool, name string) (core.ToolConfig, error) {
+		if account == "prod-id" && name == "prod-pg" {
+			return core.ToolConfig{Id: "pg-2", Name: "prod-pg"}, nil
+		}
+		return core.ToolConfig{}, errors.New("2 integrations named orders-db are connected to the selected account; none was used")
+	}
+	workspaceCtx := core.NbToolContext{AccountId: "ws-id", TargetAccountId: "ws-id", ToolConfig: core.ToolConfig{Id: "pg-1", Name: "prod-pg"}}
+
+	got, err := workspaceBoundIntegration(workspaceCtx, tools.PostgresExecuteTool{}, tools.RelayJobPostgres, "prod-id", "prod-pg")
+	require.NoError(t, err)
+	assert.Equal(t, "prod-id", got.AccountId, "relayed to the target account")
+	assert.Equal(t, "pg-2", got.ToolConfig.Id, "the target's prod-pg, not the workspace account's integration of the same name")
+	target, err := workspaceRelayTarget(got, tools.RelayJobPostgres, "prod-pg", "select 1")
+	require.NoError(t, err)
+	assert.Equal(t, "prod-id", target)
+
+	_, err = workspaceBoundIntegration(workspaceCtx, tools.PostgresExecuteTool{}, tools.RelayJobPostgres, "prod-id", "orders-db")
+	assert.ErrorContains(t, err, "none was used")
+
+	for name, tc := range map[string]struct {
+		job    tools.RelayJob
+		target string
+	}{
+		"own account":        {tools.RelayJobPostgres, "ws-id"},
+		"not bound":          {tools.RelayJobPostgres, ""},
+		"not an integration": {tools.RelayJobKubectl, "prod-id"},
+	} {
+		got, err := workspaceBoundIntegration(workspaceCtx, tools.PostgresExecuteTool{}, tc.job, tc.target, "prod-pg")
+		require.NoError(t, err, name)
+		assert.Equal(t, workspaceCtx, got, name)
+	}
+}

@@ -3,8 +3,13 @@
 package agents
 
 import (
+	"fmt"
+	"github.com/google/uuid"
+	"nudgebee/llm/agents/core"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"nudgebee/llm/tools"
 
@@ -61,4 +66,43 @@ func TestNaturalQuestion_VMsInAnotherAccount(t *testing.T) {
 	}
 	assert.NotZero(t, onTarget, "a VM tool must run on %s", target)
 	assert.Contains(t, conversationAnswer(t, resp.ConversationId), "load average", "the answer must include uptime from a VM in %s", target)
+}
+
+// TestNaturalQuestion_PickTargetIntegration (#39906): asked about "the postgres
+// database" on an account with several, Nubi asks the user which one, as it
+// does for the conversation's own account, and runs the query on the pick.
+func TestNaturalQuestion_PickTargetIntegration(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	sc := tenantWideE2EContext()
+	accountId, userId := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_USER")
+	sessionId := fmt.Sprintf("pick-target-integration-%d", time.Now().Unix())
+	resp1, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, sessionId,
+		"On k8s-prod, run select current_database(), inet_server_addr() on postgres database.")
+	require.NoError(t, err)
+	t.Logf("Preserved sessionId=%s conversationId=%s status=%s question=%q options=%v", sessionId, resp1.ConversationId, resp1.Status, resp1.FollowupRequest.Question, resp1.FollowupRequest.FollowupOptions)
+	require.Equal(t, core.ConversationStatusWaiting, resp1.Status, "Nubi must ask which k8s-prod database, not guess")
+	assert.ElementsMatch(t, []string{"prod", "prod-pg"}, resp1.FollowupRequest.FollowupOptions, "the choices are k8s-prod's integrations")
+
+	waiting := resp1.FollowupRequest.AgentId
+	resolvedAgent, _, _, err := core.ResolveAgentByConversationAgentId(sc, waiting, accountId)
+	require.NoError(t, err)
+	_, err = core.HandleConversationSessionRequest(sc, resolvedAgent, userId, accountId, sessionId, "prod",
+		core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(resp1.ConversationId), Valid: true}),
+		core.ConversationSessionRequestWithMessageId(uuid.NullUUID{UUID: uuid.MustParse(resp1.MessageId), Valid: true}),
+		core.ConversationSessionRequestWithAgentId(uuid.NullUUID{UUID: waiting, Valid: true}),
+		core.ConversationSessionRequestWithIsResume(true),
+	)
+	require.NoError(t, err)
+	final := waitForTerminalMessageStatus(t, accountId, resp1.ConversationId, resp1.MessageId, 240*time.Second)
+	t.Logf("final status after picking prod: %s", final)
+
+	calls := fetchConversationToolCalls(t, resp1.ConversationId)
+	logRoute(t, calls)
+	var onPick int
+	for _, c := range calls {
+		if c.ToolName == tools.ToolExecutePostgresQuery && c.Status == "success" && strings.Contains(c.Response, "172.31.4.191") {
+			onPick++
+		}
+	}
+	assert.NotZero(t, onPick, "the query must run on k8s-prod's prod database after the pick")
 }

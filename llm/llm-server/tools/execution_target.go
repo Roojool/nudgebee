@@ -210,7 +210,22 @@ func ResolveToolCallTarget(ctx core.NbToolContext, tool core.NBTool, request cor
 	decl, _ := core.AccountScopeOf(tool.Name())
 	switch decl.Scope {
 	case core.AccountScopeFollowsTarget:
-		return ResolveCallTarget(ctx, request)
+		resolved, err := ResolveCallTarget(ctx, request)
+		if err != nil || !IsTargetedIntegrationTool(ctx.Ctx, tool) {
+			return resolved, err
+		}
+		// The conversation's own integration was picked when the context was
+		// built; a call on another account, or one that named its target
+		// without a default, picks among the target's integrations instead.
+		if resolved.TargetAccountId == resolved.AccountId && resolved.ToolConfig.Name != "" {
+			return resolved, nil
+		}
+		selected, err := targetIntegrationConfig(resolved, tool, request)
+		if err != nil {
+			return ctx, err
+		}
+		resolved.ToolConfig = selected
+		return resolved, nil
 	case core.AccountScopeIndependent:
 		return ctx, nil
 	}

@@ -119,9 +119,7 @@ func (m RedisExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 
 	command = redisCommandAsRun(command)
 	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, IntegrationWorkspaceEnv(nbRequestContext, nil))
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("redis: unable to execute shell script", "error", err.Error(), "command", command)
 		if response == "" {
