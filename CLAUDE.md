@@ -106,6 +106,8 @@ Each service has its own CLAUDE.md where one exists — **always read it before 
 - `llm/llm-server/CLAUDE.md` — LLM service architecture
 - `llm/code-analysis/CLAUDE.md` — Code-analysis engine
 - `collector-server/k8s-collector/relay-server/CLAUDE.md` — K8s relay gateway
+- `llm/gateway/CLAUDE.md` — AI Gateway: request path, security invariants, design docs index
+- `runbook-server/CLAUDE.md` — Automations: rules for tasks, templates, secrets
 - `api-server/services/knowledge_graph/CLAUDE.md` — Knowledge graph subsystem
 - `api-server/services/anomoly/CLAUDE.md` — Anomaly detection subsystem
 
