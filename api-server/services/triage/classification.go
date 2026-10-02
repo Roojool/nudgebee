@@ -355,26 +355,29 @@ type eventBasicInfo struct {
 	TenantID         string  `db:"tenant"`
 	AggregationKey   *string `db:"aggregation_key"`
 	FindingType      *string `db:"finding_type"`
+	Source           *string `db:"source"`
+	SubjectType      *string `db:"subject_type"`
+	SubjectName      *string `db:"subject_name"`
 	SubjectOwner     *string `db:"subject_owner"`
 	SubjectNamespace *string `db:"subject_namespace"`
 }
 
 // classKey derives the signal-class key for this event projection (same formula as ClassKey).
 func (e *eventBasicInfo) classKey() string {
-	get := func(p *string) string {
-		if p == nil {
-			return ""
-		}
-		return *p
-	}
-	return classKeyFromParts(get(e.AggregationKey), get(e.FindingType), get(e.SubjectOwner), get(e.SubjectNamespace))
+	return classKeyFromParts(deref(e.AggregationKey), deref(e.FindingType), classSubject{
+		Source:    deref(e.Source),
+		Owner:     deref(e.SubjectOwner),
+		Type:      deref(e.SubjectType),
+		Name:      deref(e.SubjectName),
+		Namespace: deref(e.SubjectNamespace),
+	})
 }
 
 // loadEventByID loads basic event info by ID
 func loadEventByID(ctx context.Context, db *sqlx.DB, eventID, cloudAccountID string) (*eventBasicInfo, error) {
 	query := `
 		SELECT id, title, fingerprint, computed_score, computed_priority, cloud_account_id, tenant,
-		       aggregation_key, finding_type, subject_owner, subject_namespace
+		       aggregation_key, finding_type, source, subject_type, subject_name, subject_owner, subject_namespace
 		FROM events
 		WHERE id = $1 AND cloud_account_id = $2
 	`
