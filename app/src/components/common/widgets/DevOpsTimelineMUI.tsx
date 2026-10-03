@@ -9,6 +9,7 @@ import { Card } from '@ui/Card';
 import CopyButton from '@shared/buttons/CopyButton';
 import { ExternalLinkIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
+import { formatClockCompact } from '@shared/format/Datetime';
 
 interface TimelineMetadata {
   cloud_account_id?: string;
@@ -30,22 +31,8 @@ interface TimelineResponse {
   timeline: TimelineItem[];
 }
 
-// Create formatter instance once to avoid overhead in loop
-const dateTimeFormatter = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  day: 'numeric',
-  hour: 'numeric',
-  minute: 'numeric',
-  hour12: true,
-});
-
-const formatDate = (isoString: string) => {
-  if (!isoString) {
-    return '';
-  }
-  const date = new Date(isoString);
-  return dateTimeFormatter.format(date);
-};
+// The same compact form the investigation panel uses, so one page does not show two date styles.
+const formatDate = (isoString: string) => formatClockCompact(isoString);
 
 const getEventProps = (item: TimelineItem) => {
   const { ref_type, action } = item;

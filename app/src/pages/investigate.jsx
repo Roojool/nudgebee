@@ -113,6 +113,8 @@ import { MdOutlineCategory } from 'react-icons/md';
 import DatadogMonitorSearch from '@components/k8s/investigate/cards/DatadogMonitorSearch';
 import SafeIcon from '@shared/icons/SafeIcon';
 import RemediationPanel, { isRemediationPlan, runnableActionCount } from '@components/k8s/investigate/cards/RemediationPanel';
+import { podDetailsFromEvidence } from '@components/k8s/investigate/podFacts';
+import { uniqueInsightLines } from '@components/k8s/investigate/insightLines';
 import EventAlertControlsSection from '@components/k8s/investigate/EventAlertControlsSection';
 // Cloud-specific card imports
 import CloudTrailEventCard from '@components/cloudaccount/investigate/cards/CloudTrailEventCard';
@@ -1557,7 +1559,13 @@ const Investigate = () => {
         let aggregation_key = queryParam.aggregationKey;
         let service_key = queryParam.serviceKey;
         let end_date = queryParam.start_at;
-        const response = await apiKubernetes.getEventsSimilarDataAndInsights(aggregation_key, service_key, id, end_date);
+        const response = await apiKubernetes.getEventsSimilarDataAndInsights(
+          aggregation_key,
+          service_key,
+          id,
+          end_date,
+          row?.cloud_account_id || router.query.accountId
+        );
         let last7Days = response?.data?.similar_issue_on_same_service_in_7days?.aggregate?.count;
         let last1Days = response?.data?.similar_issue_on_same_service_in_1days?.aggregate?.count;
         const othersData = [];
@@ -1570,29 +1578,8 @@ const Investigate = () => {
           othersData.push(`${last1Days} in the day before`);
         }
         setOthersData(othersData);
-        const result = row?.evidences;
-        if (result) {
-          const parsedData = result;
-          if (parsedData) {
-            const filteredData = parsedData.find((item) => {
-              if (item.type === 'json' && typeof item.data === 'string') {
-                try {
-                  let parsedData = JSON.parse(item.data);
-                  if (parsedData.name === 'pod_details') {
-                    return true;
-                  }
-                } catch {
-                  // do nothing
-                }
-              }
-              return false;
-            });
-            if (filteredData?.data) {
-              const jsonData = JSON.parse(filteredData.data);
-              setPodDetails(jsonData);
-            }
-          }
-        }
+        const details = podDetailsFromEvidence(row?.evidences);
+        if (details) setPodDetails(details);
         const insights = (row?.evidences || [])?.reduce((allInsights, evidence) => {
           const messages = evidence.insight?.filter((insight) => insight.severity === 'Critical').map((insight) => insight.message);
           if (messages) {
@@ -1600,7 +1587,7 @@ const Investigate = () => {
           }
           return allInsights;
         }, []);
-        setInsightData(insights.flat());
+        setInsightData(uniqueInsightLines(insights.flat()));
       } catch (error) {
         console.error(error);
       }

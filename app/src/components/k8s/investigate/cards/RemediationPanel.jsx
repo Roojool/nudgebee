@@ -17,6 +17,7 @@ import { getBrandTitle } from '@hooks/useTenantBranding';
 import { reportContainsInvestigation } from '@utils/investigationReport';
 import AlertRuleChangeAction from './AlertRuleChangeAction';
 import { buildAlertRuleContext, isAlertRuleChangeApplied } from './remediationAlertRule';
+import { formatClockCompact } from '@shared/format/Datetime';
 
 const STATUS_META = {
   SUCCESS: { text: 'Success', tone: 'success' },
@@ -135,9 +136,7 @@ function formatThresholdContext(res) {
 
 // Human-readable timestamp for when an action was last applied; empty string if unparseable.
 function formatAppliedAt(value) {
-  if (!value) return '';
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  return formatClockCompact(value);
 }
 
 // Reasoning can arrive as an array of points or (defensively) a newline-separated string; normalize
