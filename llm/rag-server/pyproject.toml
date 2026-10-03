@@ -29,6 +29,7 @@ dependencies = [
 
     # --- Vector database ---
     "qdrant-client==1.19.0",
+    "redis==5.2.1",
 
     # --- Database & storage ---
     "psycopg2-binary==2.9.12",

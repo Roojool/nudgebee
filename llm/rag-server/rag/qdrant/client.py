@@ -11,6 +11,7 @@ import gc
 import logging
 import os
 import threading
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, List, cast
@@ -367,6 +368,26 @@ def _fetch_collection_info(client: QdrantClient, name: str) -> CollectionInfo:
         return CollectionInfo(name=name, metadata={}, points_count=0)
 
 
+# Cross-process single-flight. The in-process Event below coalesces threads;
+# this lock coalesces replicas. The TTL means a holder that dies cannot pin
+# everyone else -- the worst case is one duplicated refresh.
+_REFRESH_LOCK_KEY = "collection_list:refresh"
+_REFRESH_LOCK_TTL_SECONDS = 120
+_REFRESH_LOCK_WAIT_SECONDS = 30
+# A full refresh takes ~18s, so polling four times a second just adds load.
+_REFRESH_POLL_SECONDS = 1.0
+
+
+def _signal_singleflight() -> None:
+    """Clear the in-flight marker and wake any waiting threads."""
+    global _singleflight_event
+    with _singleflight_lock:
+        event_to_signal = _singleflight_event
+        _singleflight_event = None
+    if event_to_signal is not None:
+        event_to_signal.set()
+
+
 # Single-flight coordination for list_collections_optimized. When the cache is
 # empty (fresh start, retag_migration clear, TTL expiry), N concurrent callers
 # would each trigger the slow list+metadata iteration — the "thundering herd"
@@ -436,8 +457,39 @@ def list_collections_optimized() -> List[CollectionInfo]:
             return cached_collections
         return []
 
-    # We are the refresh winner. Do the slow work outside the coordination
-    # lock so other paths (add, clear, get) aren't blocked by the fetch.
+    # We are the in-process winner. Across processes, a shared lock decides
+    # who actually talks to Qdrant -- otherwise every replica refreshes the
+    # same 300+ collections at the same moment.
+    from rag.core.cache_backend import get_cache_backend
+
+    backend = get_cache_backend()
+    lock_token = backend.try_lock(_REFRESH_LOCK_KEY, _REFRESH_LOCK_TTL_SECONDS)
+    if lock_token is None:
+        # Another process is refreshing. Give it a moment, then take its
+        # snapshot rather than duplicating the work.
+        deadline = time.monotonic() + _REFRESH_LOCK_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(_REFRESH_POLL_SECONDS)
+            borrowed = cache.get()
+            if borrowed is not None:
+                logger.info("Collection list cache: used another process's refresh")
+                _signal_singleflight()
+                return borrowed
+        # It did not finish in time -- the holder died, or is slower than the
+        # wait. Try once more for the lock: if several replicas time out
+        # together, this is what stops all of them refreshing at once, which
+        # is the stampede the lock exists to prevent.
+        lock_token = backend.try_lock(_REFRESH_LOCK_KEY, _REFRESH_LOCK_TTL_SECONDS)
+        if lock_token is None:
+            # Still held. Refreshing anyway is wasteful but correct; returning
+            # nothing would not be.
+            logger.warning(
+                "Collection list cache: shared refresh did not land in time and the lock is "
+                "still held, refreshing locally"
+            )
+        else:
+            logger.warning("Collection list cache: shared refresh did not land in time, took over the lock")
+
     fetched_at_generation = cache.begin_refresh()
     logger.info("Collection list cache MISS - fetching from Qdrant")
     client = get_qdrant_client()
@@ -478,10 +530,6 @@ def list_collections_optimized() -> List[CollectionInfo]:
         return []
 
     finally:
-        # Clear the in-flight marker and wake any waiters. Signal outside
-        # the lock so we don't hold it across a potentially large wake-up.
-        with _singleflight_lock:
-            event_to_signal = _singleflight_event
-            _singleflight_event = None
-        if event_to_signal is not None:
-            event_to_signal.set()
+        if lock_token is not None:
+            backend.unlock(_REFRESH_LOCK_KEY, lock_token)
+        _signal_singleflight()
