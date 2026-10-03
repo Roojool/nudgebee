@@ -176,9 +176,13 @@ const VmSummary = ({ accountId }: { accountId: string }) => {
       // trip — a card and its tab can never disagree.
       const topGroups = (grouping: 'vm' | 'package' | 'vulnerability') =>
         apiVm.listVulnerabilityGroups({ accountId, grouping, limit: TOP_N, offset: 0, includeTotal: false, orderBy: 'count' });
-      const [vms, packageCounts, severities, agents, topVms, topPackages, topVulnerabilities, osByVm] = await Promise.all([
+      const [vms, packageCounts, packages, severities, agents, topVms, topPackages, topVulnerabilities, osByVm] = await Promise.all([
         apiVm.listVms({ accountId, limit: 1, offset: 0 }),
         apiVm.getPackageCountsByVm(accountId),
+        // The Packages tab's own query, for its total: distinct packages. Summing
+        // the per-VM counts above instead counts a package once per VM that has
+        // it, which is a different (larger) number under the same label.
+        apiVm.listPackages({ accountId, limit: 1, offset: 0 }),
         apiVm.getSeverityCounts({ accountId }),
         apiVm.listAgents(accountId),
         topGroups('vm'),
@@ -194,7 +198,7 @@ const VmSummary = ({ accountId }: { accountId: string }) => {
       }
       setSummary({
         vms: vms.total,
-        packages: scanned.reduce((total, entry) => total + (entry.count || 0), 0),
+        packages: packages.total,
         scannedVms: scanned.length,
         agentsConnected: agents.filter((agent) => agent.connected).length,
         agentsTotal: agents.length,
