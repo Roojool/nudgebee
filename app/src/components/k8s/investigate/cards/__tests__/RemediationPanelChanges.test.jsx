@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { OptionalHardening, RequiredChangeDetails, afterOf } from '../RemediationPanel';
+import { OptionalHardening, RequiredChangeDetails, afterOf, noActionsText, runnableActionCount } from '../RemediationPanel';
 
 // A fix no command applies (a chart value, a node pool) is shown as the change to make, not as the
 // event's code diff.
@@ -58,5 +58,47 @@ describe('afterOf', () => {
     expect(afterOf(actions[3], actions, {})).toEqual({ name: 'Add API_TOKEN key', applied: false });
     expect(afterOf(actions[0], actions, {})).toBeNull();
     expect(afterOf({ after: 'nothing like this' }, actions, {})).toBeNull();
+  });
+});
+
+// A plan with no actions explains itself once: the root-cause card already carries the summary.
+describe('noActionsText', () => {
+  it('is empty when the root-cause card has already printed the summary', () => {
+    expect(noActionsText({ root_cause: 'Undetermined', summary: 'Evidence is partial, so no action is recommended.' })).toBe('');
+  });
+
+  it('is the summary when there is no root-cause card to carry it', () => {
+    expect(noActionsText({ summary: 'Evidence is partial, so no action is recommended.' })).toBe('Evidence is partial, so no action is recommended.');
+  });
+
+  it('falls back to a plain sentence when the plan has no summary', () => {
+    expect(noActionsText({ root_cause: 'Undetermined' })).toBe('No automated remediation is recommended: the root cause is not conclusive enough.');
+    expect(noActionsText(null)).toBe('No automated remediation is recommended: the root cause is not conclusive enough.');
+  });
+});
+
+// The tab count is what the operator can run from the tab, not every fix the plan describes.
+describe('runnableActionCount', () => {
+  it('counts actions with a command or an alert rule change, and not a change to make elsewhere', () => {
+    const plan = {
+      actions: [
+        {
+          action: 'Fix unbounded cache',
+          kind: 'fix',
+          execute_command: '',
+          required_change: { where: 'code', target: 'cache.py', change: 'bound the cache' },
+        },
+        { action: 'Raise memory limit', kind: 'mitigation', execute_command: 'kubectl set resources deployment web -n demo --limits=memory=1Gi' },
+        { action: 'Lengthen the alert window', kind: 'fix', alert_rule_change: { operation: 'edit', duration: '10m' } },
+        { action: 'Blank command', execute_command: '   ' },
+      ],
+    };
+    expect(runnableActionCount(plan)).toBe(2);
+  });
+
+  it('is zero when there is no plan', () => {
+    expect(runnableActionCount(null)).toBe(0);
+    expect(runnableActionCount({ actions: [] })).toBe(0);
+    expect(runnableActionCount('could not load')).toBe(0);
   });
 });

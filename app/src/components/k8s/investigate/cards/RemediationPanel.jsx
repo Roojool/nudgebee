@@ -646,6 +646,27 @@ export function afterOf(action, actions, executedCommands) {
   return { name, applied: cmd ? !!executedCommands?.[cmd] : false };
 }
 
+// noActionsText is the sentence shown in place of the action list when the plan has none. The
+// root-cause card above already prints the summary whenever the plan has a root cause, so printing
+// it here too put the same paragraph on screen twice.
+export function noActionsText(plan) {
+  if (plan?.root_cause && plan?.summary) return '';
+  return plan?.summary || 'No automated remediation is recommended: the root cause is not conclusive enough.';
+}
+
+// isRemediationPlan reports whether a response is a plan rather than an empty or error body.
+export function isRemediationPlan(value) {
+  return !!value && typeof value === 'object' && Array.isArray(value.actions);
+}
+
+// runnableActionCount is how many of the plan's actions the operator can carry out from the panel:
+// those with a command to run, or a change to the alert rule to apply. A fix stated as a change to
+// make elsewhere (chart values, application code) is listed but is not something to run here.
+export function runnableActionCount(plan) {
+  if (!isRemediationPlan(plan)) return 0;
+  return plan.actions.filter((a) => trimmedString(a?.execute_command) || a?.alert_rule_change).length;
+}
+
 // RemediationPanel renders below the investigation analysis. "Generate Remediation" reuses the
 // already-computed investigation as context (no re-investigation) and turns it into a structured plan
 // of hypotheses + runnable actions, each with its own Run button.
@@ -658,8 +679,11 @@ export function afterOf(action, actions, executedCommands) {
 // treating it as resolved suppressed the panel's whole point on almost every event.
 const RESOLVED_STATUSES = ['RESOLVED', 'CLOSED'];
 
-const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
-  const [plan, setPlan] = useState(null);
+// The page owns the saved plan: it reads it once (savedPlan, with savedPlanReady false until that
+// read settles) so the tab can count the plan's actions before the tab is opened, and it is told
+// about a plan generated here through onPlanChange. The panel never reads the saved plan itself.
+const RemediationPanel = ({ accountId, eventId, nbStatus, savedPlan, savedPlanReady, onPlanChange }) => {
+  const [plan, setPlan] = useState(savedPlanReady && isRemediationPlan(savedPlan) ? savedPlan : null);
   // The event's alert rule and what can be changed on it: sent with generate so the
   // plan can propose a rule fix, and read back to show when that fix is applied.
   const [alertControls, setAlertControls] = useState(null);
@@ -803,8 +827,9 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
         console.error('RemediationPanel: failed to fetch alert rule controls', err);
       }
       const res = await apiKubernetes.generateRemediation(accountId, eventId, context, artifacts, alertRule);
-      if (res && typeof res === 'object' && Array.isArray(res.actions)) {
+      if (isRemediationPlan(res)) {
         setPlan(res);
+        onPlanChange?.(res);
       } else {
         setError('Could not generate a remediation plan for this event.');
       }
@@ -815,41 +840,41 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
     }
   };
 
-  // On mount: restore the saved plan + past runs, and generate one if the event has none. The panel is
-  // keyed on event + investigation refresh in the parent, so a fresh mount corresponds to a completed
-  // investigation for this event.
+  // Once the page's read of the saved plan has settled: restore that plan + past runs, and generate
+  // a plan if the event has none. The panel is keyed on event + investigation refresh in the parent,
+  // so a fresh mount corresponds to a completed investigation for this event.
   //
   // This mount only happens when the Remediation tab is opened (TabPanel renders its children behind
   // `value === index`), so generation follows someone actually looking for a remediation. It is
   // bounded by the saved-plan check — a plan is generated once per event, not once per visit — and by
-  // autoTriggered, which holds across the StrictMode double-mount.
+  // autoTriggered, which holds across the StrictMode double-mount. Waiting for savedPlanReady is
+  // what keeps a tab opened before that read finishes from generating a plan that already exists.
   //
   // The generation itself is not budget-checked server-side, so this is the only place that decides
   // whether the call happens. Anything that needs to cap it belongs on the endpoint, not here.
   useEffect(() => {
+    if (!savedPlanReady) return undefined;
     let cancelled = false;
     const init = async () => {
-      let loaded = false;
-      try {
-        const saved = await apiKubernetes.getRemediation(accountId, eventId);
-        if (saved && typeof saved === 'object' && Array.isArray(saved.actions)) {
-          loaded = true;
-          if (!cancelled) setPlan(saved);
+      const loaded = isRemediationPlan(savedPlan);
+      if (loaded) {
+        setPlan(savedPlan);
+        try {
           // A restored rule change shows Applied from the rule's live state.
-          if (saved.actions.some((a) => a?.alert_rule_change)) loadAlertControls();
+          if (savedPlan.actions.some((a) => a?.alert_rule_change)) loadAlertControls();
           // A restored plan holds no diff (only generate() sees the analysis record), so fetch it
           // when the plan actually has a command-less fix to show it against. Skipped otherwise so
           // the common all-commands plan costs no extra request.
-          const needsCodeFix = saved.actions.some(
+          const needsCodeFix = savedPlan.actions.some(
             (a) => trimmedString(a?.kind).toLowerCase() === 'fix' && !trimmedString(a?.execute_command) && !trimmedString(a?.required_change?.change)
           );
           if (needsCodeFix) {
             const rec = await apiKubernetes.generateAiRecommendation(accountId, eventId, 'pod_log_analysis');
             if (!cancelled && mountedRef.current) setCodeFix(extractCodeFix(rec));
           }
+        } catch (err) {
+          console.error('RemediationPanel: failed to load the code fix for the saved plan', err);
         }
-      } catch (err) {
-        console.error('RemediationPanel: failed to load saved plan', err);
       }
       await loadExecutions();
       if (cancelled) return;
@@ -863,8 +888,9 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
     return () => {
       cancelled = true;
     };
+    // Runs when the page's read settles, not when a plan generated here comes back as savedPlan.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [savedPlanReady]);
 
   const resolvedBanner = isResolved ? (
     <Card variant='tinted' tone='neutral' size='sm' elevation='flat'>
@@ -947,9 +973,7 @@ const RemediationPanel = ({ accountId, eventId, nbStatus }) => {
 
       {actions.length === 0 ? (
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-2)' }}>
-          <Box sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>
-            {plan.summary || 'No automated remediation is recommended: the root cause is not conclusive enough.'}
-          </Box>
+          {noActionsText(plan) ? <Box sx={{ fontSize: 'var(--ds-text-small)', color: 'var(--ds-gray-600)' }}>{noActionsText(plan)}</Box> : null}
           {hypotheses.map((h, i) => (
             <HypothesisBlock key={i} hypothesis={h} />
           ))}
@@ -997,6 +1021,9 @@ RemediationPanel.propTypes = {
   accountId: PropTypes.string,
   eventId: PropTypes.string,
   nbStatus: PropTypes.string,
+  savedPlan: PropTypes.object,
+  savedPlanReady: PropTypes.bool,
+  onPlanChange: PropTypes.func,
 };
 
 export default RemediationPanel;

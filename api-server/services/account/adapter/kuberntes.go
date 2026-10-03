@@ -627,6 +627,7 @@ func (k *kuberntesAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterC
 		message = "Recommendation applied successfully"
 	case "FAILED":
 		resolutionStatus = RecommendationResolutionStatusFailed
+		message = agentFailureMessage(message)
 	case "TODO":
 		resolutionStatus = RecommendationResolutionStatusInProgress
 	}
@@ -635,4 +636,17 @@ func (k *kuberntesAdapter) GetRecommendationResolutionStatus(ctx AccountAdapterC
 		Status:        resolutionStatus,
 		StatusMessage: message,
 	}, nil
+}
+
+// agentFailureMessage returns the reason out of a failed agent task's response. The agent answers
+// {"msg": "...", "success": false, ...}; stored whole, every screen that says why an attempt failed
+// printed the JSON. Anything that is not that shape is returned unchanged.
+func agentFailureMessage(response string) string {
+	var parsed struct {
+		Msg string `json:"msg"`
+	}
+	if err := json.Unmarshal([]byte(response), &parsed); err == nil && strings.TrimSpace(parsed.Msg) != "" {
+		return parsed.Msg
+	}
+	return response
 }
