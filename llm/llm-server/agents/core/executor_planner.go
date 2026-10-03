@@ -1167,7 +1167,7 @@ func (e *plannerExecutor) doIterationSequential(
 	}
 	successContext := successContextBuilder.String()
 
-	for _, action := range actions {
+	for idx, action := range actions {
 		// Gather all available steps for condition evaluation
 		allAvailableStepsForCondition := append([]NBAgentPlannerToolActionStep{}, previousIterationSteps...)
 		allAvailableStepsForCondition = append(allAvailableStepsForCondition, newStepsThisIteration...)
@@ -1261,7 +1261,11 @@ func (e *plannerExecutor) doIterationSequential(
 		stepResponse, finishAct, errAct := e.doAction(nameToTool, action, queryContext)
 		if finishAct != nil {
 			if finishAct.Status == ConversationStatusWaiting || finishAct.Status == ConversationStatusWaitingForClientTool {
-				e.currentAction = actions
+				// Resume re-runs currentAction, so keep only this action and the
+				// ones after it. Earlier ones already ran and are in steps;
+				// replaying one would repeat its tool_use id in the next prompt
+				// (Anthropic rejects that) and duplicate its result.
+				e.currentAction = actions[idx:]
 			}
 			if errAct == nil && stepResponse.Action.ToolID != "" {
 				newStepsThisIteration = append(newStepsThisIteration, stepResponse)
