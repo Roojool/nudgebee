@@ -817,7 +817,39 @@ func cloneWhereClause(where QueryWhereClause) QueryWhereClause {
 	return clone
 }
 
+// distinctArgsReference reports whether a count(DISTINCT ...) transformation on
+// a requested column names any of cols in its args. For a count(*) column,
+// generateColumnExpression rewrites those args to the named columns' Defs, so
+// the request reads them even though the only column it names is the count
+// (#39843). Only "distinct" args are column names; a date_unit's args are a
+// unit and a period. On any other column the args are ignored when the SQL is
+// built, so counting them here costs at most a join nothing reads.
+func distinctArgsReference(columns []QueryColumn, cols map[string]bool) bool {
+	for _, col := range columns {
+		if col.Expr != "distinct" {
+			continue
+		}
+		for _, arg := range col.Args {
+			if cols[arg] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// requestReferencesColumns reports whether the request reads any of cols, by
+// name or through a distinct count's args. It is the check for a DefGenerator
+// deciding what its subquery must expose: anything it misses becomes a column
+// the outer SELECT names and the subquery never produced.
 func requestReferencesColumns(request QueryRequest, cols map[string]bool) bool {
+	return requestNamesColumns(request, cols) || distinctArgsReference(request.Columns, cols)
+}
+
+// requestNamesColumns is the by-name half: the request selects, groups, orders
+// or filters on one of cols itself. Use it where the question is which rows the
+// request is about, not which columns must exist.
+func requestNamesColumns(request QueryRequest, cols map[string]bool) bool {
 	if len(request.Columns) == 0 {
 		return true
 	}
@@ -3545,8 +3577,13 @@ var table_metadata = map[string]TableDefinition{
 			// inspects Having and treats an empty Columns list as "references everything",
 			// either of which would re-route requests that take the fast path today. This
 			// closure performs exactly the checks the previous inline loops did, so
-			// needsJoin is unchanged for every request.
+			// needsJoin is unchanged for every request. The one addition since is
+			// count(DISTINCT ...) args (distinctArgsReference), which only re-routes
+			// a request whose distinct args name one of these columns.
 			references := func(cols map[string]bool) bool {
+				if distinctArgsReference(request.Columns, cols) {
+					return true
+				}
 				for _, col := range request.Columns {
 					if cols[col.Name] {
 						return true
@@ -4254,13 +4291,14 @@ var table_metadata = map[string]TableDefinition{
 			//   - the per-CVE listing GROUPs BY vulnerability_id, so a NULL-CVE row would
 			//     create a bogus bucket. That listing selects the RAW `vulnerability_id`
 			//     column (nothing else does — `count_vulnerability_id` is fine, DISTINCT
-			//     ignores the NULL), so gate on that.
+			//     ignores the NULL), so gate on that. By name only, for the same reason:
+			//     a count(DISTINCT vulnerability_id) passes the column as an arg.
 			//   - a severity filter implies the user wants vulnerable rows, and clean
 			//     rows have no severity, so they correctly drop out.
 			// The status filter is applied to the clean branch itself (cleanStatusFilter
 			// below) rather than disabling clean rows — summary rows are written
 			// status='Open', so the default Status=Open view includes them.
-			includeCleanImages := !requestReferencesColumns(request, map[string]bool{"vulnerability_id": true}) &&
+			includeCleanImages := !requestNamesColumns(request, map[string]bool{"vulnerability_id": true}) &&
 				recSeverityFilter == ""
 
 			// v2 joins vulnerabilities against rec2.vulnerability_id — only added

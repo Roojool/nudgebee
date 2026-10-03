@@ -1,6 +1,7 @@
 package query
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -224,4 +225,97 @@ func TestRecommendationGroupings_FastPathVulnJoinHasNoMissingComma(t *testing.T)
 			assert.Regexp(t, `,\s*TRUE AS is_primary_recommendation`, sql, "TRUE AS is_primary_recommendation must be preceded by a comma")
 		})
 	}
+}
+
+// distinctCount is the request a paged, grouped table sends for its total:
+// columns ["count"] with column_transformations
+// [{name: "count", expr: "distinct", args: [<the group column>]}].
+func distinctCount(args ...string) []QueryColumn {
+	return []QueryColumn{{Name: "count", Expr: "distinct", Args: args}}
+}
+
+// Regression test for #39843. A distinct count names its column only in the
+// transformation's args — the one requested column is "count" — and
+// generateColumnExpression rewrites it to count(DISTINCT <that column's Def>).
+// The DefGenerator read column names alone, so a count over package_name or
+// vuln_id skipped the vulnerabilities join while the outer SELECT still named
+// r1.v_package_name / r1.v_vuln_id: Postgres `column does not exist`, surfaced
+// as "Unable to execute query". The VM Vulnerabilities tab pages its Package and
+// Vulnerability groupings on exactly this count, so both showed one page only.
+func TestRecommendationGroupings_DistinctCountArgsRouteLikeTheColumn(t *testing.T) {
+	const vulnJoin = "LEFT JOIN vulnerabilities v ON v.id = r.vulnerability_id"
+	subqueryColumn := regexp.MustCompile(`r1\.(v_\w+)`)
+
+	tests := []struct {
+		arg          string
+		wantSelect   string
+		wantRoute    string
+		wantVulnJoin bool
+	}{
+		{"package_name", "count(DISTINCT COALESCE(r1.v_package_name, r1.recommendation -> 'package' ->> 'name')) AS count", fast, true},
+		{"vuln_id", "count(DISTINCT COALESCE(r1.v_vuln_id, r1.recommendation ->> 'vuln_id')) AS count", fast, true},
+		// Worked before the fix and must keep its plan: a plain recommendation
+		// column needs neither join.
+		{"resource_id", "count(DISTINCT resource_id) AS count", fast, false},
+		// The same gap on the cloud_resourses side: resource_name exists only in
+		// the joined CTE.
+		{"resource_name", "count(DISTINCT resource_name) AS count", full, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.arg, func(t *testing.T) {
+			request := QueryRequest{Table: "recommendation_groupings_v2", Columns: distinctCount(tc.arg)}
+			sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+			require.NoError(t, err)
+
+			assert.Contains(t, sql, "SELECT "+tc.wantSelect)
+			assert.Equal(t, tc.wantRoute, route(t, request))
+			assert.Equal(t, tc.wantVulnJoin, strings.Contains(sql, vulnJoin), "vulnerabilities join")
+			// Valid SQL here means every r1.v_* the outer query names is a column
+			// the subquery projects.
+			for _, ref := range subqueryColumn.FindAllStringSubmatch(sql, -1) {
+				assert.Regexp(t, `\bAS `+ref[1]+`\b`, sql, "outer query reads r1.%s, which the subquery does not project", ref[1])
+			}
+		})
+	}
+}
+
+// The shared helper behind every other DefGenerator's conditional join has to
+// agree: distinct args are column references, a date_unit's args are not.
+func TestRequestReferencesColumns_DistinctArgsAreColumnReferences(t *testing.T) {
+	gated := map[string]bool{"package_name": true}
+
+	assert.True(t, requestReferencesColumns(QueryRequest{Columns: distinctCount("package_name")}, gated))
+	assert.True(t, requestReferencesColumns(QueryRequest{Columns: distinctCount("resource_id", "package_name")}, gated))
+	assert.False(t, requestReferencesColumns(QueryRequest{Columns: distinctCount("resource_id")}, gated))
+	assert.False(t, requestReferencesColumns(QueryRequest{
+		Columns: []QueryColumn{{Name: "timestamp", Expr: "date_unit", Args: []string{"package_name"}}},
+	}, gated), "a date_unit's args are a unit and a period, never column names")
+}
+
+// The security groupings table asks the request two different questions. Which
+// columns its subquery must project follows distinct args. Whether the
+// scanned-but-clean images are listed does not: a distinct count over
+// vulnerability_id skips their NULL, the same as count_vulnerability_id, so
+// they stay. Only the per-CVE listing, which names the column, drops them.
+func TestRecommendationSecurityGroupings_DistinctCountKeepsCleanImages(t *testing.T) {
+	const cleanImages = "'image_scan_summary'"
+	generate := func(request QueryRequest) string {
+		t.Helper()
+		request.Table = "recommendation_security_groupings_v2"
+		sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_security_groupings_v2"])
+		require.NoError(t, err)
+		return sql
+	}
+
+	counted := generate(QueryRequest{
+		Columns: []QueryColumn{{Name: "image"}, {Name: "count", Expr: "distinct", Args: []string{"vulnerability_id"}}},
+		GroupBy: []string{"image"},
+	})
+	assert.Contains(t, counted, "count(DISTINCT vulnerability_id) AS count")
+	assert.Contains(t, counted, "r.vulnerability_id as vulnerability_id", "the subquery must project the counted column")
+	assert.Contains(t, counted, cleanImages, "clean images must stay in a per-image list")
+
+	listed := generate(QueryRequest{Columns: cols("vulnerability_id", "count"), GroupBy: []string{"vulnerability_id"}})
+	assert.NotContains(t, listed, cleanImages, "the per-CVE listing must not get a NULL-CVE bucket")
 }
