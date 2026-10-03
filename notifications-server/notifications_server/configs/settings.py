@@ -741,6 +741,11 @@ class NotificationSettings(BaseSettings):
     grouped_redis_ttl_seconds: int = Field(
         3900, validation_alias=AliasChoices("GROUPED_REDIS_TTL_SECONDS", "grouped_redis_ttl_seconds")
     )
+    # An anomaly that clears joins the next grouped anomaly digest, in a
+    # "Resolved" section. Off: its resolve looks for a Slack thread, as before.
+    digest_resolved_enabled: bool = Field(
+        False, validation_alias=AliasChoices("DIGEST_RESOLVED_ENABLED", "digest_resolved_enabled")
+    )
     event_cache_ttl_seconds: int = Field(
         7200,
         gt=0,
@@ -749,7 +754,13 @@ class NotificationSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    @field_validator("enable_batched", "enable_incident_channel_reply", "channel_awareness_enabled", mode="before")
+    @field_validator(
+        "enable_batched",
+        "enable_incident_channel_reply",
+        "channel_awareness_enabled",
+        "digest_resolved_enabled",
+        mode="before",
+    )
     @classmethod
     def parse_bool(cls, v):
         """Parse boolean values from environment variables."""

@@ -34,7 +34,12 @@ from notifications_server.services.rules import (
     rule_sources,
 )
 from notifications_server.services import weekly_digest_report
-from notifications_server.services.delivery_split import account_sections, has_recommendations, merged_parameters
+from notifications_server.services.delivery_split import (
+    account_sections,
+    has_recommendations,
+    latest_per_key,
+    merged_parameters,
+)
 from notifications_server.message_templates.slack.weekly_digest_events import digest_link, digest_verdict
 from notifications_server.services.slack.slack import retriable_slack_api_error, slack_channel_not_found_error
 from notifications_server.message_templates import template_mapping
@@ -849,7 +854,11 @@ class GroupedMessageHandler:
                     platform_responses = []
                     for ip, channel, indexes in routes:
                         self.message_service.point_at(installed_platforms, ip, channel)
-                        params = {"events": [batch[index]["parameters"] for index in indexes]}
+                        events = [batch[index]["parameters"] for index in indexes]
+                        if orig_type == "anomaly" and settings.notifications.digest_resolved_enabled:
+                            # A firing anomaly and its resolve in one window show once, as resolved.
+                            events = latest_per_key(events)
+                        params = {"events": events}
                         platform_responses.extend(
                             await self.message_service.send_template_notification(
                                 session, tenant_id, {"parameters": params}, f"grouped_{orig_type}", [ip]
@@ -931,6 +940,12 @@ class MessageService:
                 return await self.send_threaded_reply(tenant_id, thread, parameters)
 
             if type_ == "finding_resolved":
+                # An anomaly's firing went out in a grouped digest, which records
+                # no thread to reply in; its resolve joins the next digest instead.
+                if settings.notifications.digest_resolved_enabled:
+                    group_result = await self._maybe_enqueue_anomaly(parameters, tenant_id)
+                    if group_result is not None:
+                        return group_result
                 return await self.send_finding_resolved_reply(tenant_id, parameters)
 
             group_result = await self._maybe_handle_grouped_message(source, parameters, tenant_id, payload)
@@ -998,6 +1013,11 @@ class MessageService:
         if source and source.lower() == "slo":
             return await self.group_handler.enqueue(kwargs)
 
+        return await self._maybe_enqueue_anomaly(parameters, tenant_id)
+
+    async def _maybe_enqueue_anomaly(self, parameters, tenant_id):
+        """Queue an anomaly finding, firing or resolved, for the grouped anomaly
+        digest. None when the finding is not an anomaly."""
         finding = parameters.get("finding") or {}
         finding_source = finding.get("source", "")
         if finding_source and finding_source.lower() == "anomaly":
