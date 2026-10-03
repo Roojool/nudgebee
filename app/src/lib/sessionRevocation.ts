@@ -66,22 +66,50 @@ export async function revokeAllUserSessions(userId: string, expiresAtSec: number
  */
 const REVOCATION_CHECK_TIMEOUT_MS = 1000;
 
+type SkipReason = 'timeout' | 'unreachable' | 'error';
+
+// Every skipped check lets one request through without knowing whether the user
+// logged out. One fixed-shape line per skip, so a log query can count them and
+// alert when skips stop being rare (#39801). The error lines beside it keep the
+// detail; this one only has to be countable.
+function logSkippedCheck(reason: SkipReason, startedAtMs: number): void {
+  console.warn(`[sessionRevocation] session_check_skipped reason=${reason} duration_ms=${Date.now() - startedAtMs}`);
+}
+
+function skipReason(signal: AbortSignal, errors?: Array<{ message?: unknown }>): SkipReason {
+  if (signal.aborted) return 'timeout';
+  const message = errors?.[0]?.message;
+  return typeof message === 'string' && message.startsWith('Upstream unreachable') ? 'unreachable' : 'error';
+}
+
 export async function isSessionRevoked(userId: string, jti: string | null, iatSec: number): Promise<boolean> {
+  const startedAtMs = Date.now();
+  const signal = AbortSignal.timeout(REVOCATION_CHECK_TIMEOUT_MS);
   try {
     const response = await queryGraphQL(
       IS_REVOKED_MUTATION,
       'AuthCheckSession',
       { object: { user_id: userId, jti: jti ?? '', iat: iatSec } },
       undefined,
-      AbortSignal.timeout(REVOCATION_CHECK_TIMEOUT_MS)
+      signal
     );
-    if (response?.data?.errors?.length) {
-      console.error('[sessionRevocation] isSessionRevoked errors', JSON.stringify(response.data.errors));
+    const errors = response?.data?.errors;
+    const revoked = response?.data?.data?.auth_check_session?.revoked;
+    // No verdict is a skipped check too: queryGraphQL resolves to undefined when
+    // the gateway call itself throws, and that also lets the request through.
+    if (errors?.length || revoked == null) {
+      if (errors?.length) {
+        console.error('[sessionRevocation] isSessionRevoked errors', JSON.stringify(errors));
+      } else {
+        console.error('[sessionRevocation] isSessionRevoked got no answer');
+      }
+      logSkippedCheck(skipReason(signal, errors), startedAtMs);
       return false;
     }
-    return Boolean(response?.data?.data?.auth_check_session?.revoked);
+    return Boolean(revoked);
   } catch (err) {
     console.error('[sessionRevocation] isSessionRevoked threw', err);
+    logSkippedCheck(signal.aborted ? 'timeout' : 'error', startedAtMs);
     return false;
   }
 }

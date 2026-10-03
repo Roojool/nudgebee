@@ -31,6 +31,7 @@ describe('isSessionRevoked', () => {
 
   it('fails open when the check comes back with an error', async () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
     queryGraphQLMock.mockResolvedValue({
       data: { data: { auth_check_session: null }, errors: [{ message: 'Upstream unreachable for auth_check_session' }] },
     });
@@ -42,6 +43,87 @@ describe('isSessionRevoked', () => {
     queryGraphQLMock.mockResolvedValue({ data: { data: { auth_check_session: { revoked: true } } } });
 
     await expect(isSessionRevoked('u1', null, 1700000000)).resolves.toBe(true);
+  });
+});
+
+// #39801: a skipped check lets one request through unchecked. Each skip must leave
+// one line of a fixed shape, so a log query can count skips and say why.
+describe('isSessionRevoked logs each skipped check', () => {
+  const SKIP_LINE = /^\[sessionRevocation\] session_check_skipped reason=(timeout|unreachable|error) duration_ms=\d+$/;
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    queryGraphQLMock.mockReset();
+    jest.restoreAllMocks();
+  });
+
+  const skipLines = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('session_check_skipped'));
+
+  it('says "unreachable" when services-server refuses the connection', async () => {
+    queryGraphQLMock.mockResolvedValue({
+      data: { data: { auth_check_session: null }, errors: [{ message: 'Upstream unreachable for auth_check_session' }] },
+    });
+
+    await isSessionRevoked('u1', null, 1700000000);
+
+    expect(skipLines()).toHaveLength(1);
+    expect(skipLines()[0]).toMatch(SKIP_LINE);
+    expect(skipLines()[0]).toContain('reason=unreachable');
+  });
+
+  it('says "timeout" when the one-second limit fired', async () => {
+    jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new DOMException('timed out', 'TimeoutError')));
+    queryGraphQLMock.mockResolvedValue({
+      data: { data: { auth_check_session: null }, errors: [{ message: 'Upstream unreachable for auth_check_session' }] },
+    });
+
+    await isSessionRevoked('u1', null, 1700000000);
+
+    expect(skipLines()).toHaveLength(1);
+    expect(skipLines()[0]).toMatch(SKIP_LINE);
+    expect(skipLines()[0]).toContain('reason=timeout');
+  });
+
+  it('says "error" for any other failed answer, and when the call throws', async () => {
+    queryGraphQLMock.mockResolvedValueOnce({
+      data: { data: { auth_check_session: null }, errors: [{ message: 'Service is temporarily unavailable.' }] },
+    });
+    queryGraphQLMock.mockRejectedValueOnce(new Error('boom'));
+
+    await expect(isSessionRevoked('u1', null, 1700000000)).resolves.toBe(false);
+    await expect(isSessionRevoked('u1', null, 1700000000)).resolves.toBe(false);
+
+    expect(skipLines()).toHaveLength(2);
+    skipLines().forEach((line) => {
+      expect(line).toMatch(SKIP_LINE);
+      expect(line).toContain('reason=error');
+    });
+  });
+
+  it('says "error" when the answer carries no verdict at all', async () => {
+    queryGraphQLMock.mockResolvedValueOnce(undefined);
+    queryGraphQLMock.mockResolvedValueOnce({ data: { data: { auth_check_session: null } } });
+
+    await expect(isSessionRevoked('u1', null, 1700000000)).resolves.toBe(false);
+    await expect(isSessionRevoked('u1', null, 1700000000)).resolves.toBe(false);
+
+    expect(skipLines()).toHaveLength(2);
+    skipLines().forEach((line) => {
+      expect(line).toMatch(SKIP_LINE);
+      expect(line).toContain('reason=error');
+    });
+  });
+
+  it('logs nothing when the check answers', async () => {
+    queryGraphQLMock.mockResolvedValue({ data: { data: { auth_check_session: { revoked: false } } } });
+
+    await isSessionRevoked('u1', null, 1700000000);
+
+    expect(skipLines()).toHaveLength(0);
   });
 });
 
