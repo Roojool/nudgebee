@@ -1205,7 +1205,7 @@ func PreviewTriageRule(ctx context.Context, db *sqlx.DB, req RulePreviewRequest,
 	}
 
 	if req.MatchNamespace != nil && *req.MatchNamespace != "" {
-		conditions += fmt.Sprintf(" AND subject_namespace ~ $%d", argIndex)
+		conditions += fmt.Sprintf(" AND subject_namespace = $%d", argIndex)
 		args = append(args, *req.MatchNamespace)
 		argIndex++
 	}
@@ -1322,7 +1322,7 @@ func ApplyRuleToExistingEvents(ctx context.Context, db *sqlx.DB, rule *TriageRul
 	}
 
 	if rule.MatchNamespace != nil && *rule.MatchNamespace != "" {
-		query += fmt.Sprintf(" AND subject_namespace ~ $%d", argIndex)
+		query += fmt.Sprintf(" AND subject_namespace = $%d", argIndex)
 		args = append(args, *rule.MatchNamespace)
 		argIndex++
 	}
@@ -1415,7 +1415,7 @@ func applyScoreAdjustmentToExistingEvents(ctx context.Context, db *sqlx.DB, rule
 	}
 
 	if rule.MatchNamespace != nil && *rule.MatchNamespace != "" {
-		conditions += fmt.Sprintf(" AND subject_namespace ~ $%d", argIndex)
+		conditions += fmt.Sprintf(" AND subject_namespace = $%d", argIndex)
 		args = append(args, *rule.MatchNamespace)
 		argIndex++
 	}
@@ -1533,7 +1533,7 @@ func applyPriorityPinToExistingEvents(ctx context.Context, db *sqlx.DB, rule *Tr
 		argIndex++
 	}
 	if rule.MatchNamespace != nil && *rule.MatchNamespace != "" {
-		conditions += fmt.Sprintf(" AND subject_namespace ~ $%d", argIndex)
+		conditions += fmt.Sprintf(" AND subject_namespace = $%d", argIndex)
 		args = append(args, *rule.MatchNamespace)
 		argIndex++
 	}
