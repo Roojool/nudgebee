@@ -713,13 +713,8 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// Compute the effective planner type for prompt rendering. Orchestrating and
 	// ReAct agents always run as react_3 at runtime, so their prompt uses react-style formatting.
 	effectivePlannerType := resolveEffectivePlannerType(agent.GetPlannerType())
-	// The ReAct planners render RAG examples into the human message; they vary
-	// per query and would otherwise end the system prompt with a per-query block.
-	systemPrompt := basePrompt
-	if effectivePlannerType == AgentPlannerTypeReAct3 {
-		request.RAGExamples = strings.TrimSpace(renderRAGExamples(basePrompt, request, effectivePlannerType))
-		systemPrompt.Rag = NBAgentPromptRag{}
-	}
+	var systemPrompt NBAgentPrompt
+	systemPrompt, request = moveRAGExamplesToHumanMessage(basePrompt, request, effectivePlannerType)
 	systemMessage, sysFmtErr := GetPromptTemplate(systemPrompt, request, effectivePlannerType).Format(map[string]any{"history": messageFormatterToString(messageHistoryFomatter)})
 	// Surface template-render failures: a Format error here yields an empty system prompt, which Bedrock Converse rejects with a 400 (issue #30120).
 	if sysFmtErr != nil {
@@ -1339,6 +1334,20 @@ func isResumedTopLevelInvocation(request NBAgentRequest) bool {
 // AgentPlannerTypeReAct3; every other type runs as declared. Callers that need
 // to reason about runtime behavior (prompt style, DisplayID assignment, response
 // formatting) must use this rather than GetPlannerType() directly.
+// moveRAGExamplesToHumanMessage retrieves the RAG examples into
+// request.RAGExamples and drops them from the system prompt for the ReAct
+// planners (ReAct3 and ReAct4 both run with effective type ReAct3), which render
+// them into the human message. They vary per query, so in the system prompt they
+// would make it differ on every query. Other planner types are unchanged.
+func moveRAGExamplesToHumanMessage(p NBAgentPrompt, request NBAgentRequest, effectivePlannerType AgentPlannerType) (NBAgentPrompt, NBAgentRequest) {
+	if effectivePlannerType != AgentPlannerTypeReAct3 {
+		return p, request
+	}
+	request.RAGExamples = strings.TrimSpace(renderRAGExamples(p, request, effectivePlannerType))
+	p.Rag = NBAgentPromptRag{}
+	return p, request
+}
+
 func resolveEffectivePlannerType(declared AgentPlannerType) AgentPlannerType {
 	if declared == AgentPlannerTypeOrchestrating || declared == AgentPlannerTypeReAct {
 		return AgentPlannerTypeReAct3
