@@ -134,3 +134,29 @@ func TestTargetIntegrationConfig_PickAndDuplicates(t *testing.T) {
 	assert.Equal(t, []string{"orders-db"}, UniqueConfigNames(byAccount["dup-id"]))
 	assert.Equal(t, []string{"prod", "prod-pg"}, UniqueConfigNames(byAccount["prod-id"]))
 }
+
+// #38596: a call on the conversation's own account that names another of its
+// integrations runs there; calls naming nothing, or a name that is no
+// integration of the account (a database or host name), keep the conversation's.
+func TestOwnIntegrationNamedByCall(t *testing.T) {
+	restore := listIntegrationConfigs
+	t.Cleanup(func() { listIntegrationConfigs = restore })
+	listIntegrationConfigs = func(_ *security.RequestContext, account string, _ core.NBTool) ([]core.ToolConfig, error) {
+		return map[string][]core.ToolConfig{
+			"origin-id": {{Id: "1", Name: "dev-pg"}, {Id: "2", Name: "test-pg"}, {Id: "3", Name: "dup"}, {Id: "4", Name: "dup"}},
+		}[account], nil
+	}
+	ctx := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "origin-id", ToolConfig: core.ToolConfig{Id: "1", Name: "dev-pg"}}
+	run := func(input string) string {
+		resolved, err := ResolveToolCallTarget(ctx, PostgresExecuteTool{}, core.ParseNBToolCallRequestFromInput(input))
+		require.NoError(t, err)
+		return resolved.ToolConfig.Name
+	}
+
+	assert.Equal(t, "test-pg", run(`{"query":"select 1","instance":"test-pg"}`), "named: switches for this call")
+	assert.Equal(t, "test-pg", run(`{"query":"select 1","instance":"TEST-PG"}`), "names are matched case-insensitively")
+	assert.Equal(t, "dev-pg", run(`{"query":"select 1"}`), "not named: the conversation's pick")
+	assert.Equal(t, "dev-pg", run(`{"query":"select 1","instance":"nudgebee"}`), "a database name is not an integration")
+	assert.Equal(t, "dev-pg", run(`{"query":"select 1","instance":"dup"}`), "a name shared by two integrations cannot be told apart")
+	assert.Equal(t, "dev-pg", ctx.ToolConfig.Name, "the conversation's pick itself is unchanged")
+}

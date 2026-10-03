@@ -357,3 +357,49 @@ func TestNaturalQuestion_WriteApprovalVariations(t *testing.T) {
 		approve(t, tr)
 	})
 }
+
+// TestNaturalQuestion_SwitchOwnDatabaseConnection (#38596): in one
+// conversation, two of the conversation's own Postgres connections are
+// queried by name; each step runs on the one it names, with no question
+// about which connection to use.
+func TestNaturalQuestion_SwitchOwnDatabaseConnection(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	sc := tenantWideE2EContext()
+	accountId, userId := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_USER")
+	first, second := envOr("TEST_OWN_PG_FIRST", "dev-pg"), envOr("TEST_OWN_PG_SECOND", "test-pg")
+	sessionId := fmt.Sprintf("switch-own-db-%d", time.Now().Unix())
+	conversationId := ""
+	for _, name := range []string{first, second} {
+		var opts []core.ConversationSessionRequestConfig
+		if conversationId != "" {
+			opts = append(opts, core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(conversationId), Valid: true}))
+		}
+		resp, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, sessionId,
+			fmt.Sprintf("On the %s postgres connection, run select current_database() and tell me the result.", name), opts...)
+		require.NoError(t, err)
+		if conversationId == "" {
+			conversationId = resp.ConversationId
+			t.Logf("Preserved sessionId=%s conversationId=%s", sessionId, conversationId)
+		}
+		assert.NotEqual(t, core.ConversationStatusWaiting, resp.Status, "naming the connection must not ask which one: %q", resp.FollowupRequest.Question)
+	}
+
+	dbm, err := common.GetDatabaseManager(common.Metastore)
+	require.NoError(t, err)
+	rows, err := dbm.Db.Query(`SELECT COALESCE(t.metadata->>'nb_resolved_target', ''), COALESCE(t.status, ''), COALESCE(NULLIF(t.params_sql, ''), t.parameters, '')
+		FROM llm_conversation_tool_calls t WHERE t.conversation_id = $1 AND t.tool_name = 'postgres_query_execute' ORDER BY t.created_at`, conversationId)
+	require.NoError(t, err)
+	defer rows.Close()
+	ran := map[string]bool{}
+	for rows.Next() {
+		var integration, status, params string
+		require.NoError(t, rows.Scan(&integration, &status, &params))
+		t.Logf("postgres_query_execute on %q status=%s params=%.200s", integration, status, params)
+		if status == "success" {
+			ran[integration] = true
+		}
+	}
+	require.NoError(t, rows.Err())
+	assert.True(t, ran[first], "a query must run on %s", first)
+	assert.True(t, ran[second], "a query must run on %s in the same conversation", second)
+}

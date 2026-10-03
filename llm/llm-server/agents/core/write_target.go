@@ -113,9 +113,10 @@ func confirmationQuestionWithTarget(question string, action NBAgentPlannerToolAc
 
 // destinationOf is where a write lands, for the approval card: the other
 // account when it lands elsewhere, else the conversation's own account and
-// the integration already chosen there (picked, or the only one). Nil when
+// the integration the call runs with there (the one it names, else the one
+// already chosen: picked, or the only one). Nil when
 // the conversation's account cannot be named; the card then keeps its old text.
-func (e *plannerExecutor) destinationOf(tool toolcore.NBTool, target *writeTarget) *writeTarget {
+func (e *plannerExecutor) destinationOf(tool toolcore.NBTool, action NBAgentPlannerToolAction, target *writeTarget) *writeTarget {
 	if target != nil {
 		return target
 	}
@@ -129,6 +130,13 @@ func (e *plannerExecutor) destinationOf(tool toolcore.NBTool, target *writeTarge
 		if name == "" {
 			if configs, err := toolcore.ListToolConfigs(e.ctx, e.agentRequest.AccountId, tool); err == nil && len(configs) == 1 {
 				name = configs[0].Name
+			}
+		}
+		// A call that names another of the account's integrations runs there.
+		if tools.IsTargetedIntegrationTool(e.ctx, tool) {
+			callCtx := toolcore.NbToolContext{Ctx: e.ctx, AccountId: e.agentRequest.AccountId, ToolConfig: toolcore.ToolConfig{Name: name}}
+			if named, ok := tools.IntegrationNamedByCall(callCtx, tool, toolcore.ParseNBToolCallRequestFromInput(action.ToolInput)); ok {
+				name = named.Name
 			}
 		}
 		// A cluster's kubectl config is named after the cluster; placeholders
@@ -155,7 +163,23 @@ func (e *plannerExecutor) confirmationKeyOf(nameToTool map[string]toolcore.NBToo
 	if !ok || tool == nil {
 		return action.Tool
 	}
-	return confirmationKeyWithTarget(confirmationKeyForAction(tool, action), e.writeTargetOf(tool, action))
+	return e.approvalKey(tool, action, e.writeTargetOf(tool, action))
+}
+
+// approvalKey is the key a write's approval is recorded and looked up under:
+// the tool's key, scoped to the account the write lands on, and on the
+// conversation's own account to the integration a call switches to, so a
+// "yes" given for one database does not run a write the call aimed at
+// another. A write that does not switch keeps its key.
+func (e *plannerExecutor) approvalKey(tool toolcore.NBTool, action NBAgentPlannerToolAction, target *writeTarget) string {
+	key := confirmationKeyWithTarget(confirmationKeyForAction(tool, action), target)
+	if target == nil && tools.IsTargetedIntegrationTool(e.ctx, tool) {
+		callCtx := toolcore.NbToolContext{Ctx: e.ctx, AccountId: e.agentRequest.AccountId, ToolConfig: toolcore.ToolConfig{Name: e.resolvedToolConfig(tool.Name())}}
+		if named, ok := tools.IntegrationNamedByCall(callCtx, tool, toolcore.ParseNBToolCallRequestFromInput(action.ToolInput)); ok {
+			key += "#" + named.Name
+		}
+	}
+	return key
 }
 
 // writeAccountOf is the account a write must be allowed on: where it lands

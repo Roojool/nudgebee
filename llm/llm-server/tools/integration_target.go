@@ -97,6 +97,32 @@ func targetIntegrationConfig(ctx core.NbToolContext, tool core.NBTool, request c
 	return chosen, nil
 }
 
+// IntegrationNamedByCall is the integration of the account the call reads
+// that the call names with `instance`, when that is not the one the context
+// already has. Only an exact (case-insensitive) name that one integration
+// carries counts: models also put database or host names there, and those
+// keep the conversation's pick.
+func IntegrationNamedByCall(ctx core.NbToolContext, tool core.NBTool, request core.NBToolCallRequest) (core.ToolConfig, bool) {
+	instance := RequestedInstance(request)
+	if instance == "" || strings.EqualFold(instance, ctx.ToolConfig.Name) {
+		return core.ToolConfig{}, false
+	}
+	configs, err := listIntegrationConfigs(ctx.Ctx, ctx.DataAccountID(), tool)
+	if err != nil {
+		return core.ToolConfig{}, false
+	}
+	var named []core.ToolConfig
+	for _, c := range configs {
+		if strings.EqualFold(c.Name, instance) {
+			named = append(named, c)
+		}
+	}
+	if len(named) != 1 {
+		return core.ToolConfig{}, false
+	}
+	return named[0], true
+}
+
 // TargetIntegrationChoiceKey is where the user's pick among another account's
 // integrations is kept in QueryConfig.ToolConfigs. The tool's own key holds the
 // conversation account's pick; sharing it would make a pick on one account

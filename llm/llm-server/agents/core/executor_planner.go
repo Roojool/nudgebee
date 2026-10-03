@@ -2526,11 +2526,11 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 			// A write on another account is approved for that account; every
 			// write's card says where it lands.
 			target := e.writeTargetOf(tool, action)
-			confirmationKey := confirmationKeyWithTarget(confirmationKeyForAction(tool, action), target)
+			confirmationKey := e.approvalKey(tool, action, target)
 			// Operator-readable card text, when the tool can provide it — the
 			// default rendering shows the raw tool input, which for id-driven
 			// tools describes nothing the approver can judge.
-			destination := e.destinationOf(tool, target)
+			destination := e.destinationOf(tool, action, target)
 			confirmationQuestion := confirmationQuestionWithTarget(confirmationQuestionForAction(tool, action), action, *requestType, destination)
 			isFollowupFound := false
 			if e.agentRequest.QueryConfig.ToolConfirmations != nil {

@@ -333,9 +333,13 @@ func ResolveToolCallTarget(ctx core.NbToolContext, tool core.NBTool, request cor
 			return resolved, err
 		}
 		// The conversation's own integration was picked when the context was
-		// built; a call on another account, or one that named its target
+		// built; a call that names another of its integrations runs there
+		// (#38596). A call on another account, or one that named its target
 		// without a default, picks among the target's integrations instead.
 		if resolved.TargetAccountId == resolved.AccountId && resolved.ToolConfig.Name != "" {
+			if named, ok := IntegrationNamedByCall(resolved, tool, request); ok {
+				resolved.ToolConfig = named
+			}
 			return resolved, nil
 		}
 		selected, err := targetIntegrationConfig(resolved, tool, request)

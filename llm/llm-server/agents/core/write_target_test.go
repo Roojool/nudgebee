@@ -23,7 +23,7 @@ func writeTargetExecutor(t *testing.T, prodID string) *plannerExecutor {
 		{Name: "k8s-prod", Values: []toolcore.ToolConfigValue{{Name: "id", Value: prodID}}},
 	})
 	tools.StubIntegrationConfigs(t, map[string][]toolcore.ToolConfig{
-		"dev-id": {{Name: "dev-pg"}},
+		"dev-id": {{Name: "dev-pg"}, {Name: "test-pg"}},
 		prodID:   {{Name: "prod"}, {Name: "prod-pg"}},
 	})
 	return &plannerExecutor{
@@ -142,7 +142,7 @@ func TestWriteApprovalCardNamesTheConversationsOwnAccount(t *testing.T) {
 	postgres := tools.PostgresExecuteTool{}
 	action := NBAgentPlannerToolAction{Tool: postgres.Name(), ToolInput: `{"query":"delete from orders"}`}
 	card := func(tool toolcore.NBTool) string {
-		return confirmationQuestionWithTarget("", action, toolcore.ToolRequestTypeDelete, e.destinationOf(tool, e.writeTargetOf(tool, action)))
+		return confirmationQuestionWithTarget("", action, toolcore.ToolRequestTypeDelete, e.destinationOf(tool, action, e.writeTargetOf(tool, action)))
 	}
 
 	e.agentRequest.QueryConfig.ToolConfigs = map[string]string{postgres.Name(): "dev-pg"}
@@ -157,10 +157,15 @@ func TestWriteApprovalCardNamesTheConversationsOwnAccount(t *testing.T) {
 
 	kubectl := tools.KubectlExecuteTool{}
 	e.agentRequest.QueryConfig.ToolConfigs = map[string]string{kubectl.Name(): "k8s-dev"}
-	got := confirmationQuestionWithTarget("", NBAgentPlannerToolAction{Tool: kubectl.Name(), ToolInput: `{"command":"kubectl delete pod x"}`}, toolcore.ToolRequestTypeDelete, e.destinationOf(kubectl, nil))
+	got := confirmationQuestionWithTarget("", NBAgentPlannerToolAction{Tool: kubectl.Name(), ToolInput: `{"command":"kubectl delete pod x"}`}, toolcore.ToolRequestTypeDelete, e.destinationOf(kubectl, NBAgentPlannerToolAction{Tool: kubectl.Name()}, nil))
 	require.Contains(t, got, "on Kubernetes cluster **k8s-dev**.", "a cluster is not named twice")
 
-	require.Nil(t, (&plannerExecutor{ctx: e.ctx, agentRequest: NBAgentRequest{AccountId: "unknown-id"}}).destinationOf(postgres, nil), "an account that cannot be named keeps the generic card")
+	e.agentRequest.QueryConfig.ToolConfigs = map[string]string{postgres.Name(): "dev-pg"}
+	switched := NBAgentPlannerToolAction{Tool: postgres.Name(), ToolInput: `{"query":"delete from orders","instance":"test-pg"}`}
+	require.Contains(t, confirmationQuestionWithTarget("", switched, toolcore.ToolRequestTypeDelete, e.destinationOf(postgres, switched, nil)),
+		"on Kubernetes cluster **k8s-dev** · test-pg", "a call naming another of the account's databases is approved for that one")
+
+	require.Nil(t, (&plannerExecutor{ctx: e.ctx, agentRequest: NBAgentRequest{AccountId: "unknown-id"}}).destinationOf(postgres, action, nil), "an account that cannot be named keeps the generic card")
 }
 
 // The approval's stored config carries where the write lands, for the UI.
@@ -173,4 +178,25 @@ func TestApprovalConfigCarriesTheTarget(t *testing.T) {
 	own := followupMessageConfig(FollowupRequest{FollowupType: FollowupTypeToolConfirmation, Target: (&writeTarget{Target: toolcore.ExecutionTarget{Provider: "kubernetes", Name: "k8s-dev"}}).followupTarget()})
 	require.NotContains(t, own, "crossAccount")
 	require.NotContains(t, followupMessageConfig(FollowupRequest{FollowupType: FollowupTypeToolConfirmation}), "target")
+}
+
+// On the conversation's own account, approving a write on its database does
+// not approve a write the call aims at another of its databases.
+func TestOwnDatabaseSwitchIsApprovedSeparately(t *testing.T) {
+	e := writeTargetExecutor(t, "prod-id")
+	postgres := tools.PostgresExecuteTool{}
+	e.agentRequest.QueryConfig.ToolConfigs = map[string]string{postgres.Name(): "dev-pg"}
+	key := func(input string) string {
+		action := NBAgentPlannerToolAction{Tool: postgres.Name(), ToolInput: input}
+		return e.approvalKey(postgres, action, e.writeTargetOf(postgres, action))
+	}
+	picked := key(`{"query":"delete from t"}`)
+	require.Equal(t, "postgres_query_execute", picked, "the conversation's pick keeps today's key")
+	require.Equal(t, picked, key(`{"query":"delete from t","instance":"dev-pg"}`), "naming the pick is no switch")
+	switched := key(`{"query":"delete from t","instance":"test-pg"}`)
+	require.Equal(t, "postgres_query_execute#test-pg", switched)
+	require.False(t, isToolConfirmationApproved(map[string]string{picked: "yes"}, switched), "a yes for dev-pg does not run a write on test-pg")
+
+	nameToTool := getNameToTool([]toolcore.NBTool{postgres})
+	require.Equal(t, switched, e.confirmationKeyOf(nameToTool, NBAgentPlannerToolAction{Tool: postgres.Name(), ToolInput: `{"query":"delete from t","instance":"test-pg"}`}), "resume looks the approval up under the gate's key")
 }
