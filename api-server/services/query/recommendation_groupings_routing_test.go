@@ -194,6 +194,101 @@ func TestRecommendationGroupings_StatusAndRuleNamePushdownGatedToWindowSafety(t 
 	})
 }
 
+// nonTerminalPushdown is what nonTerminalStatusPushdown adds to the dedupe CTE.
+const nonTerminalPushdown = "AND (r.status IS NULL OR ((r.status < 'Archive' OR r.status > 'Archive') AND (r.status < 'Closed' OR r.status > 'Closed')))"
+
+// A savings roll-up filtered to live statuses used to rank every archived row
+// of the account and then discard it (#35172). Terminal rows sort last in the
+// window, so leaving them out cannot change the rank of a live row — but only
+// when the request returns no terminal row itself. The request's own status
+// filter must stay on the outer query either way (#38469).
+func TestRecommendationGroupings_TerminalRowsStayOutOfTheWindow(t *testing.T) {
+	savings := cols("count", "sum_estimated_savings")
+	display := cols("count", "sum_estimated_savings", "resource_cloud_service")
+	status := func(filter map[BinaryWhereClauseType]any) QueryWhereClause {
+		return QueryWhereClause{Binary: BinaryWhereClause{"status": filter}}
+	}
+
+	tests := []struct {
+		name       string
+		columns    []QueryColumn
+		where      QueryWhereClause
+		wantPushed bool
+		wantOuter  string // the request's own status filter, still applied outside the CTE
+	}{
+		{"live statuses on the window-only path", savings,
+			status(map[BinaryWhereClauseType]any{In: []any{"Open", "Assigned"}}), true, "status IN ('Open','Assigned')"},
+		{"live statuses on the joined path", display,
+			status(map[BinaryWhereClauseType]any{In: []any{"Open", "Assigned"}}), true, "status IN ('Open','Assigned')"},
+		{"a single live status", savings,
+			status(map[BinaryWhereClauseType]any{Eq: "Open"}), true, "status = 'Open'"},
+		{"live statuses sent inside an _and list", savings,
+			QueryWhereClause{And: []QueryWhereClause{status(map[BinaryWhereClauseType]any{In: []string{"Open"}})}}, true, "status IN ('Open')"},
+
+		{"a terminal status in the list", savings,
+			status(map[BinaryWhereClauseType]any{In: []any{"Open", "Archive"}}), false, "status IN ('Open','Archive')"},
+		{"a terminal status alone", savings,
+			status(map[BinaryWhereClauseType]any{Eq: "Closed"}), false, "status = 'Closed'"},
+		{"no status filter", savings, QueryWhereClause{}, false, ""},
+		{"an empty list is no filter", savings,
+			status(map[BinaryWhereClauseType]any{In: []any{}}), false, ""},
+		{"a negative filter still returns Closed rows", savings,
+			status(map[BinaryWhereClauseType]any{Nq: "Archive"}), false, "Archive"},
+		{"a status filter under _or is conditional", savings,
+			QueryWhereClause{Or: []QueryWhereClause{
+				status(map[BinaryWhereClauseType]any{Eq: "Open"}),
+				{Binary: BinaryWhereClause{"severity": {Eq: "High"}}},
+			}}, false, "status = 'Open'"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := QueryRequest{Table: "recommendation_groupings_v2", Columns: tc.columns, Where: tc.where}
+			sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+			require.NoError(t, err)
+			require.Contains(t, sql, "ROW_NUMBER", "expected this request shape to take a windowed (lean/full) path")
+
+			assert.Equal(t, tc.wantPushed, strings.Contains(sql, nonTerminalPushdown), "terminal-row exclusion in the CTE")
+			assert.NotContains(t, sql, "r.status IN ('Open'", "the request's status filter must not be pushed into the CTE")
+			assert.NotContains(t, sql, "r.status = 'Open'", "the request's status filter must not be pushed into the CTE")
+			if tc.wantOuter != "" {
+				assert.Contains(t, sql, tc.wantOuter, "the request's status filter must still apply on the outer query")
+			}
+		})
+	}
+
+	t.Run("the fast path has no window and pushes the status filter itself", func(t *testing.T) {
+		request := QueryRequest{
+			Table:   "recommendation_groupings_v2",
+			Columns: cols("count"),
+			Where:   status(map[BinaryWhereClauseType]any{In: []any{"Open", "Assigned"}}),
+		}
+		sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata["recommendation_groupings_v2"])
+		require.NoError(t, err)
+		require.NotContains(t, sql, "ROW_NUMBER", "expected this request shape to take the fast path")
+		assert.Contains(t, sql, "r.status IN ('Open','Assigned')")
+		assert.NotContains(t, sql, nonTerminalPushdown)
+	})
+}
+
+// The pushdown is only exact while the window keeps sorting the same statuses
+// last. Both tables spell that list inline in SQL; this ties it to the Go list
+// the pushdown is built from.
+func TestRecommendationDedupe_TerminalStatusesMatchTheWindow(t *testing.T) {
+	terminalLast := "CASE WHEN r.status IN ('" + strings.Join(recommendationTerminalStatuses, "', '") + "') THEN 1 ELSE 0 END"
+	requests := []QueryRequest{
+		{Table: "recommendation_groupings_v2", Columns: cols("count", "sum_estimated_savings")},
+		{Table: "recommendation_groupings_v2", Columns: cols("count", "sum_estimated_savings", "resource_cloud_service")},
+		{Table: "recommendations_v2", Columns: cols("id", "is_primary_recommendation")},
+	}
+	for _, request := range requests {
+		sql, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), "", request, table_metadata[request.Table])
+		require.NoError(t, err)
+		require.Contains(t, sql, "ROW_NUMBER")
+		assert.Contains(t, sql, terminalLast, "%s: the window must sort exactly recommendationTerminalStatuses last", request.Table)
+	}
+}
+
 // Regression test for a missing-comma bug in the fast path's SELECT list: when
 // a request needs the vulnerabilities join (package_name/vuln_id/recommendation)
 // but no join- or window-requiring column, the fast path used to splice vulnCols

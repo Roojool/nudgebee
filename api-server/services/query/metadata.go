@@ -1027,6 +1027,74 @@ func renderFilterSQLForColumn(request *QueryRequest, filterName string, sqlColum
 	return ""
 }
 
+// recommendationTerminalStatuses are the statuses the recommendation dedupe
+// window sorts last (the first key of its ORDER BY). The window SQL spells them
+// out inline; TestRecommendationDedupe_TerminalStatusesMatchTheWindow fails if
+// the two drift.
+var recommendationTerminalStatuses = []string{"Archive", "Closed"}
+
+// nonTerminalStatusPushdown returns a predicate that keeps terminal rows out of
+// the recommendation dedupe window, or "" when dropping them is not safe.
+//
+// The window orders terminal rows after every other row of their partition, so
+// removing them cannot change the rank of any row that is left. That is only
+// useful to a request whose own status filter (top-level eq / in) returns no
+// terminal row: the rows it returns, and their is_primary_recommendation, are
+// then identical with or without the terminal rows in the window. Any other
+// request gets "" and ranks the full set as before.
+//
+// This is not the request's status filter pushed down. That one also removes
+// live competitors — a Dismissed row that outranks an Open one — and crowns the
+// wrong row primary (#38469), so the status filter itself stays on the outer
+// query.
+//
+// Written as ranges rather than NOT IN: a btree cannot serve "<>", so with NOT
+// IN the scan still reads every row of the account and only the sort shrinks.
+// With ranges idx_recommendation_tenant_account_status reaches the live rows
+// directly. "x < v OR x > v" is exactly "x <> v" under a deterministic
+// collation. Measured on a 387k-row account that is 77% archived, warm cache:
+// 3.0s -> 0.6s and 112.7k -> 48.4k buffers (NOT IN: 1.0s, buffers unchanged).
+// A NULL status ranks as live in the window, so it is kept.
+func nonTerminalStatusPushdown(request *QueryRequest, sqlColumn string) string {
+	if request == nil {
+		return ""
+	}
+	filter, holder := locateBinaryFilter(&request.Where, "status")
+	if holder == nil {
+		return ""
+	}
+	var wanted []any
+	if eqVal, ok := filter[Eq]; ok {
+		wanted = []any{eqVal}
+	} else if inVal, ok := filter[In]; ok {
+		switch vals := inVal.(type) {
+		case []any:
+			wanted = vals
+		case []string:
+			for _, v := range vals {
+				wanted = append(wanted, v)
+			}
+		}
+	}
+	// An empty IN list renders as "true" on the outer query: no filter at all.
+	if len(wanted) == 0 {
+		return ""
+	}
+	for _, v := range wanted {
+		// Same rendering QuoteLiteral gives the outer filter's value.
+		if slices.Contains(recommendationTerminalStatuses, fmt.Sprintf("%v", v)) {
+			return ""
+		}
+	}
+	dialect := &postgresDialect{}
+	live := make([]string, len(recommendationTerminalStatuses))
+	for i, status := range recommendationTerminalStatuses {
+		literal := dialect.QuoteLiteral(status)
+		live[i] = "(" + sqlColumn + " < " + literal + " OR " + sqlColumn + " > " + literal + ")"
+	}
+	return " AND (" + sqlColumn + " IS NULL OR (" + strings.Join(live, " AND ") + "))"
+}
+
 // VulnerabilityRecommendationSQL reconstructs the legacy recommendation.recommendation
 // JSON shape (the one every consumer — frontend, LLM security tool, PR-prompt
 // generator — was written against) from the deduplicated vulnerabilities row,
@@ -3624,6 +3692,11 @@ var table_metadata = map[string]TableDefinition{
 				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
 				pushdownFilters += extractFilterSQL(&request, "severity", "r.severity")
 			}
+			// The windowed paths keep the status filter on the outer query, but
+			// can still skip ranking the terminal rows it would discard.
+			if !isFastPath {
+				pushdownFilters += nonTerminalStatusPushdown(&request, "r.status")
+			}
 
 			// Push tenant_id into the CTE for the same reason the sibling recommendations_v2
 			// generator does (see its comment): the ROW_NUMBER() window's PARTITION BY does
@@ -5718,6 +5791,10 @@ var table_metadata = map[string]TableDefinition{
 				pushdownFilters += extractFilterSQL(&request, "id", "r.id")
 				pushdownFilters += extractFilterSQL(&request, "rule_name", "r.rule_name")
 				pushdownFilters += extractFilterSQL(&request, "account_object_id", "r.account_object_id")
+			} else {
+				// Terminal rows can still be kept out of the window when the
+				// status filter would discard them anyway.
+				pushdownFilters += nonTerminalStatusPushdown(&request, "r.status")
 			}
 			// Push tenant_id and category into the CTE WHERE so the ROW_NUMBER()
 			// window is computed over only the relevant slice. The window's
