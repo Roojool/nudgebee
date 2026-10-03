@@ -266,6 +266,10 @@ type appConfig struct {
 	// disabled with a single env, independent of which detectors are wired in.
 	// Default false (off).
 	LlmServerEgressFilterEnabled bool `mapstructure:"llm_server_egressfilter_enabled"`
+	// LlmServerTargetWriteAccess: a write that lands on another cluster or
+	// account needs write access there instead of on the conversation's
+	// account. Off restores requiring write on the conversation's account too.
+	LlmServerTargetWriteAccess bool `mapstructure:"llm_server_target_write_access"`
 
 	// Per-detector knobs. These only apply when LlmServerEgressFilterEnabled is true.
 	//
@@ -1303,6 +1307,7 @@ func init() {
 	// flipped off explicitly if an operator doesn't want the wrapper
 	// installed at all.
 	viper.SetDefault("llm_server_egressfilter_enabled", true)
+	viper.SetDefault("llm_server_target_write_access", true)
 	viper.SetDefault("llm_server_egressfilter_secrets_enabled", true)
 	viper.SetDefault("llm_server_egressfilter_secrets_mode", "detect")
 	// Required even though "" is the natural zero — viper.Unmarshal skips

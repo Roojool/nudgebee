@@ -3,6 +3,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
 	"nudgebee/llm/agents/core"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"nudgebee/llm/tools"
+	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,4 +148,212 @@ func TestNaturalQuestion_StepsSayWhereTheyRan(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	assert.NotZero(t, elsewhere, "metrics or logs for %s run under its account", target)
+}
+
+// TestNaturalQuestion_WriteOnAnotherClusterIsApprovedThere (#38588): from a
+// k8s-dev conversation, a write on k8s-prod asks for approval naming
+// k8s-prod, runs there after "yes", and leaves k8s-dev untouched. The
+// configmap is a throwaway the test deletes.
+func TestNaturalQuestion_WriteOnAnotherClusterIsApprovedThere(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	sc := tenantWideE2EContext()
+	accountId, userId := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_USER")
+	target := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	origin := delegateE2ETarget("TEST_DELEGATE_K8S_ORIGIN", "k8s-dev")
+	name := fmt.Sprintf("nb-e2e-write-%d", time.Now().Unix())
+	kubectl := func(cluster, command string) string {
+		tool, ok := toolcore.GetNBTool(accountId, tools.ToolExecuteKubectlCommand)
+		require.True(t, ok)
+		ctx := toolcore.NewNbToolContext(sc, tool, accountId, userId, uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", toolcore.NBQueryConfig{}, "oracle-"+cluster)
+		resp, err := tool.Call(ctx, toolcore.NBToolCallRequest{Command: command, Arguments: map[string]any{"cluster": cluster}})
+		require.NoError(t, err)
+		return fmt.Sprint(resp.Data)
+	}
+	t.Cleanup(func() { kubectl(target, "kubectl delete configmap "+name+" -n default --ignore-not-found") })
+
+	sessionId := fmt.Sprintf("write-other-cluster-%d", time.Now().Unix())
+	resp1, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, sessionId,
+		fmt.Sprintf("On %s, create a configmap named %s in the default namespace with key owner=nudgebee-e2e.", target, name))
+	require.NoError(t, err)
+	t.Logf("Preserved sessionId=%s conversationId=%s status=%s question=%q", sessionId, resp1.ConversationId, resp1.Status, resp1.FollowupRequest.Question)
+	require.Equal(t, core.ConversationStatusWaiting, resp1.Status, "a write must wait for approval")
+	assert.Contains(t, resp1.FollowupRequest.Question, target, "the approval card must name the cluster the write lands on")
+
+	waiting := resp1.FollowupRequest.AgentId
+	resolvedAgent, _, _, err := core.ResolveAgentByConversationAgentId(sc, waiting, accountId)
+	require.NoError(t, err)
+	_, err = core.HandleConversationSessionRequest(sc, resolvedAgent, userId, accountId, sessionId, "yes",
+		core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(resp1.ConversationId), Valid: true}),
+		core.ConversationSessionRequestWithMessageId(uuid.NullUUID{UUID: uuid.MustParse(resp1.MessageId), Valid: true}),
+		core.ConversationSessionRequestWithAgentId(uuid.NullUUID{UUID: waiting, Valid: true}),
+		core.ConversationSessionRequestWithIsResume(true),
+	)
+	require.NoError(t, err)
+	final := waitForTerminalMessageStatus(t, accountId, resp1.ConversationId, resp1.MessageId, 240*time.Second)
+	t.Logf("final status after approving: %s", final)
+
+	assert.Contains(t, kubectl(target, "kubectl get configmap "+name+" -n default -o name"), "configmap/"+name, "the write must run on %s", target)
+	assert.NotContains(t, kubectl(origin, "kubectl get configmap "+name+" -n default -o name --ignore-not-found"), "configmap/"+name, "%s must be untouched", origin)
+}
+
+// TestNaturalQuestion_WriteApprovalVariations (#38588): writes on another
+// account from a k8s-dev conversation, approved for that account. Every
+// object written is a throwaway the test removes.
+func TestNaturalQuestion_WriteApprovalVariations(t *testing.T) {
+	requireDelegateE2EEnv(t)
+	sc := tenantWideE2EContext()
+	accountId, userId := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_USER")
+	prod := delegateE2ETarget("TEST_DELEGATE_K8S_TARGET", "k8s-prod")
+	dev := delegateE2ETarget("TEST_DELEGATE_K8S_ORIGIN", "k8s-dev")
+	stamp := time.Now().Unix()
+
+	kubectl := func(cluster, command string) string {
+		tool, ok := toolcore.GetNBTool(accountId, tools.ToolExecuteKubectlCommand)
+		require.True(t, ok)
+		ctx := toolcore.NewNbToolContext(sc, tool, accountId, userId, uuid.NewString(), uuid.NewString(), uuid.NewString(), "", nil, "", toolcore.NBQueryConfig{}, "oracle-"+cluster)
+		resp, err := tool.Call(ctx, toolcore.NBToolCallRequest{Command: command, Arguments: map[string]any{"cluster": cluster}})
+		require.NoError(t, err)
+		return fmt.Sprint(resp.Data)
+	}
+	configmapOn := func(cluster, name string) bool {
+		return strings.Contains(kubectl(cluster, "kubectl get configmap "+name+" -n default -o name --ignore-not-found"), "configmap/"+name)
+	}
+	cleanupConfigmap := func(cluster, name string) {
+		t.Cleanup(func() { kubectl(cluster, "kubectl delete configmap "+name+" -n default --ignore-not-found") })
+	}
+
+	type turn struct {
+		sessionId, conversationId string
+		resp                      core.NBAgentResponse
+	}
+	ask := func(t *testing.T, tr *turn, query string) {
+		t.Helper()
+		var opts []core.ConversationSessionRequestConfig
+		if tr.conversationId != "" {
+			opts = append(opts, core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(tr.conversationId), Valid: true}))
+		}
+		resp, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, tr.sessionId, query, opts...)
+		require.NoError(t, err)
+		if tr.conversationId == "" {
+			tr.conversationId = resp.ConversationId
+			t.Logf("Preserved sessionId=%s conversationId=%s", tr.sessionId, tr.conversationId)
+		}
+		tr.resp = resp
+		t.Logf("status=%s question=%q target=%+v crossAccount=%v", resp.Status, resp.FollowupRequest.Question, resp.FollowupRequest.Target, resp.FollowupRequest.CrossAccount)
+	}
+	// pending is the question the conversation is waiting on: its stored config
+	// and the agent that asked it.
+	pending := func(t *testing.T, tr *turn) (map[string]any, uuid.UUID) {
+		t.Helper()
+		dbm, err := common.GetDatabaseManager(common.Metastore)
+		require.NoError(t, err)
+		var raw, agentId string
+		require.NoError(t, dbm.Db.QueryRow(`SELECT COALESCE(message_config, '{}'), parent_agent_id::text FROM llm_conversation_messages
+			WHERE conversation_id = $1 AND message_type = 'followup' AND status = 'WAITING' ORDER BY created_at DESC LIMIT 1`, tr.conversationId).Scan(&raw, &agentId))
+		cfg := map[string]any{}
+		require.NoError(t, json.Unmarshal([]byte(raw), &cfg))
+		t.Logf("waiting on %v: %v (target %v)", cfg["followupType"], cfg["question"], cfg["target"])
+		return cfg, uuid.MustParse(agentId)
+	}
+	answer := func(t *testing.T, tr *turn, waiting uuid.UUID, text string) {
+		t.Helper()
+		agent, _, _, err := core.ResolveAgentByConversationAgentId(sc, waiting, accountId)
+		require.NoError(t, err)
+		_, err = core.HandleConversationSessionRequest(sc, agent, userId, accountId, tr.sessionId, text,
+			core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(tr.conversationId), Valid: true}),
+			core.ConversationSessionRequestWithMessageId(uuid.NullUUID{UUID: uuid.MustParse(tr.resp.MessageId), Valid: true}),
+			core.ConversationSessionRequestWithAgentId(uuid.NullUUID{UUID: waiting, Valid: true}),
+			core.ConversationSessionRequestWithIsResume(true),
+		)
+		require.NoError(t, err)
+		t.Logf("after %q: %s", text, waitForTerminalMessageStatus(t, accountId, tr.conversationId, tr.resp.MessageId, 240*time.Second))
+	}
+	approve := func(t *testing.T, tr *turn) {
+		t.Helper()
+		waiting := tr.resp.FollowupRequest.AgentId
+		agent, _, _, err := core.ResolveAgentByConversationAgentId(sc, waiting, accountId)
+		require.NoError(t, err)
+		_, err = core.HandleConversationSessionRequest(sc, agent, userId, accountId, tr.sessionId, "yes",
+			core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(tr.conversationId), Valid: true}),
+			core.ConversationSessionRequestWithMessageId(uuid.NullUUID{UUID: uuid.MustParse(tr.resp.MessageId), Valid: true}),
+			core.ConversationSessionRequestWithAgentId(uuid.NullUUID{UUID: waiting, Valid: true}),
+			core.ConversationSessionRequestWithIsResume(true),
+		)
+		require.NoError(t, err)
+		t.Logf("after yes: %s", waitForTerminalMessageStatus(t, accountId, tr.conversationId, tr.resp.MessageId, 240*time.Second))
+	}
+	requireApprovalFor := func(t *testing.T, tr *turn, name string, crossAccount bool) {
+		t.Helper()
+		require.Equal(t, core.ConversationStatusWaiting, tr.resp.Status, "a write must wait for approval")
+		require.NotNil(t, tr.resp.FollowupRequest.Target, "the approval must say where the write lands")
+		assert.Equal(t, name, tr.resp.FollowupRequest.Target.Name)
+		assert.Equal(t, crossAccount, tr.resp.FollowupRequest.CrossAccount)
+		assert.Contains(t, tr.resp.FollowupRequest.Question, "**"+name+"**")
+	}
+
+	t.Run("approval is per account", func(t *testing.T) {
+		a, b, c := fmt.Sprintf("nb-e2e-a-%d", stamp), fmt.Sprintf("nb-e2e-b-%d", stamp), fmt.Sprintf("nb-e2e-c-%d", stamp)
+		cleanupConfigmap(prod, a)
+		cleanupConfigmap(dev, b)
+		cleanupConfigmap(prod, c)
+		tr := &turn{sessionId: fmt.Sprintf("write-approval-per-account-%d", stamp)}
+
+		ask(t, tr, fmt.Sprintf("On %s, create a configmap named %s in the default namespace with key owner=nudgebee-e2e.", prod, a))
+		requireApprovalFor(t, tr, prod, true)
+		approve(t, tr)
+		assert.True(t, configmapOn(prod, a), "%s on %s", a, prod)
+
+		ask(t, tr, fmt.Sprintf("Now create a configmap named %s in the default namespace on %s with the same key.", b, dev))
+		requireApprovalFor(t, tr, dev, false) // the k8s-prod approval does not cover k8s-dev
+		approve(t, tr)
+		assert.True(t, configmapOn(dev, b), "%s on %s", b, dev)
+		assert.False(t, configmapOn(prod, b), "%s must not land on %s", b, prod)
+
+		ask(t, tr, fmt.Sprintf("Also create a configmap named %s in the default namespace on %s with the same key.", c, prod))
+		if tr.resp.Status == core.ConversationStatusWaiting {
+			t.Logf("a later turn asked again for %s (approvals did not carry across turns)", prod)
+			requireApprovalFor(t, tr, prod, true)
+			approve(t, tr)
+		}
+		assert.True(t, configmapOn(prod, c), "%s on %s", c, prod)
+	})
+
+	t.Run("postgres on another account", func(t *testing.T) {
+		tr := &turn{sessionId: fmt.Sprintf("write-approval-postgres-%d", stamp)}
+		ask(t, tr, fmt.Sprintf("On %s, in its prod postgres database, run exactly: create temporary table nb_e2e_tmp_%d (id int)", prod, stamp))
+		require.Equal(t, core.ConversationStatusWaiting, tr.resp.Status)
+		cfg, waiting := pending(t, tr)
+		if cfg["followupType"] == string(core.FollowupTypeToolConfig) {
+			// k8s-prod has two Postgres integrations: the database is asked
+			// for first, so the approval that follows can name it.
+			answer(t, tr, waiting, "prod")
+			cfg, waiting = pending(t, tr)
+		}
+		require.Equal(t, string(core.FollowupTypeToolConfirmation), cfg["followupType"], "a write must wait for approval")
+		target, _ := cfg["target"].(map[string]any)
+		assert.Equal(t, prod, target["name"])
+		assert.Equal(t, "prod", target["integration"], "the card names the database")
+		assert.Equal(t, true, cfg["crossAccount"])
+		assert.Contains(t, cfg["question"], "**"+prod+"** · prod")
+		answer(t, tr, waiting, "yes")
+	})
+
+	t.Run("delegated sub-agent", func(t *testing.T) {
+		d := fmt.Sprintf("nb-e2e-d-%d", stamp)
+		cleanupConfigmap(prod, d)
+		tr := &turn{sessionId: fmt.Sprintf("write-approval-delegated-%d", stamp)}
+		ask(t, tr, fmt.Sprintf("Use delegate_agent to hand this to a sub-agent: on %s, create a configmap named %s in the default namespace with key owner=nudgebee-e2e.", prod, d))
+		requireApprovalFor(t, tr, prod, true)
+		approve(t, tr)
+		assert.True(t, configmapOn(prod, d), "%s on %s", d, prod)
+	})
+
+	t.Run("vm account", func(t *testing.T) {
+		vms := delegateE2ETarget("TEST_DELEGATE_VM_TARGET", "vulnerable-vms-test")
+		file := fmt.Sprintf("/tmp/nb-e2e-%d", stamp)
+		tr := &turn{sessionId: fmt.Sprintf("write-approval-vm-%d", stamp)}
+		ask(t, tr, fmt.Sprintf("In the %s VM account, run `touch %s` on one of its VMs, then `rm -f %s`.", vms, file, file))
+		requireApprovalFor(t, tr, vms, true)
+		approve(t, tr)
+	})
 }

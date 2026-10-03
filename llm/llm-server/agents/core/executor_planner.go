@@ -2100,30 +2100,10 @@ func confirmationQuestionForAction(tool toolcore.NBTool, action NBAgentPlannerTo
 	return strings.TrimSpace(prompter.ConfirmationQuestion(input))
 }
 
-// confirmationApprovedForAction mirrors isToolConfirmationApproved but resolves
-// the per-action confirmation key when the tool is available, so resume paths
-// agree with the doAction gate about which entry an approval lives under.
-func confirmationApprovedForAction(confirmations map[string]string, nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId ...string) bool {
-	return isToolConfirmationApproved(confirmations, resumeConfirmationKey(nameToTool, action, accountId...))
-}
-
-func confirmationRejectedForAction(confirmations map[string]string, nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId string) bool {
-	key := resumeConfirmationKey(nameToTool, action, accountId)
+// confirmationRejected reports a recorded "no" (or any non-approval) under key.
+func confirmationRejected(confirmations map[string]string, key string) bool {
 	_, found := confirmations[key]
 	return found && !isToolConfirmationApproved(confirmations, key)
-}
-
-// resumeConfirmationKey is the key a resume looks an approval up under: the
-// per-action key when the tool scopes its confirmations, else the tool name.
-func resumeConfirmationKey(nameToTool map[string]toolcore.NBTool, action NBAgentPlannerToolAction, accountId ...string) string {
-	var accId string
-	if len(accountId) > 0 {
-		accId = accountId[0]
-	}
-	if tool, ok := lookupToolForPlanner(nameToTool, accId, action.Tool); ok && tool != nil {
-		return confirmationKeyForAction(tool, action)
-	}
-	return action.Tool
 }
 
 // writeConfirmationRequired reports whether a write (create/update/delete) tool needs user confirmation.
@@ -2427,7 +2407,12 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 	}
 	// validate user access
 	implType := toolcore.ImplTypeFor(tool)
-	finish2, requestType, err2 := IsAgentToolAuthorizedToProcessRequest(e.ctx, e.agent, e.agentRequest, action)
+	// Where a write lands decides the account it must be allowed on, its
+	// approval key and its card. Resolved for a write only, and again at the
+	// approval gate: a config picked in between can change it.
+	finish2, requestType, err2 := authorizeToolRequest(e.ctx, e.agent, e.agentRequest, action, func() []string {
+		return writeAccountOf(e.agentRequest.AccountId, e.writeTargetOf(tool, action), config.Config.LlmServerTargetWriteAccess)
+	})
 	if err2 != nil {
 		// Metrics: record fail
 		common.MetricsToolOperationsTotal(implType, toolName, "fail", accountID)
@@ -2510,48 +2495,9 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 		}
 	}
 
-	// confirmation if tehre is write operation
-	if tool.GetType() == toolcore.NBToolTypeTool {
-		if writeConfirmationRequired(tool, requestType, action) {
-			confirmationKey := confirmationKeyForAction(tool, action)
-			// Operator-readable card text, when the tool can provide it — the
-			// default rendering shows the raw tool input, which for id-driven
-			// tools describes nothing the approver can judge.
-			confirmationQuestion := confirmationQuestionForAction(tool, action)
-			isFollowupFound := false
-			if e.agentRequest.QueryConfig.ToolConfirmations != nil {
-				if previousData, exists := e.agentRequest.QueryConfig.ToolConfirmations[confirmationKey]; exists {
-					isFollowupFound = true
-					previousData = strings.TrimSpace(previousData)
-					if !slices.Contains([]string{"ok", "yes", "true"}, strings.ToLower(previousData)) {
-						return NBAgentPlannerToolActionStep{
-							Action:      action,
-							Observation: "User rejected approval for this action. It was not executed. Continue with other work or summarize.",
-							Status:      ToolStatusFailure,
-						}, nil, nil
-					}
-				}
-			}
-
-			if !isFollowupFound {
-				e.ctx.GetLogger().Info("plannerexecutor: generating followup for confirmation", logRequestType, requestType, "request", action.ToolInput, "tool", action.Tool)
-				followupSteps, followupFinish, err := e.followupForToolOperationConfirmation(action, *requestType, confirmationKey, confirmationQuestion)
-				if err != nil {
-					e.ctx.GetLogger().Info("plannerexecutor: error in generating followup for confirmation", logRequestType, requestType, "request", action.ToolInput, "tool", action.Tool, "error", err)
-					return NBAgentPlannerToolActionStep{}, nil, err
-				}
-				if followupFinish != nil {
-					e.ctx.GetLogger().Info("plannerexecutor: generated followup for tool confirmation", "tool", action.Tool, "followup", slog.AnyValue(followupFinish))
-					var fupStep NBAgentPlannerToolActionStep
-					if len(followupSteps) > 0 {
-						fupStep = followupSteps[0]
-					}
-					return fupStep, followupFinish, nil
-				}
-			}
-		}
-	}
-
+	// Which integration runs the call is settled before a write's approval, so
+	// the approval card names it ("on k8s-prod · prod") and the user is not
+	// asked for the integration after already approving.
 	// Resolving a config on behalf of a tool that is not being called cannot work:
 	// the follow-up builder matches on action.Tool, so no question can be produced.
 	if toolResolvesOwnConfig(tool) {
@@ -2571,6 +2517,52 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 				fupStep = followupSteps[0]
 			}
 			return fupStep, followupFinish, nil
+		}
+	}
+
+	// confirmation if tehre is write operation
+	if tool.GetType() == toolcore.NBToolTypeTool {
+		if writeConfirmationRequired(tool, requestType, action) {
+			// A write on another account is approved for that account; every
+			// write's card says where it lands.
+			target := e.writeTargetOf(tool, action)
+			confirmationKey := confirmationKeyWithTarget(confirmationKeyForAction(tool, action), target)
+			// Operator-readable card text, when the tool can provide it — the
+			// default rendering shows the raw tool input, which for id-driven
+			// tools describes nothing the approver can judge.
+			destination := e.destinationOf(tool, target)
+			confirmationQuestion := confirmationQuestionWithTarget(confirmationQuestionForAction(tool, action), action, *requestType, destination)
+			isFollowupFound := false
+			if e.agentRequest.QueryConfig.ToolConfirmations != nil {
+				if previousData, exists := e.agentRequest.QueryConfig.ToolConfirmations[confirmationKey]; exists {
+					isFollowupFound = true
+					previousData = strings.TrimSpace(previousData)
+					if !slices.Contains([]string{"ok", "yes", "true"}, strings.ToLower(previousData)) {
+						return NBAgentPlannerToolActionStep{
+							Action:      action,
+							Observation: "User rejected approval for this action. It was not executed. Continue with other work or summarize.",
+							Status:      ToolStatusFailure,
+						}, nil, nil
+					}
+				}
+			}
+
+			if !isFollowupFound {
+				e.ctx.GetLogger().Info("plannerexecutor: generating followup for confirmation", logRequestType, requestType, "request", action.ToolInput, "tool", action.Tool)
+				followupSteps, followupFinish, err := e.followupForToolOperationConfirmation(action, *requestType, confirmationKey, confirmationQuestion, destination.followupTarget(), target != nil)
+				if err != nil {
+					e.ctx.GetLogger().Info("plannerexecutor: error in generating followup for confirmation", logRequestType, requestType, "request", action.ToolInput, "tool", action.Tool, "error", err)
+					return NBAgentPlannerToolActionStep{}, nil, err
+				}
+				if followupFinish != nil {
+					e.ctx.GetLogger().Info("plannerexecutor: generated followup for tool confirmation", "tool", action.Tool, "followup", slog.AnyValue(followupFinish))
+					var fupStep NBAgentPlannerToolActionStep
+					if len(followupSteps) > 0 {
+						fupStep = followupSteps[0]
+					}
+					return fupStep, followupFinish, nil
+				}
+			}
 		}
 	}
 
@@ -2984,12 +2976,13 @@ func (e *plannerExecutor) matchesAnyPriorSameToolObservation(action NBAgentPlann
 // shouldn't fire).
 const noProgressLoopThreshold = 3
 
-func (e *plannerExecutor) followupForToolOperationConfirmation(action NBAgentPlannerToolAction, toolRequestType toolcore.ToolRequestType, confirmationKey string, questionOverride string) ([]NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
+func (e *plannerExecutor) followupForToolOperationConfirmation(action NBAgentPlannerToolAction, toolRequestType toolcore.ToolRequestType, confirmationKey string, questionOverride string, target *FollowupTarget, crossAccount bool) ([]NBAgentPlannerToolActionStep, *NBAgentPlannerFinishAction, error) {
 	followupRequest, err := FollowupRequestForToolOperationConfirmation(e.ctx, e.agentRequest, e.agent, action, toolRequestType, confirmationKey, questionOverride)
 	if err != nil {
 		e.ctx.GetLogger().Error(logErrUnableToGenerateFup, "error", err)
 		return nil, nil, err
 	}
+	followupRequest.Target, followupRequest.CrossAccount = target, crossAccount && target != nil
 	followupId, err := GenerateFollowup(e.ctx, e.agentRequest, followupRequest)
 	if err != nil {
 		e.ctx.GetLogger().Error(logErrUnableToGenerateFup, "error", err)
@@ -4684,7 +4677,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 		if len(executor.currentAction) > 0 {
 			// Resolved once for the whole resume pass: the confirmation checks below
 			// must look under the same per-action key doAction recorded under, which
-			// requires the tool instance (confirmationApprovedForAction).
+			// requires the tool instance (confirmationKeyOf).
 			resumeNameToTool := getNameToTool(nbAgentPlanner.GetTools())
 			// read all current actions as steps
 			for i, action := range executor.currentAction {
@@ -4699,7 +4692,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					executor.currentAction[i] = prepared
 				}
 				// Check approval against the prepared, target-bound action.
-				if confirmationRejectedForAction(request.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId) {
+				if confirmationRejected(request.QueryConfig.ToolConfirmations, executor.confirmationKeyOf(resumeNameToTool, action)) {
 					ctx.GetLogger().Info("plannerexecutor: user rejected tool confirmation", "tool", action.Tool, "toolId", action.ToolID)
 					executor.steps = append(executor.steps, NBAgentPlannerToolActionStep{
 						Action:      action,
@@ -4721,7 +4714,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					executor.steps = append(executor.steps, step)
 					executor.stepKeys[action.ToolID] = true
 					ctx.GetLogger().Info("plannerexecutor: recovered terminal client tool result from DB", "toolId", toolId, "status", status)
-				} else if errors.Is(err, sql.ErrNoRows) && !isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) && !confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId) {
+				} else if errors.Is(err, sql.ErrNoRows) && !isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) && !isToolConfirmationApproved(executor.agentRequest.QueryConfig.ToolConfirmations, executor.confirmationKeyOf(resumeNameToTool, action)) {
 					// No row found in DB for this tool AND neither a config nor a write-confirmation
 					// was resolved. This means the tool was waiting for a config selection that never
 					// arrived. A confirmation-gated tool whose confirmation was just approved is NOT
@@ -4735,7 +4728,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					// message above sends triage down the wrong path.
 					ctx.GetLogger().Error("plannerexecutor: no tool record found in DB and config not resolved, failing fast to avoid running with wrong credentials",
 						"tool", action.Tool, "toolId", toolId, "error", err,
-						"expectedConfirmationKey", resumeConfirmationKey(resumeNameToTool, action, executor.agentRequest.AccountId),
+						"expectedConfirmationKey", executor.confirmationKeyOf(resumeNameToTool, action),
 						"presentConfirmationKeys", slices.Sorted(maps.Keys(executor.agentRequest.QueryConfig.ToolConfirmations)))
 					step := NBAgentPlannerToolActionStep{
 						Action:      action,
@@ -4781,7 +4774,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					}
 					ctx.GetLogger().Info("plannerexecutor: using completed child agent response for WAITING parent tool_call",
 						"toolId", toolId, "tool", action.Tool, "childStatus", childOut.status)
-				} else if request.Query != "" && (strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusWaiting)) || (errors.Is(err, sql.ErrNoRows) && (isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) || confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId)))) {
+				} else if request.Query != "" && (strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusWaiting)) || (errors.Is(err, sql.ErrNoRows) && (isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) || isToolConfirmationApproved(executor.agentRequest.QueryConfig.ToolConfirmations, executor.confirmationKeyOf(resumeNameToTool, action))))) {
 					// [Changed for TicketV2] Tool is still waiting — execute it IMMEDIATELY so the planner starts with the result.
 					// Previously, the user's response always replaced tool input. But for tool_config followups
 					// (e.g., user selecting a Jira integration), the user's response is the config choice, not
@@ -4797,7 +4790,7 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					// we ensure doAction runs again with the newly resolved config — triggering the next
 					// config step (e.g., project selection after integration selection).
 					isConfigResolved := isToolConfigResolved(request.QueryConfig.ToolConfigs, action.Tool)
-					isConfirmationApproved := confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action, executor.agentRequest.AccountId)
+					isConfirmationApproved := isToolConfirmationApproved(executor.agentRequest.QueryConfig.ToolConfirmations, executor.confirmationKeyOf(resumeNameToTool, action))
 					// When the pause came from a sub-agent (delegate_agent, an agent
 					// tool), the user's reply is not this tool's input: an approval is
 					// recorded under the sub-agent's own tool key, so the check above

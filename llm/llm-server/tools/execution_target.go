@@ -287,6 +287,14 @@ func lookupAccountTarget(accountID string) *core.ExecutionTarget {
 	return &target
 }
 
+// AccountTarget names a connected account as a target, e.g. to say on an
+// approval card which account a write lands on. Nil when it cannot be read.
+func AccountTarget(accountID string) *core.ExecutionTarget { return describeAccount(accountID) }
+
+// ProviderOfTool is the target provider ("kubernetes", "aws", …) whose
+// connections a CLI tool selects, or "" for a tool that selects none.
+func ProviderOfTool(name string) string { return providerOfTool(name) }
+
 func providerOfTool(name string) string {
 	switch name {
 	case ToolExecuteKubectlCommand, ToolExecuteHelmCommand, ToolResourceSearch:

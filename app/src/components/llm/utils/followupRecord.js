@@ -116,9 +116,20 @@ export const describeFollowup = (task) => {
     detail = endedReason(answer);
   }
 
+  // Where an approval's write lands (llm-server followup.go FollowupTarget).
+  const target = isApproval && config.target?.name ? config.target : null;
+
   return {
     isApproval,
     toolName: config.toolName || '',
+    target: target
+      ? {
+          kind: asString(target.kind),
+          name: target.name,
+          integration: asString(target.integration),
+          crossAccount: Boolean(config.crossAccount),
+        }
+      : null,
     question,
     command,
     outcome,

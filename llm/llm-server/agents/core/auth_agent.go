@@ -13,6 +13,13 @@ import (
 )
 
 func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, action NBAgentPlannerToolAction) (*NBAgentPlannerFinishAction, *toolcore.ToolRequestType, error) {
+	return authorizeToolRequest(ctx, agent, request, action, nil)
+}
+
+// authorizeToolRequest is IsAgentToolAuthorizedToProcessRequest with the
+// accounts a write must be allowed on: writeAccounts is asked only for a
+// write, and nil means the conversation's account.
+func authorizeToolRequest(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, action NBAgentPlannerToolAction, writeAccounts func() []string) (*NBAgentPlannerFinishAction, *toolcore.ToolRequestType, error) {
 	toolName := action.Tool
 	canonicalToolName := toolcore.ResolveNBToolAlias(toolName)
 	var tool toolcore.NBTool
@@ -175,13 +182,22 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 			ctx.GetLogger().Info("auth: no classifier decided, running as read", "tool", toolName, "input", TruncateHead(action.ToolInput, 500), "agent", agent.GetName())
 		}
 
-		// Enforce write access check on confirmed mutations
+		// Enforce write access check on confirmed mutations, on the account
+		// the write lands on.
 		if requestType != "" && requestType != toolcore.ToolRequestTypeRead {
-			if !ctx.GetSecurityContext().HasAccountAccess(request.AccountId, security.SecurityAccessTypeCreate) {
-				ctx.GetLogger().Error("auth: agent is trying to execute command, but user doesnt have access to update", "tool", toolName, "input", action.ToolInput, "agent", agent.GetName(), "user", ctx.GetSecurityContext().GetUserId(), "account", request.AccountId)
-				return &NBAgentPlannerFinishAction{
-					Data: fmt.Sprintf("auth: agent is trying to execute - %s, but user doesnt have access to update", action.ToolInput),
-				}, &requestType, nil
+			accounts := []string{request.AccountId}
+			if writeAccounts != nil {
+				accounts = writeAccounts()
+			}
+			for _, account := range accounts {
+				// An empty or blank account names no account the user can write.
+				account = strings.TrimSpace(account)
+				if account == "" || !ctx.GetSecurityContext().HasAccountAccess(account, security.SecurityAccessTypeCreate) {
+					ctx.GetLogger().Error("auth: agent is trying to execute command, but user doesnt have access to update", "tool", toolName, "input", action.ToolInput, "agent", agent.GetName(), "user", ctx.GetSecurityContext().GetUserId(), "account", account, "conversation_account", request.AccountId)
+					return &NBAgentPlannerFinishAction{
+						Data: fmt.Sprintf("auth: agent is trying to execute - %s, but user doesnt have access to update", action.ToolInput),
+					}, &requestType, nil
+				}
 			}
 		}
 	}

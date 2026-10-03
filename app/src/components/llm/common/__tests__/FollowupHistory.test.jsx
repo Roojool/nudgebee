@@ -41,4 +41,35 @@ describe('FollowupHistory', () => {
     expect(screen.getByText('Approved')).toBeInTheDocument();
     expect(screen.getByText('No answer')).toBeInTheDocument();
   });
+
+  it('says which account and integration an approval wrote to', () => {
+    const approval = (target, crossAccount) => ({
+      type: 'followup-question',
+      tool: 'followup-question',
+      asked_at: '2026-10-03T09:16:00Z',
+      last_updated_at: '2026-10-03T09:17:00Z',
+      response: {
+        text: 'yes',
+        status: 'COMPLETED',
+        message_config: JSON.stringify({
+          followupType: 'tool_confirmation',
+          toolName: 'postgres_query_execute',
+          question: 'Tool(postgres_query_execute) is trying to delete resources on Kubernetes cluster **k8s-prod** · prod.\nCommand - delete from t',
+          target,
+          crossAccount,
+        }),
+      },
+    });
+    render(
+      <FollowupHistory
+        followups={[
+          approval({ provider: 'kubernetes', kind: 'Kubernetes cluster', name: 'k8s-prod', integration: 'prod' }, true),
+          approval({ provider: 'kubernetes', kind: 'Kubernetes cluster', name: 'k8s-dev' }, false),
+        ]}
+      />
+    );
+    const targets = screen.getAllByTestId('followup-target');
+    expect(targets.map((t) => t.textContent)).toEqual(['k8s-prod · prod', 'k8s-dev']);
+    expect(screen.getAllByText('delete from t')).toHaveLength(2);
+  });
 });

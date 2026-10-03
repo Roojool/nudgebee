@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { Box } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
 import { Label } from '@ui/Label';
+import { Chip } from '@ui/Chip';
 import Divider from '@ui/Divider';
 import { ds } from '@utils/colors';
 import { describeFollowup } from '../utils/followupRecord';
@@ -61,6 +62,21 @@ const FollowupRow = ({ followup }) => {
           <Box component='span' sx={{ fontFamily: ds.font.mono }}>
             {record.toolName}
           </Box>
+        )}
+        {record.target && (
+          <Tooltip
+            title={`${record.target.kind ? `${record.target.kind} ` : ''}${record.target.name}${
+              record.target.integration ? `, ${record.target.integration}` : ''
+            }`}
+            placement='top'
+          >
+            <Box component='span' sx={{ display: 'inline-flex' }} data-testid='followup-target'>
+              {/* Same colours as the "ran on" chip: another account stands out, the conversation's own stays grey. */}
+              <Chip variant='tag' size='xs' tone={record.target.crossAccount ? 'info' : 'neutral'}>
+                {[record.target.name, record.target.integration].filter(Boolean).join(' · ')}
+              </Chip>
+            </Box>
+          </Tooltip>
         )}
         {askedAt && <Box component='span'>{askedAt}</Box>}
       </Box>
