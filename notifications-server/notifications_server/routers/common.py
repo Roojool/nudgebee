@@ -107,14 +107,13 @@ def _list_channels_sync(platform, tenant):
 
 
 @router.post("/channels/list", dependencies=[Depends(verify_action_token)])
-async def list_channels(request: Request, body: Dict[Any, Any]):
+async def list_channels(request: Request, body: HasuraActionPayload):
     try:
-        session_variables = body.get("session_variables", {})
-        tenant = session_variables.get("tenant_id") or request.headers.get("tenant")
+        tenant = body.session_variables.get("tenant_id") or request.headers.get("tenant")
         if not tenant:
             return JSONResponse({"error": {"message": ERROR_TENANT_NOT_FOUND}})
 
-        platform = body.get("input", {}).get("platform")
+        platform = body.input.platform
 
         # CommonService is synchronous and can make blocking HTTP calls (Discord lists
         # channels across every guild) — run it off the event loop so a slow provider
@@ -127,14 +126,13 @@ async def list_channels(request: Request, body: Dict[Any, Any]):
 
 
 @router.post("/users/list", dependencies=[Depends(verify_action_token)])
-async def list_users(request: Request, body: Dict[Any, Any]):
+async def list_users(request: Request, body: HasuraActionPayload):
     try:
-        session_variables = body.get("session_variables", {})
-        tenant = session_variables.get("tenant_id") or request.headers.get("tenant")
+        tenant = body.session_variables.get("tenant_id") or request.headers.get("tenant")
         if not tenant:
             return JSONResponse({"error": {"message": ERROR_TENANT_NOT_FOUND}})
 
-        platform = body.get("input", {}).get("platform")
+        platform = body.input.platform
 
         with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
             users = controller.list_users(platform, tenant)
