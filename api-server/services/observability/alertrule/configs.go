@@ -624,6 +624,15 @@ func cubeAPMAdminHeaders(token string) map[string]string {
 // eventrule), so the row is read here and handed to promclient, which holds the
 // one auth implementation the metric queries also use.
 func getPrometheusUserConfig(sc *security.RequestContext, accountId string) (promclient.PrometheusUserConfig, error) {
+	// Same hazard as getCubeAPMConfigs: the cloud_account_id filter is conditional
+	// and the query ends in LIMIT 1, so an empty accountId resolves to an arbitrary
+	// user Prometheus in the tenant and the rule lands in the wrong account's ruler.
+	// CreateEventRule reaches here with an empty account for super admins, whom
+	// HasAccountAccess lets through for any account id.
+	if accountId == "" {
+		return promclient.PrometheusUserConfig{}, fmt.Errorf("account_id is required to resolve a Prometheus integration")
+	}
+
 	configs, err := listIntegrationConfigValuesWithSource(sc, accountId, "prometheus", "user")
 	if err != nil {
 		return promclient.PrometheusUserConfig{}, fmt.Errorf("failed to get prometheus integration: %w", err)
