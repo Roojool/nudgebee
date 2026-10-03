@@ -15,6 +15,7 @@
 #}
 {%- set _brand_name     = branding.name           | default("Nudgebee", true) -%}
 {%- set _primary_color  = branding.primary_color   | default("#3470e9", true) -%}
+{%- set _primary_tint   = branding.primary_tint_color | default("#DCE7FB", true) -%}
 {%- set _support_email  = branding.support_email   | default("", true) -%}
 {%- set _brand_logo_url = images.logo_url           | default("/branding/default/logo.png", true) -%}
 {%- set _copyright      = texts.copyright          | default("Copyright © 2022-2025", true) -%}
