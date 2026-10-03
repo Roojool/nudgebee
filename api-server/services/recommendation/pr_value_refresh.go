@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"nudgebee/services/account/adapter"
@@ -67,7 +68,14 @@ func maybeRefreshOpenPR(
 
 	drifts := detectValueDrift(oldValues, newValues, thresholds)
 	if len(drifts) == 0 {
-		return refreshDecision{Reason: "open pull request is still within the change threshold"}
+		reason := "open pull request is still within the change threshold"
+		// The verdict only covers what was compared. A value the pull request sets
+		// that this run produced nothing for is named, so the reason does not read
+		// as vouching for it.
+		if leftOut := fieldsRunLeftOut(oldValues, newValues, thresholds); len(leftOut) > 0 {
+			reason += "; not compared because this run produced no value: " + strings.Join(leftOut, ", ")
+		}
+		return refreshDecision{Reason: reason}
 	}
 
 	if blocked := valueRefreshBlocked(existingPR); blocked != "" {
@@ -80,7 +88,7 @@ func maybeRefreshOpenPR(
 	ctx.GetLogger().Info("pr_value_refresh: refreshing open pull request with changed values",
 		"resolution_id", existingPR.Id, "pr_url", existingPR.TypeReferenceId, "drift", summary)
 
-	dispatchValueRefresh(ctx, existingPR, newValues, drifts)
+	dispatchRefresh(ctx, existingPR, mergeRefreshValues(oldValues, newValues), drifts)
 
 	return refreshDecision{
 		Refreshed: true,
@@ -117,6 +125,97 @@ func storedResolutionValues(res *models.RecommendationResolution) map[string]any
 	return values
 }
 
+// mergeRefreshValues returns what the open pull request should propose after the
+// update: newValues, plus every value the pull request records that this run
+// produced nothing for, minus dimensions left with no value at all. The result is
+// what the agent is asked to apply and what is recorded once it lands.
+//
+// A run does not always produce every field the pull request sets. The rule can
+// reject one dimension while another passes — a cpu change past its max-change
+// limit, say — and the payload then carries that dimension empty. Sent as it is,
+// the empty dimension reads as "remove it": the agent put the base branch's cpu
+// back on a pull request whose memory limit was the only thing that had moved.
+// Recorded as it is, the stored values forget the pull request ever set it.
+// Carrying the pull request's own value over keeps both saying what the pull
+// request still proposes — which is what detectValueDrift already assumes when
+// it ignores a field the recommendation dropped. A dimension with nothing to
+// carry over is left out rather than sent empty, for the same reason.
+//
+// A field counts as produced when it holds a readable quantity, the same test
+// detectValueDrift applies. Neither input is modified.
+func mergeRefreshValues(oldValues, newValues map[string]any) map[string]any {
+	merged := make(map[string]any, len(newValues)+len(oldValues))
+	for key, value := range newValues {
+		merged[key] = value
+	}
+
+	containers := make(map[string]struct{}, len(newValues)+len(oldValues))
+	for container := range newValues {
+		containers[container] = struct{}{}
+	}
+	for container := range oldValues {
+		containers[container] = struct{}{}
+	}
+
+	for container := range containers {
+		newEntry := newValues[container]
+		newDims, isContainer := newEntry.(map[string]any)
+		if newEntry != nil && !isContainer {
+			continue // not shaped like a container entry; left as the run sent it
+		}
+		oldDims, _ := oldValues[container].(map[string]any)
+
+		dims := make(map[string]any, len(oldDims)+len(newDims))
+		for dimension, newDim := range newDims {
+			newFields, isFields := newDim.(map[string]any)
+			if newDim != nil && !isFields {
+				dims[dimension] = newDim
+				continue
+			}
+			oldFields, _ := oldDims[dimension].(map[string]any)
+			if fields := mergeRefreshFields(oldFields, newFields); len(fields) > 0 {
+				dims[dimension] = fields
+			}
+		}
+		for dimension, oldDim := range oldDims {
+			if _, sent := newDims[dimension]; sent {
+				continue
+			}
+			oldFields, _ := oldDim.(map[string]any)
+			if fields := mergeRefreshFields(oldFields, nil); len(fields) > 0 {
+				dims[dimension] = fields
+			}
+		}
+
+		if len(dims) > 0 {
+			merged[container] = dims
+		} else {
+			delete(merged, container)
+		}
+	}
+	return merged
+}
+
+// mergeRefreshFields is one dimension's fields: what the run produced, with the
+// pull request's recorded value for any field it did not.
+func mergeRefreshFields(oldFields, newFields map[string]any) map[string]any {
+	fields := make(map[string]any, len(oldFields)+len(newFields))
+	for field, value := range newFields {
+		if _, _, produced := quantityOf(newFields, field); produced {
+			fields[field] = value
+		}
+	}
+	for field, value := range oldFields {
+		if _, present := fields[field]; present {
+			continue
+		}
+		if _, _, recorded := quantityOf(oldFields, field); recorded {
+			fields[field] = value
+		}
+	}
+	return fields
+}
+
 // valueRefreshBlocked returns a human-readable reason when a guardrail says not to
 // refresh right now, or "" when a refresh may proceed.
 func valueRefreshBlocked(res *models.RecommendationResolution) string {
@@ -129,6 +228,10 @@ func valueRefreshBlocked(res *models.RecommendationResolution) string {
 	return ""
 }
 
+// dispatchRefresh is dispatchValueRefresh; a variable so a test can see what a
+// refresh is asked to apply without a database or a code agent.
+var dispatchRefresh = dispatchValueRefresh
+
 // dispatchValueRefresh re-runs the code agent against the open pull request with
 // the changed values, and records the outcome.
 //
@@ -137,16 +240,19 @@ func valueRefreshBlocked(res *models.RecommendationResolution) string {
 // claiming numbers the pull request did not contain — the same class of problem
 // as #34924 — and, because later drift is measured from the recorded values, it
 // also hid the real drift from every run after.
+//
+// values is the full set the pull request should propose after the update
+// (mergeRefreshValues), not the run's payload alone.
 func dispatchValueRefresh(
 	ctx adapter.AccountAdapterContext,
 	existingPR *models.RecommendationResolution,
-	newValues map[string]any,
+	values map[string]any,
 	drifts []valueDrift,
 ) {
 	summary := describeDrifts(drifts)
 	// The agent is shown memory the way the values file writes it ("278Mi"), not
 	// as the byte count the recommendation carries, and the check looks for either.
-	rendered := adapter.FormatRequestedValuesForPrompt(newValues)
+	rendered := adapter.FormatRequestedValuesForPrompt(values)
 	prompt := buildValueRefreshPrompt(existingPR.TypeReferenceId, rendered, renderDrifts(drifts))
 	verify := func(addedLines []string) (bool, string) {
 		return valuesOnBranch(drifts, rendered, addedLines)
@@ -155,7 +261,7 @@ func dispatchValueRefresh(
 	adapter.DispatchPRValueRefresh(ctx, existingPR, prompt, valueRefreshCap, valueRefreshCooldown, verify, func(outcome adapter.ValueRefreshOutcome, message string) {
 		switch outcome {
 		case adapter.ValueRefreshUpdated:
-			if err := recordValueRefresh(ctx, existingPR, newValues, summary); err != nil {
+			if err := recordValueRefresh(ctx, existingPR, values, summary); err != nil {
 				ctx.GetLogger().Error("pr_value_refresh: pull request updated but recording it failed",
 					"resolution_id", existingPR.Id, "error", err)
 			}
