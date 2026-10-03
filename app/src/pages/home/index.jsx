@@ -2029,6 +2029,10 @@ const Home = () => {
                   <>
                     {imageScanData && Object.keys(imageScanData).length > 0 ? (
                       <Box
+                        onClick={() =>
+                          selectedCluster?.value &&
+                          window.open(`/kubernetes/details/${selectedCluster.value}?status=Open&severity=Critical#security/image-scan`, '_blank')
+                        }
                         sx={{
                           display: 'flex',
                           alignItems: 'center',
@@ -2037,6 +2041,9 @@ const Home = () => {
                           px: 'var(--ds-space-3)',
                           mx: 'var(--ds-space-2)',
                           borderBottom: '1px solid var(--ds-gray-100)',
+                          cursor: 'pointer',
+                          transition: 'background-color 120ms ease',
+                          '&:hover': { backgroundColor: 'var(--ds-background-200)' },
                         }}
                       >
                         <Box sx={{ flexShrink: 0 }}>
@@ -2045,21 +2052,28 @@ const Home = () => {
                         <Typography sx={{ flex: 1, minWidth: 0, fontSize: 'var(--ds-text-body)', lineHeight: 1.5, color: 'var(--ds-gray-800)' }}>
                           {`${imageScanData.appCount} apps have ${imageScanData.totalCritical} critical CVEs in ${imageScanData.imageCount} images`}
                         </Typography>
-                        <Button
-                          tone='ghost'
-                          size='xs'
-                          icon={<AgentSparkleIcon />}
-                          iconPlacement='start'
-                          onClick={() =>
-                            window.open(`/kubernetes/details/${selectedCluster?.value}?status=Open&severity=Critical#security/image-scan`, '_blank')
-                          }
-                        >
-                          Review
-                        </Button>
+                        <Box sx={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                          <Button
+                            tone='ghost'
+                            size='xs'
+                            icon={<AgentSparkleIcon />}
+                            iconPlacement='start'
+                            onClick={() =>
+                              selectedCluster?.value &&
+                              window.open(`/kubernetes/details/${selectedCluster.value}?status=Open&severity=Critical#security/image-scan`, '_blank')
+                            }
+                          >
+                            Review
+                          </Button>
+                        </Box>
                       </Box>
                     ) : null}
                     {certificateData && Object.keys(certificateData).length > 0 ? (
                       <Box
+                        onClick={() =>
+                          selectedCluster?.value &&
+                          window.open(`/kubernetes/details/${selectedCluster.value}#security/ssl-certificate-issues`, '_blank')
+                        }
                         sx={{
                           display: 'flex',
                           alignItems: 'center',
@@ -2069,6 +2083,9 @@ const Home = () => {
                           mx: 'var(--ds-space-2)',
                           borderBottom: '1px solid var(--ds-gray-100)',
                           '&:last-child': { borderBottom: 'none' },
+                          cursor: 'pointer',
+                          transition: 'background-color 120ms ease',
+                          '&:hover': { backgroundColor: 'var(--ds-background-200)' },
                         }}
                       >
                         <Box sx={{ flexShrink: 0 }}>
@@ -2077,15 +2094,20 @@ const Home = () => {
                         <Typography sx={{ flex: 1, minWidth: 0, fontSize: 'var(--ds-text-body)', lineHeight: 1.5, color: 'var(--ds-gray-800)' }}>
                           {`${certificateData.expiringSoon} certificates expiring in less than 30 days`}
                         </Typography>
-                        <Button
-                          tone='ghost'
-                          size='xs'
-                          icon={<AgentSparkleIcon />}
-                          iconPlacement='start'
-                          onClick={() => window.open(`/kubernetes/details/${selectedCluster?.value}#security/ssl-certificate-issues`, '_blank')}
-                        >
-                          Review
-                        </Button>
+                        <Box sx={{ flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                          <Button
+                            tone='ghost'
+                            size='xs'
+                            icon={<AgentSparkleIcon />}
+                            iconPlacement='start'
+                            onClick={() =>
+                              selectedCluster?.value &&
+                              window.open(`/kubernetes/details/${selectedCluster.value}#security/ssl-certificate-issues`, '_blank')
+                            }
+                          >
+                            Review
+                          </Button>
+                        </Box>
                       </Box>
                     ) : null}
                   </>
