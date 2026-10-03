@@ -451,6 +451,23 @@ func TestFlattenLogsToTabSeparated(t *testing.T) {
 		assert.Equal(t, "\tjust a message\n", got)
 	})
 
+	t.Run("line breaks inside a message stay on one line", func(t *testing.T) {
+		input := `{"logs":[` +
+			`{"timestamp":"2026-05-06T03:00:10Z","message":"panic: boom\ngoroutine 1 [running]:\r\n\tmain.go:12"},` +
+			`{"timestamp":"2026-05-06T03:00:11Z","message":"progress 10%\rprogress 100%"},` +
+			`{"timestamp":"2026-05-06T03:00:12Z","message":"{\"level\":\"ERROR\",\"path\":\"C:\\\\tmp\"}"}` +
+			`]}`
+		got := flattenLogsToTabSeparated(input)
+		lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+		require.Len(t, lines, 3, "one line per record: %q", got)
+		assert.Equal(t, "2026-05-06T03:00:10Z\tpanic: boom\\ngoroutine 1 [running]:\\n\tmain.go:12", lines[0])
+		assert.Equal(t, "2026-05-06T03:00:11Z\tprogress 10%\\rprogress 100%", lines[1])
+		// JSON messages keep their own escapes, so the message still decodes.
+		var msg map[string]string
+		require.NoError(t, json.Unmarshal([]byte(strings.SplitN(lines[2], "\t", 2)[1]), &msg))
+		assert.Equal(t, `C:\tmp`, msg["path"])
+	})
+
 	t.Run("grep shape — head -N means N entries", func(t *testing.T) {
 		// Build an envelope with 50 entries; verify the result has exactly
 		// 50 newline-terminated lines so `head -N` semantics work.

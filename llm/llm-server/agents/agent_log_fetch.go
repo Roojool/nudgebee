@@ -1018,11 +1018,17 @@ func saveLogsToWorkspace(ctx *security.RequestContext, accountId, conversationId
 	}
 }
 
+// logLineBreakEscaper keeps one log record per line in the saved file.
+// Backslashes are left alone: messages are often JSON that is decoded later.
+var logLineBreakEscaper = strings.NewReplacer("\r\n", `\n`, "\n", `\n`, "\r", `\r`)
+
 // flattenLogsToTabSeparated converts a Loki/Signoz/ES JSON envelope to one entry per
 // line. Each output line is `<outer_timestamp>\t<message>` where <message> is
 // the application's emitted line (often itself JSON of the form
 // `{"timestamp":"...","level":"ERROR",...}`). grep then matches per-entry
-// and `head -N` means N entries.
+// and `head -N` means N entries. Line breaks inside a message (stack traces,
+// `\r` progress output) are written as the literal escapes `\n` / `\r`, so a
+// record never spans two lines and line counts stay record counts.
 //
 // Returns the input verbatim when:
 //   - it doesn't parse as the expected envelope (kubectl text, "No logs
@@ -1058,7 +1064,7 @@ func flattenLogsToTabSeparated(raw string) string {
 	b.Grow(len(raw))
 	for _, e := range doc.Logs {
 		ts := strings.TrimSpace(e.Timestamp)
-		msg := strings.TrimSpace(e.Message)
+		msg := logLineBreakEscaper.Replace(strings.TrimSpace(e.Message))
 		b.WriteString(ts)
 		b.WriteByte('\t')
 		b.WriteString(msg)
