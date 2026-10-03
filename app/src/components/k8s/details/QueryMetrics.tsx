@@ -552,7 +552,13 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
             labels: decimatedLabels.map((e: number) => convertNumberToTimestamp(e)),
             data: fromMetric
               ? chartDataDataset
-              : [{ label: 'Value', data: decimateData(g.payload[0]?.values?.map((e: string) => parseFloat(e)) || [], MAX_CHART_DATA_POINTS) }],
+              : // A series with no labels of its own is named after the metric it charts.
+                [
+                  {
+                    label: g.query_key || 'Value',
+                    data: decimateData(g.payload[0]?.values?.map((e: string) => parseFloat(e)) || [], MAX_CHART_DATA_POINTS),
+                  },
+                ],
           },
         });
       } else if (evidenceData[g]) {

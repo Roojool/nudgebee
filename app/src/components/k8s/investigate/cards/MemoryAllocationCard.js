@@ -9,6 +9,7 @@ import { safeJSONParse } from 'src/utils/common';
 import { Box, Typography } from '@mui/material';
 import { useMemo, useState } from 'react';
 import { ds } from '@utils/colors';
+import { mentionsContainer, summarizeAllocation } from './cardSummaries';
 
 // Owner kinds as events store them (the Go agent writes them lowercase) → the
 // k8s_workloads.kind spelling the workload lookup and the apply path match on.
@@ -333,8 +334,16 @@ class MemoryAllocationCard {
     return this.renderContent;
   };
 
+  // The stored summary when the evidence has one, otherwise the first container's peak against its
+  // limit. When a container was killed and the stored summary is about another one, the killed
+  // container's line leads: on #38638 the summary described a sidecar while the container that
+  // died had no samples at all.
   getHighLightsData = () => {
-    return this.insightData;
+    const stored = this.insightData?.length > 0 ? this.insightData : [];
+    const killed = this.oomKilledContainer();
+    if (stored.length > 0 && (!killed || stored.some((line) => mentionsContainer(line, killed)))) return stored;
+    const items = killed ? (this.podMemoryAllocationItem || []).filter((i) => i?.container === killed) : this.podMemoryAllocationItem;
+    return [...summarizeAllocation(items), ...stored];
   };
 
   // The workload behind the event's pod. The event's own owner fields are the

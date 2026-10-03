@@ -104,10 +104,14 @@ const getNavigationUrl = (item: TimelineItem, currentEventId: string): string | 
 };
 
 // --- Main Component ---
-const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
+// `prefetched` is the timeline the caller already loaded for this event; with it the widget shows
+// that and does not fetch again. It is read on every render, not copied into state, so a caller
+// that moves to another event is never shown the previous event's timeline.
+const DevOpsTimelineMUI = ({ eventId, prefetched }: { eventId: string; prefetched?: TimelineResponse | null }) => {
   const theme = useTheme();
 
-  const [timelineData, setTimelineData] = useState<TimelineResponse | null>(null);
+  const [fetchedData, setFetchedData] = useState<TimelineResponse | null>(null);
+  const timelineData = prefetched || fetchedData;
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -122,7 +126,7 @@ const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
         if (cancelled) {
           return;
         }
-        setTimelineData(response?.data?.data?.event_get_timeline || {});
+        setFetchedData(response?.data?.data?.event_get_timeline || {});
       } catch (err) {
         if (cancelled) {
           return;
@@ -136,14 +140,14 @@ const DevOpsTimelineMUI = ({ eventId }: { eventId: string }) => {
       }
     };
 
-    if (eventId) {
+    if (eventId && !prefetched) {
       fetchTimelineData();
     }
 
     return () => {
       cancelled = true;
     };
-  }, [eventId]);
+  }, [eventId, prefetched]);
 
   // Memoize sorted timeline to prevent re-sorting on every render
   const sortedTimeline = useMemo(() => {

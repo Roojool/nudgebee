@@ -2,6 +2,7 @@ import { MetricsInvestigateIcon } from '@assets';
 import QueryMetrics from '@components/k8s/details/QueryMetrics';
 import { formatDateForPlusMinusDuration, safeJSONParse } from 'src/utils/common';
 import { formatMetricValue } from '@lib/promqlUnit';
+import { summarizeQueryMetrics } from './cardSummaries';
 
 let queryMetricsCardIdx = 0;
 
@@ -36,6 +37,7 @@ class QueryMetricsCard {
         );
         if (hasData) {
           this.preparedEvidences = (parsedJson?.data || parsedJson).results;
+          this.insightData = summarizeQueryMetrics(this.preparedEvidences);
           this.renderContent = true;
         }
       }

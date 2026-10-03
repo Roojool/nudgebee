@@ -2,10 +2,13 @@ import Datetime from '@shared/format/Datetime';
 import { PrometheusIcon } from '@assets';
 import KubernetesPrometheus from '@components/k8s/details/KubernetesPrometheus';
 import { formatMetricValue, inferPromqlUnit } from '@lib/promqlUnit';
+import { summarizeMetricGroups, summarizeSeries } from './cardSummaries';
 
 class PrometheusCard {
-  constructor(data, _event) {
+  constructor(data, event) {
     this.id = 'PrometheusCard';
+    this.sourceData = data;
+    this.event = event;
     this.icon = PrometheusIcon;
     // Fall back to the PromQL query as the title, but collapse whitespace and
     // truncate so long/multi-line expressions don't overflow the card header.
@@ -41,7 +44,18 @@ class PrometheusCard {
         this.resultType = 'vector';
       }
     }
+    if (this.renderContent) this.insightData = this.summarize();
     return this.renderContent;
+  };
+
+  // The stored summary when there is one. Otherwise: for a cloud resource's metrics, the one the
+  // alarm watches and its peak; for a query result, how many series and the range they cover.
+  summarize = () => {
+    const data = this.sourceData;
+    if (data?.insight?.length > 0) return data.insight;
+    if (data?.data?.metric_groups) return summarizeMetricGroups(data.data.metric_groups, this.event?.labels?.aws_event_metric_name);
+    const unit = inferPromqlUnit(data?.metadata?.query);
+    return summarizeSeries(data?.data?.series_list_result, unit ? (value) => formatMetricValue(value, unit) : undefined);
   };
 
   getHighLightsData = () => {
