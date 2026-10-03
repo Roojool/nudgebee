@@ -12,6 +12,7 @@ import (
 	"nudgebee/tickets-server/models"
 	"nudgebee/tickets-server/services/ticket"
 	"nudgebee/tickets-server/services/tools"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -421,6 +422,40 @@ func applyTicketUpdate(dbManager *database.DatabaseManager, ticketRowID string, 
 	}
 }
 
+// authStatusRx matches a 401/403 status the way these SDKs actually emit it —
+// Jira's "Status code: 401", PagerDuty's "status code 401", ZenDuty's
+// "status 403: ...", or the bare "<method> <url>: 401 ..." GitHub/GitLab
+// produce — rather than a bare "401"/"403" substring, which would also match
+// a Jira issue key (PROJ-403), a port number, or similar incidental digits.
+var authStatusRx = regexp.MustCompile(`(?i)(?:\bstatus(?:\s+code)?\s*:?\s*|:\s+)(401|403)\b`)
+
+// isAuthFailure reports whether err indicates rejected credentials or
+// insufficient permissions (HTTP 401/403) rather than a transient failure
+// (timeout, 5xx, 429, DNS, network unreachable). Freshdesk and the
+// ServiceNow wrapper (interpretServiceNowError) already rewrite 401/403 into
+// a human-readable phrase instead of a status code, so those are matched by
+// wording instead of authStatusRx.
+func isAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if authStatusRx.MatchString(msg) {
+		return true
+	}
+	msgLower := strings.ToLower(msg)
+	for _, needle := range []string{"unauthorized", "forbidden", "authentication failed", "lacks permission"} {
+		if strings.Contains(msgLower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// configSyncTimeout bounds a single configuration's metadata validation so a
+// hung upstream can't block the rest of this sequential loop indefinitely.
+const configSyncTimeout = time.Minute
+
 // SyncConfigurations refreshes metadata for all enabled ticketing integrations.
 // Uses context.Background() since it runs as a background goroutine detached from any HTTP request.
 func SyncConfigurations() {
@@ -453,9 +488,18 @@ func SyncConfigurations() {
 			continue
 		}
 
-		metadata, err := ValidateAndGetMetadataWithContext(ctx, configuration)
+		iterCtx, cancel := context.WithTimeout(ctx, configSyncTimeout)
+		metadata, err := ValidateAndGetMetadataWithContext(iterCtx, configuration)
+		cancel()
 		if err != nil {
-			// Mark integration as disabled/expired
+			if !isAuthFailure(err) {
+				// Transient failure (timeout, 5xx, 429, DNS, unreachable host,
+				// …) — leave the integration enabled so the next sync run can
+				// self-heal instead of disabling it after one slow upstream.
+				slog.Warn("Transient failure validating configuration; leaving enabled", "error", slog.AnyValue(err), "id", configuration.ID)
+				continue
+			}
+
 			_, dbErr := dbManager.Exec(`
 				UPDATE integrations
 				SET status = $1, updated_at = NOW()
@@ -464,7 +508,7 @@ func SyncConfigurations() {
 			if dbErr != nil {
 				slog.Error("Unable to update integration status:", "error", slog.AnyValue(dbErr), "id", configuration.ID)
 			}
-			slog.Error("Unable to validate configuration:", "error", slog.AnyValue(err), "id", configuration.ID)
+			slog.Error("Disabling integration: credentials rejected", "error", slog.AnyValue(err), "id", configuration.ID)
 			continue
 		}
 

@@ -166,3 +166,41 @@ func TestNewSafeGinContext_HasNonNilRequest(t *testing.T) {
 		t.Fatal("Request is nil; a gin.Context method that reads it directly would panic")
 	}
 }
+
+// isAuthFailure is what SyncConfigurations relies on to tell a real
+// credential rejection (which should disable the integration) apart from a
+// transient failure (which should not — nudgebee-enterprise#39091: a brief
+// upstream outage used to disable the integration permanently since any
+// error, transient or not, was treated as fatal). Every tool's SDK formats
+// its error differently, so each one is exercised with its actual wording.
+func TestIsAuthFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"jira 401", errors.New("request failed. Please analyze the request body for more details. Status code: 401"), true},
+		{"jira 403", errors.New("request failed. Please analyze the request body for more details. Status code: 403"), true},
+		{"github 401", errors.New("GET https://api.github.com/user: 401 Bad credentials []"), true},
+		{"gitlab 403", errors.New("GET https://gitlab.example.com/api/v4/projects: 403 Forbidden"), true},
+		{"pagerduty 401", errors.New("HTTP response failed with status code 401 and no JSON error object was present"), true},
+		{"zenduty 403", errors.New("request failed with status 403: forbidden"), true},
+		{"freshdesk 401", errors.New("freshdesk GET /tickets failed: authentication failed (invalid API key)"), true},
+		{"freshdesk 403", errors.New("freshdesk GET /groups failed: API key lacks permission"), true},
+		{"servicenow 401", errors.New("servicenow authentication failed: invalid username or password"), true},
+		{"servicenow 403", errors.New("servicenow authentication failed: user lacks permission to read the incident table"), true},
+		{"timeout", errors.New("context deadline exceeded"), false},
+		{"server error", errors.New("request failed. Please analyze the request body for more details. Status code: 503"), false},
+		{"rate limited", errors.New("request failed with status 429: too many requests"), false},
+		{"dns failure", errors.New(`Get "https://jira.example.com": dial tcp: lookup jira.example.com: no such host`), false},
+		{"transient error with ticket ID containing 403", errors.New(`Get "https://jira.example.com/rest/api/2/issue/PROJ-403": dial tcp: lookup jira.example.com: no such host`), false},
+		{"nil error", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isAuthFailure(c.err); got != c.want {
+				t.Errorf("isAuthFailure(%q) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
