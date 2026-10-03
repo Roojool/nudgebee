@@ -326,6 +326,11 @@ func serializeMessagesWithSources(messages []llms.MessageContent) (string, []Sou
 		for pIdx, p := range m.Parts {
 			currentMIdx = mIdx
 			currentPIdx = pIdx
+			// A cache-marked part (Anthropic prompt caching) is scanned like
+			// the part it wraps; SetPartText re-wraps it on redaction.
+			if cc, ok := p.(llms.CachedContent); ok {
+				p = cc.ContentPart
+			}
 			switch part := p.(type) {
 			case llms.TextContent:
 				addRegion(part.Text, textSource, "")

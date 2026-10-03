@@ -1336,27 +1336,21 @@ func GetLlmModelWithProvider(provider string, agentName string, appendAgentName 
 	return GetLLMModel(provider, modelName, agentName, appendAgentName, accountId)
 }
 
-// Anthropic prompt-caching fix (regression from PR #36318).
+// Anthropic system-prompt caching for calls that skip AnthropicCacheProvider.
 //
-// The multi-breakpoint layout places its primary cache breakpoint on the
-// SYSTEM message, but langchaingo v0.1.14's handleSystemMessage unwraps
-// llms.CachedContent and serializes `system` as a plain string — silently
-// dropping the cache_control block. Anthropic only caches a system prompt
-// when `system` is sent as a content-block array. Result: zero cache
-// creation/reads on the anthropic provider since 2026-08-16 (worked in March
-// when the old single breakpoint landed on a Human message, which the client
-// serializes correctly).
-//
-// Until the client is patched/upgraded, this transport restores the intended
-// behavior at the wire: when a /v1/messages body carries `system` as a
-// non-empty string (and caching is enabled), it is rewritten to
+// Anthropic only caches a system prompt sent as a content-block array. When
+// AnthropicCacheProvider marks the system prompt, the in-repo adapter
+// (llms/anthropic) already sends it as blocks with cache_control and this
+// transport leaves the body alone. Calls that never reach the provider (no
+// conversation ID) send `system` as a plain string; for those, when a
+// /v1/messages body carries `system` as a non-empty string (and caching is
+// enabled), it is rewritten to
 //
 //	"system": [{"type":"text","text":<s>,"cache_control":{"type":"ephemeral"}}]
 //
 // which is the documented cacheable form. Prompts below Anthropic's minimum
 // cacheable size are simply not cached by the API — the form is valid either
-// way. Human-message breakpoints are unaffected (they serialize correctly).
-// Composes with the temperature sanitizer (http_sanitizer.go) as its base.
+// way. Composes with the temperature sanitizer (http_sanitizer.go) as its base.
 type anthropicSystemCacheTransport struct {
 	base http.RoundTripper
 }

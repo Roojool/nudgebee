@@ -56,8 +56,11 @@ func CopyMessages(orig []llms.MessageContent) []llms.MessageContent {
 //   - llms.ToolCall (FunctionCall.Arguments)
 //   - llms.ToolCallResponse (Content)
 //   - llms.ImageURLContent (URL)
+//   - llms.CachedContent wrapping any of the above
 func ExtractPartText(p llms.ContentPart) (string, bool) {
 	switch part := p.(type) {
+	case llms.CachedContent:
+		return ExtractPartText(part.ContentPart)
 	case llms.TextContent:
 		return part.Text, true
 	case *llms.TextContent:
@@ -96,6 +99,8 @@ func ExtractPartText(p llms.ContentPart) (string, bool) {
 // reached for those.
 func SetPartText(p llms.ContentPart, text string) llms.ContentPart {
 	switch part := p.(type) {
+	case llms.CachedContent:
+		return llms.CachedContent{ContentPart: SetPartText(part.ContentPart, text), CacheControl: part.CacheControl}
 	case llms.TextContent:
 		return llms.TextContent{Text: text}
 	case *llms.TextContent:

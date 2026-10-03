@@ -820,6 +820,9 @@ func TestAnthropicLLM_ProcessMessages_ChatMessageTypeTool(t *testing.T) {
 				llms.TextContent{
 					Text: "Additional tool log context",
 				},
+				// Other part types are skipped in a tool message, wrapped or not.
+				llms.BinaryContent{MIMEType: "image/png", Data: []byte{1}},
+				llms.WithCacheControl(llms.BinaryContent{MIMEType: "image/png", Data: []byte{1}}, &llms.CacheControl{Type: "ephemeral"}),
 			},
 		},
 	}
@@ -831,6 +834,10 @@ func TestAnthropicLLM_ProcessMessages_ChatMessageTypeTool(t *testing.T) {
 	assert.Equal(t, "user", chatMsgs[0].Role)
 	assert.Equal(t, "assistant", chatMsgs[1].Role)
 	assert.Equal(t, "user", chatMsgs[2].Role)
+	// tool_result + text only; both image parts were skipped.
+	blocks, ok := chatMsgs[2].Content.([]any)
+	require.True(t, ok)
+	assert.Len(t, blocks, 2)
 }
 
 func TestToContentBlocks_NilAndEmptyHandling(t *testing.T) {
@@ -841,4 +848,87 @@ func TestToContentBlocks_NilAndEmptyHandling(t *testing.T) {
 	blocks := toContentBlocks([]any{nil, anthropicclient.TextContent{Type: "text", Text: "hello"}})
 	require.Len(t, blocks, 1)
 	assert.Equal(t, "hello", blocks[0].(anthropicclient.TextContent).Text)
+}
+
+// Cache markers from AnthropicCacheProvider arrive as llms.CachedContent. The
+// adapter must keep the wrapped content and put cache_control on its block —
+// a cached system prompt used to be dropped (system sent empty) and a cached
+// human part used to fail with "unsupported content part type".
+func TestAnthropicLLM_GenerateContent_CachedContentOnWire(t *testing.T) {
+	var capturedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	llm, err := New(WithToken("test-token"), WithModel("claude-sonnet-4-6"), WithBaseURL(server.URL), WithHTTPClient(server.Client()))
+	require.NoError(t, err)
+
+	ephemeral := &llms.CacheControl{Type: "ephemeral"}
+	messages := []llms.MessageContent{
+		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{
+			llms.WithCacheControl(llms.TextContent{Text: "You are Nubi."}, ephemeral),
+		}},
+		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{
+			llms.WithCacheControl(llms.TextContent{Text: "Why is the pod crashing?"}, ephemeral),
+		}},
+		{Role: llms.ChatMessageTypeAI, Parts: []llms.ContentPart{
+			llms.ToolCall{ID: "call_1", Type: "function", FunctionCall: &llms.FunctionCall{Name: "kubectl", Arguments: `{"cmd":"get pods"}`}},
+		}},
+		{Role: llms.ChatMessageTypeTool, Parts: []llms.ContentPart{
+			llms.WithCacheControl(llms.ToolCallResponse{ToolCallID: "call_1", Name: "kubectl", Content: "pod-a CrashLoopBackOff"}, ephemeral),
+		}},
+	}
+
+	_, err = llm.GenerateContent(context.Background(), messages)
+	require.NoError(t, err)
+
+	var body struct {
+		System   []map[string]any `json:"system"`
+		Messages []struct {
+			Role    string           `json:"role"`
+			Content []map[string]any `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(capturedBody, &body), string(capturedBody))
+
+	require.Len(t, body.System, 1)
+	assert.Equal(t, "You are Nubi.", body.System[0]["text"])
+	assert.Equal(t, map[string]any{"type": "ephemeral"}, body.System[0]["cache_control"])
+
+	require.Len(t, body.Messages, 3)
+	assert.Equal(t, "Why is the pod crashing?", body.Messages[0].Content[0]["text"])
+	assert.Equal(t, map[string]any{"type": "ephemeral"}, body.Messages[0].Content[0]["cache_control"])
+	assert.Nil(t, body.Messages[1].Content[0]["cache_control"], "tool_use carries no marker unless asked")
+	assert.Equal(t, "tool_result", body.Messages[2].Content[0]["type"])
+	assert.Equal(t, "pod-a CrashLoopBackOff", body.Messages[2].Content[0]["content"])
+	assert.Equal(t, map[string]any{"type": "ephemeral"}, body.Messages[2].Content[0]["cache_control"])
+}
+
+// Without a cache marker the system prompt stays a plain string, so the
+// transport-level system rewrite in agents/core keeps caching those calls;
+// with one it is sent as blocks, without empty ones.
+func TestProcessMessages_SystemPromptShape(t *testing.T) {
+	system, _, err := processMessages([]llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeSystem, "part one", "part two"),
+		llms.TextParts(llms.ChatMessageTypeHuman, "hi"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "part one\n\npart two", system)
+
+	// A blank part next to a marked one is dropped, not sent as an empty block.
+	system, _, err = processMessages([]llms.MessageContent{{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{
+		llms.TextContent{Text: ""},
+		llms.WithCacheControl(llms.TextContent{Text: "rules"}, &llms.CacheControl{Type: "ephemeral"}),
+	}}})
+	require.NoError(t, err)
+	blocks, ok := system.([]anthropicclient.TextContent)
+	require.True(t, ok)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, "rules", blocks[0].Text)
+
+	system, _, err = processMessages([]llms.MessageContent{llms.TextParts(llms.ChatMessageTypeHuman, "hi")})
+	require.NoError(t, err)
+	assert.Nil(t, system)
 }

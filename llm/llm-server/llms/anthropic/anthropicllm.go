@@ -220,26 +220,33 @@ func (o *LLM) GenerateContent(ctx context.Context, messages []llms.MessageConten
 	return contentResp, nil
 }
 
-func processMessages(messages []llms.MessageContent) (string, []anthropicclient.ChatMessage, error) {
-	var systemBuilder strings.Builder
+// processMessages returns the system prompt as a plain string, or as text
+// blocks when any system part carries a cache marker (Anthropic only caches a
+// system prompt sent as blocks). It is nil when there is no system text.
+func processMessages(messages []llms.MessageContent) (any, []anthropicclient.ChatMessage, error) {
+	var systemBlocks []anthropicclient.TextContent
+	systemCached := false
 	chatMessages := make([]anthropicclient.ChatMessage, 0, len(messages))
 
 	for _, mc := range messages {
 		switch mc.Role {
 		case llms.ChatMessageTypeSystem:
 			for _, part := range mc.Parts {
-				if tc, ok := part.(llms.TextContent); ok {
-					if systemBuilder.Len() > 0 {
-						systemBuilder.WriteString("\n\n")
-					}
-					systemBuilder.WriteString(tc.Text)
+				var cacheControl *anthropicclient.CacheControl
+				if cc, ok := part.(llms.CachedContent); ok {
+					part, cacheControl = cc.ContentPart, toCacheControl(cc.CacheControl)
+				}
+				// Anthropic rejects empty text blocks.
+				if tc, ok := part.(llms.TextContent); ok && strings.TrimSpace(tc.Text) != "" {
+					systemBlocks = append(systemBlocks, anthropicclient.TextContent{Type: "text", Text: tc.Text, CacheControl: cacheControl})
+					systemCached = systemCached || cacheControl != nil
 				}
 			}
 
 		case llms.ChatMessageTypeHuman, llms.ChatMessageTypeGeneric:
 			blocks, err := convertPartsToBlocks(mc.Parts)
 			if err != nil {
-				return "", nil, err
+				return nil, nil, err
 			}
 			chatMessages = append(chatMessages, anthropicclient.ChatMessage{
 				Role:    "user",
@@ -249,7 +256,7 @@ func processMessages(messages []llms.MessageContent) (string, []anthropicclient.
 		case llms.ChatMessageTypeAI:
 			blocks, err := convertPartsToBlocks(mc.Parts)
 			if err != nil {
-				return "", nil, err
+				return nil, nil, err
 			}
 			chatMessages = append(chatMessages, anthropicclient.ChatMessage{
 				Role:    "assistant",
@@ -258,32 +265,77 @@ func processMessages(messages []llms.MessageContent) (string, []anthropicclient.
 
 		case llms.ChatMessageTypeTool:
 			for _, part := range mc.Parts {
-				switch tr := part.(type) {
-				case llms.ToolCallResponse:
-					chatMessages = append(chatMessages, anthropicclient.ChatMessage{
-						Role: "user",
-						Content: []anthropicclient.ToolResultContent{
-							{
-								Type:      "tool_result",
-								ToolUseID: tr.ToolCallID,
-								Content:   tr.Content,
-							},
-						},
-					})
-				case llms.TextContent:
-					chatMessages = append(chatMessages, anthropicclient.ChatMessage{
-						Role:    "user",
-						Content: tr.Text,
-					})
+				inner := part
+				if cc, ok := part.(llms.CachedContent); ok {
+					inner = cc.ContentPart
 				}
+				switch inner.(type) {
+				case llms.ToolCallResponse, llms.TextContent:
+				default:
+					continue
+				}
+				content, err := convertPartsToBlocks([]llms.ContentPart{part})
+				if err != nil {
+					return nil, nil, err
+				}
+				chatMessages = append(chatMessages, anthropicclient.ChatMessage{
+					Role:    "user",
+					Content: content,
+				})
 			}
 
 		default:
-			return "", nil, fmt.Errorf("unsupported message role: %v", mc.Role)
+			return nil, nil, fmt.Errorf("unsupported message role: %v", mc.Role)
 		}
 	}
 
-	return systemBuilder.String(), coalesceChatMessages(chatMessages), nil
+	var system any
+	switch {
+	case systemCached:
+		system = systemBlocks
+	case len(systemBlocks) > 0:
+		texts := make([]string, len(systemBlocks))
+		for i, b := range systemBlocks {
+			texts[i] = b.Text
+		}
+		if joined := strings.Join(texts, "\n\n"); joined != "" {
+			system = joined
+		}
+	}
+
+	return system, coalesceChatMessages(chatMessages), nil
+}
+
+func toCacheControl(cc *llms.CacheControl) *anthropicclient.CacheControl {
+	if cc == nil {
+		return nil
+	}
+	typ := cc.Type
+	if typ == "" {
+		typ = "ephemeral"
+	}
+	return &anthropicclient.CacheControl{Type: typ}
+}
+
+// withCacheControl sets cache_control on a converted block. Blocks that cannot
+// carry one are returned unchanged.
+func withCacheControl(block any, cc *anthropicclient.CacheControl) any {
+	switch b := block.(type) {
+	case anthropicclient.TextContent:
+		b.CacheControl = cc
+		return b
+	case anthropicclient.ImageContent:
+		b.CacheControl = cc
+		return b
+	case anthropicclient.ToolUseContent:
+		b.CacheControl = cc
+		return b
+	case anthropicclient.ToolResultContent:
+		b.CacheControl = cc
+		return b
+	default:
+		return block
+	}
 }
 
 func coalesceChatMessages(messages []anthropicclient.ChatMessage) []anthropicclient.ChatMessage {
@@ -350,6 +402,18 @@ func convertPartsToBlocks(parts []llms.ContentPart) (any, error) {
 	blocks := make([]any, 0, len(parts))
 	for _, part := range parts {
 		switch p := part.(type) {
+		case llms.CachedContent:
+			inner, err := convertPartsToBlocks([]llms.ContentPart{p.ContentPart})
+			if err != nil {
+				return nil, err
+			}
+			innerBlocks := toContentBlocks(inner)
+			if len(innerBlocks) == 0 {
+				continue
+			}
+			last := len(innerBlocks) - 1
+			innerBlocks[last] = withCacheControl(innerBlocks[last], toCacheControl(p.CacheControl))
+			blocks = append(blocks, innerBlocks...)
 		case llms.TextContent:
 			blocks = append(blocks, anthropicclient.TextContent{
 				Type: "text",

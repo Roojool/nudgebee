@@ -23,7 +23,7 @@ type ChatMessage struct {
 type MessageRequest struct {
 	Model         string          `json:"model"`
 	Messages      []ChatMessage   `json:"messages"`
-	System        string          `json:"system,omitempty"`
+	System        any             `json:"system,omitempty"` // string, or []TextContent when a block carries cache_control
 	MaxTokens     int             `json:"max_tokens"`
 	Temperature   *float64        `json:"temperature,omitempty"`
 	TopP          *float64        `json:"top_p,omitempty"`
@@ -88,6 +88,8 @@ type ToolUseContent struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // ToolResultContent represents a tool execution result returned to the model.
@@ -96,6 +98,8 @@ type ToolResultContent struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
 
 // Usage represents token usage statistics returned by Anthropic.
