@@ -189,7 +189,9 @@ const VmInventory = ({ accountId, vulnId, scopeLabel, onClearScope }: VmInventor
   }, [pollDeadline, fetchEnrichment]);
 
   const onSearchEnter = () => {
-    setAppliedSearch(searchInput);
+    // Pasted text often carries a stray space, which the substring match would
+    // otherwise treat as part of the name and find nothing.
+    setAppliedSearch(searchInput.trim());
     setPage(0);
   };
 

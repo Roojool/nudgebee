@@ -778,9 +778,13 @@ const apiCloudAccount = {
         where.region = { _eq: data.region };
       }
       const andConditions: any[] = [];
-      if (data.nameFilter) {
+      // Every caller passes the search box text as typed. Pasted text often
+      // carries a stray space, which the substring match would otherwise treat
+      // as part of the id/name and find nothing.
+      const nameFilter = data.nameFilter?.trim();
+      if (nameFilter) {
         andConditions.push({
-          _or: [{ resourse_id: { _ilike: '%' + data.nameFilter + '%' } }, { name: { _ilike: '%' + data.nameFilter + '%' } }],
+          _or: [{ resourse_id: { _ilike: '%' + nameFilter + '%' } }, { name: { _ilike: '%' + nameFilter + '%' } }],
         });
       }
       // Handle tag filtering with JSON _contains (values serialized as JSON strings)

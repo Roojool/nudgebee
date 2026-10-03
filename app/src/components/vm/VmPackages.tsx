@@ -109,7 +109,9 @@ const VmPackages = ({ accountId, cloudResourceId, embedded = false, vmNames = NO
   }, [fetchPackages]);
 
   const onSearchEnter = () => {
-    setAppliedSearch(searchInput);
+    // Pasted text often carries a stray space, which the substring match would
+    // otherwise treat as part of the name and find nothing.
+    setAppliedSearch(searchInput.trim());
     setPage(0);
   };
 
