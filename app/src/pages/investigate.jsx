@@ -830,22 +830,27 @@ const Investigate = () => {
     }
   }, [selectedCluster, isK8s]);
 
-  // tabValue 0 is set optimistically below, before the AskAiCard has necessarily arrived (or when it never
-  // does, e.g. the AI service is down). Tab 0 only exists once that card does, so until then show Evidence
+  // Once the reader has picked a tab or opened a card, the page stops choosing the tab for them:
+  // the switch to the analysis when it is ready used to move the screen under someone already
+  // reading the evidence.
+  const readerChoseViewRef = useRef(false);
+
+  // Tab 0 only exists while the AskAiCard does. If the card goes away with tab 0 selected, show Evidence
   // rather than pointing Tabs at a value it has no child for.
   const hasAskAiTab = matchedOptions.some((option) => option?.id === 'AskAiCard');
   const activeTab = tabValue === 0 && !hasAskAiTab ? 1 : tabValue;
 
   useEffect(() => {
+    if (readerChoseViewRef.current) return;
     if (currentInvestigation) {
       setTabValue(1);
-    } else {
+    } else if (hasAskAiTab) {
       const timer = setTimeout(() => {
-        setTabValue(0);
+        if (!readerChoseViewRef.current) setTabValue(0);
       }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [currentInvestigation]);
+  }, [currentInvestigation, hasAskAiTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1612,6 +1617,7 @@ const Investigate = () => {
   }, [queryParam?.id, queryParam?.aggregationKey, queryParam?.serviceKey, queryParam?.start_at, source]);
 
   const handleCardClick = useCallback((cardKey) => {
+    readerChoseViewRef.current = true;
     setOpenCardKey((prevOpenCardKey) => {
       const isCurrentlyOpen = prevOpenCardKey === cardKey;
       setCollapsedObj((prevCollapsedObj) => {
@@ -1709,6 +1715,8 @@ const Investigate = () => {
   };
 
   const resetState = () => {
+    readerChoseViewRef.current = false;
+    setTabValue(1);
     cancelGeneration();
     stopRcaPolling();
     setRow({});
@@ -2314,6 +2322,13 @@ const Investigate = () => {
                           )
                         )}
                         <Box
+                          // A click on a tab is the reader choosing a view, including a click on the tab
+                          // already selected, which Tabs does not report as a change. A disabled tab is not
+                          // a choice.
+                          onClickCapture={(event) => {
+                            const tab = event.target.closest?.('[role="tab"]');
+                            if (tab && !tab.disabled && tab.getAttribute('aria-disabled') !== 'true') readerChoseViewRef.current = true;
+                          }}
                           sx={{
                             textTransform: 'capitalize',
                             flex: 1,
@@ -2331,7 +2346,9 @@ const Investigate = () => {
                           }}
                         >
                           <Tabs value={activeTab} onChange={handleTabChange} aria-label='basic tabs example'>
-                            {!isGeneratingCards && matchedOptions.some((option) => option?.id === 'AskAiCard') && (
+                            {/* Present from the start, disabled until the analysis card exists, so the tab bar
+                                does not gain a tab partway through loading. */}
+                            {(hasAskAiTab || (isGeneratingCards && isRenderInvestigationCard)) && (
                               <Tab
                                 label={
                                   <Box component='span' sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
@@ -2340,7 +2357,7 @@ const Investigate = () => {
                                   </Box>
                                 }
                                 {...a11yProps(0)}
-                                disabled={!!currentInvestigation}
+                                disabled={!!currentInvestigation || isGeneratingCards || !hasAskAiTab}
                                 value={0}
                               />
                             )}
@@ -2435,6 +2452,9 @@ const Investigate = () => {
                                 component='button'
                                 type='button'
                                 data-testid='linked-ticket-btn'
+                                // The chip is a bare number; say what it is and what a click does.
+                                aria-label={`Linked ticket ${ticketData.ticket_id}${ticketData.url ? ', opens in a new tab' : ''}`}
+                                title={`Linked ticket ${ticketData.ticket_id}${ticketData.url ? ' — open' : ''}`}
                                 sx={{
                                   display: 'inline-flex',
                                   cursor: 'pointer',
@@ -2648,7 +2668,7 @@ const Investigate = () => {
                               );
                             })()}
                           {loading ? (
-                            <ConversationLoader />
+                            <ConversationLoader label='Loading the alert' />
                           ) : (
                             insightData.length > 0 && (
                               <Box>
@@ -3198,7 +3218,7 @@ const Investigate = () => {
                               ))}
                             {currentInvestigation?.text && (
                               <Card elevation='flat' sx={{ textAlign: 'center' }}>
-                                <ConversationLoader />
+                                <ConversationLoader label={`Loading ${currentInvestigation.text}`} />
                               </Card>
                             )}
                           </Box>

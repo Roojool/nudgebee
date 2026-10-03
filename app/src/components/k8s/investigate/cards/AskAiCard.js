@@ -10,6 +10,7 @@ import DOMPurify from 'dompurify';
 import KubernetesRightSizingUpdateForm from '@components/recommendations/KubernetesRightSizingUpdateForm';
 import { useEffect, useState, useCallback, useRef } from 'react';
 import ConversationLoader from '@shared/ConversationLoader';
+import { describeAnalysisStage } from '@components/k8s/investigate/analysisStage';
 import { ds } from 'src/utils/colors';
 import { ANNOTATIONS } from '@lib/annotationKeys';
 import { getNubiIconUrl } from '@hooks/useTenantBranding';
@@ -608,7 +609,7 @@ class AskAiCard {
       );
 
       if (!localAiData) {
-        return <ConversationLoader />;
+        return <ConversationLoader label='Loading the analysis' />;
       }
 
       let { analysis, summary, investigation, detailed_response, source_updates, task_statuses, code_analysis_enabled } = localAiData || {};
@@ -643,6 +644,11 @@ class AskAiCard {
 
       let sections = [];
       const isTerminal = ['completed', 'failed', 'killed'].includes(localAiData?.status?.toLowerCase());
+
+      // The step still running while the shown run is live. It is the wait line, and it also sits
+      // above a first summary: the summary lands in about half a minute and the report that
+      // replaces it takes minutes more, with nothing on the first screen saying so.
+      const runningStage = isTerminal ? '' : describeAnalysisStage(task_statuses);
 
       const fallbackStatus = (taskStatus, content) => {
         const normalizedStatus = taskStatus?.toUpperCase();
@@ -995,12 +1001,19 @@ class AskAiCard {
                   return (
                     <Box sx={{ marginTop: 'var(--ds-space-4)' }}>
                       {activeSection.status === 'IN_PROGRESS' || activeSection.status === 'PENDING' ? (
-                        <ConversationLoader />
+                        <ConversationLoader label={runningStage || 'Analysing the alert'} />
                       ) : activeSection.content && activeSection.content.trim() !== '' ? (
-                        <MarkDowns
-                          data={cleanContent(activeSection.content)}
-                          sx={{ width: '100%', padding: noPadding ? '0px' : undefined, maxHeight: 'none', overflowY: 'visible' }}
-                        />
+                        <>
+                          {runningStage && (
+                            <Box sx={{ marginBottom: 'var(--ds-space-3)' }}>
+                              <ConversationLoader label={runningStage} />
+                            </Box>
+                          )}
+                          <MarkDowns
+                            data={cleanContent(activeSection.content)}
+                            sx={{ width: '100%', padding: noPadding ? '0px' : undefined, maxHeight: 'none', overflowY: 'visible' }}
+                          />
+                        </>
                       ) : (
                         <Box
                           sx={{
