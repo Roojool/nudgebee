@@ -1169,11 +1169,34 @@ func canProjectLate(request QueryRequest, tableDef TableDefinition, accountId st
 	return true
 }
 
+// ErrQueryCancelled marks a table query that stopped because the caller that asked
+// for it went away, as opposed to one that failed. Nobody reads the answer, so it
+// is not an error worth alarming on; callers can tell the two apart with errors.Is.
+var ErrQueryCancelled = errors.New("query cancelled by caller")
+
+// sqlQueryParent picks the context a table query runs under.
+//
+// With app_database_query_cancel_on_disconnect on, it is the caller's own context:
+// when a browser abandons a request the gateway drops its upstream call, Gin
+// cancels the request context, and the driver cancels the statement, so the query
+// stops holding a pool connection for an answer nobody will read (#39740 measured
+// 13.7 s of that for a call the gateway had given up on after 1.1 s).
+//
+// Off (the default), it is context.Background(), which is what this path always
+// used. The switch exists because cancelling is not free: lib/pq dials a second
+// connection to send the cancel and discards the pooled one, so a wave of
+// abandoned requests turns into connection churn against a 20-connection pool.
+// Measure that on an environment before turning it on there.
+func sqlQueryParent(caller context.Context) context.Context {
+	if caller == nil || !config.Config.ServiceDBQueryCancelOnDisconnect {
+		return context.Background()
+	}
+	return caller
+}
+
 // sqlQueryContext bounds a single RPC query, covering both the wait for a pool
-// connection and the query itself. Without it these waits are unbounded: this
-// path has no request context, so database/sql falls back to context.Background()
-// and a goroutine queued for a connection never gives up — not even when the
-// client has already disconnected.
+// connection and the query itself. Without the bound a goroutine queued for a
+// connection never gives up.
 //
 // This query drains its rows into a slice and never issues a nested query, so it
 // only ever waits on the pool — it cannot be the handler that starves it. The
@@ -1185,17 +1208,31 @@ func canProjectLate(request QueryRequest, tableDef TableDefinition, accountId st
 // app_database_query_timeout_seconds defaults to 120: well above the slowest
 // queries we actually see (11-21s routinely, ~27s for a cold finops recompute —
 // see #34921) and well under the 300s the frontend waits before giving up, so a
-// starved pool surfaces as errors rather than a hang. Set it to 0 to disable the
-// bound and restore the previous unbounded behaviour.
-func sqlQueryContext() (context.Context, context.CancelFunc) {
+// starved pool surfaces as errors rather than a hang. Set it to 0 to remove the
+// ceiling; the parent's own cancellation still applies.
+func sqlQueryContext(parent context.Context) (context.Context, context.CancelFunc) {
 	seconds := config.Config.ServiceDBQueryTimeoutSeconds
 	if seconds <= 0 {
-		return context.Background(), func() {}
+		return context.WithCancel(parent)
 	}
-	return context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
+	return context.WithTimeout(parent, time.Duration(seconds)*time.Second)
 }
 
-func executeSqlQuery(source database.DatabaseManagerType, query string, args []any, limit int) ([]QueryRow, error) {
+// cancelledOr reports err as ErrQueryCancelled when the caller's context is done.
+// It asks the context rather than inspecting err: lib/pq answers a statement
+// cancelled mid-flight with its own *pq.Error (SQLSTATE 57014), not
+// context.Canceled, so errors.Is(err, context.Canceled) misses the common case.
+//
+// The result also wraps the context's own error, so a generic
+// errors.Is(err, context.Canceled) check further up still recognises it.
+func cancelledOr(parent context.Context, err error) error {
+	if ctxErr := parent.Err(); ctxErr != nil {
+		return fmt.Errorf("%w (%w): %v", ErrQueryCancelled, ctxErr, err)
+	}
+	return err
+}
+
+func executeSqlQuery(caller context.Context, source database.DatabaseManagerType, query string, args []any, limit int) ([]QueryRow, error) {
 
 	if source == "" {
 		return nil, fmt.Errorf("source not found")
@@ -1206,12 +1243,13 @@ func executeSqlQuery(source database.DatabaseManagerType, query string, args []a
 		return nil, err
 	}
 
-	ctx, cancel := sqlQueryContext()
+	parent := sqlQueryParent(caller)
+	ctx, cancel := sqlQueryContext(parent)
 	defer cancel()
 
 	rows, err := databaseManager.Db.QueryxContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, cancelledOr(parent, err)
 	}
 	defer func() {
 		err := rows.Close()
@@ -1228,19 +1266,19 @@ func executeSqlQuery(source database.DatabaseManagerType, query string, args []a
 	columns, err := rows.Columns()
 	if err != nil {
 		slog.Error("sql: unable to get columns", "error", err)
-		return nil, err
+		return nil, cancelledOr(parent, err)
 	}
 	colsLen := len(columns)
 	for rows.Next() {
 		var row = make(map[string]any, colsLen)
 		err = rows.MapScan(row)
 		if err != nil {
-			return nil, err
+			return nil, cancelledOr(parent, err)
 		}
 		rowsMap = append(rowsMap, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error during sql query rows iteration: %w", err)
+		return nil, cancelledOr(parent, fmt.Errorf("error during sql query rows iteration: %w", err))
 	}
 
 	return rowsMap, nil

@@ -209,7 +209,9 @@ func main() {
 	slogginConfig := sloggin.DefaultConfig()
 	slogginConfig.WithTraceID = true
 	slogginConfig.WithSpanID = true
-	slogginConfig.Filters = []sloggin.Filter{sloggin.IgnorePath("/health")}
+	// 499 is a request the caller abandoned (api.StatusClientClosedRequest). sloggin
+	// would log it at Warn like any 4xx; the handler already logs it at Info.
+	slogginConfig.Filters = []sloggin.Filter{sloggin.IgnorePath("/health"), sloggin.IgnoreStatus(api.StatusClientClosedRequest)}
 	r.Use(sloggin.NewWithConfig(logger, slogginConfig))
 	r.Use(traceResponseHeaderMiddleware())
 	r.Use(authHandlerMiddleware())

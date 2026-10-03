@@ -70,7 +70,10 @@ type appConfig struct {
 	ServiceDBIdleMinutes            int    `mapstructure:"app_database_idle_minutes"`
 	ServiceDBConnMaxLifetimeMinutes int    `mapstructure:"app_database_conn_max_lifetime_minutes"`
 	ServiceDBQueryTimeoutSeconds    int    `mapstructure:"app_database_query_timeout_seconds"`
-	ServiceEndpoint                 string `mapstructure:"service_api_server_url"`
+	// ServiceDBQueryCancelOnDisconnect stops a table query when the caller that asked
+	// for it goes away. Off by default; see sqlQueryParent in query/sql.go.
+	ServiceDBQueryCancelOnDisconnect bool   `mapstructure:"app_database_query_cancel_on_disconnect"`
+	ServiceEndpoint                  string `mapstructure:"service_api_server_url"`
 
 	NudgebeeEncryptionKey string `mapstructure:"nudgebee_encryption_key"`
 
@@ -476,6 +479,7 @@ func init() {
 	viper.SetDefault("app_database_idle_minutes", "5")
 	viper.SetDefault("app_database_conn_max_lifetime_minutes", "15")
 	viper.SetDefault("app_database_query_timeout_seconds", "120")
+	viper.SetDefault("app_database_query_cancel_on_disconnect", "false")
 	viper.SetDefault("nudgebee_encryption_key", "")
 
 	viper.SetDefault("rabbit_mq_notifications_queue", "notifications")
