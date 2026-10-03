@@ -28,6 +28,8 @@ For the `anthropic` provider, the cache provider places up to 3 `cache_control: 
 - Breakpoint 2: the tail — the last non-assistant message (a tool result or human turn). The next step of the tool loop resends this prompt plus its new turn, so it reads the whole previous prompt from cache.
 - Breakpoint 3: the previous step's tail — the last non-assistant message before the last assistant turn, i.e. where the previous request wrote. Keeps the read working when one step adds more than Anthropic's 20-block lookback (a wide parallel batch).
 
+TTL: the system-prompt marker of Global/Account-scope agents uses Anthropic's 1-hour TTL (`llm_server_anthropic_system_cache_ttl`, default `1h`, rollback `5m`) so the shared system prompt + tools survive gaps between runs; 1-hour writes bill at 2x input (tracked from `usage.cache_creation.ephemeral_1h_input_tokens` and priced into `cost_usd`). Conversation scope and all tool-loop markers keep the 5-minute default, which every read within a run refreshes.
+
 Assistant messages are never marked. This relies on the tool loop being append-only between steps; window-gated observation compression rewrites older tool results and costs one cache miss when it kicks in.
 
 ### 4. Per-Model TTL Profiles

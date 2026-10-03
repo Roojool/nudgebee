@@ -238,6 +238,11 @@ type appConfig struct {
 	//                          can cover the growing tool history. A request that references a
 	//                          CachedContent gets no implicit caching on the rest of the prompt.
 	LlmServerGeminiCacheStrategy string `mapstructure:"llm_server_gemini_cache_strategy"`
+	// LlmServerAnthropicSystemCacheTTL is the TTL of the Anthropic system-prompt cache
+	// marker for Global/Account-scope agents (#39633): "1h" (default) keeps the shared
+	// system prompt + tools cached across runs up to an hour apart, at 2x write cost;
+	// "5m" is the rollback value. Conversation scope and tool-loop markers stay at 5m.
+	LlmServerAnthropicSystemCacheTTL string `mapstructure:"llm_server_anthropic_system_cache_ttl"`
 	// LlmServerGeminiCacheHybridMinCoverage is the share of the prompt's tokens the CachedContent must
 	// cover for "hybrid" to reference it. Default 0.65.
 	LlmServerGeminiCacheHybridMinCoverage float64 `mapstructure:"llm_server_gemini_cache_hybrid_min_coverage"`
@@ -1293,6 +1298,7 @@ func init() {
 	viper.SetDefault("llm_enable_caching", true)
 	viper.SetDefault("llm_server_async_cache_creation", true)
 	viper.SetDefault("llm_server_gemini_cache_strategy", "hybrid")
+	viper.SetDefault("llm_server_anthropic_system_cache_ttl", "1h")
 	viper.SetDefault("llm_server_gemini_cache_hybrid_min_coverage", 0.65)
 	viper.SetDefault("llm_server_cache_flash_ttl_minutes", 30)
 	viper.SetDefault("llm_server_cache_pro_ttl_minutes", 10)

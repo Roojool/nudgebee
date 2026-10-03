@@ -1050,7 +1050,11 @@ func (p *AnthropicCacheProvider) ApplyCache(ctx context.Context, req *CacheReque
 		j := lastPart(i)
 		parts := make([]llms.ContentPart, len(messages[i].Parts))
 		copy(parts, messages[i].Parts)
-		parts[j] = llms.WithCacheControl(parts[j], &llms.CacheControl{Type: "ephemeral"})
+		cc := &llms.CacheControl{Type: "ephemeral"}
+		if i == targets[0] && messages[i].Role == llms.ChatMessageTypeSystem {
+			cc.Duration = anthropicSystemCacheTTL(req.Scope)
+		}
+		parts[j] = llms.WithCacheControl(parts[j], cc)
 		modifiedMessages[i] = llms.MessageContent{Role: messages[i].Role, Parts: parts}
 		slog.Debug("Added Anthropic cache control", "messageIndex", i, "partIndex", j, "conversationId", req.ConversationId)
 	}
@@ -1063,6 +1067,19 @@ func (p *AnthropicCacheProvider) ApplyCache(ctx context.Context, req *CacheReque
 		Messages: modifiedMessages,
 		CacheHit: false, // Anthropic doesn't tell us about cache hits upfront
 	}
+}
+
+// anthropicSystemCacheTTL is the TTL of the system-prompt marker. Global and
+// Account scope declare the system prompt shared across conversations, so it is
+// kept for an hour (2x write cost) to survive gaps between runs; everything
+// else uses the 5-minute default, which every read within a run refreshes.
+// Anthropic requires longer TTLs before shorter ones; the system prompt comes
+// first, so a 1h system marker before 5m tool-loop markers is valid.
+func anthropicSystemCacheTTL(scope CacheScope) time.Duration {
+	if (scope == CacheScopeGlobal || scope == CacheScopeAccount) && config.Config.LlmServerAnthropicSystemCacheTTL == "1h" {
+		return time.Hour
+	}
+	return 0
 }
 
 // isAnthropicCacheablePart reports whether the llms/anthropic adapter can put

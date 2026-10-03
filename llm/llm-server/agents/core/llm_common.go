@@ -374,8 +374,12 @@ type TokenInfo struct {
 	OutputTokens        int // Total output tokens received from the model
 	CacheReadTokens     int // Input tokens that were served from a cache
 	CacheCreationTokens int // Input tokens used to create a new cache entry
-	TotalTokens         int // Total tokens used (input + output)
-	ThinkingTokens      int // Hidden chain-of-thought tokens (Gemini 2.5+ usage.ThoughtsTokenCount). 0 for non-thinking models.
+	// CacheCreation1hTokens is the part of CacheCreationTokens written with
+	// Anthropic's 1-hour TTL, billed at 2x input instead of the 1.25x
+	// creation rate.
+	CacheCreation1hTokens int
+	TotalTokens           int // Total tokens used (input + output)
+	ThinkingTokens        int // Hidden chain-of-thought tokens (Gemini 2.5+ usage.ThoughtsTokenCount). 0 for non-thinking models.
 }
 
 // LLMCallMetadata contains metadata about the LLM call for token tracking
@@ -785,6 +789,7 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 			totalTokenInfo.OutputTokens += continuationTokenInfo.OutputTokens
 			totalTokenInfo.CacheReadTokens += continuationTokenInfo.CacheReadTokens
 			totalTokenInfo.CacheCreationTokens += continuationTokenInfo.CacheCreationTokens
+			totalTokenInfo.CacheCreation1hTokens += continuationTokenInfo.CacheCreation1hTokens
 			totalTokenInfo.TotalTokens += continuationTokenInfo.TotalTokens
 
 			// Accumulate latency from this continuation chunk so the row's
@@ -1044,6 +1049,9 @@ func getDetailedTokenInfo(response *llms.ContentResponse, cacheResp *CacheRespon
 	}
 	if val, ok := generateInfo["CacheCreationInputTokens"]; ok {
 		info.CacheCreationTokens = extractInt(val)
+	}
+	if val, ok := generateInfo["CacheCreation1hInputTokens"]; ok {
+		info.CacheCreation1hTokens = extractInt(val)
 	}
 
 	// Google AI cache fields (for compatibility)
@@ -3815,8 +3823,14 @@ func trackTokenUsage(
 	if nonCachedInputTokens < 0 {
 		nonCachedInputTokens = 0
 	}
+	// Anthropic 1-hour cache writes bill at 2x input: the 1.25x creation rate
+	// already applied to every write, plus 0.75x input, priced here as extra
+	// non-cached input. Cost only; the stored token counts stay real. Exact
+	// while the model's creation rate is 1.25x input and it has no long-context
+	// tier, which holds for every built-in Anthropic pricing row.
+	pricedNonCached := nonCachedInputTokens + tokenInfo.CacheCreation1hTokens*3/4
 	var costUsd *float64
-	if cost, err := dao.GetConversationCost(provider, model, nonCachedInputTokens, tokenInfo.CacheReadTokens, tokenInfo.CacheCreationTokens, tokenInfo.OutputTokens, tokenInfo.ThinkingTokens, pricingTenantFromContext(ctx)); err == nil {
+	if cost, err := dao.GetConversationCost(provider, model, pricedNonCached, tokenInfo.CacheReadTokens, tokenInfo.CacheCreationTokens, tokenInfo.OutputTokens, tokenInfo.ThinkingTokens, pricingTenantFromContext(ctx)); err == nil {
 		costUsd = &cost
 	} else {
 		ctx.GetLogger().Debug("trackTokenUsage: no pricing data for cost calc", "provider", provider, "model", model, "error", err)

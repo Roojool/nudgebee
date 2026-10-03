@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nudgebee/llm/common"
+	"nudgebee/llm/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -341,4 +342,40 @@ func TestAnthropicCacheProvider_ToolLoopMovingBreakpoint(t *testing.T) {
 	// The caller's messages are not modified in place.
 	_, wrapped := step3[5].Parts[0].(llms.CachedContent)
 	assert.False(t, wrapped)
+}
+
+// Global/Account scope keeps the shared system prompt for an hour; Conversation
+// scope, the tool-loop markers and the "5m" rollback stay on the 5-minute default.
+func TestAnthropicCacheProvider_SystemTTLByScope(t *testing.T) {
+	orig := config.Config.LlmServerAnthropicSystemCacheTTL
+	t.Cleanup(func() { config.Config.LlmServerAnthropicSystemCacheTTL = orig })
+
+	msgs := []llms.MessageContent{
+		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextContent{Text: "system + tools"}}},
+		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: "question"}}},
+		{Role: llms.ChatMessageTypeAI, Parts: []llms.ContentPart{
+			llms.ToolCall{ID: "t1", Type: "function", FunctionCall: &llms.FunctionCall{Name: "kubectl", Arguments: `{}`}},
+		}},
+		{Role: llms.ChatMessageTypeTool, Parts: []llms.ContentPart{llms.ToolCallResponse{ToolCallID: "t1", Content: "pods"}}},
+	}
+	durations := func(scope CacheScope) map[int]time.Duration {
+		resp := NewAnthropicCacheProvider().ApplyCache(context.Background(), &CacheRequest{Provider: "anthropic", Messages: msgs, Scope: scope})
+		out := map[int]time.Duration{}
+		for i, m := range resp.Messages {
+			for _, p := range m.Parts {
+				if cc, ok := p.(llms.CachedContent); ok {
+					out[i] = cc.CacheControl.Duration
+				}
+			}
+		}
+		return out
+	}
+
+	config.Config.LlmServerAnthropicSystemCacheTTL = "1h"
+	assert.Equal(t, map[int]time.Duration{0: time.Hour, 1: 0, 3: 0}, durations(CacheScopeAccount))
+	assert.Equal(t, map[int]time.Duration{0: time.Hour, 1: 0, 3: 0}, durations(CacheScopeGlobal))
+	assert.Equal(t, map[int]time.Duration{0: 0, 1: 0, 3: 0}, durations(CacheScopeConversation))
+
+	config.Config.LlmServerAnthropicSystemCacheTTL = "5m"
+	assert.Equal(t, map[int]time.Duration{0: 0, 1: 0, 3: 0}, durations(CacheScopeAccount))
 }
