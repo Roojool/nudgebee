@@ -12,6 +12,7 @@ import logging
 import os
 import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, List, cast
 
 import httpx
@@ -20,7 +21,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.http.models import CollectionDescription
 from qdrant_client.models import Distance, VectorParams, HnswConfigDiff
 
-from utils.config import FileConfig
+from utils.config import Config, FileConfig
 
 # Suppress Qdrant local mode warnings for large collections
 # We're aware of the limitation and accept the tradeoff for simplicity
@@ -349,6 +350,23 @@ class CollectionInfo:
         self.points_count = points_count
 
 
+def _fetch_collection_info(client: QdrantClient, name: str) -> CollectionInfo:
+    """Read one collection's metadata.
+
+    Never raises: a collection we cannot describe still has to appear in the
+    list, or module/account routing silently stops seeing it.
+    """
+    try:
+        coll_info = client.get_collection(name)
+        metadata = {}
+        if hasattr(coll_info, "config") and hasattr(coll_info.config, "metadata"):
+            metadata = coll_info.config.metadata or {}
+        return CollectionInfo(name=name, metadata=metadata, points_count=getattr(coll_info, "points_count", 0))
+    except Exception as e:
+        logger.warning(f"Error fetching metadata for collection {name}: {e}")
+        return CollectionInfo(name=name, metadata={}, points_count=0)
+
+
 # Single-flight coordination for list_collections_optimized. When the cache is
 # empty (fresh start, retag_migration clear, TTL expiry), N concurrent callers
 # would each trigger the slow list+metadata iteration — the "thundering herd"
@@ -431,28 +449,20 @@ def list_collections_optimized() -> List[CollectionInfo]:
             response.collections if hasattr(response, "collections") else cast(List[CollectionDescription], response)
         )
 
-        # Then fetch metadata for each collection
-        collections_with_metadata = []
-        for coll_desc in collection_descriptions:
-            try:
-                # Get detailed collection info including metadata
-                coll_info = client.get_collection(coll_desc.name)
-
-                # Extract metadata from config
-                metadata = {}
-                if hasattr(coll_info, "config") and hasattr(coll_info.config, "metadata"):
-                    metadata = coll_info.config.metadata or {}
-
-                # Get points count
-                points_count = getattr(coll_info, "points_count", 0)
-
-                collections_with_metadata.append(
-                    CollectionInfo(name=coll_desc.name, metadata=metadata, points_count=points_count)
-                )
-            except Exception as e:
-                logger.warning(f"Error fetching metadata for collection {coll_desc.name}: {e}")
-                # Add collection with empty metadata on error
-                collections_with_metadata.append(CollectionInfo(name=coll_desc.name, metadata={}, points_count=0))
+        # Qdrant's list endpoint returns names only, so each collection needs its
+        # own GET for the module/account metadata routing depends on. Fan them
+        # out: sequentially this was ~8s for 300 collections, paid on the request
+        # that happened to trip the TTL.
+        names = [coll_desc.name for coll_desc in collection_descriptions]
+        workers = min(Config.collection_metadata_max_workers, len(names))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="qdrant-collmeta") as pool:
+                collections_with_metadata = list(pool.map(lambda name: _fetch_collection_info(client, name), names))
+        else:
+            # Empty listing, a single collection, or concurrency turned off: no
+            # pool. This also means a nonsensical worker count cannot reach
+            # ThreadPoolExecutor, which rejects anything below 1.
+            collections_with_metadata = [_fetch_collection_info(client, name) for name in names]
 
         logger.debug(f"Fetched {len(collections_with_metadata)} collections with metadata from Qdrant")
 

@@ -63,6 +63,9 @@ class Config:
     search_max_workers = int(
         os.environ.get("RAG_SEARCH_MAX_WORKERS", 8)
     )  # thread pool size for parallel collection search
+    collection_metadata_max_workers = max(
+        1, int(os.environ.get("RAG_COLLECTION_METADATA_MAX_WORKERS", 16))
+    )  # thread pool size for the collection-list metadata refresh; 1 disables concurrency
     reranking_enabled = os.environ.get("RAG_RERANKING_ENABLED", "false").lower() == "true"  # LLM reranking default
 
     # Figures described in parallel during a knowledge-base load. Bounded because
