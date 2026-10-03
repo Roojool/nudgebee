@@ -336,6 +336,15 @@ query ListVmScanStatuses($accountId: String!) {
   }
 }`;
 
+const LIST_VM_SCAN_DATASOURCES = `
+query ListVmScanDatasources($accountId: String!) {
+  security_list_vm_scan_datasources(object: {
+    account_id: $accountId
+  }) {
+    data
+  }
+}`;
+
 const safeParse = (value: any) => {
   if (typeof value !== 'string') return value;
   try {
@@ -765,13 +774,21 @@ const apiVm = {
 
   /**
    * Forager discovery integrations — the pickable `datasource_id`s for a scan.
-   * The relay auto-registers a forager discovery datasource as type `discovery`,
-   * so it must not be looked up as an SSH integration.
+   * Read through the scan's own action, not the integrations list: that one is
+   * tenant-admin only, while account and namespace admins may scan a VM too,
+   * and it left them with an empty picker (#39859). The server returns exactly
+   * the datasources `security_scan_vm` accepts for this account.
    */
   /** Uncached; use listDiscoveryTargets. */
   async fetchDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
-    const rows = await listAccountIntegrations(accountId, 'discovery');
-    return rows.map((row: any) => ({
+    const response: any = await queryGraphQL(LIST_VM_SCAN_DATASOURCES, 'ListVmScanDatasources', { accountId });
+    if (!response || response instanceof Error) {
+      throw response || new Error('Failed to list discovery targets');
+    }
+    if (response?.data?.errors?.length) {
+      throw new Error(response.data.errors[0]?.message || 'Failed to list discovery targets');
+    }
+    return (response?.data?.data?.security_list_vm_scan_datasources?.data || []).map((row: any) => ({
       id: row.id,
       name: row.name,
       status: row.status,
