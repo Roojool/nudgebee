@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -68,6 +69,11 @@ func processEventPostProcessMessage(msgCtx context.Context, data []byte) error {
 	return nil
 }
 
+// errEventNotConvertible marks a loadEventMap failure that happened after the
+// event row was fetched. The conversion reads nothing else, so a retry fails
+// the same way: a consumer that requeues on error must ACK it instead.
+var errEventNotConvertible = errors.New("event cannot be converted to a map")
+
 // loadEventMap fetches the event by ID, builds a tenant-scoped request context,
 // and converts the event to the map[string]any shape the event processors
 // expect (the same format as RPC event.data.new). Evidences are cleared from
@@ -116,7 +122,7 @@ func loadEventMap(msgCtx context.Context, eventID string, logger *slog.Logger) (
 	eventMap, err := structToMap(eventObj)
 	if err != nil {
 		logger.Error("event_queue: failed to convert event to map", "error", err)
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w: %w", errEventNotConvertible, err)
 	}
 
 	eventMap["has_evidences"] = hasEvidences
