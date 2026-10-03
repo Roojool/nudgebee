@@ -21,12 +21,12 @@ import (
 	"nudgebee/llm/workspace"
 )
 
-// This file backs the events_v2 agent (agents/agent_events_v2.go): three
-// deterministic, parameter-typed tools that cover the query shapes real
+// This file backs the events agent's structured tools (agents/agent_events.go):
+// three deterministic, parameter-typed tools that cover the query shapes real
 // events_execute traffic actually uses (single-ID lookup, filtered lists,
 // aggregation/count — see docs/architecture-decisions.md for the traffic
 // breakdown this design is based on). Raw SQL via events_execute/anomaly_execute
-// remains available on the events_v2 agent as a fallback for the long tail
+// remains available on the events agent as a fallback for the long tail
 // these tools don't cover.
 //
 // These tools build SQL themselves from typed, server-validated arguments —
@@ -56,7 +56,7 @@ func init() {
 // shared helpers
 // ---------------------------------------------------------------------------
 
-func eventsV2ErrorResponse(err error) core.NBToolResponse {
+func structuredEventsErrorResponse(err error) core.NBToolResponse {
 	return core.NBToolResponse{
 		Data:   fmt.Sprintf("Error: %s", err.Error()),
 		Status: core.NBToolResponseStatusError,
@@ -269,10 +269,10 @@ func (t GetEventByIdTool) InferToolRequestType(_ *security.RequestContext, _, _ 
 func (t GetEventByIdTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 	eventID := stringArg(input, "event_id")
 	if eventID == "" {
-		return eventsV2ErrorResponse(errors.New("event_id is required")), nil
+		return structuredEventsErrorResponse(errors.New("event_id is required")), nil
 	}
 	if _, err := uuid.Parse(eventID); err != nil {
-		return eventsV2ErrorResponse(fmt.Errorf("event_id must be a valid UUID: %w", err)), nil
+		return structuredEventsErrorResponse(fmt.Errorf("event_id must be a valid UUID: %w", err)), nil
 	}
 
 	query := fmt.Sprintf(
@@ -718,7 +718,7 @@ func (t ListEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequ
 
 	startTime, endTime, err := resolveTimeRange(input)
 	if err != nil {
-		return eventsV2ErrorResponse(err), nil
+		return structuredEventsErrorResponse(err), nil
 	}
 	if startTime != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("starts_at >= %s", pq.QuoteLiteral(startTime)))
@@ -866,7 +866,7 @@ func (t AggregateEventsTool) InferToolRequestType(_ *security.RequestContext, _,
 func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRequest) (core.NBToolResponse, error) {
 	groupBy := stringArg(input, "group_by")
 	if !isAllowedGroupByColumn(groupBy) {
-		return eventsV2ErrorResponse(fmt.Errorf("group_by must be one of: %s", strings.Join(allowedGroupByColumns, ", "))), nil
+		return structuredEventsErrorResponse(fmt.Errorf("group_by must be one of: %s", strings.Join(allowedGroupByColumns, ", "))), nil
 	}
 
 	countExpr := "count(*)"
@@ -886,7 +886,7 @@ func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCal
 	}
 	startTime, endTime, err := resolveTimeRange(input)
 	if err != nil {
-		return eventsV2ErrorResponse(err), nil
+		return structuredEventsErrorResponse(err), nil
 	}
 	if startTime != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("starts_at >= %s", pq.QuoteLiteral(startTime)))
@@ -897,7 +897,7 @@ func (t AggregateEventsTool) Call(nbCtx core.NbToolContext, input core.NBToolCal
 	whereClauses = appendDefaultEventStart(whereClauses, startTime, time.Now())
 
 	// group_by is enum-validated above against a fixed allowlist, so it's safe
-	// to interpolate directly — this is the one column name events_v2 lets
+	// to interpolate directly — this is the one column name these tools let
 	// caller input drive, and it can only ever be one of those seven values.
 	query := fmt.Sprintf("SELECT %s, %s AS count FROM events", groupBy, countExpr)
 	if len(whereClauses) > 0 {

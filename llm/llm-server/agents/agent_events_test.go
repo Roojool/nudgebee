@@ -279,7 +279,7 @@ func TestSummarizeTraceSpan(t *testing.T) {
 	})
 }
 
-// Regression: tool_event_v2.go's capInvestigateDataEvidence can shrink an
+// Regression: tool_event_structured.go's capInvestigateDataEvidence can shrink an
 // oversized evidence payload down to a plain truncated string. Traces.Data
 // and AlertLabels.Data are normally map[string]any / []any respectively —
 // reduceEventData must not panic when a cap has collapsed either into a
