@@ -2736,6 +2736,43 @@ func getPlaybookStartEndTime(e Event) (start, end, detected time.Time) {
 // playbookLeadIn is how far before the alert the playbook window starts.
 const playbookLeadIn = 10 * time.Minute
 
+// repeatDeliveryUpdateSQL applies a repeat delivery of an alert that is already
+// stored (an Alertmanager repeat, a Datadog re-notification) to its event.
+//
+// A repeat is the source's payload again. It carries nothing of what enrichment
+// has added to the event since the first delivery, so it must not erase that:
+//   - Labels are merged, and the delivery's value wins for a label both carry.
+//     A label the playbook added survives. So does a label the source has since
+//     stopped sending: nothing records which labels came from the source, and a
+//     stale one that lasts until the event closes costs less than losing the
+//     playbook's.
+//   - An empty subject field or resource link leaves the stored one alone.
+//   - Unless the delivery names a different subject. The stored namespace, type,
+//     owner and resource then describe the old subject, so all of them are
+//     replaced as sent, empty or not. An event stored without a subject name has
+//     no old subject: "<>" against its empty name is NULL, not true, so naming it
+//     fills the name in and keeps the rest.
+//
+// Priority is always the delivery's: an escalation arrives as a repeat.
+//
+// A single statement for the reason enrichmentMergeSQL is one: enrichment writes
+// these columns while repeats arrive, and the comparison with the stored subject
+// has to be made against the row version the update locks.
+const repeatDeliveryUpdateSQL = `UPDATE events
+		    SET updated_at = $1,
+		        labels = CASE
+		                WHEN jsonb_typeof(labels) = 'object' THEN labels
+		                ELSE '{}'::jsonb
+		            END || $3::jsonb,
+		        priority           = $4,
+		        subject_name       = COALESCE(NULLIF($5, ''), subject_name),
+		        subject_namespace  = CASE WHEN NULLIF($5, '') <> NULLIF(subject_name, '') THEN $6 ELSE COALESCE(NULLIF($6, ''), subject_namespace) END,
+		        subject_type       = CASE WHEN NULLIF($5, '') <> NULLIF(subject_name, '') THEN $7 ELSE COALESCE(NULLIF($7, ''), subject_type) END,
+		        cloud_resource_id  = CASE WHEN NULLIF($5, '') <> NULLIF(subject_name, '') THEN $8 ELSE COALESCE($8, cloud_resource_id) END,
+		        subject_owner      = CASE WHEN NULLIF($5, '') <> NULLIF(subject_name, '') THEN $9 ELSE COALESCE(NULLIF($9, ''), subject_owner) END,
+		        subject_owner_kind = CASE WHEN NULLIF($5, '') <> NULLIF(subject_name, '') THEN $10 ELSE COALESCE(NULLIF($10, ''), subject_owner_kind) END
+		  WHERE id = $2`
+
 func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string) (string, error) {
 	start := time.Now().UTC()
 	tenantId := sc.GetSecurityContext().GetTenantId()
@@ -2922,6 +2959,21 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 	switch err {
 	case nil: // event exists
 		sc.GetLogger().Info("event: already processed, updating event details", "event_id", existingEventId, "finding_id", webhookEvent.FindingId)
+		// Resolve the subject exactly as the insert below does, so the repeat names
+		// the subject the event was stored with rather than the raw one it arrived
+		// with. applySubjectFallbacks also leaves Labels non-nil, which the label
+		// merge in repeatDeliveryUpdateSQL needs: a nil map marshals to null.
+		applySubjectFallbacks(&webhookEvent)
+		applyNodeSubjectCorrection(sc, &webhookEvent)
+		// The correction can miss on a repeat where the first delivery resolved it
+		// (the exporter pod was rescheduled and its row is gone). The delivery then
+		// still names the exporter pod, and writing that would move a corrected
+		// event back onto it. Send no subject instead, so the stored one stands.
+		if existingSubjectName.String != "" && !integrationcore.IsExporterWorkloadName(existingSubjectName.String) &&
+			webhookEvent.SubjectType != "node" && integrationcore.IsExporterWorkloadName(webhookEvent.SubjectName) {
+			webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType = "", "", ""
+			webhookEvent.SubjectOwner, webhookEvent.SubjectOwnerKind, webhookEvent.CloudResourceId = "", "", ""
+		}
 		labels, err1 := common.MarshalJson(webhookEvent.Labels)
 		if err1 != nil {
 			slog.Error("event: failed to marshal labels", "error", err1)
@@ -2933,7 +2985,7 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		}
 		// Do NOT overwrite evidences — playbook-collected evidences would be lost.
 		// Duplicate webhooks carry the same inline evidences, so nothing new to store.
-		_, err := dbms.Db.Exec("UPDATE events SET updated_at = $1, labels = $3, priority=$4, subject_name=$5, subject_namespace=$6, subject_type=$7, cloud_resource_id=$8, subject_owner=$9, subject_owner_kind=$10 WHERE id = $2", time.Now().UTC(), existingEventId, labels, webhookEvent.Priority, webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, nullableCloudResourceId, webhookEvent.SubjectOwner, webhookEvent.SubjectOwnerKind)
+		_, err := dbms.Db.Exec(repeatDeliveryUpdateSQL, time.Now().UTC(), existingEventId, labels, webhookEvent.Priority, webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, nullableCloudResourceId, webhookEvent.SubjectOwner, webhookEvent.SubjectOwnerKind)
 		if err != nil {
 			sc.GetLogger().Error("event: failed to update existing event", "error", err)
 			return "", err
@@ -3116,8 +3168,8 @@ func applySubjectFallbacks(webhookEvent *Event) {
 // be resolved, in which case the event is left exactly as it arrived rather than
 // half-rewritten.
 //
-// Runs on the new-event path only. Occurrences that attach to an existing chain
-// keep the subject the chain was opened with.
+// Runs for a repeat delivery as well as a new event. The repeat names the
+// exporter pod again, and would otherwise point the stored event back at it.
 func applyNodeSubjectCorrection(sc *security.RequestContext, webhookEvent *Event) {
 	alertName := webhookEvent.AggregationKey
 	if v := webhookEvent.Labels["nb_alert_name"]; v != "" {
