@@ -145,6 +145,10 @@ type appConfig struct {
 
 	RelayServerEndpoint  string `mapstructure:"relay_server_endpoint"`
 	RelayServerSecretKey string `mapstructure:"relay_server_secret_key"`
+	// RelayMaxResponseBytes caps how much of one relay response is read. A response
+	// is decoded into generic maps, which costs several times its size in memory, so
+	// an oversized one is rejected instead of read. 0 or less disables the cap.
+	RelayMaxResponseBytes int64 `mapstructure:"relay_max_response_bytes"`
 
 	VulnMatcherServerEndpoint string `mapstructure:"vuln_matcher_server_endpoint"`
 
@@ -495,6 +499,7 @@ func init() {
 
 	viper.SetDefault("relay_server_endpoint", "http://localhost:52832")
 	viper.SetDefault("relay_server_secret_key", "")
+	viper.SetDefault("relay_max_response_bytes", 64<<20)
 
 	viper.SetDefault("vuln_matcher_server_endpoint", "http://vulnerability-server:8080")
 
