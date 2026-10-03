@@ -134,6 +134,10 @@ type NBAgentRequest struct {
 	// KBPrestepContent holds relevant knowledge retrieved before planning. The
 	// planner renders it into the human message, not the cacheable system prefix.
 	KBPrestepContent string `json:"kb_prestep_content,omitempty"`
+	// RAGExamples holds the agent's RAG examples retrieved for this query. They
+	// vary per query, so the planner renders them into the human message, not
+	// the cacheable system prefix.
+	RAGExamples string `json:"rag_examples,omitempty"`
 	// KBReferences holds references to knowledge base sources retrieved by the pre-step.
 	KBReferences []AgentReference `json:"kb_references,omitempty"`
 	// KBPrestepExecuted indicates whether pre-step RAG retrieval has already been performed

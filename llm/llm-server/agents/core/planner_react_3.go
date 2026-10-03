@@ -2605,7 +2605,8 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	dynamicPrompt := `
 **Current date and time:** {{.today}}
 {{.kb_prestep_content}}
-{{.skill_lists_menu}}
+{{if .rag_examples}}{{.rag_examples}}
+{{end}}{{.skill_lists_menu}}
 {{.global_preferences_block}}
 {{.user_context_block}}
 {{if .is_top_level}}<task_context>
@@ -2638,6 +2639,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"global_preferences_block",
 		"user_context_block",
 		"kb_prestep_content",
+		"rag_examples",
 		"skill_lists_menu",
 		"memory_context_block",
 		"channel_context_block",
@@ -2714,10 +2716,13 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"scratchpad":               "", // default; overridden per-iteration in fullInputs
 		"global_preferences_block": renderGlobalPreferencesBlock(request.AccountPrompt),
 		"user_context_block":       userContextBlock,
-		"kb_prestep_content":       request.KBPrestepContent,
-		"skill_lists_menu":         request.SkillListsMenu,
-		"memory_context_block":     memoryContextBlock,
-		"channel_context_block":    channelContextBlock,
+		// Relevant knowledge is placed above the scratchpad so compression never
+		// drops it.
+		"kb_prestep_content":    request.KBPrestepContent,
+		"rag_examples":          request.RAGExamples,
+		"skill_lists_menu":      request.SkillListsMenu,
+		"memory_context_block":  memoryContextBlock,
+		"channel_context_block": channelContextBlock,
 	}
 	return tmpl, tools, nil
 }

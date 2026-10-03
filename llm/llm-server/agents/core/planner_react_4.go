@@ -1237,6 +1237,8 @@ func (o *NBReActPlanner4) buildMessages(input string, steps []NBAgentPlannerTool
 const react4HumanPromptTemplate = `The current date and time is {{.today}}.
 {{if .kb_prestep_content}}
 {{.kb_prestep_content}}
+{{end}}{{if .rag_examples}}
+{{.rag_examples}}
 {{end}}{{if .skill_lists_menu}}
 {{.skill_lists_menu}}
 {{end}}{{if .global_preferences_block}}
@@ -1268,7 +1270,7 @@ const react4HumanPromptTemplate = `The current date and time is {{.today}}.
 // once at planner construction to avoid parsing overhead on every iteration.
 func newReact4HumanPromptTemplate() prompts.PromptTemplate {
 	vars := []string{
-		"today", "kb_prestep_content", "skill_lists_menu", "global_preferences_block",
+		"today", "kb_prestep_content", "rag_examples", "skill_lists_menu", "global_preferences_block",
 		"user_context_block", "is_top_level", "orchestrator_mode", "conversation_context", "history",
 		"evidence_index", "memory_context_block", "channel_context_block", "notebook", "input",
 	}
@@ -1293,6 +1295,7 @@ func (o *NBReActPlanner4) humanText(input string) string {
 	out, err := tmpl.Format(map[string]any{
 		"today":                    o.turnStartTime().Format("Monday, January 2, 2006, 15:04:05 UTC"),
 		"kb_prestep_content":       strings.TrimSpace(o.request.KBPrestepContent),
+		"rag_examples":             strings.TrimSpace(o.request.RAGExamples),
 		"skill_lists_menu":         strings.TrimSpace(o.request.SkillListsMenu),
 		"global_preferences_block": strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)),
 		"user_context_block":       strings.TrimSpace(o.userContextBlock),

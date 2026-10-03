@@ -135,6 +135,7 @@ Fires when the agent is top-level (not a sub-agent) and the query is an investig
 | Account-wide GlobalContext | System message (`AccountContext`) | Stable per account = cacheable |
 | Entry-point/request additional instructions | Human message (`AccountPrompt`) | May differ between event analysis and ordinary chat |
 | User query, conversation history, scratchpad | Human message | Changes every request = must not pollute cache |
+| RAG examples retrieved for the query (`NBAgentPrompt.Rag`) | Human message (`rag_examples`, ReAct planners) | Retrieved per query; other planner types still get them in the system prompt |
 | Date/time (`today`) | System message is OK | Rotates daily; acceptable for 12h TTL |
 | Previous tool observations, iteration state | Human message (`scratchpad`) | Changes every ReAct3 iteration |
 
