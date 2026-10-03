@@ -9,6 +9,7 @@ import (
 	"nudgebee/llm/common"
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
+	"nudgebee/llm/security/egressfilter"
 	toolcore "nudgebee/llm/tools/core"
 	"regexp"
 	"strings"
@@ -304,8 +305,16 @@ func (toolSource) Observe(ctx *security.RequestContext, w Watch) (Observation, e
 	}
 	resp, err := tool.Call(toolCtx, request)
 	if err != nil {
+		if redacted := egressfilter.RedactToolOutput(ctx, "", cfg.ToolName, err.Error()); redacted != err.Error() {
+			// Error text can embed command output; drop the wrapped error
+			// only when it held a secret.
+			return Observation{}, fmt.Errorf("tool source: tool %q invocation failed: %s", cfg.ToolName, redacted)
+		}
 		return Observation{}, fmt.Errorf("tool source: tool %q invocation failed: %w", cfg.ToolName, err)
 	}
+	// Watch observations reach the model like any tool output; redact them
+	// the same way.
+	resp.Data = egressfilter.RedactToolOutput(ctx, "", cfg.ToolName, resp.Data)
 	if resp.Status == toolcore.NBToolResponseStatusError {
 		return Observation{}, fmt.Errorf("tool source: tool %q returned error: %s", cfg.ToolName, truncate(resp.Data, 500))
 	}

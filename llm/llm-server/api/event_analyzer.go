@@ -16,6 +16,7 @@ import (
 	"nudgebee/llm/events"
 	"nudgebee/llm/prompts"
 	"nudgebee/llm/security"
+	"nudgebee/llm/security/egressfilter"
 	"nudgebee/llm/services_server"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
@@ -4218,7 +4219,9 @@ func getEventData(ctx *security.RequestContext, request EventAnalysisRequest) (e
 		return events.Event{}, err
 	}
 	var event []events.Event
-	err = common.UnmarshalJson([]byte(data.Data), &event)
+	// Event evidence carries collected logs; secrets in them must not reach
+	// the analysis prompts.
+	err = common.UnmarshalJson([]byte(egressfilter.RedactToolOutput(ctx, "", eventTool.Name(), data.Data)), &event)
 	if err != nil {
 		return events.Event{}, err
 	}

@@ -12,6 +12,7 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/prompts"
 	"nudgebee/llm/security"
+	"nudgebee/llm/security/egressfilter"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"runtime/debug"
@@ -4573,6 +4574,10 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	// copy can be stale, so reading it there misses exactly the calls most at
 	// risk — the ones resolved inside the tool rather than by the planner.
 	data = tools.StampExecutedTarget(data, err, tool, toolContext, input)
+	// Secrets in tool output (a pod's environment, a log line with a
+	// connection string) must not reach the model, the stored conversation or
+	// later commands built from them. Governed by the egress filter settings.
+	data.Data = egressfilter.RedactToolOutput(nbRequestContext, parentAgentName, tool.Name(), data.Data)
 	latency := time.Since(t0).Seconds()
 	nbRequestContext.GetLogger().Info("tool execution time", "tool", tool.Name(), "time", latency, "input", input)
 	// Record tool latency metric
@@ -4593,10 +4598,12 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 		}
 	}
 	if err != nil {
-		nbRequestContext.GetLogger().Error("tool execution error", "error", err, "tool", tool.Name())
+		// Redacted before logging too: the model can read this service's logs.
+		errText := egressfilter.RedactToolOutput(nbRequestContext, parentAgentName, tool.Name(), err.Error())
+		nbRequestContext.GetLogger().Error("tool execution error", "error", errText, "tool", tool.Name())
 		responseData := data.Data
 		if responseData == "" {
-			responseData = err.Error()
+			responseData = errText
 		}
 		if data.AdditionalDetails == nil {
 			data.AdditionalDetails = map[string]any{}

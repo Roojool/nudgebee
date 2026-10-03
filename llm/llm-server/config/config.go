@@ -286,6 +286,12 @@ type appConfig struct {
 	LlmServerEgressFilterSecretsEnabled bool   `mapstructure:"llm_server_egressfilter_secrets_enabled"`
 	LlmServerEgressFilterSecretsMode    string `mapstructure:"llm_server_egressfilter_secrets_mode"`
 
+	// LlmServerEgressFilterToolOutputRedactEnabled redacts credential values
+	// in tool output before it is stored or shown to the model, whenever the
+	// secrets detector is on (the mode above governs the outbound request
+	// only). See egressfilter.RedactToolOutput.
+	LlmServerEgressFilterToolOutputRedactEnabled bool `mapstructure:"llm_server_egressfilter_tool_output_redact_enabled"`
+
 	// LlmServerEgressFilterAllowlist is a comma-separated list of values that
 	// will be excluded from detection even when they match a rule. Typical
 	// use is canonical docs samples (AWS's AKIAIOSFODNN7EXAMPLE, a GCP
@@ -1316,6 +1322,7 @@ func init() {
 	viper.SetDefault("llm_server_target_write_access", true)
 	viper.SetDefault("llm_server_egressfilter_secrets_enabled", true)
 	viper.SetDefault("llm_server_egressfilter_secrets_mode", "detect")
+	viper.SetDefault("llm_server_egressfilter_tool_output_redact_enabled", true)
 	// Required even though "" is the natural zero — viper.Unmarshal skips
 	// fields with no default set, so without this line the env var
 	// LLM_SERVER_EGRESSFILTER_ALLOWLIST is silently ignored in any
