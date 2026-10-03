@@ -422,6 +422,12 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 	if r.Id == "" {
 		return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: event not found - %s", query.EventId)
 	}
+	// The event is loaded by id alone, and every change below is dispatched to the
+	// event's own account. The account authorized above is the one the request
+	// named, so the two have to be the same account.
+	if r.CloudAccountId == nil || *r.CloudAccountId != query.AccountId {
+		return EventRecommendationApplyResponse{}, common.ErrorUnauthorized("error: account access not found")
+	}
 
 	var cr models.Resource
 	if r.CloudResourceId != nil {
@@ -522,7 +528,7 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 		return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: event has no aggregation key")
 	}
 	if undoResolutionID != "" {
-		undoRequest, action, err := buildUndoRequest(ctx, undoResolutionID)
+		undoRequest, action, err := buildUndoRequest(ctx, r.Id, undoResolutionID)
 		if err != nil {
 			return EventRecommendationApplyResponse{}, err
 		}
@@ -1387,6 +1393,8 @@ func stringValue(v any) string {
 }
 
 // buildUndoRequest reconstructs the action that puts back what a previous attempt replaced.
+// The attempt is looked up on the event being acted on, so an id from another event — or another
+// tenant — is simply not found rather than replayed here.
 //
 // It re-dispatches the SAME action the attempt used, with the recorded before-state substituted for
 // the values that attempt wrote. That keeps undo uniform: an action becomes undoable by recording a
@@ -1395,15 +1403,15 @@ func stringValue(v any) string {
 // The coordinates (name, namespace, kind) are taken from the original task's params rather than
 // recomputed from the event, so an undo targets exactly what was changed even if the event's view of
 // the workload has since moved on.
-func buildUndoRequest(ctx *security.RequestContext, resolutionID string) (map[string]any, string, error) {
+func buildUndoRequest(ctx *security.RequestContext, eventID, resolutionID string) (map[string]any, string, error) {
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		return nil, "", err
 	}
 	var dataJSON, taskID string
 	if err := dbms.Db.QueryRow(
-		`SELECT COALESCE(data::text, '{}'), COALESCE(type_reference_id, '') FROM event_resolution WHERE id = $1`,
-		resolutionID).Scan(&dataJSON, &taskID); err != nil {
+		`SELECT COALESCE(data::text, '{}'), COALESCE(type_reference_id, '') FROM event_resolution WHERE id = $1 AND event_id = $2`,
+		resolutionID, eventID).Scan(&dataJSON, &taskID); err != nil {
 		// Only a genuinely missing row is the caller's fault. A dropped connection or a timeout is
 		// ours, and reporting it as 400 would tell the operator their undo was invalid when the
 		// database was simply unreachable.
@@ -3234,6 +3242,9 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 
 	if accountId == "" {
 		return errors.New("account ID is not available in the event")
+	}
+	if !sc.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeUpdate) {
+		return common.ErrorUnauthorized("access denied for account: " + accountId)
 	}
 
 	tenantId := ""
