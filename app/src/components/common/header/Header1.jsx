@@ -663,7 +663,10 @@ const Header1 = ({ showBorder = false }) => {
     // account-scoped page lands there, and picking anything else while on /vm
     // has to leave. Falling through to the branches below would push a
     // SelfHosted id at /cloud-account/details/, which has no provider to render.
-    if (e.cloud_provider === 'SelfHosted') {
+    //
+    // Home is the exception: it renders a VM fleet's overview itself, so the
+    // pick stays there like any other account's does.
+    if (e.cloud_provider === 'SelfHosted' && currentRouter.pathname !== '/home') {
       updateClusterState(e);
       // Preserve the tab when already on /vm; enter on Summary otherwise.
       currentRouter.push(`/vm?accountId=${e.value}${currentRouter.pathname === '/vm' ? hashString || '#summary' : '#summary'}`);

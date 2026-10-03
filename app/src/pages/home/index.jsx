@@ -73,6 +73,7 @@ import useCurrencySymbol from '@hooks/useCurrencySymbol';
 import PendingFollowUps from '@components/home/PendingFollowUps';
 import VmOverviewCard from '@components/home/VmOverviewCard';
 import { isSelfHostedProvider } from '@components/overview/providers';
+import { clearSavedWorkflowFilters } from '@components/workflow/utils/listingFilterPersistence';
 import { VmServerIcon, RecommendationIcon, OptimizeSummaryIcon } from '@assets';
 
 const replaceCurrencyInText = (text, targetCurrencySymbol) => {
@@ -1993,7 +1994,13 @@ const Home = () => {
                     icon={<KeyboardArrowRightIcon />}
                     iconPlacement='end'
                     onClick={() =>
-                      window.open(`/optimise?accountId=${selectedCluster?.value || ''}&account=${selectedCluster?.value || ''}#cost`, '_blank')
+                      // A VM fleet's rows here are vulnerabilities, which the Optimize page doesn't list.
+                      window.open(
+                        isSelfHostedProvider(selectedCluster?.cloud_provider)
+                          ? `/vm?accountId=${selectedCluster?.value || ''}#vulnerabilities`
+                          : `/optimise?accountId=${selectedCluster?.value || ''}&account=${selectedCluster?.value || ''}#cost`,
+                        '_blank'
+                      )
                     }
                   >
                     View all recommendations
@@ -2125,8 +2132,16 @@ const Home = () => {
           <AutomationsCard
             workflowData={workflowData}
             accountId={selectedCluster?.value || ''}
-            onManage={(id) => window.open(`/automation?accountId=${id}&status=Active`, '_blank')}
-            onViewWorkflows={(query) => router.push({ pathname: '/automation', query })}
+            // Each of these promises the listing behind a count, so drop any
+            // filters the listing saved on an earlier visit before opening it.
+            onManage={(id) => {
+              clearSavedWorkflowFilters();
+              window.open(`/automation?accountId=${id}&status=Active`, '_blank');
+            }}
+            onViewWorkflows={(query) => {
+              clearSavedWorkflowFilters();
+              router.push({ pathname: '/automation', query });
+            }}
           />
           <VmOverviewCard
             accountId={selectedCluster?.value || ''}
