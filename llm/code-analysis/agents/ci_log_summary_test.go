@@ -70,7 +70,8 @@ func collectGitHub(t *testing.T, checkRuns string, logs map[int64]ciReply) (stri
 	for id, r := range logs {
 		f.replies[jobLogsKey(id)] = r
 	}
-	return collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "12", ciHead{SHA: ciSHA}), f
+	got, _ := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "12", ciHead{SHA: ciSHA}, nil)
+	return got, f
 }
 
 // renderLog runs one failed job's log through parse + render.
@@ -354,7 +355,7 @@ func TestCIJobIDContaining410IsNotExpired(t *testing.T) {
 func TestCIInvalidHeadSHAIsRejected(t *testing.T) {
 	for _, sha := range []string{"", "main", "--flag", "abc..def", "abc"} {
 		f := &fakeCIRunner{t: t}
-		if got := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: sha}); got != "" || len(f.calls) != 0 {
+		if got, _ := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: sha}, nil); got != "" || len(f.calls) != 0 {
 			t.Errorf("sha %q: got %q, calls %v", sha, got, f.calls)
 		}
 	}
@@ -362,14 +363,14 @@ func TestCIInvalidHeadSHAIsRejected(t *testing.T) {
 
 func TestCICheckRunsErrorMeansNoWorkButIsLogged(t *testing.T) {
 	f := &fakeCIRunner{t: t, replies: map[string]ciReply{checkRunsKey(): {err: errors.New("boom")}}}
-	if got := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: ciSHA}); got != "" {
+	if got, _ := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: ciSHA}, nil); got != "" {
 		t.Errorf("got %q", got)
 	}
 	if len(f.logged) != 1 || !strings.Contains(f.logged[0], "boom") {
 		t.Errorf("error not logged: %v", f.logged)
 	}
 	f = &fakeCIRunner{t: t, replies: map[string]ciReply{checkRunsKey(): {out: "{not json"}}}
-	if got := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: ciSHA}); got != "" || len(f.logged) != 1 {
+	if got, _ := collectCIFailures(f, gitprovider.GitProviderGitHub, ciRepo, "1", ciHead{SHA: ciSHA}, nil); got != "" || len(f.logged) != 1 {
 		t.Errorf("decode error: got %q logged %v", got, f.logged)
 	}
 }
@@ -495,7 +496,7 @@ func TestGitLabHeadPipelineFromSameMRResponse(t *testing.T) {
 				t.Fatalf("head=%+v err=%v", head, err)
 			}
 			mrFetches := len(f.calls)
-			got := collectCIFailures(f, gitprovider.GitProviderGitLab, "g/p", "5", head)
+			got, _ := collectCIFailures(f, gitprovider.GitProviderGitLab, "g/p", "5", head, nil)
 			if (got != "") != tc.wantWork || !strings.Contains(got, tc.want) {
 				t.Fatalf("got %q", got)
 			}
@@ -517,7 +518,7 @@ func TestGitLabLookupFailureMeansNoWork(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error")
 	}
-	if got := collectCIFailures(f, gitprovider.GitProviderGitLab, "g/p", "5", head); got != "" {
+	if got, _ := collectCIFailures(f, gitprovider.GitProviderGitLab, "g/p", "5", head, nil); got != "" {
 		t.Errorf("got %q", got)
 	}
 }

@@ -158,19 +158,21 @@ func isCite(text string) bool {
 }
 
 // collectCIFailures returns text iff it found work for the planner ("" means
-// nothing for the planner: no failed check, lookup failure, or only logs that
-// are not ready yet).
-func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, prNumber string, head ciHead) string {
+// nothing for the planner: no failed check, lookup failure, only logs that are
+// not ready yet, or only failures already in handled). The ids are the failing
+// runs the text covers, for the caller to record once the planner has seen
+// them; handled is that record from earlier runs (see addressedSourceCheckRun).
+func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, prNumber string, head ciHead, handled map[string]bool) (string, []int64) {
 	if provider == gitprovider.GitProviderGitLab {
-		return collectGitLabCIFailures(run, repo, prNumber, head)
+		return collectGitLabCIFailures(run, repo, prNumber, head, handled)
 	}
 	if !ciSHAPattern.MatchString(head.SHA) {
-		return ""
+		return "", nil
 	}
 	out, err := run.Run("gh", "api", fmt.Sprintf("repos/%s/commits/%s/check-runs", repo, head.SHA), "--paginate")
 	if err != nil {
 		logCIError(run, "Failed to list CI check runs", err)
-		return ""
+		return "", nil
 	}
 	// --paginate emits one JSON document per page, concatenated.
 	var runs []githubCheckRun
@@ -179,7 +181,7 @@ func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, pr
 		var page githubCheckRuns
 		if err := dec.Decode(&page); err != nil {
 			logCIError(run, "Failed to decode CI check runs", err)
-			return ""
+			return "", nil
 		}
 		runs = append(runs, page.CheckRuns...)
 	}
@@ -195,7 +197,9 @@ func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, pr
 	}
 	var failed []githubCheckRun
 	for _, check := range groups {
-		if check.Conclusion == "failure" {
+		// A failing run an earlier followup already looked at is not new work: it
+		// has the same id only while nothing has been pushed or re-run since.
+		if check.Conclusion == "failure" && !handled[answeredCommentKey(addressedSourceCheckRun, check.ID)] {
 			failed = append(failed, check)
 		}
 	}
@@ -206,11 +210,11 @@ func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, pr
 		return failed[i].Name < failed[j].Name
 	})
 	if len(failed) == 0 {
-		return ""
+		return "", nil
 	}
 	blocks := make([]ciBlock, 0, len(failed))
 	for _, check := range failed {
-		b := ciBlock{name: check.Name}
+		b := ciBlock{name: check.Name, checkID: check.ID}
 		m := jobURL.FindStringSubmatch(check.DetailsURL)
 		if len(m) != 2 {
 			b.unavailable = "external CI, logs not fetched"
@@ -225,15 +229,34 @@ func collectCIFailures(run cmdRunner, provider gitprovider.GitProvider, repo, pr
 		case err != nil && httpNotFound.MatchString(err.Error()):
 			b.notReady = true
 		case err != nil:
-			b.unavailable = "log fetch failed"
+			b.unavailable, b.retryable = "log fetch failed", true
 		case strings.TrimSpace(log) == "":
-			b.unavailable = "empty log output"
+			b.unavailable, b.retryable = "empty log output", true
 		default:
 			b.lines = parseJobLog(log)
 		}
 		blocks = append(blocks, b)
 	}
-	return renderCISection(repo, blocks)
+	section, rendered := renderCIBlocks(repo, blocks)
+	if section == "" {
+		return "", nil
+	}
+	// Report a check only if the planner got everything there is to get for it.
+	// Left out, so that a later run still looks at them: a check whose logs are
+	// not ready yet, one whose logs could not be read this time, and one whose
+	// block was dropped to fit the size budget — those are only named in the index.
+	var shown []int64
+	work := 0
+	for _, b := range blocks {
+		if b.notReady {
+			continue
+		}
+		if work < rendered && !b.retryable {
+			shown = append(shown, b.checkID)
+		}
+		work++
+	}
+	return section, shown
 }
 
 // checkRunLater orders re-run attempts: completed_at, then started_at, then id.
@@ -259,10 +282,14 @@ type ciLine struct {
 
 type ciBlock struct {
 	name        string
+	checkID     int64
 	jobID       int64
 	lines       []ciLine
 	unavailable string
-	notReady    bool
+	// retryable: the logs were unavailable for a reason that may not hold next
+	// time (a failed fetch, an empty body), unlike expired or external logs.
+	retryable bool
+	notReady  bool
 }
 
 // parseJobLog understands the `gh api .../actions/jobs/<id>/logs` stream: a BOM,
@@ -317,6 +344,13 @@ func stripCINoise(raw string) string {
 }
 
 func renderCISection(repo string, blocks []ciBlock) string {
+	section, _ := renderCIBlocks(repo, blocks)
+	return section
+}
+
+// renderCIBlocks renders the section and reports how many of the work blocks,
+// in order, got a full block rather than only an index line.
+func renderCIBlocks(repo string, blocks []ciBlock) (string, int) {
 	var work []ciBlock // blocks that count as work; not_ready checks do not
 	for _, b := range blocks {
 		if !b.notReady {
@@ -324,7 +358,7 @@ func renderCISection(repo string, blocks []ciBlock) string {
 		}
 	}
 	if len(work) == 0 {
-		return ""
+		return "", 0
 	}
 	fetchHint := func(n int) string {
 		return fmt.Sprintf("%d blocks omitted, fetch with `gh api repos/%s/actions/jobs/<id>/logs`", n, repo)
@@ -340,7 +374,7 @@ func renderCISection(repo string, blocks []ciBlock) string {
 	for {
 		out := assembleCISection(blocks, work, rendered[:shown], repo, fetchHint(len(work)-shown))
 		if len(out) <= ciSectionMaxBytes || shown <= 1 {
-			return out
+			return out, shown
 		}
 		shown-- // drop the whole lowest-priority (last) block
 	}
@@ -553,24 +587,27 @@ func ciLineText(idx int, l ciLine) string {
 	return l.text
 }
 
-func collectGitLabCIFailures(run cmdRunner, repo, prNumber string, head ciHead) string {
-	failed := func(id int64) string {
-		return fmt.Sprintf("### Failed CI checks\n\npipeline #%d failed, UNVERIFIED: job logs not fetched\n", id)
+func collectGitLabCIFailures(run cmdRunner, repo, prNumber string, head ciHead, handled map[string]bool) (string, []int64) {
+	failed := func(id int64) (string, []int64) {
+		if handled[answeredCommentKey(addressedSourceCheckRun, id)] {
+			return "", nil
+		}
+		return fmt.Sprintf("### Failed CI checks\n\npipeline #%d failed, UNVERIFIED: job logs not fetched\n", id), []int64{id}
 	}
 	// head_pipeline came from the same pre-sync MR response as the head SHA.
 	if head.PipelineID != 0 || head.PipelineStatus != "" {
 		if head.PipelineStatus == "failed" {
 			return failed(head.PipelineID)
 		}
-		return ""
+		return "", nil
 	}
 	// head_pipeline null: fall back to pipelines whose sha is the MR head.
 	if !ciSHAPattern.MatchString(head.SHA) {
-		return ""
+		return "", nil
 	}
 	out, err := run.Run("glab", "api", fmt.Sprintf("projects/%s/merge_requests/%s/pipelines", url.PathEscape(repo), prNumber))
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	var ps []struct {
 		ID     int64  `json:"id"`
@@ -578,7 +615,7 @@ func collectGitLabCIFailures(run cmdRunner, repo, prNumber string, head ciHead) 
 		SHA    string `json:"sha"`
 	}
 	if json.Unmarshal([]byte(out), &ps) != nil {
-		return ""
+		return "", nil
 	}
 	var latest int64
 	status := ""
@@ -590,5 +627,5 @@ func collectGitLabCIFailures(run cmdRunner, repo, prNumber string, head ciHead) 
 	if status == "failed" {
 		return failed(latest)
 	}
-	return ""
+	return "", nil
 }

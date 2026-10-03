@@ -18,9 +18,9 @@ func TestNothingForPlannerInstructionIsWork(t *testing.T) {
 		want        bool
 	}{
 		{name: "quiet PR, no instruction", want: true},
-		{name: "quiet PR, clean base sync only", sync: baseSyncResult{merged: true}, want: true},
+		{name: "quiet PR, clean base sync only", sync: baseSyncResult{preMergeHead: "abc123"}, want: true},
 		{name: "instruction on a quiet PR", instruction: "set cpu to 200m", want: false},
-		{name: "instruction after a clean base sync", instruction: "set cpu to 200m", sync: baseSyncResult{merged: true}, want: false},
+		{name: "instruction after a clean base sync", instruction: "set cpu to 200m", sync: baseSyncResult{preMergeHead: "abc123"}, want: false},
 		{name: "pending comment", pending: 1, want: false},
 		{name: "CI failure", ciLogs: "lint failed", want: false},
 		{name: "conflicted base merge", sync: baseSyncResult{conflicted: true}, want: false},

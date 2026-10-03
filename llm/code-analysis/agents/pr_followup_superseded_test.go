@@ -206,7 +206,7 @@ func TestShouldAssessSuperseded(t *testing.T) {
 		want        bool
 	}{
 		{"idle run", "", 0, baseSyncResult{}, true},
-		{"clean merge sync", "", 0, baseSyncResult{merged: true}, true},
+		{"clean merge sync", "", 0, baseSyncResult{preMergeHead: "abc123"}, true},
 		{"conflicted sync", "", 0, baseSyncResult{conflicted: true}, false},
 		{"pending comments", "", 2, baseSyncResult{}, false},
 		{"instruction", "do a thing", 0, baseSyncResult{}, false},
