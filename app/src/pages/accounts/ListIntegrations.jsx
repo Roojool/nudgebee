@@ -711,6 +711,8 @@ const ListIntegrations = ({ integrationName }) => {
       integration_config_name: selectedIntegration.name,
       integration_name: integrationName == 'postgres' ? 'postgresql' : integrationName.toLowerCase(),
       integration_config_status: (selectedIntegration.status || 'enabled') == 'enabled' ? 'disabled' : 'enabled',
+      // The agent's own row and a hand-added one can share type and name.
+      source: selectedIntegration?.source || 'user',
     };
     setIsActionLoading(true);
     apiIntegrations

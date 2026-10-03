@@ -636,19 +636,30 @@ func logAgentLookupFailure(logger *slog.Logger, accountId string, err error) {
 	logger.Log(context.Background(), level, fmt.Sprintf("unable to get agent details, for account %s", accountId), "error", err)
 }
 
-// agentReportsSignalConnected is the account's own agent's health flag for a
-// telemetry signal, as the Agent Details page shows it.
-func agentReportsSignalConnected(features account.AgentDetailsFeatures, providerType string) bool {
-	var flag *bool
+// isAgentOwnProvider tells the agent's own logs / metrics / traces provider, which
+// the collector registers under the provider's name, from a datasource the relay
+// registers with the same "agent" source under the datasource's own name. Only the
+// former follows the agent's health flags.
+func isAgentOwnProvider(dto *core.IntegrationDto) bool {
+	return dto.Source == "agent" && dto.Name == dto.Type
+}
+
+// builtInHealthFlags lists the flags in an agent's connection_status that say its
+// own provider for a signal is up. Chronosphere serves traces from the metrics
+// backend and older agents report its traces as off, so either flag counts there.
+func builtInHealthFlags(providerType, provider string) []string {
 	switch providerType {
 	case "logs":
-		flag = features.LogsConnection
+		return []string{"logsConnection"}
 	case "metrics":
-		flag = features.PrometheusConnection
+		return []string{"prometheusConnection"}
 	case "traces":
-		flag = features.TracesEnabled
+		if provider == "chronosphere" {
+			return []string{"tracesEnabled", "prometheusConnection"}
+		}
+		return []string{"tracesEnabled"}
 	}
-	return flag != nil && *flag
+	return nil
 }
 
 func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, accountId, logProviderFromRequest, providerType string, logSourceFromRequest string) (string, string, *core.IntegrationDto, error) {
@@ -676,14 +687,44 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 			return "", "", nil, err
 		}
 
+		// The agent's own provider is one row shared by every cluster in the tenant.
+		// A cluster keeps its link to it through outages, so the link says the
+		// provider is configured here, not that it works. It is used only while this
+		// account's own agent reports it up, and that holds wherever it would be
+		// picked: as the account's default, or as the agent's provider below.
+		// builtInDown remembers a provider that is configured here but down.
+		builtInDown := ""
+		builtInUsable := func(provider string) (bool, error) {
+			configured, usable, sErr := core.AgentIntegrationState(ctx, accountId, provider, builtInHealthFlags(providerType, provider)...)
+			if sErr != nil {
+				ctx.GetLogger().Error("getLogsMetricsTracesProviderWithIntegration: failed to read the agent integration's state",
+					"account_id", accountId, "provider", provider, "error", sErr)
+				return false, sErr
+			}
+			if configured && !usable {
+				builtInDown = provider
+			}
+			return usable, nil
+		}
+
+		if integrationDto != nil && isAgentOwnProvider(integrationDto) {
+			usable, uErr := builtInUsable(integrationDto.Type)
+			if uErr != nil {
+				return "", "", nil, uErr
+			}
+			if !usable {
+				integrationDto = nil
+			}
+		}
+
 		if integrationDto != nil {
 			defaultProvider = integrationDto.Type
 			defaultSource = integrationDto.Source
 			matchedIntegration = integrationDto
 		} else {
-			// 1. Try resolving to the connected agent's own provider (guarded against explicitly disabled integrations).
+			// 1. Try resolving to the agent's own provider.
 			agentDetails, err := account.GetAgentConnectionDetails(accountId)
-			if err == nil && agentDetails.Status == "CONNECTED" {
+			if err == nil {
 				candidateProvider := ""
 				switch {
 				case providerType == "logs" && agentDetails.Features.LogsConnectionProvider != nil:
@@ -702,31 +743,29 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 					}
 				}
 
-				if candidateProvider != "" {
-					hasDisabledRecord, hErr := core.HasOnlyDisabledAccountSourceIntegration(ctx, accountId, candidateProvider, "agent")
-					if hErr != nil {
-						ctx.GetLogger().Error("getLogsMetricsTracesProviderWithIntegration: failed to check for a disabled account-level record",
-							"account_id", accountId, "provider", candidateProvider, "error", hErr)
-						return "", "", nil, hErr
+				// Already found down as the account's default: no need to ask again.
+				if candidateProvider != "" && candidateProvider != builtInDown {
+					usable, uErr := builtInUsable(candidateProvider)
+					if uErr != nil {
+						return "", "", nil, uErr
 					}
-					// The agent-source row is shared by every cluster in the tenant, and the
-					// collector sets its status from whichever cluster's heartbeat landed
-					// last. A disabled row only means this account's provider is off when
-					// this account's own agent also reports the signal unhealthy.
-					if !hasDisabledRecord || agentReportsSignalConnected(agentDetails.Features, providerType) {
+					if usable {
 						defaultProvider = candidateProvider
 						defaultSource = "agent"
 					}
 				}
 			}
 
-			// 2. Only if no connected agent provider was resolved: check active metastore integrations.
+			// 2. Only if the agent's own provider was not resolved: check the other
+			// integrations. The agent's own rows were decided above, and counting
+			// one that is down here would turn "exactly one other provider, use it"
+			// into the choose-a-default error.
 			if defaultProvider == "" {
 				var candidates []*core.IntegrationDto
 				if activeIntegrations, aErr := core.ListActiveIntegrationsForAccount(ctx, accountId); aErr == nil {
 					for i := range activeIntegrations {
 						dto := &activeIntegrations[i]
-						if isSupportedTelemetryProvider(dto.Type, dto.Source, providerType) {
+						if !isAgentOwnProvider(dto) && isSupportedTelemetryProvider(dto.Type, dto.Source, providerType) {
 							candidates = append(candidates, dto)
 						}
 					}
@@ -747,6 +786,12 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 					if err != nil {
 						logAgentLookupFailure(ctx.GetLogger(), accountId, err)
 						return "", "", nil, err
+					}
+					// Nothing else serves this signal. Say that the agent's own provider
+					// exists but is down, rather than leaving the caller to report that
+					// no provider is configured.
+					if builtInDown != "" {
+						return "", "", nil, fmt.Errorf("observability: the built-in %s provider (%s) is configured on this cluster but is not reachable right now", providerType, builtInDown)
 					}
 				default:
 					// Multiple enabled integrations without default -> prompt the user to choose.

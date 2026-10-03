@@ -115,30 +115,7 @@ func TestGetIntegrationByTypePreferringDefault(t *testing.T) {
 }
 
 func TestHasAccountSourceIntegration(t *testing.T) {
-	matchDisabledQuery := regexp.MustCompile(`(?s)SELECT EXISTS\s*\(.*WHERE ica\.cloud_account_id = \$1.*AND i\.status = 'disabled'\s*\)\s*AND NOT EXISTS\s*\(.*WHERE ica\.cloud_account_id = \$1.*AND i\.status != 'disabled'\s*\)`)
 	matchPlainQuery := regexp.MustCompile(`(?s)SELECT EXISTS\s*\(.*FROM integrations i.*WHERE ica\.cloud_account_id = \$1.*AND i\.tenant_id = \$2.*AND i\.type = \$3.*AND i\.source = \$4\s*\)`)
-
-	t.Run("HasOnlyDisabled returns true when disabled integration exists without enabled counterpart", func(t *testing.T) {
-		pkgMock.ExpectQuery(matchDisabledQuery.String()).
-			WithArgs("acc-1", testTenant, "prometheus", "agent").
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
-
-		exists, err := HasOnlyDisabledAccountSourceIntegration(ctxForTenant(t, testTenant), "acc-1", "prometheus", "agent")
-		require.NoError(t, err)
-		assert.True(t, exists)
-		assert.NoError(t, pkgMock.ExpectationsWereMet())
-	})
-
-	t.Run("HasOnlyDisabled returns false when integration is not disabled", func(t *testing.T) {
-		pkgMock.ExpectQuery(matchDisabledQuery.String()).
-			WithArgs("acc-2", testTenant, "prometheus", "agent").
-			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
-
-		exists, err := HasOnlyDisabledAccountSourceIntegration(ctxForTenant(t, testTenant), "acc-2", "prometheus", "agent")
-		require.NoError(t, err)
-		assert.False(t, exists)
-		assert.NoError(t, pkgMock.ExpectationsWereMet())
-	})
 
 	t.Run("HasAccountSourceIntegration returns true when any integration exists", func(t *testing.T) {
 		pkgMock.ExpectQuery(matchPlainQuery.String()).

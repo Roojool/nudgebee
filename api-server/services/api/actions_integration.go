@@ -359,7 +359,7 @@ func handleIntegrationAction(actionPayload *ActionRequest, c *gin.Context, trace
 			return
 		}
 
-		err = core.UpdateIntegrationConfigStatus(ctx, request.IntegrationName, request.IntegrationConfigName, request.IntegrationConfigStatus)
+		err = core.UpdateIntegrationConfigStatus(ctx, request.IntegrationName, request.IntegrationConfigName, request.IntegrationConfigStatus, request.Source)
 		if err != nil {
 			c.JSON(400, common.ErrorActionBadRequest(err.Error()))
 			return

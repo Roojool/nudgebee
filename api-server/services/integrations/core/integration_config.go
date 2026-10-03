@@ -1797,6 +1797,7 @@ func UpdateIntegrationConfigStatus(
 	integrationType string,
 	integrationConfigName string,
 	integrationStatus string,
+	source string,
 ) (err error) {
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
@@ -1829,15 +1830,18 @@ func UpdateIntegrationConfigStatus(
 
 	tenantId := ctx.GetSecurityContext().GetTenantId()
 
-	// Find integration id
-	var integrationId string
+	// Find integration id. A name is unique per (tenant, source, type), so the
+	// agent's own row and a hand-added one can share type and name; the source
+	// says which of the two the caller means.
+	var integrationId, integrationSource string
 	err = tx.QueryRowx(`
-        SELECT id
+        SELECT id, source
         FROM integrations
         WHERE tenant_id = $1
           AND lower(type) = lower($2)
           AND lower(name) = lower($3)
-    `, tenantId, integrationType, integrationConfigName).Scan(&integrationId)
+          AND ($4 = '' OR source = $4)
+    `, tenantId, integrationType, integrationConfigName, source).Scan(&integrationId, &integrationSource)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("integrations: integration not found for given tenant and config")
@@ -1920,6 +1924,31 @@ func UpdateIntegrationConfigStatus(
 	if err != nil {
 		slog.Error("integrations: failed to update integration status", "error", err)
 		return err
+	}
+
+	// An agent-source row is shared by every cluster in the tenant, and the
+	// collector's heartbeat keeps its status in step with this marker: disabled
+	// while the marker exists, enabled otherwise. So for those rows the marker,
+	// not the status written above, is what makes a user's Disable last.
+	if integrationSource == "agent" {
+		if integrationStatus == string(IntegrationStatusDisabled) {
+			_, err = tx.Exec(`
+				INSERT INTO integration_config_values(
+					id, integration_id, name, value, is_encrypted, created_at, updated_at, created_by, updated_by
+				) VALUES ($1, $2, $3, 'true', false, $4, $4, NULLIF($5, '')::uuid, NULLIF($5, '')::uuid)
+				ON CONFLICT(integration_id, name)
+				DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
+				uuid.NewString(), integrationId, AgentIntegrationUserDisabledConfigName,
+				time.Now(), ctx.GetSecurityContext().GetUserId())
+		} else {
+			_, err = tx.Exec(`
+				DELETE FROM integration_config_values WHERE integration_id = $1 AND name = $2`,
+				integrationId, AgentIntegrationUserDisabledConfigName)
+		}
+		if err != nil {
+			slog.Error("integrations: failed to record the user's switch on an agent integration", "error", err)
+			return err
+		}
 	}
 
 	// Commit before the audit write. audit.CreateAudit does not take this tx — it
@@ -2781,54 +2810,79 @@ func HasAccountSourceIntegration(
 	return exists, nil
 }
 
-// HasOnlyDisabledAccountSourceIntegration reports whether an integration of the given type
-// and source is linked to the account with status = 'disabled' and NO active (non-disabled)
-// counterpart exists.
-func HasOnlyDisabledAccountSourceIntegration(
+// AgentIntegrationUserDisabledConfigName names the integration_config_values row
+// that records a user's Disable of an agent-source integration. The collector
+// reads it on every heartbeat to set the row's status, so the name is shared
+// with collector-server/k8s-collector/app/handlers/telemetry_handler.py.
+const AgentIntegrationUserDisabledConfigName = "user_disabled"
+
+// AgentIntegrationState answers, for one account and the agent's own
+// integration of one type (the row the collector registers under the provider's
+// name; datasources the relay registers under their own name are not it), the
+// two questions that shared row cannot answer by its status:
+//
+//   - configured: the account is linked to that integration, and no user has
+//     disabled it. The link is kept while the cluster's agent names the provider,
+//     whether the provider is up or down.
+//   - usable: configured, and the account's own agent is connected and reports
+//     at least one of healthFlags true in its connection_status.
+//
+// Both are read straight from the database. The row's status is deliberately
+// not consulted: it is tenant-wide, and an older collector wrote it from
+// whichever cluster reported last.
+func AgentIntegrationState(
 	context *security.RequestContext,
 	accountId string,
 	integrationType string,
-	source string,
-) (bool, error) {
+	healthFlags ...string,
+) (configured bool, usable bool, err error) {
 	if context == nil || context.GetSecurityContext() == nil {
-		return false, errors.New("integrations: request context and security context are required")
+		return false, false, errors.New("integrations: request context and security context are required")
 	}
 
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	query := `
-		SELECT EXISTS (
-			SELECT 1
+		WITH linked AS (
+			SELECT ica.cloud_account_id
 			FROM integrations i
 			JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
 			WHERE ica.cloud_account_id = $1
 			  AND i.tenant_id = $2
 			  AND i.type = $3
-			  AND i.source = $4
-			  AND i.status = 'disabled'
-		) AND NOT EXISTS (
-			SELECT 1
-			FROM integrations i
-			JOIN integrations_cloud_accounts ica ON i.id = ica.integration_id
-			WHERE ica.cloud_account_id = $1
-			  AND i.tenant_id = $2
-			  AND i.type = $3
-			  AND i.source = $4
-			  AND i.status != 'disabled'
-		)`
-	args := []any{accountId, context.GetSecurityContext().GetTenantId(), integrationType, source}
-
-	var exists bool
-	err = dbms.Db.Get(&exists, query, args...)
-	if err != nil {
-		context.GetLogger().Error("integrations: failed to check only-disabled account-source integration existence",
-			"account_id", accountId, "type", integrationType, "source", source, "error", err)
-		return false, err
+			  AND i.name = i.type
+			  AND i.source = 'agent'
+			  AND NOT EXISTS (
+				SELECT 1 FROM integration_config_values m
+				WHERE m.integration_id = i.id AND m.name = $4
+			  )
+		)
+		SELECT
+			EXISTS (SELECT 1 FROM linked),
+			EXISTS (
+				SELECT 1
+				FROM linked l
+				JOIN agent a ON a.cloud_account_id = l.cloud_account_id AND a.type != 'proxy'
+				WHERE a.status = 'CONNECTED'
+				  AND EXISTS (
+					SELECT 1 FROM unnest($5::text[]) AS flag
+					WHERE a.connection_status ->> flag = 'true'
+				  )
+			)`
+	args := []any{
+		accountId, context.GetSecurityContext().GetTenantId(), integrationType,
+		AgentIntegrationUserDisabledConfigName, pq.Array(healthFlags),
 	}
-	return exists, nil
+
+	if err = dbms.Db.QueryRowx(query, args...).Scan(&configured, &usable); err != nil {
+		context.GetLogger().Error("integrations: failed to read agent integration state",
+			"account_id", accountId, "type", integrationType, "error", err)
+		return false, false, err
+	}
+	return configured, usable, nil
 }
 
 // GetIntegrationConfigValueByName returns the value of a single config entry
