@@ -22,6 +22,12 @@ func TestGetLogsMetricsTracesProvider_SingleActiveProviderDefault(t *testing.T) 
 		},
 	}
 
+	connected, disconnected := true, false
+	healthyAgent := connectedAgent
+	healthyAgent.Features.PrometheusConnection = &connected
+	downAgent := connectedAgent
+	downAgent.Features.PrometheusConnection = &disconnected
+
 	tests := []struct {
 		name               string
 		activeIntegrations []core.IntegrationDto
@@ -96,6 +102,30 @@ func TestGetLogsMetricsTracesProvider_SingleActiveProviderDefault(t *testing.T) 
 			hasDisabledRow:     true,
 			expectedProvider:   "",
 			expectedSource:     "",
+		},
+		{
+			// The shared agent row was last written by another cluster whose Prometheus is
+			// off; this account's own agent reports Prometheus healthy.
+			name: "disabled shared agent row but this agent reports prometheus connected -> provider is prometheus",
+			activeIntegrations: []core.IntegrationDto{
+				{Id: "int-2", Name: "Datadog-hive", Type: "datadog", Source: "user"},
+				{Id: "int-3", Name: "new relic integration", Type: "newrelic", Source: "user"},
+			},
+			agentDetails:     &healthyAgent,
+			hasDisabledRow:   true,
+			expectedProvider: "prometheus",
+			expectedSource:   "agent",
+		},
+		{
+			name: "disabled agent row and this agent reports prometheus down -> agent skipped, choice error",
+			activeIntegrations: []core.IntegrationDto{
+				{Id: "int-2", Name: "Datadog-hive", Type: "datadog", Source: "user"},
+				{Id: "int-3", Name: "new relic integration", Type: "newrelic", Source: "user"},
+			},
+			agentDetails:      &downAgent,
+			hasDisabledRow:    true,
+			expectErr:         true,
+			expectedErrSubstr: "multiple metrics providers are configured (Datadog-hive, new relic integration)",
 		},
 		{
 			name:               "no integrations and connected agent with prometheus -> provider is prometheus",

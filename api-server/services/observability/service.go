@@ -636,6 +636,21 @@ func logAgentLookupFailure(logger *slog.Logger, accountId string, err error) {
 	logger.Log(context.Background(), level, fmt.Sprintf("unable to get agent details, for account %s", accountId), "error", err)
 }
 
+// agentReportsSignalConnected is the account's own agent's health flag for a
+// telemetry signal, as the Agent Details page shows it.
+func agentReportsSignalConnected(features account.AgentDetailsFeatures, providerType string) bool {
+	var flag *bool
+	switch providerType {
+	case "logs":
+		flag = features.LogsConnection
+	case "metrics":
+		flag = features.PrometheusConnection
+	case "traces":
+		flag = features.TracesEnabled
+	}
+	return flag != nil && *flag
+}
+
 func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, accountId, logProviderFromRequest, providerType string, logSourceFromRequest string) (string, string, *core.IntegrationDto, error) {
 	if ctx == nil || ctx.GetSecurityContext() == nil {
 		return "", "", nil, ErrNoTenantContext
@@ -694,7 +709,11 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 							"account_id", accountId, "provider", candidateProvider, "error", hErr)
 						return "", "", nil, hErr
 					}
-					if !hasDisabledRecord {
+					// The agent-source row is shared by every cluster in the tenant, and the
+					// collector sets its status from whichever cluster's heartbeat landed
+					// last. A disabled row only means this account's provider is off when
+					// this account's own agent also reports the signal unhealthy.
+					if !hasDisabledRecord || agentReportsSignalConnected(agentDetails.Features, providerType) {
 						defaultProvider = candidateProvider
 						defaultSource = "agent"
 					}
