@@ -948,6 +948,9 @@ class MessageService:
                         return group_result
                 return await self.send_finding_resolved_reply(tenant_id, parameters)
 
+            if type_ == "finding_returned":
+                return await self._queue_returned_anomaly(parameters, tenant_id)
+
             group_result = await self._maybe_handle_grouped_message(source, parameters, tenant_id, payload)
             if group_result is not None:
                 return group_result
@@ -1015,12 +1018,14 @@ class MessageService:
 
         return await self._maybe_enqueue_anomaly(parameters, tenant_id)
 
-    async def _maybe_enqueue_anomaly(self, parameters, tenant_id):
-        """Queue an anomaly finding, firing or resolved, for the grouped anomaly
-        digest. None when the finding is not an anomaly."""
+    async def _maybe_enqueue_anomaly(self, parameters, tenant_id, returned=False):
+        """Queue an anomaly finding, firing, resolved or returned, for the
+        grouped anomaly digest. None when the finding is not an anomaly."""
         finding = parameters.get("finding") or {}
         finding_source = finding.get("source", "")
         if finding_source and finding_source.lower() == "anomaly":
+            if returned:
+                finding = {**finding, "returned": True}
             anomaly = {
                 "source": "anomaly",
                 "type": "anomaly",
@@ -1030,6 +1035,19 @@ class MessageService:
             return await self.group_handler.enqueue(anomaly)
 
         return None
+
+    async def _queue_returned_anomaly(self, parameters, tenant_id):
+        """An anomaly that had cleared and fired again joins the next digest,
+        labelled. No other source has a message for a return."""
+        finding_source = (parameters.get("finding") or {}).get("source") or ""
+        if finding_source.lower() != "anomaly":
+            return [system_response("dropped", "A returned finding is only announced in the anomaly digest")]
+        group_result = await self._maybe_enqueue_anomaly(parameters, tenant_id, returned=True)
+        if group_result is not None:
+            return group_result
+        # enqueue logs its own failure and returns None; say so rather than
+        # report the anomaly as unsupported.
+        return [system_response("failed", "Could not queue the returned anomaly for the digest")]
 
     async def trigger_notification(
         self,

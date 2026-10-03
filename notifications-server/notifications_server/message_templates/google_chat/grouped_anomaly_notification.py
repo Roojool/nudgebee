@@ -9,6 +9,7 @@ from notifications_server.message_templates.slack.grouped_anomaly_notification i
     AnomalyAlertParams,
     counts_phrase,
     resolved_line,
+    returned_label,
     split_resolved,
 )
 
@@ -60,7 +61,7 @@ def get_grouped_anomaly_alerts_gchat_template(input_data: Any) -> Dict[str, Any]
 
             title = alert.title or f"{alert.subject_name} anomaly"
 
-            lines.append(f"• *{title}*")
+            lines.append(f"• *{title}*{returned_label(alert, '*')}")
             lines.append(f"  - Namespace: *{alert.subject_namespace}* | Type: *{alert.subject_type or 'N/A'}*")
             lines.append(f"  - Priority: *{alert.priority}* | Status: *{alert.status}*")
             lines.append(f"  - Started at: {human}")

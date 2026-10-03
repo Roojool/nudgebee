@@ -62,6 +62,9 @@ class AnomalyAlertParams(BaseModel):
     # Evidences never reach a notification — the post-process consumer nils them
     # before publishing — so the numbers an alert shows travel on labels.
     labels: Optional[Dict[str, Any]] = None
+    # Set by the router on an anomaly that had cleared and fired again
+    # (`finding_returned`); its line carries the "returned" label.
+    returned: Optional[bool] = None
 
 
 # Dollar amounts, percentages, and Nx multipliers in the producer sentence get
@@ -179,6 +182,13 @@ def counts_phrase(firing: int, resolved: int, noun: str) -> str:
     return f"{firing} {noun} detected, {resolved} resolved"
 
 
+def returned_label(alert: AnomalyAlertParams, bold: str) -> str:
+    """What follows the title of a firing anomaly that had cleared and fired
+    again; empty for any other, whose line then renders as it always did.
+    `bold` is the platform's marker."""
+    return f" · {bold}returned{bold}" if alert.returned else ""
+
+
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -215,7 +225,7 @@ def get_grouped_anomaly_alerts_template(input_data: List[AnomalyAlertParams]) ->
     attachments = []
     for alert in firing[:MAX_ANOMALY_ITEMS]:
         title = alert.title or f"{alert.subject_name} anomaly"
-        lines = [f"*{title}*"]
+        lines = [f"*{title}*{returned_label(alert, '*')}"]
         value_line = _anomaly_value_line(alert)
         if value_line:
             lines.append(value_line)

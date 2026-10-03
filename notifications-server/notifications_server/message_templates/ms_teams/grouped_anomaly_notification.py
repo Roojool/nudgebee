@@ -9,6 +9,7 @@ from notifications_server.message_templates.slack.grouped_anomaly_notification i
     AnomalyAlertParams,
     counts_phrase,
     resolved_line,
+    returned_label,
     split_resolved,
 )
 
@@ -82,7 +83,7 @@ def get_grouped_anomaly_alerts_ms_teams_template(input_data: Any) -> Dict[str, A
                 [
                     {
                         "type": "TextBlock",
-                        "text": f"- **{title}**",
+                        "text": f"- **{title}**{returned_label(alert, '**')}",
                         "wrap": True,
                     },
                     {

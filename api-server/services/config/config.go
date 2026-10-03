@@ -304,6 +304,13 @@ type appConfig struct {
 	// always-open behavior is the bug.
 	FeatureEventPointInTimeCloseEnabled bool `mapstructure:"feature_event_point_in_time_close_enabled"`
 
+	// When true, a Kubernetes anomaly that fires again after it had cleared is
+	// announced in the next anomaly digest, labelled "returned" (issue #40007).
+	// The producer reads the stored status before its upsert to tell a return
+	// from the hourly re-detection of an open anomaly, which stays silent.
+	// Default off.
+	FeatureAnomalyReturnedDigestEnabled bool `mapstructure:"feature_anomaly_returned_digest_enabled"`
+
 	// Triage scoring: when true, ComputeScore uses the LLM-verdict-per-class + deterministic
 	// policy path instead of the legacy severity*env formula. Default off (legacy formula).
 	FeatureLLMTriageScoringEnabled bool `mapstructure:"feature_llm_triage_scoring_enabled"`
@@ -585,6 +592,9 @@ func init() {
 	viper.SetDefault("nb_anomaly_evaluation_hours", 1)
 
 	viper.SetDefault("feature_event_point_in_time_close_enabled", true)
+	// Off by default, but declared: Unmarshal skips a key with no default, so
+	// without this line the environment variable could never turn it on.
+	viper.SetDefault("feature_anomaly_returned_digest_enabled", false)
 	viper.SetDefault("feature_kg_cloud_topology_from_db", true)
 	viper.SetDefault("feature_kg_cfn_stack_resources_from_db", true)
 	viper.SetDefault("webhook_async_execution", true)

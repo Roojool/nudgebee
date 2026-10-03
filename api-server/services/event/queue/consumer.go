@@ -15,6 +15,15 @@ import (
 	"nudgebee/services/security"
 )
 
+// Indirection seams so processEventPostProcessMessage is unit-testable without
+// a live DB / MQ. Overridden in tests.
+var (
+	postProcessEventFn     = event.PostProcessEvent
+	reEmitForWorkflowsFn   = event.ReEmitForWorkflows
+	processEventResolvedFn = notification.ProcessEventResolved
+	processEventReturnedFn = notification.ProcessEventReturned
+)
+
 func init() {
 	err := common.MqConsume(
 		config.Config.RabbitMqEventPostProcessExchange,
@@ -42,29 +51,41 @@ func processEventPostProcessMessage(msgCtx context.Context, data []byte) error {
 
 	logger := slog.Default().With("event_id", message.EventID)
 
-	ctx, eventMap, err := loadEventMap(msgCtx, message.EventID, logger)
+	ctx, eventMap, err := loadEventMapFn(msgCtx, message.EventID, logger)
 	if err != nil {
 		return nil // Already logged; don't requeue (malformed / missing event)
+	}
+
+	if message.Phase == EventPostProcessPhaseReturned {
+		// RESOLVED→FIRING update of an event that had cleared: deliver the
+		// returned notification only; the full pipeline ran on first insert.
+		// Checked before workflow_only, which the producer also sets so that a
+		// consumer predating phase re-delivers to workflows rather than running
+		// the full pipeline again.
+		if err := processEventReturnedFn(ctx, eventMap); err != nil {
+			logger.Error("event_queue: failed to publish returned notification", "error", err)
+		}
+		return nil
 	}
 
 	if message.WorkflowOnly {
 		// Re-fire of an existing event: re-deliver to event-trigger workflows only,
 		// without re-running triage/llm/notification (which ran on first insert).
-		event.ReEmitForWorkflows(ctx, eventMap)
+		reEmitForWorkflowsFn(ctx, eventMap)
 		return nil
 	}
 
 	if message.NotifyResolved {
 		// FIRING→RESOLVED update: deliver the resolved notification only; the
 		// full pipeline ran on first insert.
-		if err := notification.ProcessEventResolved(ctx, eventMap); err != nil {
+		if err := processEventResolvedFn(ctx, eventMap); err != nil {
 			logger.Error("event_queue: failed to publish resolved notification", "error", err)
 		}
 		return nil
 	}
 
 	// Run all event processors
-	event.PostProcessEvent(ctx, eventMap)
+	postProcessEventFn(ctx, eventMap)
 
 	return nil
 }
