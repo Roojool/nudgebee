@@ -290,6 +290,9 @@ type IConversationDao interface {
 	UpdateConversationToolResponse(toolId, messageId, conversationId, accountId, response string, status toolcore.NBToolResponseStatus) error
 	GetConversationMessageByAgentId(agentId string) (string, error)
 	GetAgentNameFromAgentId(agentId string) (string, error)
+	// GetAgentRunAttribution returns the conversation, message and user of the
+	// agent run agentId, provided it is an agentName run in accountId.
+	GetAgentRunAttribution(agentId, accountId, agentName string) (conversationId, messageId, userId string, err error)
 	UpdateConversationAgentThought(agentId, thought string) error
 	GetConversationAgentInput(agentId, accountId string) (string, error)
 	SaveConversationToolCall(conversationID, accountID, userID, messageId, agenId, toolId, toolName, toolArgs, thought, toolArgsSql, toolResult string, status toolcore.NBToolResponseStatus, toolType toolcore.NBToolType, childAgentId *string, references []toolcore.NBToolResponseReference, metadata []byte, memoryRefs []byte) error
@@ -1593,6 +1596,19 @@ func (chat *ConversationDao) GetAgentNameFromAgentId(agentId string) (string, er
 		return "", fmt.Errorf("history: failed to scan agent name : %w", err)
 	}
 	return agentName, nil
+}
+
+func (chat *ConversationDao) GetAgentRunAttribution(agentId, accountId, agentName string) (string, string, string, error) {
+	query := `SELECT conversation_id::text, message_id::text, COALESCE(user_id::text, '') FROM llm_conversation_agent WHERE id = $1 AND account_id = $2 AND agent_name = $3`
+	var conversationId, messageId *string
+	var userId string
+	if err := chat.dbManager.Db.QueryRow(query, agentId, accountId, agentName).Scan(&conversationId, &messageId, &userId); err != nil {
+		return "", "", "", fmt.Errorf("history: failed to get agent run attribution: %w", err)
+	}
+	if conversationId == nil || messageId == nil {
+		return "", "", "", fmt.Errorf("history: agent run %s has no conversation or message", agentId)
+	}
+	return *conversationId, *messageId, userId, nil
 }
 
 func (chat *ConversationDao) GetConversationAgentParentAgentIdAndPreviousState(agenId string) (string, string) {

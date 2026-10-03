@@ -130,6 +130,10 @@ type AgenticAnalyzeRequest struct {
 	ConversationId string               `json:"conversation_id,omitempty"`
 	MessageId      string               `json:"message_id,omitempty"`
 	BuildConfig    *session.BuildConfig `json:"build_config,omitempty"`
+	// AgentRunID is the llm-server agent run this analysis was dispatched for.
+	// It is returned with every model call made through llm-server, which
+	// records that call's usage against the run's conversation.
+	AgentRunID string `json:"agent_run_id,omitempty"`
 	// AnalysisID is set internally by HandleAnalyze (the async entrypoint) to the
 	// progress-store key so the analysis can attach its tool tracker for live
 	// /status streaming. Not part of the wire contract — callers never send it.
@@ -736,6 +740,7 @@ func secureSessionWorkspace(path string) error {
 }
 
 func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req AgenticAnalyzeRequest) (*AgenticAnalyzeResponse, error) {
+	ctx = llm.WithAgentRunID(ctx, req.AgentRunID)
 	if len(req.KnowledgeFiles) > 0 {
 		req.Skills += NewFileHandler(ah.config).renderKnowledgeFiles(ctx, req.KnowledgeFiles)
 	}

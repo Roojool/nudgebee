@@ -3664,6 +3664,7 @@ func recordTokenUsageFailure(
 		CacheTTLMinutes:   &cacheTTL,
 	}
 	record.ModelTier, record.TaskType = tierAttributionForRecord(ctx)
+	applyUsageLink(ctx, record)
 
 	bgCtx := security.NewRequestContext(context.Background(), ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 	insertFn := func() {
@@ -3855,6 +3856,7 @@ func trackTokenUsage(
 		ResponseContent:     responseContent,
 	}
 	record.ModelTier, record.TaskType = tierAttributionForRecord(ctx)
+	applyUsageLink(ctx, record)
 
 	// Thinking tokens (Gemini 2.5+ thinking models). Stored only when non-zero
 	// so non-thinking-model rows stay NULL — distinguishes "model didn't think"

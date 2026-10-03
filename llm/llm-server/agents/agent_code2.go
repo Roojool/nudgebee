@@ -424,6 +424,9 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		"account_id":         request.AccountId,
 		"conversation_id":    agentRequest.SessionId,
 		"message_id":         agentRequest.MessageId,
+		// The workspace returns this on every model call it makes through
+		// llm-server, which records that call's usage against this run.
+		"agent_run_id": agentRequest.AgentId,
 	}
 
 	if orig := resolveOriginalQueryForAnalysis(request.Query, agentRequest.OriginalQuery); orig != "" {
@@ -3215,6 +3218,7 @@ func (l CodeAgent2) executeFollowup(ctx *security.RequestContext, query core.NBA
 		"raise_pr":        true,
 		"conversation_id": query.SessionId,
 		"message_id":      query.MessageId,
+		"agent_run_id":    query.AgentId,
 		// Followup-specific fields
 		"followup":  true,
 		"pr_url":    request.PRURL,
