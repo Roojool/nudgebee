@@ -671,22 +671,21 @@ func addDuplicateLabelTx(ctx context.Context, tx *sqlx.Tx, eventID, linkedEventI
 	return err
 }
 
-// getFirstEventIDFromChainTx looks up the TRUE first event for a fingerprint from event_duplicates (within transaction)
-func getFirstEventIDFromChainTx(ctx context.Context, tx *sqlx.Tx, fingerprint, cloudAccountID string) string {
+// getFirstEventIDFromChainTx looks up the TRUE first event of the chain eventID belongs to (within transaction).
+// Keyed on the event's own row for the same reason as getFirstEventIDFromChain.
+func getFirstEventIDFromChainTx(ctx context.Context, tx *sqlx.Tx, eventID, cloudAccountID string) string {
 	query := `
 		SELECT first_event_id
 		FROM event_duplicates
-		WHERE fingerprint = $1
+		WHERE event_id = $1
 		  AND cloud_account_id = $2
-		  AND occurrence_number = 1
-		LIMIT 1
 	`
 
 	var firstEventID string
-	err := tx.GetContext(ctx, &firstEventID, query, fingerprint, cloudAccountID)
+	err := tx.GetContext(ctx, &firstEventID, query, eventID, cloudAccountID)
 	if err != nil {
-		slog.DebugContext(ctx, "No duplicate chain found for fingerprint",
-			"fingerprint", fingerprint,
+		slog.DebugContext(ctx, "No duplicate chain found for event",
+			"event_id", eventID,
 			"error", err,
 		)
 		return ""
@@ -785,7 +784,7 @@ func createRuleFromClassificationTx(ctx context.Context, tx *sqlx.Tx, c *EventCl
 		// This ensures nb_duplicate_of always points to the original event
 		linkedEventID := c.LinkedEventID
 		if event.Fingerprint != nil {
-			firstEventID := getFirstEventIDFromChainTx(ctx, tx, *event.Fingerprint, c.CloudAccountID)
+			firstEventID := getFirstEventIDFromChainTx(ctx, tx, event.ID, c.CloudAccountID)
 			if firstEventID != "" {
 				linkedEventID = &firstEventID
 				slog.InfoContext(ctx, "Using true first event for duplicate rule",
