@@ -2,7 +2,7 @@ import * as React from 'react';
 import { useRouter } from 'next/router';
 import { useSession } from 'next-auth/react';
 import PropTypes from 'prop-types';
-import homeApi from '@api1/home';
+import homeApi, { isCloudAccountsLoadFailure } from '@api1/home';
 import userApi, { PREFERENCE_LAST_ACCOUNT_ID } from '@api1/user';
 import apiAccount from '@api1/account';
 import { useData } from '@context/DataContext';
@@ -10,11 +10,43 @@ import { transformClusters } from '@shared/layout/UpdateDataContext';
 import CustomDropdown from '@shared/CustomDropdown';
 import { isAccountGuardActive } from '@lib/accountGuard';
 
+// Waits before asking for the account list again after it failed to load. The list ends on purpose:
+// once it runs out the dropdown stops asking, so a backend that stays down is not polled forever.
+const RELOAD_DELAYS_MS = [2000, 5000, 10000, 20000];
+
 /**
  * Custom Hook: Handles fetching and Context synchronization.
  */
 const useClusterData = (allCluster, setAllCluster) => {
   const [isLoading, setIsLoading] = React.useState(false);
+  // Reloads tried since the list last held a real account; at RELOAD_DELAYS_MS.length it stops.
+  const [reloads, setReloads] = React.useState(0);
+
+  // A list with no real account is either a tenant that has none, or the Demo-only stand-in
+  // getCloudAccounts returns when the request failed. The stand-in would otherwise stay until the
+  // page is reloaded, so ask again. Keyed on the list, not on who fetched it, so a stand-in written
+  // by another caller or before this dropdown mounted recovers too.
+  React.useEffect(() => {
+    if (allCluster == null || allCluster.some((cluster) => cluster?.value !== 'demo')) {
+      setReloads(0); // a later failure gets the full set of tries again
+      return undefined;
+    }
+    const delay = RELOAD_DELAYS_MS[reloads];
+    if (delay === undefined) {
+      return undefined;
+    }
+    const timer = setTimeout(async () => {
+      const response = await homeApi.getCloudAccounts('', false, true);
+      if (isCloudAccountsLoadFailure(response)) {
+        setReloads((count) => count + 1); // still failing: wait longer, then give up
+      } else if (response.some((account) => account?.id !== 'demo')) {
+        setAllCluster(transformClusters(response));
+      } else {
+        setReloads(RELOAD_DELAYS_MS.length); // loaded fine: this tenant has no accounts
+      }
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [allCluster, reloads, setAllCluster]);
 
   const fetchClusters = React.useCallback(async () => {
     setIsLoading(true);
