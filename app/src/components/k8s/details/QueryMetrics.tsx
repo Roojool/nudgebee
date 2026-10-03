@@ -150,6 +150,14 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   // Guards the async ES-index resolve below against a stale response landing after
   // the user has switched providers again.
   const selectedProviderRef = useRef('');
+  // Bumped on every provider switch and used as QueryModeSwitcher's key, so a switch
+  // remounts it. That component keeps the editor text, the builder blocks and the ES
+  // query language in its own state, which a reset here does not reach: without the
+  // remount the old query stays on screen while `query` is empty, and Submit sends
+  // nothing. The key is not metricsProvider because that also changes when the account
+  // default resolves on load; a remount then would clear a query that arrived in the
+  // link from `query` while the editor still showed it.
+  const [providerSwitchCount, setProviderSwitchCount] = useState(0);
   const [operatorDescriptors, setOperatorDescriptors] = useState<OperatorDescriptor[] | undefined>(undefined);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [truncationWarnings, setTruncationWarnings] = useState<{
@@ -262,6 +270,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setOperatorDescriptors(descriptors);
     selectedProviderRef.current = newProvider;
     setMetricsProvider(newProvider);
+    setProviderSwitchCount((count) => count + 1);
 
     if (newProvider === defaultProvider) {
       // Switching back to the account default — its per-account/top-level index was
@@ -1115,6 +1124,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
         <ListingLayout.Body sx={{ pb: 'var(--ds-space-4)' }}>
           {showQueryBox && (
             <QueryModeSwitcher
+              key={providerSwitchCount}
               accountId={accountId}
               params={{ ...selectedDateRange }}
               logProvider={metricsProvider}
