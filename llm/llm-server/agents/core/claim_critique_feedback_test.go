@@ -142,7 +142,7 @@ func TestClaimFeedbackSkipsChildAgent(t *testing.T) {
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
 	withFakeLLMModel(t, fake)
-	d, f := runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react4", "test", "accept", "legacy", "why", "answer", "", nil)
+	d, f := runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react4", "test", "accept", "legacy", "why", "answer", "", nil, false)
 	require.Equal(t, "accept", d)
 	require.Equal(t, "legacy", f)
 	require.Zero(t, fake.callCount())

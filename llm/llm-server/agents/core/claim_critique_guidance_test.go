@@ -34,7 +34,7 @@ func TestClaimGuidanceFeedback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeLLMModel{turns: []fakeTurn{{content: tc.output}}}
 			withFakeLLMModel(t, fake)
-			feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit)
+			feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit, false)
 			require.Equal(t, tc.status, capture.Status)
 			require.Equal(t, 1, fake.callCount())
 			if tc.status != "ok" {
@@ -55,13 +55,28 @@ func TestClaimGuidanceFeedback(t *testing.T) {
 	}
 }
 
+// The last refinement's answer is not reviewed again, so its feedback says so.
+func TestClaimGuidanceFinalRound(t *testing.T) {
+	audit, err := parseClaimAudit(validClaimAudit, 1)
+	require.NoError(t, err)
+	for _, final := range []bool{false, true} {
+		fake := &fakeLLMModel{turns: []fakeTurn{{content: validClaimGuidance}}}
+		withFakeLLMModel(t, fake)
+		feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit, final)
+		require.Equal(t, "ok", capture.Status)
+		require.Equal(t, final, capture.FinalRound)
+		require.Contains(t, feedback, "A check that fails or is denied is not evidence for the alternative")
+		require.Equal(t, final, strings.Contains(feedback, claimGuidanceFinalRound))
+	}
+}
+
 func TestClaimGuidanceSkipsRejectionWithoutFlaggedClaims(t *testing.T) {
 	// A rejection driven only by missing_required has no claim to explain.
 	audit, err := parseClaimAudit(`{"claims":[{"claim":"CPU is high","support":"observed","asserted_as_fact":true,"material":true,"evidence_refs":[1]}],"missing_required":["check the health endpoint logs"]}`, 1)
 	require.NoError(t, err)
 	fake := &fakeLLMModel{response: validClaimGuidance}
 	withFakeLLMModel(t, fake)
-	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit)
+	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit, false)
 	require.Empty(t, feedback)
 	require.Equal(t, "no_flagged_claims", capture.Status)
 	require.Zero(t, fake.callCount())
@@ -72,7 +87,7 @@ func TestClaimGuidanceRejectsEmptyPacket(t *testing.T) {
 	require.NoError(t, err)
 	fake := &fakeLLMModel{response: validClaimGuidance}
 	withFakeLLMModel(t, fake)
-	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimCaptureDetail{InputPacket: []byte("null")}, audit)
+	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimCaptureDetail{InputPacket: []byte("null")}, audit, false)
 	require.Empty(t, feedback)
 	require.Equal(t, "prepare_error", capture.Status)
 	require.Zero(t, fake.callCount())
@@ -84,7 +99,7 @@ func TestClaimGuidanceTruncatesLongFields(t *testing.T) {
 	long := strings.Repeat("x", 3*claimGuidanceLimit)
 	fake := &fakeLLMModel{turns: []fakeTurn{{content: strings.Replace(validClaimGuidance, "Observation 1 shows CPU high but no health-check failure.", long, 1)}}}
 	withFakeLLMModel(t, fake)
-	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit)
+	feedback, capture := claimGuidanceFeedback(llmOverrideContext(), NBAgentRequest{}, claimGuidanceDetail(t), audit, false)
 	require.Equal(t, "ok", capture.Status)
 	require.Less(t, len(feedback), 2*claimGuidanceLimit+1000)
 }
@@ -124,11 +139,13 @@ func TestClaimGuidanceBothPlanners(t *testing.T) {
 		decision        string
 		calls           int
 		guided          bool
+		usedRefinements int
 	}{
-		{"flag off", false, validClaimAudit, "", "refine", 2, false},
-		{"guided", true, validClaimAudit, validClaimGuidance, "refine", 3, true},
-		{"guidance fails", true, validClaimAudit, `not json`, "refine", 3, false},
-		{"accepted", true, accepted, "", "accept", 2, false},
+		{"flag off", false, validClaimAudit, "", "refine", 2, false, 0},
+		{"guided", true, validClaimAudit, validClaimGuidance, "refine", 3, true, 0},
+		{"guided final round", true, validClaimAudit, validClaimGuidance, "refine", 3, true, 1},
+		{"guidance fails", true, validClaimAudit, `not json`, "refine", 3, false, 0},
+		{"accepted", true, accepted, "", "accept", 2, false, 0},
 	}
 	for _, planner := range []string{"react3", "react4"} {
 		for _, tc := range cases {
@@ -145,10 +162,12 @@ func TestClaimGuidanceBothPlanners(t *testing.T) {
 				steps := []NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}
 				var decision, feedback string
 				if planner == "react4" {
-					p := &NBReActPlanner4{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{}}
+					p := &NBReActPlanner4{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{},
+						maxRefinementAttempts: 2, refinementData: make([]refinementRecord, tc.usedRefinements)}
 					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps)
 				} else {
-					p := &NBReActPlanner3{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{}}
+					p := &NBReActPlanner3{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{},
+						maxRefinementAttempts: 2, refinementAttempts: tc.usedRefinements}
 					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps, ctx.GetLogger())
 				}
 				require.Equal(t, tc.decision, decision)
@@ -159,6 +178,8 @@ func TestClaimGuidanceBothPlanners(t *testing.T) {
 				case tc.guided:
 					require.True(t, strings.HasPrefix(feedback, claimGuidanceHeader))
 					require.Contains(t, feedback, "check: logs: health endpoint errors")
+					// Only the refinement that spends the last attempt says the next answer is final.
+					require.Equal(t, tc.usedRefinements == 1, strings.Contains(feedback, claimGuidanceFinalRound))
 				default:
 					require.Equal(t, legacyClaimFeedback, feedback)
 				}

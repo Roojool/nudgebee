@@ -18,12 +18,18 @@ import (
 const claimGuidanceTimeout = 20 * time.Second
 const claimGuidanceLimit = 2000
 
-const claimGuidanceHeader = "Review of your root-cause analysis. For each weak point: why it is weak, the competing explanation, and the one check that tells them apart. Run the most decisive of these checks (one permitted discriminating read), or revise the answer to what the evidence supports; do not repeat denied evidence paths."
+const claimGuidanceHeader = "Review of your root-cause analysis. For each weak point: why it is weak, the competing explanation, and the one check that tells them apart. Run the most decisive of these checks (one permitted discriminating read), or revise the answer to what the evidence supports; do not repeat denied evidence paths. " +
+	"A check that fails or is denied is not evidence for the alternative: keep the original claim and label it unverified."
+
+// On the last refinement the next answer is accepted without review, so an
+// alternative adopted then is never checked (#39803 live data: 3/32 refines).
+const claimGuidanceFinalRound = "This is the last review: your next answer will not be reviewed. Change the root cause only if a new observation proves the alternative."
 
 // claimGuidanceCapture records step 2 on the audit row so its effect can be
 // measured. Status is "ok", or the stage that fell back to legacy feedback.
 type claimGuidanceCapture struct {
 	Status         string  `json:"status"`
+	FinalRound     bool    `json:"final_round"`
 	LatencySeconds float64 `json:"latency_seconds"`
 	ErrorDetail    string  `json:"error_detail,omitempty"`
 	RawResponse    string  `json:"raw_response,omitempty"`
@@ -39,9 +45,9 @@ type claimGuidanceItem struct {
 // claimGuidanceFeedback asks a second call to explain the claims the audit
 // already rejected. It never changes the verdict: on any failure it returns an
 // error and the caller keeps the audit's legacy feedback.
-func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest, detail claimCaptureDetail, audit claimAudit) (string, *claimGuidanceCapture) {
+func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest, detail claimCaptureDetail, audit claimAudit, finalRound bool) (string, *claimGuidanceCapture) {
 	started := time.Now()
-	capture := &claimGuidanceCapture{}
+	capture := &claimGuidanceCapture{FinalRound: finalRound}
 	finish := func(status string, err error) (string, *claimGuidanceCapture) {
 		capture.Status, capture.LatencySeconds = status, time.Since(started).Seconds()
 		if err != nil {
@@ -149,6 +155,10 @@ func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest,
 		lines = append(lines, line)
 	}
 	lines = append(lines, audit.MissingRequired...)
+	header := claimGuidanceHeader
+	if finalRound {
+		header += " " + claimGuidanceFinalRound
+	}
 	capture.Status, capture.LatencySeconds = "ok", time.Since(started).Seconds()
-	return claimGuidanceHeader + "\n- " + strings.Join(lines, "\n- "), capture
+	return header + "\n- " + strings.Join(lines, "\n- "), capture
 }

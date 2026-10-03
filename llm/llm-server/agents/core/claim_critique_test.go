@@ -159,9 +159,9 @@ func TestClaimShadowDisabledAndSubagentDoNotCallLLM(t *testing.T) {
 	withFakeLLMModel(t, fake)
 	ctx := llmOverrideContext()
 	config.Config.ClaimCritiqueFeedbackEnabled = false
-	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "legacy", "why", "answer", "", nil)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "legacy", "why", "answer", "", nil, false)
 	config.Config.ClaimCritiqueFeedbackEnabled = true
-	runClaimCritiqueShadow(ctx, NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react3", "test_agent", "accept", "legacy", "why", "answer", "", nil)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react3", "test_agent", "accept", "legacy", "why", "answer", "", nil, false)
 	require.Zero(t, fake.callCount())
 }
 

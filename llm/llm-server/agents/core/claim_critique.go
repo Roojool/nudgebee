@@ -254,7 +254,9 @@ func evaluateClaimResponse(response *llms.ContentResponse, count int) (result cl
 
 // The enabled audit captures its result and can request refinement,
 // but can never clear an incumbent rejection or create a separate retry budget.
-func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) (effectiveDecision, effectiveFeedback string) {
+// finalRound marks the critique whose rejection spends the planner's last
+// refinement: the answer that follows is accepted without another review.
+func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep, finalRound bool) (effectiveDecision, effectiveFeedback string) {
 	effectiveDecision, effectiveFeedback = baseline, baselineFeedback
 	if !config.Config.ClaimCritiqueFeedbackEnabled || ctx == nil ||
 		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId) {
@@ -286,7 +288,7 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 	// Step 2: explain the rejected claims. The verdict is already fixed; guidance
 	// only replaces the feedback text, and any failure keeps the legacy text.
 	if config.Config.ClaimCritiqueActionableFeedbackEnabled && result.Status == "ok" && result.Decision == "refine" && result.Audit != nil {
-		guided, capture := claimGuidanceFeedback(ctx, request, record.Detail, *result.Audit)
+		guided, capture := claimGuidanceFeedback(ctx, request, record.Detail, *result.Audit, finalRound)
 		record.Detail.Guidance = capture
 		if guided != "" {
 			result.Feedback = guided

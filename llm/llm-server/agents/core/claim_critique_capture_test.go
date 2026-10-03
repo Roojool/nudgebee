@@ -76,7 +76,7 @@ func TestClaimCapturePersistsWithTracingDisabled(t *testing.T) {
 			withFakeLLMModel(t, fake)
 			request := NBAgentRequest{AccountId: uuid.NewString(), ConversationId: uuid.NewString(), MessageId: uuid.NewString(), AgentId: uuid.NewString()}
 			runClaimCritiqueShadow(llmOverrideContext(), request, "react4", "test_agent", "accept", "baseline feedback", "why", "answer", "notes",
-				[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}})
+				[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false)
 			require.Equal(t, 1, fake.callCount())
 			require.Len(t, dao.rows, 2)
 			initial, final := dao.rows[0], dao.rows[1]
@@ -118,7 +118,7 @@ func TestClaimCaptureStorageFailureSkipsInference(t *testing.T) {
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
 	withFakeLLMModel(t, fake)
-	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "", nil)
+	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "", nil, false)
 	require.Zero(t, fake.callCount())
 	require.Empty(t, dao.rows)
 }
@@ -135,7 +135,7 @@ func TestClaimCaptureOversizeAndCancellationRemainVisible(t *testing.T) {
 	cancelled, cancel := context.WithCancel(base.GetContext())
 	cancel()
 	ctx := security.NewRequestContext(cancelled, base.GetSecurityContext(), base.GetLogger(), base.GetTracer(), base.GetMeter())
-	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", strings.Repeat("x", claimCritiqueInputLimit), "", nil)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", strings.Repeat("x", claimCritiqueInputLimit), "", nil, false)
 	require.Zero(t, fake.callCount())
 	require.Len(t, dao.rows, 2)
 	require.Equal(t, "input_limit", dao.rows[1].Status)
@@ -193,7 +193,7 @@ func TestClaimCaptureCompletionFailureLeavesStarted(t *testing.T) {
 	fake := &fakeLLMModel{turns: []fakeTurn{{content: validClaimAudit}}}
 	withFakeLLMModel(t, fake)
 	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "",
-		[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}})
+		[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false)
 	require.Equal(t, 1, fake.callCount())
 	require.Len(t, dao.rows, 1)
 	require.Equal(t, "started", dao.rows[0].Status)

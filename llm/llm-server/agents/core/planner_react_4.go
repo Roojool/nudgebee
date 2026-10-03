@@ -1855,7 +1855,8 @@ func (o *NBReActPlanner4) flattenTranscript(steps []NBAgentPlannerToolActionStep
 // analytics persistence for react_4 is a follow-up.
 func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, intermediateSteps []NBAgentPlannerToolActionStep) (resultDecision, resultFeedback string) {
 	defer func() {
-		resultDecision, resultFeedback = runClaimCritiqueShadow(o.ctx, o.request, "react4", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps)
+		resultDecision, resultFeedback = runClaimCritiqueShadow(o.ctx, o.request, "react4", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps,
+			len(o.refinementData)+1 >= o.maxRefinementAttempts)
 	}()
 	logger := o.ctx.GetLogger()
 
