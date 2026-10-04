@@ -6,7 +6,9 @@ import (
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/google/shlex"
@@ -321,6 +323,138 @@ func kubectlBlockedKind(command string) string {
 	return ""
 }
 
+// secretPathRoots are the mounted-secret directories that a glob must not be
+// able to reach (kubectlSecretFilesystemPatterns holds the literal markers).
+var secretPathRoots = []string{"/var/run/secrets", "/var/lib/kubelet/pods", "/run/secrets"}
+
+// globCanReachSecretPath reports a glob in tokens (quote-stripped shell words)
+// that could expand to a mounted-secret path:
+//   - an absolute path whose fixed part before the glob leads to, or is inside,
+//     a secret root or /proc (`/var/r*`, `/*`, `/proc/*/root/...`);
+//   - a glob with `..`, braces or a variable in it, which can climb out of or
+//     rewrite any prefix (`/tmp/*/../../var/run/s*`, `/var/run/se{c,}rets/*`,
+//     `$d/s*`);
+//   - a glob naming the secret or service-account mounts (`*/secrets/*`);
+//   - a relative glob whose first part could name a top-level directory on the
+//     way to a secret root (`v*/run/s*` from a workdir of /);
+//   - any relative glob when the command changes into such a directory, or
+//     into a relative one (`cd /var/run && cat s*/token`, `tar -C / ...`).
+//
+// URLs are skipped: `?` and `*` there are query text, not paths.
+func globCanReachSecretPath(tokens []string) bool {
+	var words []string
+	for _, tok := range tokens {
+		// A URL argument (curl/wget) is query text, not a path, and PromQL in
+		// it has parentheses, so it is kept whole and only checked for `..`.
+		// A word that also holds shell operators or `$` is not just a URL
+		// (`http://x;cat${IFS}/var/run/se*rets/t`) and is checked as words.
+		if urlWord.MatchString(tok) && !strings.ContainsAny(tok, ";&|<>$`\n") {
+			if strings.Contains(tok, "..") {
+				return true
+			}
+			continue
+		}
+		words = append(words, strings.FieldsFunc(tok, func(r rune) bool { return strings.ContainsRune(";&|()<>`", r) })...)
+	}
+	relativeRisk, recursive := false, readsRecursively(words)
+	for i, w := range words {
+		var dir string
+		switch {
+		case (w == "cd" || w == "pushd" || w == "chroot" || w == "-C" || w == "-w" || w == "--workdir") && i+1 < len(words):
+			dir = words[i+1]
+		case strings.HasPrefix(w, "--workdir="):
+			dir = strings.TrimPrefix(w, "--workdir=")
+		case strings.HasPrefix(w, "-C") && len(w) > 2:
+			dir = w[2:]
+		default:
+			continue
+		}
+		if !strings.HasPrefix(dir, "/") || pathCanLeadToSecret(dir) {
+			relativeRisk = true
+		}
+	}
+	for _, w := range words {
+		g := strings.IndexAny(w, "*?[")
+		if g < 0 {
+			continue
+		}
+		lower := strings.ToLower(w)
+		// `..` climbs out of any prefix; braces and variables build paths the
+		// fixed prefix does not show (`/var/run/se{c,}rets/*`, `$d/s*`).
+		if strings.ContainsAny(w, "{}$") || strings.Contains(w, "..") || strings.Contains(lower, "secret") || strings.Contains(lower, "serviceacc") || strings.Contains(lower, "kubernetes.io") {
+			return true
+		}
+		// An absolute path starts the word, follows `pod:` or `--flag=`, or is
+		// glued to a short flag (`-f/var/run/...`).
+		if slash := strings.IndexByte(w, '/'); slash >= 0 && slash < g && (slash == 0 || w[slash-1] == ':' || w[slash-1] == '=' || w[0] == '-') {
+			if pathCanLeadToSecret(w[slash:g]) {
+				return true
+			}
+			continue
+		}
+		if relativeRisk || relativeGlobCanNameTopDir(w, recursive) {
+			return true
+		}
+	}
+	return false
+}
+
+// relativeGlobCanNameTopDir reports a relative glob whose first part could
+// match a top-level directory on the way to a secret root. The pod's workdir
+// is unknown and may be /, so `v*/run/s*` must be treated as `/v*/run/s*`;
+// `s*/token`, `*.log` and `mcp:sess:*` cannot name one. A glob with no `/`
+// (`CONFIG GET *`) names only top-level entries, which hold no secret file,
+// so it matters only when the command reads directories recursively.
+func relativeGlobCanNameTopDir(word string, recursive bool) bool {
+	for strings.HasPrefix(word, "./") {
+		word = word[2:]
+	}
+	first, _, hasSlash := strings.Cut(word, "/")
+	if !hasSlash && !recursive {
+		return false
+	}
+	// ".." too: some shells let `.?` or `.*` match it.
+	for _, dir := range []string{"var", "run", "proc", ".."} {
+		if matched, _ := path.Match(first, dir); matched {
+			return true
+		}
+	}
+	return false
+}
+
+// urlWord matches an http(s) URL argument.
+var urlWord = regexp.MustCompile(`^(?i)https?://`)
+
+// readsRecursively reports a command that can read whole directory trees: a
+// recursive flag (-r, -R, -lR, --recursive) or a tool that walks trees.
+func readsRecursively(words []string) bool {
+	for _, w := range words {
+		switch w {
+		case "--recursive", "find", "tar", "rsync", "zip", "xargs":
+			return true
+		}
+		if len(w) > 1 && w[0] == '-' && w[1] != '-' && strings.ContainsAny(w, "rR") && strings.Trim(w[1:], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// pathCanLeadToSecret reports whether an absolute path, or the fixed start of
+// one, is a secret root, inside one, or on the way to one.
+func pathCanLeadToSecret(prefix string) bool {
+	p := path.Clean(prefix)
+	if strings.HasPrefix(p, "/proc") {
+		return true
+	}
+	for _, root := range secretPathRoots {
+		if strings.HasPrefix(root, p) || strings.HasPrefix(p, root) {
+			return true
+		}
+	}
+	return false
+}
+
 // kubectlReadsSecretFilesystemPath returns true if the command uses a
 // pod-filesystem verb (exec / cp / attach) and references one of the
 // well-known kubelet-mounted secret paths. Catches commands like
@@ -351,10 +485,11 @@ func kubectlReadsSecretFilesystemPath(command string) bool {
 	if !hasFilesystemVerb {
 		return false
 	}
-	// Globs are resolved inside the target pod, where the validator cannot
-	// know which path they select. Fail closed for filesystem-capable verbs so
-	// `/var/run/se*rets` cannot hide a mounted-secret path.
-	if strings.ContainsAny(cmd, "*?[") {
+	// Globs are resolved inside the target pod, so one that could expand to a
+	// mounted-secret path fails closed (`/var/run/se*rets`). A glob that cannot
+	// reach one is ordinary: `du -sh /data/*`, a redis pattern `mcp:sess:*`,
+	// a `?` in a URL query.
+	if globCanReachSecretPath(tokens) {
 		return true
 	}
 	// Clean every path-shaped token before matching. This covers normal shell

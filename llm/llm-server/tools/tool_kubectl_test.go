@@ -362,6 +362,40 @@ func TestKubectlReadsSecretFilesystemPath(t *testing.T) {
 		{"parent segment path obfuscation", "kubectl exec mypod -- cat /var/run/tmp/../secrets/token", true},
 		{"wildcard path obfuscation", "kubectl exec mypod -- sh -c \"cat /var/run/se*rets/token\"", true},
 		{"cp path normalization", "kubectl cp mypod:/var/run/./secrets/token /tmp/token", true},
+		// Globs that could expand to a secret path.
+		{"glob on the way to a secret root", "kubectl exec mypod -- ls /var/r*", true},
+		{"glob at the filesystem root", "kubectl exec mypod -- grep -r token /*", true},
+		{"single-character glob in a secret root", "kubectl cp mypod:/run/se?rets/x /tmp/x", true},
+		{"glob through /proc", "kubectl exec mypod -- cat /proc/*/root/var/run/se*/x", true},
+		{"glob naming the service-account mount", "kubectl exec mypod -- cat */serviceaccount/token", true},
+		{"relative glob after cd toward a secret root", "kubectl exec mypod -- sh -c \"cd /var/run && cat s*/k*/s*/token\"", true},
+		{"relative glob after relative cd", "kubectl exec mypod -- sh -c \"cd ../.. && cat va*/r*/s*/x\"", true},
+		{"relative glob from a workdir of /", "kubectl exec p -- cat v*/run/s*/x", true},
+		{"relative glob climbing with ..", "kubectl exec p -- cat ../../../../v*/run/s*/x", true},
+		{"glob hiding .. after a safe prefix", "kubectl exec p -- cat /tmp/*/../../var/run/s*/x", true},
+		{"glob from the home directory", "kubectl exec p -- sh -c 'cat ~/../../v*/run/s*/x'", true},
+		{"relative glob after chroot", "kubectl exec p -- sh -c 'chroot / cat v*/run/s*/x'", true},
+		{"relative glob after tar -C", "kubectl exec p -- sh -c 'tar -C/ -cf - s*/k*'", true},
+		{"glob naming secrets", "kubectl exec p -- sh -c \"find / -path '*/secrets/*'\"", true},
+		{"bare glob from a workdir of /", "kubectl exec p -- grep -r token *", true},
+		{"brace expansion before a glob", "kubectl exec p -- sh -c 'cat /var/run/se{c,}rets/*/x'", true},
+		{"variable as the glob's path", "kubectl exec p -- sh -c 'd=/var/run; cat $d/s*/x'", true},
+		{"dot glob that can match ..", "kubectl exec p -- cat .?/v*/x", true},
+		{"path disguised with a URL-like tail", "kubectl exec p -- cat /v*/run/s*/x://", true},
+		{"command hidden behind a URL prefix", "kubectl exec p -- sh -c \"http://x;cat${IFS}/var/run/se*rets/token\"", true},
+		// Globs that cannot reach one (false positives seen on dev).
+		{"redis key pattern", `kubectl exec -n redis redis-master-0 -c redis -- sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --scan --pattern "mcp:sess:*"'`, false},
+		{"question mark in a URL query", `kubectl exec vmsingle-0 -n victoria -- sh -c 'wget -qO- "http://localhost:8429/api/v1/status/tsdb?topN=10"'`, false},
+		{"PromQL in a URL", `kubectl exec prom-0 -- wget -qO- 'http://localhost:9090/api/v1/query?query=sum+by+(namespace)+(increase(x{job="a"}[5m]))'`, false},
+		{"glob in a data directory", "kubectl exec -n shop cart-cache-0 -- du -sh /data/*", false},
+		{"glob in an app directory", "kubectl exec postgresql-0 -c postgresql -- du -sh /bitnami/postgresql/* /bitnami/postgresql/data/*", false},
+		{"glob under /var that cannot reach a secret root", "kubectl exec db-0 -- ls /var/lib/postgresql/data/*", false},
+		{"relative glob after cd elsewhere", "kubectl exec mypod -- sh -c \"cd /tmp && ls *.log\"", false},
+		{"path glued to a short flag", "kubectl exec p -- grep -f/var/run/se*/token x", true},
+		{"redis CONFIG GET with a bare glob", "kubectl exec -it cart-cache-0 -n shop -- redis-cli CONFIG GET *", false},
+		{"bare glob read recursively", "kubectl exec p -- grep -rl token *", true},
+		{"bare glob walked by find", "kubectl exec p -- find * -name token", true},
+		{"relative glob that cannot name a top-level directory", "kubectl exec mypod -- ls -la s*/token *.log", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -485,6 +519,19 @@ func TestValidateKubectlCommandAccess_SecretExclusion(t *testing.T) {
 		require.Error(t, err, cmd)
 		require.Contains(t, err.Error(), "blocked", cmd)
 	}
+}
+
+// Commands blocked on dev as secret-path reads because they held a glob
+// character; they read no secret path and pass the relay boundary.
+func TestValidateKubectlRelayCommandAllowsGlobsThatCannotReachSecrets(t *testing.T) {
+	for _, command := range []string{
+		`kubectl exec -n redis redis-master-0 -c redis -- sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --scan --pattern "mcp:sess:*"'`,
+		`kubectl exec vmsingle-0 -n victoria -- sh -c 'wget -qO- "http://localhost:8429/api/v1/status/tsdb?topN=10"'`,
+		`kubectl exec -n shop cart-cache-0 -- du -sh /data/*`,
+	} {
+		assert.NoError(t, ValidateKubectlRelayCommand(command), command)
+	}
+	assert.Error(t, ValidateKubectlRelayCommand(`kubectl exec api -- sh -c "cat /var/run/se*rets/token"`))
 }
 
 func TestValidateKubectlRelayCommand(t *testing.T) {
