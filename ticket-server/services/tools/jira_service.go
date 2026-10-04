@@ -444,9 +444,11 @@ const (
 // key — the per-GET pattern is exactly what Jira Cloud rate-limits under
 // load. Used by the ticket-status sync job. A 429 is retried up to
 // jiraSyncMaxRetries times honoring Retry-After instead of being treated as
-// a generic fetch failure. On a batch failure after retries are exhausted,
-// returns whatever issues earlier batches already fetched along with the
-// error, so the caller can still apply those updates.
+// a generic fetch failure. A batch that still fails after retries does not
+// abort the rest: every batch is attempted, and the issues from the ones
+// that succeeded are returned alongside the joined errors from the ones that
+// didn't, so one bad batch (e.g. a malformed key tripping the JQL parser)
+// can't stop sync from reaching tickets in later, unrelated batches.
 func FetchIssuesByKeys(ctx context.Context, jiraClient *jira.Client, keys []string) ([]jira.Issue, error) {
 	if len(keys) == 0 {
 		return nil, nil
@@ -458,15 +460,17 @@ func FetchIssuesByKeys(ctx context.Context, jiraClient *jira.Client, keys []stri
 	}
 
 	var all []jira.Issue
+	var errs []error
 	for start := 0; start < len(keys); start += jiraSyncBatchSize {
 		batch := keys[start:min(start+jiraSyncBatchSize, len(keys))]
 		issues, err := fetchJiraIssueBatch(ctx, jiraClient, cloud, batch)
 		if err != nil {
-			return all, err
+			errs = append(errs, err)
+			continue
 		}
 		all = append(all, issues...)
 	}
-	return all, nil
+	return all, errors.Join(errs...)
 }
 
 // fetchJiraIssueBatch runs a single "key in (...)" JQL search for batch,

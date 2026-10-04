@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"nudgebee/tickets-server/clients"
 	"nudgebee/tickets-server/models"
 	"nudgebee/tickets-server/services/ticket"
@@ -38,6 +40,13 @@ func (s *ZenDutyService) GetComments(ctx *gin.Context, config models.TicketConfi
 	return GetZenDutyIncidentComments(ctx, config, ticketID)
 }
 
+// zenDutyIsNotFound reports whether err means the incident does not exist
+// upstream (deleted, or never valid).
+func zenDutyIsNotFound(err error) bool {
+	var statusErr clients.ZenDutyStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
+}
+
 func (s *ZenDutyService) Get(ctx *gin.Context, config models.TicketConfigurations, ticketID string) (*models.Ticket, error) {
 	if err := utils.ValidateZenDutyIncidentID(ticketID); err != nil {
 		return nil, fmt.Errorf("invalid incident ID: %w", err)
@@ -45,6 +54,9 @@ func (s *ZenDutyService) Get(ctx *gin.Context, config models.TicketConfiguration
 	client := clients.CreateZenDutyClient(config.Password)
 	incident, full, err := client.GetIncidentWithBody(ctx, ticketID)
 	if err != nil {
+		if zenDutyIsNotFound(err) {
+			return nil, fmt.Errorf("zenduty incident %s not found: %w", ticketID, ticket.ErrNotFound)
+		}
 		return nil, err
 	}
 

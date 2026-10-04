@@ -429,7 +429,7 @@ func getServiceNowIncidentRecord(ctx context.Context, config models.TicketConfig
 		return nil, fmt.Errorf("snow get: unmarshal: %w", jerr)
 	}
 	if len(envelope.Result) == 0 {
-		return nil, fmt.Errorf("incident not found: %s", ticketID)
+		return nil, fmt.Errorf("incident not found: %s: %w", ticketID, ticket.ErrNotFound)
 	}
 	return envelope.Result[0], nil
 }

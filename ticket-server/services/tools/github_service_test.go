@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"nudgebee/tickets-server/models"
+	"nudgebee/tickets-server/services/ticket"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-github/v67/github"
@@ -259,5 +261,32 @@ func TestGetGithubIssueWithClient_MapsMetadata(t *testing.T) {
 	}
 	if got.Raw["title"] != "Issue Title" {
 		t.Errorf("Raw title = %v, want the issue title", got.Raw["title"])
+	}
+}
+
+// A deleted GitHub issue (410 Gone) or one that never existed (404) must
+// surface as ticket.ErrNotFound, not a generic error — the ticket-status
+// sync job relies on that to skip it without aborting the rest of the run
+// (nudgebee-enterprise#39092 follow-up: a stale backlog with deleted issues
+// was tripping the sync's consecutive-failure abort guard before it ever
+// reached healthy tickets).
+func TestGetGithubIssueWithClient_NotFoundAndGoneAreErrNotFound(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			const owner, repo = "nudgebee", "demo"
+			handler := http.NewServeMux()
+			handler.HandleFunc("/repos/"+owner+"/"+repo+"/issues/99", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"message": "not found"}`))
+			})
+			client, srv := newTestGithubClient(t, handler)
+			defer srv.Close()
+
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			_, err := getGithubIssueWithClient(ctx, client, owner, repo, 99, owner+"/"+repo)
+			if !errors.Is(err, ticket.ErrNotFound) {
+				t.Fatalf("err = %v, want it to wrap ticket.ErrNotFound", err)
+			}
+		})
 	}
 }

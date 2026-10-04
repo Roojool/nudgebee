@@ -24,6 +24,18 @@ type ZenDutyClient struct {
 	httpClient *http.Client
 }
 
+// ZenDutyStatusError is a non-2xx response from the ZenDuty API. Exported so
+// callers can distinguish, for example, a 404 (incident deleted upstream)
+// from a transient failure.
+type ZenDutyStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e ZenDutyStatusError) Error() string {
+	return fmt.Sprintf("request failed with status %d: %s", e.StatusCode, e.Body)
+}
+
 // CreateZenDutyClient creates a new ZenDuty API client.
 func CreateZenDutyClient(apiKey string) *ZenDutyClient {
 	return &ZenDutyClient{
@@ -65,7 +77,7 @@ func (c *ZenDutyClient) doRequest(ctx context.Context, method, endpoint string, 
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(respBody))
+		return nil, ZenDutyStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return respBody, nil

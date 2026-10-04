@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,5 +124,33 @@ func TestReadPagerDutyIncidentDoesNotRetryWhatCannotSucceed(t *testing.T) {
 	cancel()
 	if _, _, err := readPagerDutyIncident(ctx, client, srv.URL, "Q1ABC"); err == nil || len(*seen) != 0 {
 		t.Errorf("cancelled: err = %v, requests = %v; want the error and no request", err, *seen)
+	}
+}
+
+// A deleted PagerDuty incident must be recognized as not-found via both read
+// paths readPagerDutyIncident can return — Get() wraps this with
+// ticket.ErrNotFound so the ticket-status sync job can skip it without
+// counting toward its consecutive-failure abort guard.
+func TestPagerDutyIsNotFound(t *testing.T) {
+	notFoundSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(notFoundSrv.Close)
+	client := pagerduty.NewClient("pd-test-token", pagerduty.WithAPIEndpoint(notFoundSrv.URL))
+
+	// The custom-fields path's own status wrapper (pagerDutyStatusError).
+	_, _, err := getPagerDutyIncidentWithCustomFields(context.Background(), client, notFoundSrv.URL, "Q1ABC")
+	if !pagerDutyIsNotFound(err) {
+		t.Errorf("getPagerDutyIncidentWithCustomFields 404: pagerDutyIsNotFound(%v) = false, want true", err)
+	}
+
+	// The SDK's own error type from the plain fallback read.
+	_, err = client.GetIncidentWithContext(context.Background(), "Q1ABC")
+	if !pagerDutyIsNotFound(err) {
+		t.Errorf("GetIncidentWithContext 404: pagerDutyIsNotFound(%v) = false, want true", err)
+	}
+
+	if pagerDutyIsNotFound(errors.New("boom")) {
+		t.Error("pagerDutyIsNotFound(generic error) = true, want false")
 	}
 }

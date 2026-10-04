@@ -22,6 +22,7 @@ type fakeJiraSync struct {
 	cloud       bool
 	rejectFirst int // number of requests to answer with 429 before succeeding
 	retryAfter  string
+	failCall    int      // 1-indexed call number to permanently fail with 500 (non-retryable), 0 disables
 	calls       []string // jql seen by each request, in order
 }
 
@@ -73,6 +74,11 @@ func (f *fakeJiraSync) handler(w http.ResponseWriter, r *http.Request) {
 
 	f.calls = append(f.calls, jql)
 	callIdx := len(f.calls)
+	if f.failCall != 0 && callIdx == f.failCall {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"errorMessages":["boom"]}`))
+		return
+	}
 	if callIdx <= f.rejectFirst {
 		if f.retryAfter != "" {
 			w.Header().Set("Retry-After", f.retryAfter)
@@ -173,6 +179,31 @@ func TestFetchIssuesByKeys_CloudUsesPOSTBody(t *testing.T) {
 	}
 	if !strings.Contains(f.calls[0], "key in (") {
 		t.Fatalf("jql = %q, want a key-in clause carried in the POST body, not a query string", f.calls[0])
+	}
+}
+
+// One bad batch (a non-retryable error, e.g. a malformed key tripping the
+// JQL parser) must not stop later batches from being attempted — otherwise a
+// single broken ticket in the first 100 keys would silently stop sync from
+// ever reaching any ticket after it.
+func TestFetchIssuesByKeys_OneBadBatchDoesNotStopLaterBatches(t *testing.T) {
+	f, client := startFakeJiraSync(t, false)
+	f.failCall = 1 // first batch (keys 1-100) fails; second (101-150) must still run
+
+	keys := make([]string, 150)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("PROJ-%d", i+1)
+	}
+
+	issues, err := FetchIssuesByKeys(context.Background(), client, keys)
+	if err == nil {
+		t.Fatal("expected a non-nil error reporting the failed batch")
+	}
+	if len(issues) != 50 {
+		t.Fatalf("got %d issues, want 50 (the second batch's, despite the first batch failing)", len(issues))
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("got %d requests, want 2 (both batches attempted)", len(f.calls))
 	}
 }
 

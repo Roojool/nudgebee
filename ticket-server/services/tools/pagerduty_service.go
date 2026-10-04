@@ -75,7 +75,7 @@ func resolveIncidentAPIID(ctx *gin.Context, client *pagerduty.Client, ticketID s
 		offset += 100
 	}
 
-	return "", fmt.Errorf("PagerDuty incident with number %s not found", ticketID)
+	return "", fmt.Errorf("PagerDuty incident with number %s not found: %w", ticketID, ticket.ErrNotFound)
 }
 
 func (s *PagerDutyService) Create(ctx *gin.Context, config models.TicketConfigurations, t models.Ticket) (models.Ticket, error) {
@@ -129,6 +129,9 @@ func (s *PagerDutyService) Get(ctx *gin.Context, config models.TicketConfigurati
 
 	incident, full, err := readPagerDutyIncident(ctx, client, clients.NormalizePagerDutyEndpoint(""), apiID)
 	if err != nil {
+		if pagerDutyIsNotFound(err) {
+			return nil, fmt.Errorf("pagerduty incident %s not found: %w", ticketID, ticket.ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to get PagerDuty incident: %w", err)
 	}
 
@@ -189,6 +192,20 @@ type pagerDutyStatusError struct{ statusCode int }
 
 func (e pagerDutyStatusError) Error() string {
 	return fmt.Sprintf("status %d: %s", e.statusCode, http.StatusText(e.statusCode))
+}
+
+// pagerDutyIsNotFound reports whether err means the incident does not exist
+// upstream (deleted, or never valid), covering both read paths
+// readPagerDutyIncident can return: getPagerDutyIncidentWithCustomFields's
+// own status wrapper, and the SDK's own error type from the plain fallback
+// read.
+func pagerDutyIsNotFound(err error) bool {
+	var statusErr pagerDutyStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.statusCode == http.StatusNotFound
+	}
+	var apiErr pagerduty.APIError
+	return errors.As(err, &apiErr) && apiErr.NotFound()
 }
 
 // retryWithoutCustomFields says whether the plain SDK read can succeed where the

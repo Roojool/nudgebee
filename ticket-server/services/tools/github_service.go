@@ -94,6 +94,11 @@ func getGithubIssueWithClient(ctx *gin.Context, githubClient *github.Client, own
 	req.Header.Set("Accept", "application/vnd.github.squirrel-girl-preview")
 	var body json.RawMessage
 	if _, err := githubClient.Do(ctx, req, &body); err != nil {
+		var ghErr *github.ErrorResponse
+		if errors.As(err, &ghErr) && ghErr.Response != nil &&
+			(ghErr.Response.StatusCode == http.StatusNotFound || ghErr.Response.StatusCode == http.StatusGone) {
+			return nil, fmt.Errorf("github issue %s/%s#%d not found: %w", owner, repo, issueNumber, ticket.ErrNotFound)
+		}
 		return nil, fmt.Errorf("failed to get GitHub issue: %w", err)
 	}
 	issue := new(github.Issue)

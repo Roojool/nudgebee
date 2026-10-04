@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -353,9 +354,18 @@ func diffTicketUpdate(stored, current models.Ticket) (models.UpdateFields, bool)
 func collectManagerUpdates(ctx *gin.Context, manager ticket.TicketManager, configuration models.TicketConfigurations, tickets []models.Ticket) []ticketUpdate {
 	var updates []ticketUpdate
 	consecutiveFailures := 0
+	notFoundCount := 0
 	for _, t := range tickets {
 		current, err := manager.Get(ctx, configuration, t.TicketID)
 		if err != nil {
+			if errors.Is(err, ticket.ErrNotFound) {
+				// Permanent and ticket-specific (deleted upstream, or never
+				// valid) — never counts toward the consecutive-failure abort
+				// below, which exists for transient/connectivity failures.
+				notFoundCount++
+				slog.Debug("Ticket not found upstream, skipping", "ticketID", t.TicketID, "tool", configuration.Tool)
+				continue
+			}
 			consecutiveFailures++
 			if consecutiveFailures >= consecutiveFetchFailureLimit {
 				slog.Warn("Aborting ticket sync for integration after repeated fetch failures", "configuration_id", configuration.ID, "tool", configuration.Tool, "error", slog.AnyValue(err))
@@ -375,6 +385,20 @@ func collectManagerUpdates(ctx *gin.Context, manager ticket.TicketManager, confi
 		}
 		slog.Debug("Updating ticket fields", "ticketID", t.TicketID, "tool", configuration.Tool, "updateFields", fields)
 		updates = append(updates, ticketUpdate{rowID: t.ID, fields: fields})
+	}
+	if notFoundCount > 0 {
+		// A handful of not-found tickets scattered through a large backlog is
+		// expected background noise; every ticket coming back not-found is the
+		// one shape that actually signals a real problem (wrong project/repo
+		// key, revoked access) — distinguish the two instead of relying on the
+		// per-ticket Debug line above, which production's Info log level drops.
+		level := slog.LevelInfo
+		if notFoundCount == len(tickets) {
+			level = slog.LevelWarn
+		}
+		slog.Log(context.Background(), level, "Ticket sync skipped tickets not found upstream",
+			"configuration_id", configuration.ID, "tool", configuration.Tool,
+			"not_found_count", notFoundCount, "total_tickets", len(tickets))
 	}
 	return updates
 }

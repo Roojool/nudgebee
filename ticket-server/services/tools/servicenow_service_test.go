@@ -2,12 +2,14 @@ package tools
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"nudgebee/tickets-server/models"
+	"nudgebee/tickets-server/services/ticket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -237,6 +239,9 @@ func TestServiceNowService_Get_NotFound(t *testing.T) {
 	_, err := svc.Get(ctx, cfg, "INC9999999")
 	if err == nil || !strings.Contains(err.Error(), "incident not found") {
 		t.Errorf("expected 'incident not found' error, got %v", err)
+	}
+	if !errors.Is(err, ticket.ErrNotFound) {
+		t.Errorf("err = %v, want it to wrap ticket.ErrNotFound (so sync can skip it without counting toward its failure-abort guard)", err)
 	}
 }
 

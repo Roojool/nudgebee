@@ -1,7 +1,11 @@
 package services
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"nudgebee/tickets-server/models"
@@ -9,6 +13,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// captureSlog swaps the default slog logger for one writing text-formatted
+// records to a buffer, restoring the original on test cleanup.
+func captureSlog(t *testing.T, level slog.Level) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level})))
+	return &buf
+}
 
 // stubTicketManager answers Get from a canned map keyed by ticket ID, or an
 // error for IDs not present (or explicitly listed in errs).
@@ -137,6 +152,103 @@ func TestCollectManagerUpdates_SuccessResetsFailureStreak(t *testing.T) {
 	if len(updates) != 1 || updates[0].rowID != "row-4" {
 		t.Fatalf("updates = %+v, want a single update for row-4", updates)
 	}
+}
+
+// A ticket deleted upstream (404/410) is a permanent, ticket-specific
+// condition, not a transient one — it must never count toward the
+// consecutive-failure abort guard, or a backlog containing a few deleted
+// tickets would stop sync from ever reaching healthy ones after them
+// (nudgebee-enterprise#39092 follow-up: this is exactly why GitHub's 407-ticket
+// backlog, which has deleted issues scattered through it, never synced a
+// single ticket, while ServiceNow's much smaller backlog did).
+func TestCollectManagerUpdates_NotFoundDoesNotCountTowardFailureLimit(t *testing.T) {
+	stored := []models.Ticket{
+		{ID: "row-1", TicketID: "T1", Status: "open"},
+		{ID: "row-2", TicketID: "T2", Status: "open"},
+		{ID: "row-3", TicketID: "T3", Status: "open"},
+		{ID: "row-4", TicketID: "T4", Status: "open"}, // must still be reached
+	}
+	manager := &stubTicketManager{
+		byID: map[string]*models.Ticket{
+			"T4": {TicketID: "T4", Status: "closed"},
+		},
+		errs: map[string]error{
+			"T1": fmt.Errorf("github issue not found: %w", ticketmgr.ErrNotFound),
+			"T2": fmt.Errorf("github issue not found: %w", ticketmgr.ErrNotFound),
+			"T3": fmt.Errorf("github issue not found: %w", ticketmgr.ErrNotFound),
+		},
+	}
+
+	updates := collectManagerUpdates(newSafeGinContext(), manager, models.TicketConfigurations{Tool: "github"}, stored)
+
+	if len(manager.gets) != 4 {
+		t.Fatalf("Get was called %d times, want 4 (not-found errors must not abort)", len(manager.gets))
+	}
+	if len(updates) != 1 || updates[0].rowID != "row-4" {
+		t.Fatalf("updates = %+v, want a single update for row-4", updates)
+	}
+}
+
+// Skipping not-found tickets must stay visible in production: the per-ticket
+// line is Debug (filtered out by main.go's Info floor), so a summary line
+// carries the signal — Info for ordinary backlog noise, Warn when every
+// ticket in the run came back not-found, which usually means a config
+// pointing at the wrong project/repo rather than a few deleted tickets.
+func TestCollectManagerUpdates_NotFoundSummaryLogLevel(t *testing.T) {
+	t.Run("some not found logs at Info", func(t *testing.T) {
+		buf := captureSlog(t, slog.LevelInfo)
+		stored := []models.Ticket{
+			{ID: "row-1", TicketID: "T1", Status: "open"},
+			{ID: "row-2", TicketID: "T2", Status: "open"},
+		}
+		manager := &stubTicketManager{
+			byID: map[string]*models.Ticket{"T2": {TicketID: "T2", Status: "open"}},
+			errs: map[string]error{"T1": fmt.Errorf("not found: %w", ticketmgr.ErrNotFound)},
+		}
+
+		collectManagerUpdates(newSafeGinContext(), manager, models.TicketConfigurations{Tool: "github"}, stored)
+
+		out := buf.String()
+		if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "not_found_count=1") {
+			t.Fatalf("log output = %q, want an INFO summary with not_found_count=1", out)
+		}
+		if strings.Contains(out, "level=WARN") {
+			t.Fatalf("log output = %q, want no WARN (not every ticket was not-found)", out)
+		}
+	})
+
+	t.Run("every ticket not found logs at Warn", func(t *testing.T) {
+		buf := captureSlog(t, slog.LevelInfo)
+		stored := []models.Ticket{
+			{ID: "row-1", TicketID: "T1", Status: "open"},
+			{ID: "row-2", TicketID: "T2", Status: "open"},
+		}
+		manager := &stubTicketManager{
+			errs: map[string]error{
+				"T1": fmt.Errorf("not found: %w", ticketmgr.ErrNotFound),
+				"T2": fmt.Errorf("not found: %w", ticketmgr.ErrNotFound),
+			},
+		}
+
+		collectManagerUpdates(newSafeGinContext(), manager, models.TicketConfigurations{Tool: "github"}, stored)
+
+		out := buf.String()
+		if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "not_found_count=2") {
+			t.Fatalf("log output = %q, want a WARN summary with not_found_count=2 (every ticket missing signals misconfiguration)", out)
+		}
+	})
+
+	t.Run("no not-found tickets logs no summary", func(t *testing.T) {
+		buf := captureSlog(t, slog.LevelInfo)
+		stored := []models.Ticket{{ID: "row-1", TicketID: "T1", Status: "open"}}
+		manager := &stubTicketManager{byID: map[string]*models.Ticket{"T1": {TicketID: "T1", Status: "open"}}}
+
+		collectManagerUpdates(newSafeGinContext(), manager, models.TicketConfigurations{Tool: "github"}, stored)
+
+		if out := buf.String(); strings.Contains(out, "not found upstream") {
+			t.Fatalf("log output = %q, want no not-found summary when nothing was skipped", out)
+		}
+	})
 }
 
 // Jira issue keys are case-insensitive; the batch sync path matches a search
