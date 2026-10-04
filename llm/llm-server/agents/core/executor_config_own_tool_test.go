@@ -207,3 +207,28 @@ func TestShellOwnersForEveryAliasedCloudTool(t *testing.T) {
 			"%s must still resolve its own integration", tc.wantTool)
 	}
 }
+
+// #38596: the first pick for an integration tool takes the connection the call
+// names with `instance` — exactly, so a database or host name is not a pick —
+// for tools with no matching of their own (MySQL, MSSQL, ArgoCD, Datadog, New
+// Relic), as Postgres already did through its own.
+func TestFirstPickTakesTheInstanceTheCallNames(t *testing.T) {
+	const account = "first-pick-instance"
+	ctx := security.NewRequestContextForSuperAdmin()
+	tool := tools.MySQLExecuteTool{}
+	seedConfigs(t, account, tool.Name(), "mysql-1", "mysql-2")
+	e := plannerExecutor{ctx: ctx, agent: &MockAgent{SupportedTools: []toolcore.NBTool{tool}},
+		agentRequest: NBAgentRequest{AccountId: account, AgentId: uuid.NewString()}}
+	steps, finish, err := e.followupForMultipleToolConfigs(tool,
+		NBAgentPlannerToolAction{Tool: tool.Name(), ToolID: "c1", ToolInput: `{"query":"select 1","instance":"MYSQL-2"}`})
+	require.NoError(t, err)
+	require.Empty(t, steps)
+	require.Nil(t, finish, "the named connection is the pick; nothing to ask")
+	require.Equal(t, "mysql-2", e.agentRequest.QueryConfig.ToolConfigs[tool.Name()])
+
+	configs := []toolcore.ToolConfig{{Name: "mysql-1"}, {Name: "mysql-2"}}
+	_, ok := tools.IntegrationNamedIn(configs, toolcore.ParseNBToolCallRequestFromInput(`{"query":"select 1","instance":"orders"}`))
+	require.False(t, ok, "a database name is no pick; the planner's other ways apply as before")
+	_, ok = tools.IntegrationNamedIn(configs, toolcore.ParseNBToolCallRequestFromInput(`{"query":"select 1"}`))
+	require.False(t, ok, "a call naming nothing picks as before")
+}

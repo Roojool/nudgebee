@@ -66,10 +66,19 @@ func targetIntegrationConfig(ctx core.NbToolContext, tool core.NBTool, request c
 	if len(configs) == 1 {
 		chosen = configs[0]
 	} else if instance != "" {
-		// Only the named instance picks among the target's integrations. The
-		// tools' wider matching also reads names out of the call's text, which
-		// carries the target's own name (k8s-prod would pick "prod").
-		if identifier, ok := tool.(core.NBToolConfigIdentifier); ok {
+		// Only the named instance picks among the target's integrations. An
+		// exact name wins over a tool's fuzzy matching (a host regex can match
+		// a different integration first); two integrations with that name are
+		// refused below.
+		for _, c := range configs {
+			if strings.EqualFold(c.Name, instance) {
+				chosen = c
+				break
+			}
+		}
+		// The tools' wider matching also reads names out of the call's text,
+		// which carries the target's own name (k8s-prod would pick "prod").
+		if identifier, ok := tool.(core.NBToolConfigIdentifier); ok && chosen.Name == "" {
 			blank := ctx
 			blank.ToolConfig = core.ToolConfig{}
 			blank.Query = ""
@@ -103,12 +112,22 @@ func targetIntegrationConfig(ctx core.NbToolContext, tool core.NBTool, request c
 // carries counts: models also put database or host names there, and those
 // keep the conversation's pick.
 func IntegrationNamedByCall(ctx core.NbToolContext, tool core.NBTool, request core.NBToolCallRequest) (core.ToolConfig, bool) {
-	instance := RequestedInstance(request)
-	if instance == "" || strings.EqualFold(instance, ctx.ToolConfig.Name) {
+	if strings.EqualFold(RequestedInstance(request), ctx.ToolConfig.Name) {
 		return core.ToolConfig{}, false
 	}
 	configs, err := listIntegrationConfigs(ctx.Ctx, ctx.DataAccountID(), tool)
 	if err != nil {
+		return core.ToolConfig{}, false
+	}
+	return IntegrationNamedIn(configs, request)
+}
+
+// IntegrationNamedIn is the one config the call's `instance` names exactly
+// (case-insensitively); none when the call names nothing, or a name no
+// single config carries.
+func IntegrationNamedIn(configs []core.ToolConfig, request core.NBToolCallRequest) (core.ToolConfig, bool) {
+	instance := RequestedInstance(request)
+	if instance == "" {
 		return core.ToolConfig{}, false
 	}
 	var named []core.ToolConfig
@@ -121,6 +140,13 @@ func IntegrationNamedByCall(ctx core.NbToolContext, tool core.NBTool, request co
 		return core.ToolConfig{}, false
 	}
 	return named[0], true
+}
+
+// instanceProperty is the `instance` argument an integration tool takes to
+// name the connection a call runs on.
+var instanceProperty = core.ToolSchemaProperty{
+	Type:        core.ToolSchemaTypeString,
+	Description: "Name of the configured connection to run on, when several are configured (optional).",
 }
 
 // TargetIntegrationChoiceKey is where the user's pick among another account's

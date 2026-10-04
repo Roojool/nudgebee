@@ -3453,8 +3453,15 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 			queryConfig.ToolConfigMetadata = md
 		}
 
+		// Without a conversation store (no database) there is nothing to save
+		// to, and a nil store in this goroutine would crash the process.
+		dao := GetConversationDao()
+		if dao == nil {
+			slog.Warn("plannerexecutor: no conversation store; resolved config not persisted", "message_id", messageId)
+			return
+		}
 		go func() {
-			if err := GetConversationDao().UpdateConversationMessageConfig(messageId, queryConfig); err != nil {
+			if err := dao.UpdateConversationMessageConfig(messageId, queryConfig); err != nil {
 				slog.Warn("plannerexecutor: failed to persist resolved config", "error", err, "message_id", messageId)
 			}
 		}()
@@ -3485,6 +3492,21 @@ func (e *plannerExecutor) followupForMultipleToolConfigs(tool toolcore.NBTool, a
 				persistResolvedConfigAsync()
 				return nil, nil, nil
 			}
+		}
+	}
+
+	// Strategy 3.4: an integration tool's call names its connection with
+	// `instance`. Exact names only, so it is as safe unattended as a pick.
+	if tools.IsTargetedIntegrationTool(e.ctx, tool) {
+		if named, ok := tools.IntegrationNamedIn(configs, toolcore.ParseNBToolCallRequestFromInput(action.ToolInput)); ok {
+			if e.agentRequest.QueryConfig.ToolConfigs == nil {
+				e.agentRequest.QueryConfig.ToolConfigs = make(map[string]string)
+			}
+			e.agentRequest.QueryConfig.ToolConfigs[tool.Name()] = named.Name
+			recordConfigSelectionStrategy(&e.agentRequest.QueryConfig, tool.Name(), "explicit_instance")
+			e.ctx.GetLogger().Info("plannerexecutor: resolved tool config via the call's instance", "tool", tool.Name(), "config", named.Name)
+			persistResolvedConfigAsync()
+			return nil, nil, nil
 		}
 	}
 

@@ -160,3 +160,52 @@ func TestOwnIntegrationNamedByCall(t *testing.T) {
 	assert.Equal(t, "dev-pg", run(`{"query":"select 1","instance":"dup"}`), "a name shared by two integrations cannot be told apart")
 	assert.Equal(t, "dev-pg", ctx.ToolConfig.Name, "the conversation's pick itself is unchanged")
 }
+
+// #38596: MySQL, MSSQL, Oracle, ClickHouse and ArgoCD name their connection
+// with `instance`: on the conversation's own account the call switches to it;
+// on another account it picks among that account's integrations.
+func TestPerCallIntegrationTools(t *testing.T) {
+	restore := listIntegrationConfigs
+	t.Cleanup(func() { listIntegrationConfigs = restore })
+	listIntegrationConfigs = func(_ *security.RequestContext, account string, _ core.NBTool) ([]core.ToolConfig, error) {
+		return map[string][]core.ToolConfig{
+			"origin-id": {{Id: "o1", Name: "conn-1"}, {Id: "o2", Name: "conn-2"}},
+			"prod-id":   {{Id: "p1", Name: "prod-1"}, {Id: "p2", Name: "prod-2"}},
+		}[account], nil
+	}
+	for _, tool := range []core.NBTool{MySQLExecuteTool{}, MSSQLExecuteTool{}, OracleExecuteTool{}, ClickhouseExecuteTool{}, ArgoCDExecuteTool{}} {
+		require.True(t, IsTargetedIntegrationTool(nil, tool), tool.Name())
+
+		own := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "origin-id", ToolConfig: core.ToolConfig{Id: "o1", Name: "conn-1"}}
+		resolved, err := ResolveToolCallTarget(own, tool, core.ParseNBToolCallRequestFromInput(`{"command":"x","instance":"conn-2"}`))
+		require.NoError(t, err, tool.Name())
+		assert.Equal(t, "o2", resolved.ToolConfig.Id, "%s: switches to the named connection", tool.Name())
+		resolved, err = ResolveToolCallTarget(own, tool, core.ParseNBToolCallRequestFromInput(`{"command":"x"}`))
+		require.NoError(t, err, tool.Name())
+		assert.Equal(t, "o1", resolved.ToolConfig.Id, "%s: not named keeps the pick", tool.Name())
+
+		other := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "prod-id", ExecutedTarget: &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod", AccountID: "prod-id"}}
+		picked, err := targetIntegrationConfig(other, tool, core.ParseNBToolCallRequestFromInput(`{"command":"x","instance":"prod-2"}`))
+		require.NoError(t, err, tool.Name())
+		assert.Equal(t, "p2", picked.Id, "%s: the target's named integration", tool.Name())
+	}
+}
+
+// On another account an exact name wins over a tool's fuzzy matching: a
+// host that merely contains the name must not pick a different integration.
+func TestTargetIntegrationPrefersExactName(t *testing.T) {
+	restore := listIntegrationConfigs
+	t.Cleanup(func() { listIntegrationConfigs = restore })
+	listIntegrationConfigs = func(*security.RequestContext, string, core.NBTool) ([]core.ToolConfig, error) {
+		return []core.ToolConfig{
+			{Id: "a", Name: "x", Values: []core.ToolConfigValue{{Name: "host", Value: "orders"}}},
+			{Id: "b", Name: "orders-db"},
+		}, nil
+	}
+	other := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "prod-id", ExecutedTarget: &core.ExecutionTarget{Provider: "kubernetes", Name: "k8s-prod", AccountID: "prod-id"}}
+	for _, tool := range []core.NBTool{OracleExecuteTool{}, ClickhouseExecuteTool{}, PostgresExecuteTool{}} {
+		picked, err := targetIntegrationConfig(other, tool, core.ParseNBToolCallRequestFromInput(`{"query":"select 1","instance":"orders-db"}`))
+		require.NoError(t, err, tool.Name())
+		assert.Equal(t, "b", picked.Id, "%s: the integration named orders-db, not the one whose host contains orders", tool.Name())
+	}
+}

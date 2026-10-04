@@ -143,9 +143,7 @@ func (m OracleExecuteTool) Call(nbRequestContext core.NbToolContext, input core.
 	// The shim captures this -Q flag in os.Args, and forager's sanitizeQuery
 	// extracts the SQL from it.
 	wsQuery := oracleWorkspaceShellCommand(database, query)
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, wsQuery, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, wsQuery, IntegrationWorkspaceEnv(nbRequestContext, nil))
 
 	response = convertCsvToJsonString(nbRequestContext, response, rune(','))
 

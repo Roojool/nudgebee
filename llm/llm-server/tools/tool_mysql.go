@@ -72,6 +72,7 @@ func (m MySQLExecuteTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Target MySQL database to run the query against.",
 			},
+			"instance": instanceProperty,
 		},
 		RequiredOneOf: [][]string{{"command", "query"}},
 	}
@@ -127,10 +128,9 @@ func (m MySQLExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 	if err != nil {
 		return core.NBToolResponse{}, err
 	}
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, query, map[string]string{
-		"MYSQL_DATABASE":                  database,
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, query, IntegrationWorkspaceEnv(nbRequestContext, map[string]string{
+		"MYSQL_DATABASE": database,
+	}))
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("mysql: unable to execute shell script", "error", err.Error(), "command", query)
 		if response == "" {

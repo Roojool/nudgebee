@@ -151,9 +151,7 @@ func (m ClickhouseExecuteTool) Call(nbRequestContext core.NbToolContext, input c
 	command := fmt.Sprintf("clickhouse-client%s --query %s --format CSVWithNames --send_logs_level=none --progress=0",
 		dbFlag, sshShellQuote(q))
 
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, IntegrationWorkspaceEnv(nbRequestContext, nil))
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("clickhouse: unable to execute shell script", "error", err.Error(), "command", query)
 		if response == "" {

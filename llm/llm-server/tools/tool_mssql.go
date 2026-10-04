@@ -70,6 +70,7 @@ func (m MSSQLExecuteTool) InputSchema() core.ToolSchema {
 				Type:        core.ToolSchemaTypeString,
 				Description: "Target database name to run the query against. Use this instead of USE statements.",
 			},
+			"instance": instanceProperty,
 		},
 		RequiredOneOf: [][]string{{"command", "query"}},
 	}
@@ -120,10 +121,9 @@ func (m MSSQLExecuteTool) Call(nbRequestContext core.NbToolContext, input core.N
 	// Wrap query in sqlcmd command so the workspace shim can intercept it.
 	// Same pattern as Postgres (psql -c "query") and other DB tools.
 	wsQuery := mssqlWorkspaceShellCommand(database, query)
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, wsQuery, map[string]string{
-		"MSSQL_DATABASE":                  database,
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, wsQuery, IntegrationWorkspaceEnv(nbRequestContext, map[string]string{
+		"MSSQL_DATABASE": database,
+	}))
 	if err != nil {
 		nbRequestContext.Ctx.GetLogger().Error("mssql: unable to execute mssql query in workspace", "error", err.Error(), "tool_config", nbRequestContext.ToolConfig.Name)
 		if response == "" {

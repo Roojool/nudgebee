@@ -868,9 +868,14 @@ func workspaceExecuteReply(result any, err error) (int, gin.H) {
 // workspaceIntegrationJobs run against an account's own integration and may
 // be bound to another account by a per-call target.
 var workspaceIntegrationJobs = map[tools.RelayJob]bool{
-	tools.RelayJobPostgres: true,
-	tools.RelayJobRedis:    true,
-	tools.RelayJobRabbitmq: true,
+	tools.RelayJobPostgres:   true,
+	tools.RelayJobRedis:      true,
+	tools.RelayJobRabbitmq:   true,
+	tools.RelayJobMysql:      true,
+	tools.RelayJobMssql:      true,
+	tools.RelayJobOracle:     true,
+	tools.RelayJobClickhouse: true,
+	tools.RelayJobArgoCD:     true,
 }
 
 // integrationConfigByName is replaced in tests, which have no integration store.

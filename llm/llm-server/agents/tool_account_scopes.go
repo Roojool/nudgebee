@@ -14,7 +14,8 @@ func init() {
 	toolcore.DeclareAccountScope(toolcore.AccountScopeFollowsTarget,
 		"prometheus", "promql_query", "elastic_search_metrics", "splunk_enterprise_metrics",
 		"aws_observability", "delegate_agent", "event_summary", "events", "fetch_logs_direct", "finops",
-		"logs", "metrics", "nudgebee", "postgres", "security", "service_dependency_graph", "traces",
+		"clickhouse", "logs", "metrics", "mssql", "mysql", "nudgebee", "oracle", "postgres", "security",
+		"service_dependency_graph", "traces",
 	)
 	toolcore.DeclareAccountScope(toolcore.AccountScopeIndependent,
 		"loganalysis",
@@ -25,10 +26,10 @@ func init() {
 		"automation", "automation_builder", "remediation",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundIntegration,
-		"clickhouse", "datadog_containers", "datadog_containers_query", "datadog_events", "datadog_hosts",
+		"datadog_containers", "datadog_containers_query", "datadog_events", "datadog_hosts",
 		"datadog_incident", "datadog_log_query", "datadog_logs", "datadog_metrics",
 		"datadog_metrics_query", "datadog_orchestrator", "datadog_service", "datadog_software_catalog",
-		"datadog_traces", "mssql", "mysql", "oracle",
+		"datadog_traces",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundNotYetSupported,
 		"code_analyzer", "evidenceinsightstool", "fetch_logs", "server")

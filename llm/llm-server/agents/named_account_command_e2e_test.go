@@ -359,47 +359,55 @@ func TestNaturalQuestion_WriteApprovalVariations(t *testing.T) {
 }
 
 // TestNaturalQuestion_SwitchOwnDatabaseConnection (#38596): in one
-// conversation, two of the conversation's own Postgres connections are
+// conversation, two of the conversation's own connections of one kind are
 // queried by name; each step runs on the one it names, with no question
-// about which connection to use.
+// about which connection to use. The connection a step ran with is recorded
+// even when the query fails, so an unreachable dev database still shows
+// whether the switch happened.
 func TestNaturalQuestion_SwitchOwnDatabaseConnection(t *testing.T) {
 	requireDelegateE2EEnv(t)
 	sc := tenantWideE2EContext()
 	accountId, userId := os.Getenv("TEST_ACCOUNT"), os.Getenv("TEST_USER")
-	first, second := envOr("TEST_OWN_PG_FIRST", "dev-pg"), envOr("TEST_OWN_PG_SECOND", "test-pg")
-	sessionId := fmt.Sprintf("switch-own-db-%d", time.Now().Unix())
-	conversationId := ""
-	for _, name := range []string{first, second} {
-		var opts []core.ConversationSessionRequestConfig
-		if conversationId != "" {
-			opts = append(opts, core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(conversationId), Valid: true}))
-		}
-		resp, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, sessionId,
-			fmt.Sprintf("On the %s postgres connection, run select current_database() and tell me the result.", name), opts...)
-		require.NoError(t, err)
-		if conversationId == "" {
-			conversationId = resp.ConversationId
-			t.Logf("Preserved sessionId=%s conversationId=%s", sessionId, conversationId)
-		}
-		assert.NotEqual(t, core.ConversationStatusWaiting, resp.Status, "naming the connection must not ask which one: %q", resp.FollowupRequest.Question)
-	}
+	for _, tc := range []struct{ kind, tool, first, second, query string }{
+		{"postgres", tools.ToolExecutePostgresQuery, envOr("TEST_OWN_PG_FIRST", "dev-pg"), envOr("TEST_OWN_PG_SECOND", "test-pg"), "select current_database()"},
+		{"mysql", "mysql_query_execute", envOr("TEST_OWN_MYSQL_FIRST", "mysql-1"), envOr("TEST_OWN_MYSQL_SECOND", "mysql-2"), "select database()"},
+		{"mssql", "mssql_query_execute", envOr("TEST_OWN_MSSQL_FIRST", "mssql-vk"), envOr("TEST_OWN_MSSQL_SECOND", "mssql-vk2"), "select db_name()"},
+		{"oracle", "oracle_query_execute", envOr("TEST_OWN_ORACLE_FIRST", "oracle-1"), envOr("TEST_OWN_ORACLE_SECOND", "oracle-2"), "select sys_context('userenv','db_name') from dual"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			sessionId := fmt.Sprintf("switch-own-%s-%d", tc.kind, time.Now().Unix())
+			conversationId := ""
+			for _, name := range []string{tc.first, tc.second} {
+				var opts []core.ConversationSessionRequestConfig
+				if conversationId != "" {
+					opts = append(opts, core.ConversationSessionRequestWithConversationId(uuid.NullUUID{UUID: uuid.MustParse(conversationId), Valid: true}))
+				}
+				resp, err := core.HandleConversationSessionRequest(sc, newK8sOrchestratorAgent(accountId), userId, accountId, sessionId,
+					fmt.Sprintf("On the %s %s connection, run %s and tell me the result.", name, tc.kind, tc.query), opts...)
+				require.NoError(t, err)
+				if conversationId == "" {
+					conversationId = resp.ConversationId
+					t.Logf("Preserved sessionId=%s conversationId=%s", sessionId, conversationId)
+				}
+				assert.NotEqual(t, core.ConversationStatusWaiting, resp.Status, "naming the connection must not ask which one: %q", resp.FollowupRequest.Question)
+			}
 
-	dbm, err := common.GetDatabaseManager(common.Metastore)
-	require.NoError(t, err)
-	rows, err := dbm.Db.Query(`SELECT COALESCE(t.metadata->>'nb_resolved_target', ''), COALESCE(t.status, ''), COALESCE(NULLIF(t.params_sql, ''), t.parameters, '')
-		FROM llm_conversation_tool_calls t WHERE t.conversation_id = $1 AND t.tool_name = 'postgres_query_execute' ORDER BY t.created_at`, conversationId)
-	require.NoError(t, err)
-	defer rows.Close()
-	ran := map[string]bool{}
-	for rows.Next() {
-		var integration, status, params string
-		require.NoError(t, rows.Scan(&integration, &status, &params))
-		t.Logf("postgres_query_execute on %q status=%s params=%.200s", integration, status, params)
-		if status == "success" {
-			ran[integration] = true
-		}
+			dbm, err := common.GetDatabaseManager(common.Metastore)
+			require.NoError(t, err)
+			rows, err := dbm.Db.Query(`SELECT COALESCE(t.metadata->>'nb_resolved_target', ''), COALESCE(t.status, ''), COALESCE(NULLIF(t.params_sql, ''), t.parameters, ''), LEFT(COALESCE(t.response, ''), 160)
+				FROM llm_conversation_tool_calls t WHERE t.conversation_id = $1 AND t.tool_name = $2 ORDER BY t.created_at`, conversationId, tc.tool)
+			require.NoError(t, err)
+			defer rows.Close()
+			ran := map[string]bool{}
+			for rows.Next() {
+				var integration, status, params, response string
+				require.NoError(t, rows.Scan(&integration, &status, &params, &response))
+				t.Logf("%s on %q status=%s params=%.160s response=%s", tc.tool, integration, status, params, response)
+				ran[integration] = true
+			}
+			require.NoError(t, rows.Err())
+			assert.True(t, ran[tc.first], "a %s call must run on %s", tc.tool, tc.first)
+			assert.True(t, ran[tc.second], "a %s call must run on %s in the same conversation", tc.tool, tc.second)
+		})
 	}
-	require.NoError(t, rows.Err())
-	assert.True(t, ran[first], "a query must run on %s", first)
-	assert.True(t, ran[second], "a query must run on %s in the same conversation", second)
 }

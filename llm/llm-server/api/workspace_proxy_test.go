@@ -1007,3 +1007,25 @@ func TestWorkspaceBoundIntegration(t *testing.T) {
 		assert.Equal(t, workspaceCtx, got, name)
 	}
 }
+
+// The SQL and ArgoCD jobs relay to another account's integration like Postgres.
+func TestWorkspaceBoundIntegration_PerCallJobs(t *testing.T) {
+	restore := integrationConfigByName
+	t.Cleanup(func() { integrationConfigByName = restore })
+	integrationConfigByName = func(_ *security.RequestContext, account string, _ core.NBTool, name string) (core.ToolConfig, error) {
+		return core.ToolConfig{Id: account + "/" + name, Name: name}, nil
+	}
+	workspaceCtx := core.NbToolContext{AccountId: "ws-id", TargetAccountId: "ws-id", ToolConfig: core.ToolConfig{Id: "own", Name: "db-2"}}
+	for job, tool := range map[tools.RelayJob]core.NBTool{
+		tools.RelayJobMysql:      tools.MySQLExecuteTool{},
+		tools.RelayJobMssql:      tools.MSSQLExecuteTool{},
+		tools.RelayJobOracle:     tools.OracleExecuteTool{},
+		tools.RelayJobClickhouse: tools.ClickhouseExecuteTool{},
+		tools.RelayJobArgoCD:     tools.ArgoCDExecuteTool{},
+	} {
+		got, err := workspaceBoundIntegration(workspaceCtx, tool, job, "prod-id", "db-2")
+		require.NoError(t, err, job)
+		assert.Equal(t, "prod-id", got.AccountId, job)
+		assert.Equal(t, "prod-id/db-2", got.ToolConfig.Id, "%s: the target's integration of that name", job)
+	}
+}
