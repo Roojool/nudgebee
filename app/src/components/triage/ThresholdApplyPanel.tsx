@@ -268,7 +268,8 @@ const ThresholdApplyPanel: React.FC<ThresholdApplyPanelProps> = ({ data, onAppli
 
   const directOption = options?.options?.find((o) => o.method === 'direct');
   const prOption = options?.options?.find((o) => o.method === 'pr');
-  const requiresOverride = options?.requires_override || data.metric_stats?.risk_level === 'dangerous';
+  const isDangerous = options?.risk_level === 'dangerous' || data.metric_stats?.risk_level === 'dangerous';
+  const requiresOverride = options?.requires_override || isDangerous;
   const selectedAvailable = method === 'direct' ? directOption?.available : prOption?.available;
 
   const selectedIntegration = gitIntegrations.find((i) => i.key === gitIntegrationKey);
@@ -415,7 +416,7 @@ const ThresholdApplyPanel: React.FC<ThresholdApplyPanelProps> = ({ data, onAppli
             {statusLabel(applyStatus)}
           </Chip>
         )}
-        {requiresOverride && (
+        {isDangerous && (
           <Chip variant='tag' size='xs' tone='critical'>
             High risk
           </Chip>
@@ -496,7 +497,7 @@ const ThresholdApplyPanel: React.FC<ThresholdApplyPanelProps> = ({ data, onAppli
               id='threshold-apply-confirm'
               data-testid='threshold-apply-confirm'
               size='sm'
-              tone={requiresOverride ? 'danger' : 'primary'}
+              tone={isDangerous ? 'danger' : 'primary'}
               loading={applying}
               disabled={confirmDisabled}
               onClick={doApply}
@@ -591,7 +592,15 @@ const ThresholdApplyPanel: React.FC<ThresholdApplyPanelProps> = ({ data, onAppli
           )}
 
           {requiresOverride && (
-            <Checkbox checked={overrideRisk} onChange={setOverrideRisk} label='I understand this is a high-risk change and want to proceed' />
+            <Checkbox
+              checked={overrideRisk}
+              onChange={setOverrideRisk}
+              label={
+                isDangerous
+                  ? 'I understand this is a high-risk change and want to proceed'
+                  : 'This suggestion is not rated safe with solid confidence. I have reviewed it and want to proceed'
+              }
+            />
           )}
 
           {error && <Text value={error} sx={{ fontSize: ds.text.caption, color: ds.red[700] }} />}
