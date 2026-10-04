@@ -677,7 +677,10 @@ export const ECSServices = (props: {
 };
 
 const SERVICE_EVENT_TABLE_ID = 'ECS_SERVICE_EVENT_TABLE_ID';
-const SERVICE_EVENT_HEADERS = ['Event Message', 'Timestamp'];
+const SERVICE_EVENT_HEADERS = [
+  { name: 'Event Message', width: '85%' },
+  { name: 'Timestamp', width: '15%' },
+];
 
 interface ECSEvent {
   Id: string;
