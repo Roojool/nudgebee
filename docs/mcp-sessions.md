@@ -52,8 +52,8 @@ is needed; llm-server marks these calls `NoAgent` so its own agent check skips t
 **Relay, direct mode** (`relay-server/pkg/server/handlers/`: `mcp_direct.go` for
 the protocol, `mcp_session.go` for the lifecycle, `mcp_session_store*.go` for the
 store). Sessions are keyed by account, caller session id and MCP server URL, in a
-session store: per-pod memory by default, or Redis shared by all relay pods
-(Section 4).
+session store: Redis shared by all relay pods by default, or per-pod memory for
+installs without Redis (Section 4).
 
 | Event | Behaviour |
 |---|---|
@@ -76,8 +76,8 @@ returns, including on error.
 Medium and large installs run **2 relay pods** with no session affinity (also 2
 llm-server and 2 workflow-server pods). With the per-pod memory store, call 1 of a
 chat can open a browser on pod A while call 2 lands on pod B, which opens a second
-session, and the chat silently loses its browser state. Those profiles therefore
-use the Redis store (Section 4). Single-pod installs (the SaaS default) are
+session, and the chat silently loses its browser state. The relay therefore uses
+the Redis store by default (Section 4). Single-pod installs (the SaaS default) are
 unaffected either way.
 
 ## 4. Multiple relay pods: shared session directory
@@ -126,16 +126,18 @@ any session. Credentials are **not** stored in Redis.
        runbook-server rewrites OAuth2 to a bearer token before calling the relay.
   4. It sends the `DELETE`, with an OAuth2 exchange when needed.
 
-  A credential, decrypt or `DELETE` failure is logged at error level and counted
-  in `nb_relay_mcp_session_close_failures_total` (by reason); the MCP server's
-  own timeout is the backstop.
+  A sent `DELETE` is logged at info level (`MCP session ended upstream`, with the
+  status; a 404 means the server had already ended it). A credential, decrypt or
+  `DELETE` failure is logged at error level and counted in
+  `nb_relay_mcp_session_close_failures_total` (by reason); the MCP server's own
+  timeout is the backstop.
 
   This keeps working through relay restarts and rollouts.
 - **Store selection is relay-only.** A relay setting, `MCP_SESSION_STORE`
-  (`redis` | `memory`, default `memory`), is set in the relay chart, not in the
+  (`redis` | `memory`, default `redis`), is set in the relay chart, not in the
   shared secret. Four other services read the shared `CACHE_PROVIDER`, and the
-  Redis host there is always set. The medium and large profiles (2 relay pods)
-  set `redis` explicitly, as must any multi-pod install on external Redis.
+  Redis host there is always set. Only an install without Redis sets `memory`,
+  and it must then run a single relay pod.
 - **Redis error on a call.** Fall back to the pod's memory store, and skip Redis
   for the next 10 seconds so an outage costs one timeout rather than one per
   call. Log at error level and count it in `nb_relay_mcp_session_store_fallbacks_total`.

@@ -169,7 +169,7 @@ RELAY_SERVER_SECRET_KEY=<32-char-string> # Static key for X-SECRET-KEY auth head
 NUDGEBEE_ENCRYPTION_KEY=<base64>         # AES key for decrypting agent secrets
 
 # Direct-mode MCP sessions (docs/mcp-sessions.md)
-MCP_SESSION_STORE=memory|redis           # redis when the relay runs >1 pod; uses REDIS_SERVER_* settings
+MCP_SESSION_STORE=redis|memory           # default redis (shared across relay pods; uses REDIS_SERVER_*); memory only without Redis, single pod
 
 # OpenTelemetry
 OTEL_EXPORTER=noop|console|otlp          # Exporter type

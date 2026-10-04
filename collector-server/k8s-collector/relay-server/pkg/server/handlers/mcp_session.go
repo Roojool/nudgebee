@@ -66,9 +66,9 @@ type mcpAuthEntry struct {
 	at   time.Time
 }
 
-// InitMCPSessions selects the session store and starts the idle sweeper. With
-// MCP_SESSION_STORE=redis the directory is shared by all relay pods, which a
-// multi-pod relay needs for a chat to keep one session across calls.
+// InitMCPSessions selects the session store and starts the idle sweeper. By
+// default (MCP_SESSION_STORE=redis) the directory is shared by all relay pods,
+// which a multi-pod relay needs for a chat to keep one session across calls.
 func InitMCPSessions(cfg *config.Config, store any, logger *slog.Logger) {
 	if l, ok := store.(mcpCredentialLoader); ok {
 		mcpCredentials = l
@@ -92,8 +92,11 @@ func InitMCPSessions(cfg *config.Config, store any, logger *slog.Logger) {
 			logger:   logger,
 		}
 		logger.Info("MCP session store: redis (shared by relay pods)", "addr", addr)
+	} else if strings.EqualFold(strings.TrimSpace(cfg.MCP.SessionStore), "memory") {
+		logger.Info("MCP session store: memory (per pod; MCP_SESSION_STORE=memory); correct only with one relay pod")
 	} else {
-		logger.Info("MCP session store: memory (per pod); set MCP_SESSION_STORE=redis when the relay runs more than one pod")
+		logger.Warn("MCP session store: unknown MCP_SESSION_STORE value, using per-pod memory; correct only with one relay pod",
+			"configured", cfg.MCP.SessionStore)
 	}
 	go mcpSessionSweeper(logger)
 }
@@ -238,7 +241,14 @@ func terminateMCPSession(key mcpSessionKey, rec mcpSessionRecord, authBody []byt
 		recordMCPCloseFailure(ctx, logger, key, "rejected", fmt.Errorf("DELETE returned HTTP %d", resp.StatusCode))
 		return
 	}
-	logger.Debug("MCP session terminated", "url", key.URL, "status", resp.StatusCode)
+	// Info, not Debug: one line per closed session is how an operator sees closes
+	// reach the MCP server (a 404 means it had already ended the session).
+	sid := rec.SessionID
+	if len(sid) > 8 {
+		sid = sid[:8]
+	}
+	logger.Info("MCP session ended upstream", "url", key.URL, "account_id", key.Account,
+		"mcp_session", sid, "status", resp.StatusCode)
 }
 
 // loadMCPAuth rebuilds the auth fields for an integration from Postgres. The

@@ -61,12 +61,6 @@ k8s-collector:
 
 relay-server:
   replicaCount: 2
-  # More than one relay pod: share direct-mode MCP sessions through Redis, so a
-  # chat keeps one session on a stateful MCP server across calls
-  # (docs/mcp-sessions.md). Uses the chart's Redis, or an external one set via
-  # REDIS_SERVER_HOST.
-  env:
-    MCP_SESSION_STORE: redis
   resources:
     # 1.5Gi, matching Small: the failure here is a sub-scrape-interval allocation
     # spike on the large-payload reply path, not estate growth. Dev sat at 35Mi

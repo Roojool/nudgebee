@@ -70,12 +70,6 @@ k8s-collector:
 
 relay-server:
   replicaCount: 2
-  # More than one relay pod: share direct-mode MCP sessions through Redis, so a
-  # chat keeps one session on a stateful MCP server across calls
-  # (docs/mcp-sessions.md). Uses the chart's Redis, or an external one set via
-  # REDIS_SERVER_HOST.
-  env:
-    MCP_SESSION_STORE: redis
   resources:
     # Still cheap at 77 attached clusters — 39Mi average. Agent connections scale
     # almost for free; this is headroom for reconnect storms and for the
