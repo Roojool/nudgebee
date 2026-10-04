@@ -578,7 +578,13 @@ func TestMqConsume_WaitsForInFlightDial(t *testing.T) {
 		<-release
 		return &rabbitmq.Conn{}, nil
 	})
-	go getConnection()
+	// Wait for this dial before the test ends: connect() reads the dial
+	// settings useFakeMq restores in its cleanup, so returning first races.
+	dialed := make(chan struct{})
+	go func() {
+		defer close(dialed)
+		getConnection()
+	}()
 	<-started
 	require.NoError(t, MqConsume("ex", "rk", "q-wait", noopProcessor))
 	time.Sleep(50 * time.Millisecond)
@@ -587,6 +593,7 @@ func TestMqConsume_WaitsForInFlightDial(t *testing.T) {
 	waitConsumer(t, fleet)
 	st := waitState(t, "q-wait", MqConsumerRunning)
 	assert.Zero(t, st.Restarts, "waiting for another caller's dial is not a failure")
+	<-dialed
 }
 
 // The real dialer is bounded: a broker that accepts TCP but never speaks AMQP (black-holed
