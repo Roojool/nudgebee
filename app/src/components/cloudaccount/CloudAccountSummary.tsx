@@ -724,7 +724,7 @@ const UtilizationAndHealth = ({ accountId, clusterSummary = {}, serviceName }: a
             label='Fired Alarm Count'
             value={
               <Box sx={{ display: 'inline-flex', alignItems: 'baseline', gap: ds.space[2] }}>
-                <Box component='span'>{clusterSummary?.events_aggregate?.aggregate?.count ?? '-'}</Box>
+                <Box component='span'>{clusterSummary?.events_aggregate?.aggregate?.count ?? 0}</Box>
                 {hasTrend && <Trend sign={trendSign} value={trendValue} width='auto' />}
                 <Typography component='span' sx={{ fontSize: ds.text.caption, color: ds.gray[400], whiteSpace: 'nowrap' }}>
                   last 7 days
@@ -740,7 +740,7 @@ const UtilizationAndHealth = ({ accountId, clusterSummary = {}, serviceName }: a
             label='Optimize Count'
             value={
               <Box component='span' className='stat-value-affordance' sx={{ transition: `color ${ds.motion.micro} ${ds.motion.ease}` }}>
-                {clusterSummary?.recommendation_aggregate?.aggregate?.count ?? '-'}
+                {clusterSummary?.recommendation_aggregate?.aggregate?.count ?? 0}
               </Box>
             }
             onClick={handleOptimizeClick}
