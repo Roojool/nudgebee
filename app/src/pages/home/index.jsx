@@ -641,7 +641,7 @@ const AutomationsCard = ({ workflowData, accountId, onManage, onViewWorkflows })
           label='Triggered (24h)'
           value={String(actionedCount)}
           id='automations-triggered-stat'
-          onClick={actionedCount > 0 ? () => viewWorkflows({ status: 'Active', last_execution_status: 'Completed' }) : undefined}
+          onClick={actionedCount > 0 ? () => viewWorkflows({ status: 'All', last_execution_status: 'All' }) : undefined}
         />
         <Stat
           size='sm'
