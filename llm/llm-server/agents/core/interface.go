@@ -138,6 +138,10 @@ type NBAgentRequest struct {
 	// #29973). New-turn requests must keep IsResume=false so legitimate races
 	// (user submits while another turn is running) still surface as errors.
 	IsResume bool `json:"is_resume,omitempty"`
+	// TopLevelResume is internal: resume_v2 is resuming the turn's top-level
+	// agent after a followup. Its OriginalQuery is already restored, so
+	// seedOriginalQuery cannot be what marks it top level (#40085).
+	TopLevelResume bool `json:"-" mapstructure:"-"`
 	// IsQueuedDispatch is internal: the queue claim owns this fresh message.
 	IsQueuedDispatch bool `json:"-" mapstructure:"-"`
 	// KBPrestepContent holds relevant knowledge retrieved before planning. The

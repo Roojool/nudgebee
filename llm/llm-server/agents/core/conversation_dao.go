@@ -2742,7 +2742,10 @@ func (chat *ConversationDao) LoadConversationMessages(accountID, conversationID,
 	var args []interface{}
 	args = append(args, conversationID, accountID)
 
-	query := `SELECT role, message, response, id::text, message_type FROM llm_conversation_messages 
+	// message_config is only needed on followup rows (it names the followup type).
+	query := `SELECT role, message, response, id::text, message_type,
+		CASE WHEN message_type = 'followup' THEN COALESCE(message_config, '') ELSE '' END
+		FROM llm_conversation_messages
 		WHERE conversation_id = $1 AND account_id = $2 AND status <> 'QUEUED'`
 
 	if userID != "" {
@@ -2770,8 +2773,8 @@ func (chat *ConversationDao) LoadConversationMessages(accountID, conversationID,
 
 	var messages []map[string]string
 	for rows.Next() {
-		var role, message, response, id, mType string
-		if err := rows.Scan(&role, &message, &response, &id, &mType); err != nil {
+		var role, message, response, id, mType, mConfig string
+		if err := rows.Scan(&role, &message, &response, &id, &mType, &mConfig); err != nil {
 			slog.Info("history: failed to scan row:", "error:", err)
 			continue
 		}
@@ -2781,6 +2784,7 @@ func (chat *ConversationDao) LoadConversationMessages(accountID, conversationID,
 		msg["response"] = response
 		msg["id"] = id
 		msg["message_type"] = mType
+		msg["message_config"] = mConfig
 		messages = append(messages, msg)
 	}
 	if err := rows.Err(); err != nil {

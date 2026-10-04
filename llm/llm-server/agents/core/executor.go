@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"nudgebee/llm/common"
@@ -366,14 +367,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 		}, errors.New("conversation terminated")
 	}
 
-	// Remove the routed-to @agent mention from the query. By default only the FIRST
-	// mention is dropped so a "@a @b q" run keeps "@b q" for the agent; set
-	// DropExtraAgentMentions to strip every leading mention ("q").
-	if config.Config.DropExtraAgentMentions {
-		request.Query = common.StripLeadingAgentMention(request.Query)
-	} else {
-		request.Query = common.StripFirstAgentMention(request.Query)
-	}
+	request.Query = stripRoutedAgentMention(request.Query)
 
 	// Stamp the agent's declared model category onto the context so every LLM
 	// call it makes resolves the category-specific model. Sub-operations may
@@ -613,10 +607,22 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// combines it with each agent's delegated task, so every agent gets a fresh,
 	// task-specific account-wide search without losing the user's intent.
 	isTopLevelInvocation := seedOriginalQuery(&request)
+	// turnRequest is the request as the turn's question sees it, for knowledge
+	// discovery and memory. On a followup resume Query is the user's answer
+	// ("yes") until refine restores it below, and resumeFollowupLocked already
+	// restored OriginalQuery (#40085). Retrieving on the answer changed the
+	// opening human message (KB and memory blocks) and lost its prompt cache.
+	turnRequest := request
+	if isResumedTopLevelInvocation(request) {
+		isTopLevelInvocation = true
+		turnRequest.Query = request.OriginalQuery
+	}
+	// Used up here; it must not travel with anything built from this request.
+	request.TopLevelResume = false
 
 	kbChan := make(chan kbAssemblyResult, 1)
 	go func(prompt NBAgentPrompt) {
-		discover := knowledgeMode != AgentKnowledgeDisabled && shouldDiscoverKnowledge(policy, request)
+		discover := knowledgeMode != AgentKnowledgeDisabled && shouldDiscoverKnowledge(policy, turnRequest)
 		ctx.GetLogger().Info("knowledge: discovery decision", "policy", policy, "discover", discover, "agent", agent.GetName())
 		if !discover {
 			kbChan <- kbAssemblyResult{prompt: prompt}
@@ -625,9 +631,9 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 		// Mapped KBs are attribution fallbacks for legacy documents. Discovery
 		// itself is account-wide and relevance-ranked, never mapping-gated.
 		mappingStarted := time.Now()
-		kbs := fetchAgentKBs(ctx, request.AccountId, ownSkillNames, request.InheritSkillsFromAgents, nil)
+		kbs := fetchAgentKBs(ctx, turnRequest.AccountId, ownSkillNames, turnRequest.InheritSkillsFromAgents, nil)
 		ctx.GetLogger().Info("knowledge: mappings resolved", "duration", time.Since(mappingStarted).String(), "count", len(kbs))
-		discovery := retrieveRelevantKB(ctx, request, kbs)
+		discovery := retrieveRelevantKB(ctx, turnRequest, kbs)
 		if knowledgeMode == AgentKnowledgeAutoChunks {
 			kbChan <- kbAssemblyResult{prompt: prompt, prestepBlock: strings.TrimSpace(discovery.content), kbRefs: discovery.references}
 			return
@@ -660,11 +666,11 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	} else if memoryModuleActive {
 		memChan <- ""
 		go func() {
-			memV2Chan <- composeMemoryV2BlockFn(ctx, request, agent)
+			memV2Chan <- composeMemoryV2BlockFn(ctx, turnRequest, agent)
 		}()
 	} else {
 		go func(cf []string) {
-			memChan <- retrieveAndBuildMemoryNotebook(ctx, request, agent, cf)
+			memChan <- retrieveAndBuildMemoryNotebook(ctx, turnRequest, agent, cf)
 		}(convFacts)
 		memV2Chan <- ""
 	}
@@ -1218,9 +1224,12 @@ func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([
 
 	// collect existing history
 	messageHistoryFomatter := []prompts.MessageFormatter{}
+	// Rows after the current turn's message belong to this turn (its followups).
+	inCurrentTurn := false
 	// Handle formatting of the message history
 	for _, chat := range chatHistory {
 		if chat["id"] == request.MessageId {
+			inCurrentTurn = true
 			continue
 		}
 
@@ -1243,6 +1252,13 @@ func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([
 				}
 			}
 		case MessageTypeFollowup:
+			// This turn's own approval reaches the planner as the action's result
+			// (it runs, or reports "User rejected approval"). Replaying it here
+			// changed the opening human message after every approval, which lost
+			// that message's prompt cache (#40085).
+			if inCurrentTurn && followupTypeOf(chat["message_config"]) == FollowupTypeToolConfirmation {
+				continue
+			}
 			// For followups, 'content' is the AI question, 'response' is user answer
 			if chat["content"] != "" {
 				aiQuestion := escapeTemplateSyntax(chat["content"])
@@ -1255,6 +1271,20 @@ func getExistingHistory(request NBAgentRequest, ctx *security.RequestContext) ([
 		}
 	}
 	return messageHistoryFomatter, nil
+}
+
+// followupTypeOf reads followupType from a followup message's message_config.
+func followupTypeOf(messageConfig string) FollowupType {
+	if messageConfig == "" {
+		return ""
+	}
+	var cfg struct {
+		FollowupType FollowupType `json:"followupType"`
+	}
+	if err := json.Unmarshal([]byte(messageConfig), &cfg); err != nil {
+		return ""
+	}
+	return cfg.FollowupType
 }
 
 // formatAttachmentDescriptions builds a text summary of image attachments for history replay.
@@ -1284,6 +1314,23 @@ type NBClassificationAgent interface {
 type NBMultiOptionClassificationAgent interface {
 	NBClassificationAgent
 	AllowsMultipleOptions() bool
+}
+
+// stripRoutedAgentMention removes the routed-to @agent mention from a query. By
+// default only the FIRST mention is dropped so a "@a @b q" run keeps "@b q" for
+// the agent; set DropExtraAgentMentions to strip every leading mention ("q").
+func stripRoutedAgentMention(query string) string {
+	if config.Config.DropExtraAgentMentions {
+		return common.StripLeadingAgentMention(query)
+	}
+	return common.StripFirstAgentMention(query)
+}
+
+// isResumedTopLevelInvocation reports the turn's top-level agent resuming after a
+// followup with its original question restored (so seedOriginalQuery reports
+// false for it).
+func isResumedTopLevelInvocation(request NBAgentRequest) bool {
+	return request.TopLevelResume && request.OriginalQuery != ""
 }
 
 // resolveEffectivePlannerType maps an agent's *declared* planner type to the
