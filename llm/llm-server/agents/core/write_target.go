@@ -173,6 +173,11 @@ func (e *plannerExecutor) confirmationKeyOf(nameToTool map[string]toolcore.NBToo
 // another. A write that does not switch keeps its key.
 func (e *plannerExecutor) approvalKey(tool toolcore.NBTool, action NBAgentPlannerToolAction, target *writeTarget) string {
 	key := confirmationKeyWithTarget(confirmationKeyForAction(tool, action), target)
+	if target == nil && e.namesWhereItRunsAnyway(tool, action, key) {
+		// "kubectl --context k8s-dev" in a k8s-dev conversation is the same
+		// write as without it; one approval covers both.
+		return action.Tool
+	}
 	if target == nil && tools.IsTargetedIntegrationTool(e.ctx, tool) {
 		callCtx := toolcore.NbToolContext{Ctx: e.ctx, AccountId: e.agentRequest.AccountId, ToolConfig: toolcore.ToolConfig{Name: e.resolvedToolConfig(tool.Name())}}
 		if named, ok := tools.IntegrationNamedByCall(callCtx, tool, toolcore.ParseNBToolCallRequestFromInput(action.ToolInput)); ok {
@@ -180,6 +185,32 @@ func (e *plannerExecutor) approvalKey(tool toolcore.NBTool, action NBAgentPlanne
 		}
 	}
 	return key
+}
+
+// namesWhereItRunsAnyway reports whether a per-call tool's key only names the
+// cluster or account the call would run on without naming it: the
+// conversation's chosen config, or its only one. Naming another of the
+// account's configs keeps its own key.
+func (e *plannerExecutor) namesWhereItRunsAnyway(tool toolcore.NBTool, action NBAgentPlannerToolAction, key string) bool {
+	scoped, ok := tool.(toolcore.PerCallTargetTool)
+	if !ok {
+		return false
+	}
+	requested, err := scoped.RequestedTarget(action.ToolInput)
+	if err != nil || requested == "" || !strings.EqualFold(key, tool.Name()+"@"+requested) {
+		return false
+	}
+	selected, found, err := e.perCallWriteTarget(tool, scoped, action)
+	if err != nil || !found || selected.Name == "" {
+		return false
+	}
+	unnamed := e.resolvedToolConfig(tool.Name())
+	if unnamed == "" {
+		if configs, err := toolcore.ListToolConfigs(e.ctx, e.agentRequest.AccountId, tool); err == nil && len(configs) == 1 {
+			unnamed = configs[0].Name
+		}
+	}
+	return strings.EqualFold(selected.Name, unnamed)
 }
 
 // writeAccountOf is the account a write must be allowed on: where it lands

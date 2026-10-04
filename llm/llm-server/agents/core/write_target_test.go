@@ -200,3 +200,21 @@ func TestOwnDatabaseSwitchIsApprovedSeparately(t *testing.T) {
 	nameToTool := getNameToTool([]toolcore.NBTool{postgres})
 	require.Equal(t, switched, e.confirmationKeyOf(nameToTool, NBAgentPlannerToolAction{Tool: postgres.Name(), ToolInput: `{"query":"delete from t","instance":"test-pg"}`}), "resume looks the approval up under the gate's key")
 }
+
+// Naming the conversation's own cluster is the same write as naming none: one
+// approval, not two (seen live: the model retried a create without `cluster`
+// and the user was asked again for k8s-dev).
+func TestOwnClusterNamedOrNotIsOneApproval(t *testing.T) {
+	e := writeTargetExecutor(t, "prod-id")
+	e.agentRequest.QueryConfig.ToolConfigs = map[string]string{"kubectl_execute": "k8s-dev"}
+	kubectl := tools.KubectlExecuteTool{}
+	key := func(input string) string {
+		action := NBAgentPlannerToolAction{Tool: kubectl.Name(), ToolInput: input}
+		return e.approvalKey(kubectl, action, e.writeTargetOf(kubectl, action))
+	}
+	unnamed := key(`{"command":"kubectl create configmap x"}`)
+	require.Equal(t, "kubectl_execute", unnamed)
+	require.Equal(t, unnamed, key(`{"command":"kubectl create configmap x","cluster":"k8s-dev"}`))
+	require.Equal(t, unnamed, key(`{"command":"kubectl create configmap x --context k8s-dev"}`))
+	require.Equal(t, "kubectl_execute@k8s-prod@prod-id", key(`{"command":"kubectl create configmap x","cluster":"k8s-prod"}`), "another cluster keeps its own approval")
+}
