@@ -280,7 +280,7 @@ export const ECSTasks = (props: {
         />
         <FilterDropdown
           id='ecs-tasks-filter-state'
-          label='State'
+          label='Status'
           value={selectedState}
           options={stateOptions}
           onSelect={(e: any) => {
@@ -554,7 +554,7 @@ export const ECSServices = (props: {
         />
         <FilterDropdown
           id='ecs-services-filter-state'
-          label='State'
+          label='Status'
           value={selectedState}
           options={stateOptions}
           onSelect={(e: any) => {
@@ -1170,7 +1170,7 @@ export const ECSClusters = (props: {
         />
         <FilterDropdown
           id='ecs-clusters-filter-state'
-          label='State'
+          label='Status'
           value={selectedState}
           options={stateOptions}
           onSelect={(e: any) => {
