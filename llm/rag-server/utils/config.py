@@ -117,6 +117,8 @@ class Config:
     cache_redis_username = os.environ.get("REDIS_USER_NAME", "").strip()
     cache_redis_password = os.environ.get("REDIS_USER_PASSWORD", "")
     cache_redis_timeout_seconds = _float_env("RAG_CACHE_REDIS_TIMEOUT_SECONDS", 2.0)
+    # How long a retired Redis is left alone before one call probes it again.
+    cache_redis_retry_after_seconds = _float_env("RAG_CACHE_REDIS_RETRY_AFTER_SECONDS", 60.0)
     reranking_enabled = os.environ.get("RAG_RERANKING_ENABLED", "false").lower() == "true"  # LLM reranking default
 
     # Figures described in parallel during a knowledge-base load. Bounded because

@@ -100,7 +100,12 @@ def test_reachable_redis_is_used():
 
 
 def test_redis_failing_mid_flight_degrades_to_memory():
-    """This is the llm-server gap: there, a dead Redis means permanent misses."""
+    """This is the llm-server gap: there, a dead Redis means permanent misses.
+
+    The tiered backend is deliberately kept rather than swapped for the bare
+    fallback -- it already skips an unhealthy primary on every path, and
+    keeping it is what leaves something for healthy() to probe later.
+    """
     client, _ = _redis_mock(fail=ConnectionError("gone"))
     with patch.object(Config, "cache_provider", "redis"), patch.object(Config, "cache_redis_host", "redis.test"):
         with patch("redis.Redis", return_value=client):
@@ -108,8 +113,12 @@ def test_redis_failing_mid_flight_degrades_to_memory():
             assert backend.name == "redis+in_memory"
             for _ in range(cb._FAILURE_THRESHOLD):
                 assert backend.get("k") is None  # swallowed, counted
-            # Next selection retires Redis for this process.
-            assert cb.get_cache_backend().name == "in_memory"
+
+            retired = cb.get_cache_backend()
+            assert not retired.primary_healthy, "Redis is retired"
+            # Reads and writes keep working, served locally.
+            assert retired.set("k", "v") is True
+            assert retired.get("k") == "v"
 
 
 def test_data_written_while_redis_was_up_survives_it_going_down():
@@ -440,8 +449,227 @@ def test_add_publishes_with_the_lock_released():
         held.append(c._lock._is_owned())
         return original()
 
+    # Seeded with a complete list, because that is the only state add()
+    # publishes from -- a partial list is deliberately never shared.
+    c.set([SimpleNamespace(name="seed", metadata={}, points_count=1)])
     c._publish_shared_snapshot = record_then_publish
     c.add(SimpleNamespace(name="a", metadata={}, points_count=1))
     c.add(SimpleNamespace(name="b", metadata={}, points_count=1))
 
-    assert held == [False, False], f"publish ran while holding the cache lock: {held}"
+    assert held, "add() published nothing, so this proves nothing"
+    assert held == [False] * len(held), f"publish ran while holding the cache lock: {held}"
+
+
+def test_a_retired_redis_is_probed_again_and_resumes():
+    """A blip must not cost sharing for the life of the process.
+
+    Every tiered path skips an unhealthy primary, so unless healthy() lets a
+    call through on its own the counter can never be reset by a success --
+    which is the flaw this mirrors in llm-server's cache.
+    """
+    client, pipe = _redis_mock(fail=ConnectionError("blip"))
+    backend = cb.RedisBackend(client)
+
+    for _ in range(cb._FAILURE_THRESHOLD):
+        backend.get("k")
+    assert not backend.healthy(), "retired after the threshold"
+
+    # Still inside the wait: no probe.
+    assert not backend.healthy()
+
+    with patch.object(Config, "cache_redis_retry_after_seconds", 0.0):
+        assert backend.healthy(), "the wait elapsed, so one call is let through"
+        pipe.execute.side_effect = None
+        pipe.execute.return_value = ['"back"', -1]
+        assert backend.get("k") == "back"
+
+    assert backend.healthy(), "a success resumes sharing"
+    assert backend._failures == 0
+
+
+def test_a_failing_probe_does_not_resume_and_restarts_the_wait():
+    client, pipe = _redis_mock(fail=ConnectionError("still down"))
+    backend = cb.RedisBackend(client)
+    for _ in range(cb._FAILURE_THRESHOLD):
+        backend.get("k")
+
+    with patch.object(Config, "cache_redis_retry_after_seconds", 0.0):
+        assert backend.healthy(), "probe allowed"
+        assert backend.get("k") is None, "probe fails"
+
+    # Back to a normal interval: the failed probe restarted the wait.
+    assert not backend.healthy(), "a failed probe must not resume sharing"
+    assert backend._failures > cb._FAILURE_THRESHOLD
+
+
+def test_the_tier_calls_redis_again_once_it_recovers():
+    """End to end through TieredBackend, which is what callers actually hold."""
+    client, _ = _redis_mock()
+    client.set.side_effect = ConnectionError("down")
+    primary = cb.RedisBackend(client)
+    tier = cb.TieredBackend(primary, cb.InMemoryBackend())
+
+    for _ in range(cb._FAILURE_THRESHOLD):
+        tier.set("k", "v")
+    assert not tier.primary_healthy
+
+    client.set.side_effect = None
+    with patch.object(Config, "cache_redis_retry_after_seconds", 0.0):
+        tier.set("k2", "v2")
+
+    assert tier.primary_healthy, "the tier must reach Redis again after it recovers"
+
+
+def test_the_probe_reaches_redis_through_the_real_selector():
+    """The health check must not consume the probe before a call is made.
+
+    get_cache_backend() runs on every metadata lookup. While healthy() had a
+    side effect, the selector's own check ate the retry window and the actual
+    read then found the backend unhealthy again -- so Redis was never retried.
+    """
+    client, pipe = _redis_mock(fail=ConnectionError("down"))
+    with patch.object(Config, "cache_provider", "redis"), patch.object(Config, "cache_redis_host", "redis.test"):
+        with patch("redis.Redis", return_value=client):
+            for _ in range(cb._FAILURE_THRESHOLD):
+                cb.get_cache_backend().get("k")
+            assert not cb.get_cache_backend().primary_healthy
+
+            pipe.execute.side_effect = None
+            pipe.execute.return_value = ['"back"', 30]
+            pipe.execute.reset_mock()
+
+            # A real interval, advanced past rather than slept through: the
+            # clock is mocked so this is deterministic and instant. A zero
+            # interval would leave the window permanently open and hide the
+            # defect, so the interval has to be non-zero.
+            with (
+                patch.object(Config, "cache_redis_retry_after_seconds", 0.05),
+                patch("time.monotonic", return_value=time.monotonic() + 1.0),
+            ):
+                # Exactly what a caller does: ask for the backend, then read.
+                value = cb.get_cache_backend().get("fresh-key")
+
+            assert pipe.execute.called, "the probe never reached Redis"
+            assert value == "back"
+            assert cb.get_cache_backend().primary_healthy, "Redis is back in use"
+
+
+def test_a_retired_redis_does_not_put_the_lock_back_on_the_hot_path():
+    """Retirement must not send every lookup through the global lock.
+
+    The backend is no longer swapped out when Redis is retired, so the fast
+    path cannot gate on health -- doing so would fall through to the lock on
+    every metadata read for as long as Redis stayed down.
+    """
+    client, _ = _redis_mock(fail=ConnectionError("down"))
+    with patch.object(Config, "cache_provider", "redis"), patch.object(Config, "cache_redis_host", "redis.test"):
+        with patch("redis.Redis", return_value=client):
+            for _ in range(cb._FAILURE_THRESHOLD):
+                cb.get_cache_backend().get("k")
+            assert not cb.get_cache_backend().primary_healthy
+
+            acquired = []
+            real_lock = cb._backend_lock
+
+            class CountingLock:
+                def __enter__(self):
+                    acquired.append(1)
+                    return real_lock.__enter__()
+
+                def __exit__(self, *a):
+                    return real_lock.__exit__(*a)
+
+            with patch.object(cb, "_backend_lock", CountingLock()):
+                for _ in range(20):
+                    cb.get_cache_backend()
+
+            assert acquired == [], f"retired Redis sent {len(acquired)} lookups through the lock"
+
+
+def test_the_retry_clock_survives_a_backwards_system_clock_jump():
+    """The retry interval is elapsed time, so it must not read the wall clock.
+
+    An NTP correction stepping the clock backwards would otherwise push the
+    next probe out by however far it moved -- an hour's step means an hour
+    with no shared cache.
+    """
+    client, _ = _redis_mock(fail=ConnectionError("down"))
+    backend = cb.RedisBackend(client)
+    for _ in range(cb._FAILURE_THRESHOLD):
+        backend.get("k")
+    assert not backend.healthy()
+
+    real_time = time.time
+    # The monotonic clock advances past the interval; the wall clock steps an
+    # hour backwards at the same moment. Only one of them may be consulted.
+    with (
+        patch.object(Config, "cache_redis_retry_after_seconds", 0.05),
+        patch("time.monotonic", return_value=time.monotonic() + 1.0),
+        patch("time.time", lambda: real_time() - 3600),
+    ):
+        assert backend.healthy(), "a wall-clock step must not delay the probe"
+
+
+def test_the_health_check_takes_no_lock():
+    """healthy() runs on every write and every local miss.
+
+    It was lock-free before the retry logic was added and has to stay that
+    way; this is the second time a lock crept onto this path in this change.
+    """
+    client, _ = _redis_mock()
+    backend = cb.RedisBackend(client)
+
+    acquired = []
+    real = backend._lock
+
+    class CountingLock:
+        def __enter__(self):
+            acquired.append(1)
+            return real.__enter__()
+
+        def __exit__(self, *a):
+            return real.__exit__(*a)
+
+    backend._lock = CountingLock()
+    for _ in range(50):
+        backend.healthy()
+    assert acquired == [], f"healthy() took the lock {len(acquired)} times"
+
+
+def test_the_retirement_clock_is_published_before_the_count():
+    """Ordering, not timing — the window is two bytecodes wide.
+
+    healthy() reads _failures and _retired_at without a lock. If the count
+    crossed the threshold while the clock still read 0.0, the subtraction
+    would measure against the epoch and wave a probe through mid-outage. A
+    threaded test would almost never hit that; asserting the write order is
+    exact.
+    """
+    client, _ = _redis_mock(fail=ConnectionError("down"))
+    backend = cb.RedisBackend(client)
+
+    writes = []
+    cls = type(backend)
+
+    def record_write(self, name, value):
+        if name in ("_failures", "_retired_at"):
+            writes.append((name, value))
+        object.__setattr__(self, name, value)
+
+    with patch.object(cls, "__setattr__", record_write):
+        for _ in range(cb._FAILURE_THRESHOLD):
+            backend.get("k")
+
+    # The write that first takes _failures to the threshold must be preceded
+    # by a non-zero _retired_at.
+    clock = 0.0
+    for name, value in writes:
+        if name == "_retired_at":
+            clock = value
+        elif name == "_failures" and value >= cb._FAILURE_THRESHOLD:
+            assert clock > 0.0, "_failures reached the threshold while the clock was still 0.0"
+            break
+    else:
+        raise AssertionError(f"never reached the threshold; writes were {writes}")
+
+    assert not backend.healthy(), "and the backend reads as retired straight away"

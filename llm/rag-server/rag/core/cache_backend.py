@@ -166,6 +166,7 @@ class RedisBackend:
         self._client = client
         self._prefix = key_prefix
         self._failures = 0
+        self._retired_at = 0.0
         self._lock = threading.Lock()
 
     def _k(self, key: str) -> str:
@@ -173,7 +174,30 @@ class RedisBackend:
 
     def _record(self, ok: bool) -> None:
         with self._lock:
-            self._failures = 0 if ok else self._failures + 1
+            if ok:
+                if self._failures >= _FAILURE_THRESHOLD:
+                    logger.info("cache: redis answered again, resuming shared cache")
+                self._failures = 0
+                self._retired_at = 0.0
+                return
+            failures = self._failures + 1
+            if failures >= _FAILURE_THRESHOLD:
+                # Stamped BEFORE _failures is published, so a lock-free reader
+                # can never see the count past the threshold while the clock
+                # still reads 0.0 -- that pairing measures against the epoch
+                # and waves a probe through mid-outage.
+                #
+                # Restamped on every failure, so a probe that fails starts the
+                # wait again rather than letting the next call straight through.
+                # monotonic, not time(): an NTP step backwards would otherwise
+                # push the next probe out by however far the clock moved.
+                self._retired_at = time.monotonic()
+            if failures == _FAILURE_THRESHOLD:
+                logger.error(
+                    "cache: redis failed %d times, serving from in-memory only until it answers again",
+                    _FAILURE_THRESHOLD,
+                )
+            self._failures = failures
 
     def get(self, key: str) -> Optional[Any]:
         value, _ = self.get_with_ttl(key)
@@ -283,7 +307,26 @@ class RedisBackend:
             return False
 
     def healthy(self) -> bool:
-        return self._failures < _FAILURE_THRESHOLD
+        """True while usable, and again once the retry interval has passed.
+
+        Reporting healthy after the wait is how a retired backend gets probed
+        at all: callers skip an unhealthy Redis entirely, so nothing would
+        ever reach it to prove it had recovered.
+
+        Deliberately free of side effects -- it is also how the selector and
+        callers *test* the backend, so consuming the window here would mean
+        the probe never reaches Redis. _record restamps instead, which only
+        runs when a real call has actually been made.
+
+        Lock-free, because this sits on every write and every local miss.
+        Both reads are atomic on their own, and _record publishes _retired_at
+        before the _failures that makes it readable, so the one pairing that
+        would matter -- a count past the threshold against a clock still at
+        0.0 -- cannot be observed.
+        """
+        if self._failures < _FAILURE_THRESHOLD:
+            return True
+        return time.monotonic() - self._retired_at >= Config.cache_redis_retry_after_seconds
 
     def try_lock(self, key: str, ttl_seconds: int) -> Optional[str]:
         token = uuid.uuid4().hex
@@ -459,11 +502,11 @@ def get_cache_backend() -> CacheBackend:
 
     # Fast path, no lock. Metadata is read per document during processing, so
     # every one of those reads would otherwise contend on this. Reading a
-    # module global is atomic, and the only transition we must not miss is a
-    # healthy Redis becoming unhealthy -- which is checked here before the
-    # backend is handed out.
+    # module global is atomic, and once the backend exists it never changes:
+    # a retired Redis is handled inside TieredBackend, not by swapping the
+    # backend out, so there is no transition left for this function to catch.
     backend = _backend
-    if backend is not None and (not isinstance(backend, TieredBackend) or backend.primary_healthy):
+    if backend is not None:
         return backend
 
     with _backend_lock:
@@ -478,12 +521,12 @@ def get_cache_backend() -> CacheBackend:
                 logger.info("cache: using in-memory backend")
                 _backend = _fallback
 
-        # Once Redis has failed enough times, stop calling it at all. The local
-        # tier has been written to all along, so this costs sharing, not data.
-        if isinstance(_backend, TieredBackend) and not _backend.primary_healthy:
-            logger.error("cache: redis failed %d times, serving from in-memory only", _FAILURE_THRESHOLD)
-            _backend = _fallback
-
+        # A retired Redis is NOT swapped out for the bare fallback here.
+        # TieredBackend already skips an unhealthy primary on every path, so
+        # swapping would only make the retirement permanent: the RedisBackend
+        # would be unreachable and could never be probed again. Crossing the
+        # threshold is logged by RedisBackend._record, which is where it is
+        # actually known.
         return _backend
 
 

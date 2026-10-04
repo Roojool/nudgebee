@@ -252,12 +252,35 @@ class CollectionListCache:
         upstream.
         """
         with self._lock:
+            # Whether this process holds the whole picture, decided before the
+            # add. Only a complete list may have its freshness extended or be
+            # shared; anything else is this process's partial view, and
+            # publishing it overwrites the real list in Redis.
+            #
+            # The timestamp is tested against 0.0 rather than left to the
+            # subtraction: 0.0 means "never filled", and reading it as a real
+            # instant only works while the epoch is further back than the TTL.
+            complete = (
+                self._collections is not None
+                and self._timestamp > 0.0
+                and time.time() - self._timestamp <= self.ttl_seconds
+            )
+
             if self._collections is None:
+                # Nothing was cached, so this process knows about exactly one
+                # collection and nothing about the other few hundred. The
+                # entry is still recorded, with its generation, so a refresh
+                # already in flight merges it instead of dropping it. The
+                # timestamp stays 0, so get() and exists() report "unknown"
+                # and the caller refreshes for real.
                 self._generation += 1
                 self._collections = [collection_info]
                 self._collection_generations = {collection_info.name: self._generation}
-                self._timestamp = time.time()
-                logger.info(f"Collection list cache initialized with '{collection_info.name}'")
+                self._timestamp = 0.0
+                logger.info(
+                    f"Collection list cache initialized with '{collection_info.name}' only; "
+                    "marked stale and not shared, the next read will refresh"
+                )
             elif any(existing.name == collection_info.name for existing in self._collections):
                 # Concurrent create-if-not-exists path may fire this
                 # from multiple threads after the winner's 200; ignore
@@ -267,12 +290,20 @@ class CollectionListCache:
                 self._generation += 1
                 self._collections.append(collection_info)
                 self._collection_generations[collection_info.name] = self._generation
-                self._timestamp = time.time()
+                if complete:
+                    self._timestamp = time.time()
                 logger.info(
                     f"Collection list cache updated: added '{collection_info.name}' ({len(self._collections)} total)"
                 )
-        # Publishing is a Redis round trip; every mutating path does it with
-        # the lock released.
+
+            if not complete:
+                # Back-to-back creates land here -- the second add appends to
+                # the one-entry list above. Freshening and publishing it would
+                # put that partial list in Redis looking current, which is the
+                # whole failure this guard exists to stop.
+                return
+
+        # Publishing is a Redis round trip; it happens with the lock released.
         self._publish_shared_snapshot()
 
     def clear(self) -> None:

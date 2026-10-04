@@ -284,3 +284,132 @@ def test_timing_out_retries_the_lock_before_refreshing():
     assert attempts == [None, None], "both refused while the holder keeps it"
 
     backend.unlock(client_mod._REFRESH_LOCK_KEY, holder)
+
+
+def test_a_one_collection_list_is_not_shared():
+    """A pod that only knows one collection must not hand that to the others.
+
+    add() normally appends to a list a refresh just populated. Reaching it
+    with nothing cached means a concurrent invalidate() -- from a delete --
+    landed in between, so this process knows one collection and nothing of
+    the other few hundred. Publishing that looks fresh to every replica and
+    overwrites the complete list in Redis.
+    """
+    backend = cb.get_cache_backend()
+    backend.set(_SHARED_SNAPSHOT_KEY, {"timestamp": time.time(), "collections": [{"name": "real"} for _ in range(3)]})
+
+    c = CollectionListCache(ttl_seconds=60)
+    c.add(SimpleNamespace(name="only-one", metadata={}, points_count=0))
+
+    shared = backend.get(_SHARED_SNAPSHOT_KEY)
+    assert [e["name"] for e in shared["collections"]] == ["real", "real", "real"], "the good snapshot was overwritten"
+
+
+def test_a_one_collection_list_is_stale_so_the_next_read_refreshes():
+    """A list of one must never be mistaken for the full list.
+
+    Both readers report "unknown" rather than answering from it, which is
+    what sends the caller to Qdrant for a real refresh.
+    """
+    c = CollectionListCache(ttl_seconds=60)
+    c.add(SimpleNamespace(name="only-one", metadata={}, points_count=0))
+
+    assert c.get() is None, "the list counts as stale, so the caller refreshes"
+    assert c.exists("only-one") is None, "and exists() says unknown, not a confident answer"
+
+
+def test_the_new_collection_survives_a_refresh_that_was_already_running():
+    """Marking it stale must not lose the entry a refresh in flight cannot see."""
+    c = CollectionListCache(ttl_seconds=60)
+    fetched_at = c.begin_refresh()
+    c.add(SimpleNamespace(name="created-mid-fetch", metadata={}, points_count=0))
+
+    # The in-flight fetch lands, without the new collection in its results.
+    c.set([SimpleNamespace(name="from-qdrant", metadata={}, points_count=5)], fetched_at_generation=fetched_at)
+
+    assert sorted(x.name for x in c.get()) == ["created-mid-fetch", "from-qdrant"]
+
+
+def test_appending_to_a_known_list_still_shares_it():
+    """The guard must not stop the normal path from publishing."""
+    c = CollectionListCache(ttl_seconds=60)
+    c.set([SimpleNamespace(name="a", metadata={}, points_count=1)])
+    c.add(SimpleNamespace(name="b", metadata={}, points_count=2))
+
+    shared = cb.get_cache_backend().get(_SHARED_SNAPSHOT_KEY)
+    assert sorted(e["name"] for e in shared["collections"]) == ["a", "b"]
+
+
+def test_back_to_back_adds_never_share_a_partial_list():
+    """The guard has to survive the second add, not just the first.
+
+    Marking the one-entry list stale is not enough on its own: the next add
+    takes the append branch, and if that branch freshens the timestamp and
+    publishes, the partial list reaches Redis one call later looking current.
+    Back-to-back creates are exactly the re-index path this protects.
+    """
+    backend = cb.get_cache_backend()
+    intact = {"timestamp": time.time(), "collections": [{"name": f"real{i}"} for i in range(324)]}
+    backend.set(_SHARED_SNAPSHOT_KEY, intact)
+
+    c = CollectionListCache(ttl_seconds=1800)
+    for name in ("first", "second", "third"):
+        c.add(SimpleNamespace(name=name, metadata={}, points_count=0))
+
+    shared = backend.get(_SHARED_SNAPSHOT_KEY)
+    assert len(shared["collections"]) == 324, "a partial list overwrote the complete one"
+
+
+def test_a_partial_list_stays_stale_however_many_are_added():
+    cb.reset_cache_backend()
+    c = CollectionListCache(ttl_seconds=1800)
+    for name in ("first", "second", "third"):
+        c.add(SimpleNamespace(name=name, metadata={}, points_count=0))
+
+    assert c.get() is None, "still stale, so the caller refreshes"
+    assert c.exists("first") is None, "and exists() still says unknown"
+    assert cb.get_cache_backend().get(_SHARED_SNAPSHOT_KEY) is None, "nothing was published"
+
+
+def test_adding_to_an_expired_list_does_not_resurrect_it():
+    """An expired list is as incomplete as an empty one.
+
+    Freshening the timestamp on add would hand back a list that is missing
+    whatever changed upstream while it sat expired. Asserted on the cache's
+    own freshness rather than through get(), which would otherwise adopt the
+    shared snapshot and mask the local behaviour.
+    """
+    c = CollectionListCache(ttl_seconds=1)
+    c.set([SimpleNamespace(name="old", metadata={}, points_count=1)])
+    expired_at = time.time() - 60
+    c._timestamp = expired_at
+    cb.reset_cache_backend()  # drop the snapshot set() published, so nothing is adopted
+
+    c.add(SimpleNamespace(name="new", metadata={}, points_count=1))
+
+    assert c._timestamp == expired_at, "add() must not refresh an expired list's clock"
+    assert c.get() is None, "so it still reads as needing a refresh"
+    assert sorted(x.name for x in c._collections) == ["new", "old"], "but the entry is kept for the merge"
+    assert cb.get_cache_backend().get(_SHARED_SNAPSHOT_KEY) is None, "and nothing was published"
+
+
+def test_the_stale_sentinel_does_not_depend_on_how_far_away_the_epoch_is():
+    """0.0 means "never filled", not "filled in 1970".
+
+    Leaving that to the subtraction only works while the wall clock is
+    further from the epoch than the TTL. Unreachable in production, but it
+    makes the sentinel depend on the calendar, and stats() already tests it
+    explicitly.
+    """
+    backend = cb.get_cache_backend()
+    backend.set(_SHARED_SNAPSHOT_KEY, {"timestamp": time.time(), "collections": [{"name": "real"}]})
+
+    c = CollectionListCache(ttl_seconds=1800)
+    c.add(SimpleNamespace(name="first", metadata={}, points_count=0))
+
+    # A clock reading well inside the TTL of the epoch.
+    with patch("time.time", return_value=100.0):
+        c.add(SimpleNamespace(name="second", metadata={}, points_count=0))
+
+    shared = backend.get(_SHARED_SNAPSHOT_KEY)
+    assert [e["name"] for e in shared["collections"]] == ["real"], "a partial list was shared"
