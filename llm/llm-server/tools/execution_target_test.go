@@ -82,10 +82,10 @@ func TestModelInputSchemaAddsTargetOnce(t *testing.T) {
 	require.Contains(t, core.ModelInputSchema(RecommendationExecuteTool{}).Properties, "target", "follows-target tools get the input")
 	require.NotContains(t, RecommendationExecuteTool{}.InputSchema().Properties, "target", "tools do not declare it themselves")
 	require.NotContains(t, core.ModelInputSchema(KubectlExecuteTool{}).Properties, "target", "own-selector tools keep their own argument")
-	require.NotContains(t, core.ModelInputSchema(DatadogLogExecuteTool{}).Properties, "target", "origin-bound tools cannot take one")
+	require.NotContains(t, core.ModelInputSchema(ServerExecuteTool{}).Properties, "target", "origin-bound tools cannot take one")
 }
 
-type ownTargetTool struct{ DatadogLogExecuteTool }
+type ownTargetTool struct{ ServerExecuteTool }
 
 func (ownTargetTool) Name() string { return "custom_with_own_target" }
 func (ownTargetTool) InputSchema() core.ToolSchema {
@@ -103,9 +103,9 @@ func TestResolveToolCallTarget(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "prod-id", got.DataAccountID(), "a follows-target tool reads the named account")
 
-	_, err = ResolveToolCallTarget(ctx, DatadogLogExecuteTool{}, prod)
+	_, err = ResolveToolCallTarget(ctx, ServerExecuteTool{}, prod)
 	require.ErrorContains(t, err, "cannot run on another cluster or account", "an origin-bound tool refuses a target")
-	_, err = ResolveToolCallTarget(ctx, DatadogLogExecuteTool{}, core.NBToolCallRequest{Arguments: map[string]any{"target": "k8s-prod"}})
+	_, err = ResolveToolCallTarget(ctx, ServerExecuteTool{}, core.NBToolCallRequest{Arguments: map[string]any{"target": "k8s-prod"}})
 	require.Error(t, err, "a malformed target is refused too, not ignored")
 
 	got, err = ResolveToolCallTarget(ctx, KubectlExecuteTool{}, prod)
@@ -115,7 +115,7 @@ func TestResolveToolCallTarget(t *testing.T) {
 	_, err = ResolveToolCallTarget(ctx, ownTargetTool{}, core.NBToolCallRequest{Arguments: map[string]any{"target": "anything"}})
 	require.NoError(t, err, "a tool that defines its own target argument is left alone")
 
-	got, err = ResolveToolCallTarget(ctx, DatadogLogExecuteTool{}, core.NBToolCallRequest{Command: `{"target":{"provider":"aws","name":"x"}}`})
+	got, err = ResolveToolCallTarget(ctx, ServerExecuteTool{}, core.NBToolCallRequest{Command: `{"target":{"provider":"aws","name":"x"}}`})
 	require.NoError(t, err, "a target key inside the command payload is not a target argument")
 	require.Equal(t, "origin-id", got.DataAccountID())
 }

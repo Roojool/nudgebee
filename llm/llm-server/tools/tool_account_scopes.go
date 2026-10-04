@@ -38,19 +38,17 @@ func init() {
 		"recommendation_set_dismissal", "remediation_execute", "remediation_generate", "trigger_cis_scan",
 		"trigger_image_scan", "watch_cancel", "watch_resource",
 	)
-	toolcore.DeclareOriginBound(toolcore.OriginBoundIntegration,
-		"datadog_apm_entities_execute", "datadog_containers_execute", "datadog_events_execute",
-		"datadog_hosts_execute", "datadog_incident_execute", "datadog_log_execute",
-		"datadog_metrics_execute", "datadog_resource_search_execute", "datadog_services_execute",
-		"datadog_software_catalog_execute", "datadog_traces_execute", "mongodb_current_op_get",
-		"mongodb_replset_status_get", "mongodb_server_status_get", "newrelic_apm_services_execute",
-		"newrelic_infrastructure_containers_execute", "newrelic_infrastructure_hosts_execute",
-		"newrelic_resource_search_execute",
-	)
 	// Run against the target account's own integration, picked by
-	// ResolveToolCallTarget.
+	// ResolveToolCallTarget; a call names one with `instance`.
 	toolcore.DeclareAccountScope(toolcore.AccountScopeFollowsTarget,
-		"argocd_execute", "clickhouse_query_execute", "mssql_query_execute", "mysql_query_execute",
+		"argocd_execute", "clickhouse_query_execute", "datadog_apm_entities_execute",
+		"datadog_containers_execute", "datadog_events_execute", "datadog_hosts_execute",
+		"datadog_incident_execute", "datadog_log_execute", "datadog_metrics_execute",
+		"datadog_resource_search_execute", "datadog_services_execute", "datadog_software_catalog_execute",
+		"datadog_traces_execute", "mongodb_current_op_get", "mongodb_replset_status_get",
+		"mongodb_server_status_get", "mssql_query_execute", "mysql_query_execute",
+		"newrelic_apm_services_execute", "newrelic_infrastructure_containers_execute",
+		"newrelic_infrastructure_hosts_execute", "newrelic_resource_search_execute",
 		"oracle_query_execute", "postgres_query_execute", "rabbit_execute", "redis_command_executer",
 	)
 	toolcore.DeclareOriginBound(toolcore.OriginBoundConversationState,

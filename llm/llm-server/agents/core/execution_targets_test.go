@@ -164,8 +164,8 @@ func TestTargetBlindToolsRefusedUnlessNeutral(t *testing.T) {
 		_, err = prepareDelegatedActionInput(tool, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 		require.NoError(t, err, "%T reads the target from the call context", tool)
 	}
-	_, err = prepareDelegatedActionInput(tools.DatadogLogExecuteTool{}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
-	require.Error(t, err, "Datadog credentials come from the conversation account's integration")
+	_, err = prepareDelegatedActionInput(tools.ServerExecuteTool{}, bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
+	require.Error(t, err, "SSH servers are reached only from the conversation's own account")
 	_, err = prepareDelegatedActionInput(toolcore.NewClientToolWrapper(toolcore.NBToolCommand{}), bound, "origin-id", NBAgentPlannerToolAction{ToolInput: "{}"})
 	require.NoError(t, err, "client tools run on the user's side")
 }

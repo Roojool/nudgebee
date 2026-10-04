@@ -22,12 +22,20 @@ func IsTargetedIntegrationTool(ctx *security.RequestContext, tool core.NBTool) b
 	if tool == nil {
 		return false
 	}
+	if _, byAccount := tool.(accountLevelIntegration); byAccount {
+		return false
+	}
 	if decl, _ := core.AccountScopeOf(tool.Name()); decl.Scope != core.AccountScopeFollowsTarget {
 		return false
 	}
 	configurable, ok := tool.(core.NBToolConfig)
 	return ok && configurable.ConfigSchema(ctx).ConfigSource == core.ToolConfigSourceIntegration
 }
+
+// accountLevelIntegration marks an integration tool whose backend picks the
+// integration by account (services-server's Datadog logs and traces): it
+// follows a target account but never picks, names or switches a connection.
+type accountLevelIntegration interface{ queriesIntegrationByAccount() }
 
 // CallHasTarget reports a call that names a target in its input, or runs in a
 // child handed another account. Such a call's integration is resolved on the

@@ -161,7 +161,7 @@ func TestOwnIntegrationNamedByCall(t *testing.T) {
 	assert.Equal(t, "dev-pg", ctx.ToolConfig.Name, "the conversation's pick itself is unchanged")
 }
 
-// #38596: MySQL, MSSQL, Oracle, ClickHouse and ArgoCD name their connection
+// #38596: the SQL tools, ArgoCD, Datadog, New Relic and MongoDB name their connection
 // with `instance`: on the conversation's own account the call switches to it;
 // on another account it picks among that account's integrations.
 func TestPerCallIntegrationTools(t *testing.T) {
@@ -173,7 +173,8 @@ func TestPerCallIntegrationTools(t *testing.T) {
 			"prod-id":   {{Id: "p1", Name: "prod-1"}, {Id: "p2", Name: "prod-2"}},
 		}[account], nil
 	}
-	for _, tool := range []core.NBTool{MySQLExecuteTool{}, MSSQLExecuteTool{}, OracleExecuteTool{}, ClickhouseExecuteTool{}, ArgoCDExecuteTool{}} {
+	for _, tool := range []core.NBTool{MySQLExecuteTool{}, MSSQLExecuteTool{}, OracleExecuteTool{}, ClickhouseExecuteTool{}, ArgoCDExecuteTool{},
+		DatadogMetricsExecuteTool{}, DatadogHostsTool{}, NewRelicAPMServicesTool{}, MongoDBTool{toolName: "mongodb_server_status_get"}} {
 		require.True(t, IsTargetedIntegrationTool(nil, tool), tool.Name())
 
 		own := core.NbToolContext{AccountId: "origin-id", TargetAccountId: "origin-id", ToolConfig: core.ToolConfig{Id: "o1", Name: "conn-1"}}
@@ -207,5 +208,26 @@ func TestTargetIntegrationPrefersExactName(t *testing.T) {
 		picked, err := targetIntegrationConfig(other, tool, core.ParseNBToolCallRequestFromInput(`{"query":"select 1","instance":"orders-db"}`))
 		require.NoError(t, err, tool.Name())
 		assert.Equal(t, "b", picked.Id, "%s: the integration named orders-db, not the one whose host contains orders", tool.Name())
+	}
+}
+
+// Datadog logs and traces are answered by services-server from the account's
+// Datadog integration: they follow the target account but pick no connection,
+// so two configured connections are not an error and no connection is named.
+func TestDatadogLogsAndTracesFollowTheAccountOnly(t *testing.T) {
+	restore := listIntegrationConfigs
+	t.Cleanup(func() { listIntegrationConfigs = restore })
+	listIntegrationConfigs = func(*security.RequestContext, string, core.NBTool) ([]core.ToolConfig, error) {
+		return []core.ToolConfig{{Id: "1", Name: "dd-us"}, {Id: "2", Name: "dd-eu"}}, nil
+	}
+	stubTargets(t)
+	ctx := core.NbToolContext{Ctx: security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"origin-id", "prod-id"}), AccountId: "origin-id"}
+	for _, tool := range []core.NBTool{DatadogLogExecuteTool{}, DatadogTracesExecuteTool{}} {
+		assert.False(t, IsTargetedIntegrationTool(nil, tool), tool.Name())
+		assert.NotContains(t, tool.InputSchema().Properties, "instance", tool.Name())
+		resolved, err := ResolveToolCallTarget(ctx, tool, core.NBToolCallRequest{Arguments: map[string]any{"target": map[string]any{"provider": "kubernetes", "name": "k8s-prod"}}})
+		require.NoError(t, err, tool.Name())
+		assert.Equal(t, "prod-id", resolved.DataAccountID(), "%s reads the target account", tool.Name())
+		assert.Empty(t, resolved.ToolConfig.Name, "%s names no connection", tool.Name())
 	}
 }
