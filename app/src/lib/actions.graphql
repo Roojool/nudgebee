@@ -11731,6 +11731,47 @@ type CloudVmPackagesRowResponse {
 }
 
 type Query {
+  cloud_list_account_integrations(
+    where: CloudAccountIntegrationsWhereRequest
+    limit: Int
+    offset: Int
+    order_by: [QuerySortByRequest!]
+    columns: [String!]
+  ): CloudAccountIntegrationsResponse
+}
+
+input CloudAccountIntegrationsWhereRequest {
+  _and: [CloudAccountIntegrationsWhereRequest]
+  _or: [CloudAccountIntegrationsWhereRequest]
+  _not: CloudAccountIntegrationsWhereRequest
+  id: QueryWhereStringRequest
+  tenant_id: QueryWhereStringRequest
+  account_id: QueryWhereStringRequest
+  name: QueryWhereStringRequest
+  type: QueryWhereStringRequest
+  source: QueryWhereStringRequest
+  status: QueryWhereStringRequest
+  created_at: QueryWhereDatetimeRequest
+  updated_at: QueryWhereDatetimeRequest
+}
+
+type CloudAccountIntegrationsResponse {
+  rows: [CloudAccountIntegrationsRowResponse]
+}
+
+type CloudAccountIntegrationsRowResponse {
+  id: String
+  tenant_id: String
+  account_id: String
+  name: String
+  type: String
+  source: String
+  status: String
+  created_at: Datetime
+  updated_at: Datetime
+}
+
+type Query {
   cloud_vm_package_groupings_v2(
     where: CloudVmPackageGroupingsWhereRequest
     limit: Int

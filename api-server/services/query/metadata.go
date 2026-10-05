@@ -8976,6 +8976,50 @@ var table_metadata = map[string]TableDefinition{
 			},
 		},
 	},
+	// Credential-free view of the integrations wired to a cloud account, one
+	// row per (integration, account). Backs cloud_list_account_integrations so
+	// the VM fleet page can list its vm_agent / discovery integrations for
+	// account-scoped roles. integrations_list (admin_get_integrations_v2) stays
+	// tenant-admin-only because its rows carry integration_config_values, and
+	// it has no account column, so it cannot be account-scoped (#39858).
+	"cloud_account_integrations_v2": {
+		Type:               Normal,
+		Source:             database.Metastore,
+		Name:               "cloud_account_integrations_v2",
+		TenantIdColumnName: "tenant_id",
+		// Columns KEY, not the physical column (see cloud_vm_packages_v2).
+		AccountIdColumnName: "account_id",
+		// Filed under `cloud`, not `integrations`: this is per-account operational
+		// data (which agents serve this account), the same grant that reads the
+		// account's VMs and packages. Keep in sync with the action's classified
+		// module (cloud_list_account_integrations -> cloud:Read).
+		PermissionModule: "cloud",
+		Def: `(
+			SELECT
+				i.id::text as id,
+				i.name,
+				i.type,
+				i.source,
+				i.status,
+				i.created_at,
+				i.updated_at,
+				i.tenant_id::text as tenant_id,
+				ica.cloud_account_id::text as cloud_account_id
+			FROM integrations i
+			JOIN integrations_cloud_accounts ica ON ica.integration_id = i.id
+			) as cloud_account_integrations_v2`,
+		Columns: map[string]ColumnDefinition{
+			"id":         {Type: ColumnDefinitionTypeString},
+			"name":       {Type: ColumnDefinitionTypeString},
+			"type":       {Type: ColumnDefinitionTypeString},
+			"source":     {Type: ColumnDefinitionTypeString},
+			"status":     {Type: ColumnDefinitionTypeString},
+			"created_at": {Type: ColumnDefinitionTypeDatetime},
+			"updated_at": {Type: ColumnDefinitionTypeDatetime},
+			"tenant_id":  {Type: ColumnDefinitionTypeString},
+			"account_id": {Type: ColumnDefinitionTypeString, Def: "cloud_account_id"},
+		},
+	},
 	"resource_spend_trend_v2": {
 		Type:   Aggregate,
 		Source: database.Metastore,
@@ -10690,6 +10734,8 @@ var tableAliases = map[string]string{
 	"users_get_super_admin_role":       "user_super_admin_role_v2",
 	"usergroups_list_users":            "usergroup_users_v2",
 	"usergroups_aggregate_users":       "usergroup_users_grouping_v2",
+	// Verb-named read over a credential-free per-account integrations view.
+	"cloud_list_account_integrations": "cloud_account_integrations_v2",
 }
 
 func GetTableMetadata(name string) (TableDefinition, bool) {

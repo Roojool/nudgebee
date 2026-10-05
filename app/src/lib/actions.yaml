@@ -6568,6 +6568,22 @@ actions:
       - role: tenant_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: cloud_list_account_integrations
+    comment: List integrations wired to a cloud account (name, type, status only; no config values)
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: k8s_namespace_admin
+      - role: k8s_namespace_admin_readonly
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: ai_list_conversations
     comment: List AI investigation conversations with status and title
     definition:

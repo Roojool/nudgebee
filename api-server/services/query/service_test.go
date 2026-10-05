@@ -349,6 +349,25 @@ func TestAccountScopeClause(t *testing.T) {
 	})
 }
 
+// #39858: cloud_list_account_integrations is the account-scoped read the VM
+// fleet page uses in place of the tenant-admin-only integrations_list. The
+// alias must resolve, and the injected account filter must land on the
+// physical join-table column (account_id is the Columns KEY, cloud_account_id
+// its Def) — otherwise an account_admin would read every tenant integration.
+func TestCloudAccountIntegrationsScoping(t *testing.T) {
+	def, ok := GetTableMetadata("cloud_list_account_integrations")
+	assert.True(t, ok)
+	assert.Equal(t, "cloud_account_integrations_v2", def.Name)
+	assert.Equal(t, "account_id", def.AccountIdColumnName)
+	assert.Equal(t, "cloud", def.PermissionModule)
+	assert.False(t, def.TenantWideReadable)
+
+	clause := accountScopeClause(def.AccountIdColumnName, []string{"acct_1"}, def.TenantWideReadable)
+	query, err := generateWhereClause(clause, def)
+	assert.Nil(t, err)
+	assert.Equal(t, "(cloud_account_id IN ('acct_1'))", query)
+}
+
 func TestSerialization(t *testing.T) {
 
 	t.Run("TestSerialization", func(t *testing.T) {

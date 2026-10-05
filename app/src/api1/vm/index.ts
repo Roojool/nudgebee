@@ -17,7 +17,6 @@
  */
 import { gqlStringify, queryGraphQL } from '@lib/HttpService';
 import apiHome from '@api1/home';
-import apiIntegrations from '@api1/integrations';
 import k8sApi from '@api1/kubernetes';
 
 /** rule_name every VM vulnerability finding is written under. */
@@ -130,6 +129,24 @@ export interface VmScanTarget {
   host: string;
   username: string;
 }
+
+// Credential-free listing of the integrations attached to one account, readable
+// by account-scoped roles. integrations_list is tenant-admin-only (its rows carry
+// integration_config_values) and apiIntegrations.listIntegrations swallows the
+// resulting 403 into an empty list, which is how account users saw "0 / 0"
+// proxy agents and an empty scan-target picker (#39858).
+const LIST_ACCOUNT_INTEGRATIONS = `
+query ListAccountIntegrations {
+  integrations: cloud_list_account_integrations(where: __WHERE__, limit: 100, offset: 0, order_by: [{column: "name", order: asc}]) {
+    rows {
+      id
+      name
+      type
+      status
+      created_at
+    }
+  }
+}`;
 
 const LIST_VMS = `
 query ListVms($limit: Int, $offset: Int) {
@@ -359,6 +376,24 @@ function cachedCall<T>(key: string, fetcher: () => Promise<T>, isFailure: (resul
   };
   pending.then((result) => isFailure(result) && drop()).catch(drop);
   return pending;
+}
+
+/** Rows of LIST_ACCOUNT_INTEGRATIONS for one account and integration type; throws on a GraphQL error instead of returning an empty list. */
+async function listAccountIntegrations(accountId: string, type: string): Promise<any[]> {
+  const where = { account_id: { _eq: accountId }, type: { _eq: type } };
+  const response: any = await queryGraphQL(LIST_ACCOUNT_INTEGRATIONS.replaceAll('__WHERE__', gqlStringify(where)), 'ListAccountIntegrations', {});
+  if (response?.data?.errors?.length) {
+    throw new Error(response.data.errors[0]?.message || `Failed to list ${type} integrations`);
+  }
+  // queryGraphQL does not throw on a transport failure — it hands back the bare
+  // axios response / XHR (or undefined on a 401 redirect). A missing payload is a
+  // failed call, not "no integrations": that silent-empty reading is the bug
+  // this function replaces.
+  const result = response?.data?.data?.integrations;
+  if (!result) {
+    throw new Error(`Failed to list ${type} integrations`);
+  }
+  return result.rows || [];
 }
 
 function queryGraphQLCached(query: string, operationName: string, variables: Record<string, any>): Promise<any> {
@@ -615,8 +650,8 @@ const apiVm = {
 
   /** Uncached; use listAgents. */
   async fetchAgents(accountId: string): Promise<VmAgent[]> {
-    const [listRes, healthRes]: any[] = await Promise.all([
-      apiIntegrations.listIntegrations({ type: 'vm_agent', cloudAccountId: accountId, limit: 100 }),
+    const [rows, healthRes]: any[] = await Promise.all([
+      listAccountIntegrations(accountId, 'vm_agent'),
       // Health is decoration on top of the agent list — if it fails, still show
       // the agents (as Disconnected) rather than rejecting the whole tab.
       k8sApi.getAgentHealth({ accountId, type: 'proxy' }).catch((error: unknown) => {
@@ -629,7 +664,7 @@ const apiVm = {
     // relay's own CONNECTED/DISCONNECTED state, not the integration's
     // enabled/disabled state (which is `row.status` below).
     const connected = health?.status === 'CONNECTED';
-    return (listRes?.data?.data?.integrations_list?.rows || []).map((row: any) => ({
+    return rows.map((row: any) => ({
       id: row.id,
       name: row.name,
       status: row.status,
@@ -647,8 +682,8 @@ const apiVm = {
    */
   /** Uncached; use listDiscoveryTargets. */
   async fetchDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
-    const response: any = await apiIntegrations.listIntegrations({ type: 'discovery', cloudAccountId: accountId, limit: 100 });
-    return (response?.data?.data?.integrations_list?.rows || []).map((row: any) => ({
+    const rows = await listAccountIntegrations(accountId, 'discovery');
+    return rows.map((row: any) => ({
       id: row.id,
       name: row.name,
       status: row.status,
