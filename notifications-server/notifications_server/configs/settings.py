@@ -653,12 +653,6 @@ class NotificationSettings(BaseSettings):
         validation_alias=AliasChoices("NOTIFICATIONS_DELAY_IN_SECONDS", "notifications_delay_in_seconds"),
         description="Delay in milliseconds",
     )
-    enable_batched: bool = Field(
-        False, validation_alias=AliasChoices("ENABLE_BATCHED_NOTIFICATIONS", "enable_batched_notifications")
-    )
-    enable_incident_channel_reply: bool = Field(
-        True, validation_alias=AliasChoices("ENABLE_INCIDENT_CHANNEL_REPLY", "enable_incident_channel_reply")
-    )
     # Global kill switch for Nubi channel awareness; per-tenant enablement is the
     # CHANNEL_AWARENESS feature flag, so nothing activates on this default alone.
     channel_awareness_enabled: bool = Field(
@@ -755,8 +749,6 @@ class NotificationSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator(
-        "enable_batched",
-        "enable_incident_channel_reply",
         "channel_awareness_enabled",
         "digest_resolved_enabled",
         mode="before",
@@ -927,8 +919,6 @@ REDIS_USER_PASSWORD = settings.redis.password
 
 # Notification settings
 NOTIFICATIONS_DELAY_IN_SECONDS = settings.notifications.delay_ms
-ENABLE_BATCHED_NOTIFICATIONS = settings.notifications.enable_batched
-ENABLE_INCIDENT_CHANNEL_REPLY = settings.notifications.enable_incident_channel_reply
 
 # Slack settings
 SLACK_AUTH_TYPE = settings.slack.auth_type
