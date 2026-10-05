@@ -1650,7 +1650,7 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
       }
 
       const response = await queryGraphQL(CLOUD_ACC_RDS_SUMMARY, 'CloudAccRDSSummary', {
-        resourcesWhere: { account: { _eq: accountId }, service_name: { _eq: data.serviceName }, status: { _eq: 'Active' } },
+        resourcesWhere: { account: { _eq: accountId }, service_name: { _eq: data.serviceName }, status: { _in: ['Active', 'Inactive'] } },
         recWhere,
         eventsWhere,
         spendSummaryWhere: { account_id: { _eq: accountId }, resource_service_name: { _eq: data.serviceName } },
@@ -1691,7 +1691,7 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
         s3Where: {
           account_id: { _eq: accountId },
           service_name: { _eq: data.serviceName },
-          status: { _eq: 'Active' },
+          status: { _in: ['Active', 'Inactive'] },
           type: { _eq: data.storageType },
         },
         recWhere: { account_id: { _eq: accountId }, resource_cloud_service: { _eq: data.serviceName }, status: { _in: ['Open', 'Assigned'] } },
@@ -1753,7 +1753,7 @@ mutation CloudMetrics($request: CloudMetricsRequestInput!) {
         resourcesWhere: {
           account: { _eq: accountId },
           service_name: { _eq: 'AmazonECS' },
-          status: { _eq: 'Active' },
+          status: { _in: ['Active', 'Inactive'] },
           meta: { _contains: JSON.stringify({}) },
         },
         recWhere,
