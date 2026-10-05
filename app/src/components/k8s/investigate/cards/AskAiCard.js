@@ -188,6 +188,22 @@ class AskAiCard {
     return this.renderContent;
   };
 
+  // A budget/GraphQL rejection returns the error string instead of a status
+  // object; render it via the errorMessage view and stop any in-flight refresh
+  // so we don't fake an in-progress run that polls the limit forever.
+  showInvestigationError = (res) => {
+    this.aiData = res;
+    this.errorMessage = res ? `Failed to generate investigation- ${res}` : 'Failed to generate investigation';
+    this.isRefreshing = false;
+    // Match the normal refresh cleanup: an errored run offers no fix to resolve,
+    // so drop any resolve affordance a prior completed run left on (gitDiff).
+    this.resolveButton = false;
+    this.refreshRenderId = (this.refreshRenderId || 0) + 1;
+    if (this.onDataUpdate && typeof this.onDataUpdate === 'function') {
+      this.onDataUpdate(this);
+    }
+  };
+
   refreshInvestigation = async () => {
     // Flag a regenerate in flight. The backend keeps the previous summary text
     // while the new run computes (UpsertEventAnalysisInProgress blanks analysis
@@ -200,6 +216,13 @@ class AskAiCard {
       // in_progress and returns the record (status in_progress, but with the
       // previous run's content still attached).
       const res = await apiKubernetes.generateAiRecommendation(this.event.cloud_account_id, this.event.id, 'pod_log_analysis', true);
+      // A budget/GraphQL rejection comes back as the error string, not a status
+      // object. Show it and stop — otherwise the forced in_progress below mounts
+      // a poll that re-hits the limit every 5s and never resolves.
+      if (typeof res === 'string') {
+        this.showInvestigationError(res);
+        return;
+      }
       // Force status in_progress locally so the remounted card's poll useEffect
       // skips its `status === 'completed'` early-return and sets up the 5s poll.
       this.aiData = res && typeof res === 'object' ? { ...res, status: 'in_progress' } : { ...(this.aiData || {}), status: 'in_progress' };
@@ -432,6 +455,13 @@ class AskAiCard {
         const interval = setInterval(async () => {
           try {
             const res = await apiKubernetes.generateAiRecommendation(event.cloud_account_id, event.id, 'pod_log_analysis');
+            if (typeof res === 'string') {
+              // Budget/GraphQL rejection mid-run: surface the error and stop the
+              // poll instead of looping on a response that has no terminal status.
+              clearInterval(interval);
+              cardInstance.showInvestigationError(res);
+              return;
+            }
             cardInstance.aiData = res;
             setLocalAiData(res);
             if (!hasFetchedInitial) {
@@ -1165,6 +1195,15 @@ class AskAiCard {
 
   isFailed = () => {
     return this.aiData?.status?.toLowerCase() === 'failed';
+  };
+
+  // A budget/GraphQL rejection (budget exceeded, llm-server down, …) comes back
+  // from generateAiRecommendation as the error string — even an empty one when
+  // the error carries no parseable message — not a status='failed' object, so
+  // isFailed() can't see it. A valid object or the demo-account null never hits
+  // this, so refresh stays correctly gated for those.
+  isError = () => {
+    return typeof this.aiData === 'string';
   };
 }
 

@@ -2428,7 +2428,8 @@ const Investigate = () => {
                                 disabled={
                                   !(
                                     matchedOptions.find((o) => o.id === 'AskAiCard')?.isCompleted() ||
-                                    matchedOptions.find((o) => o.id === 'AskAiCard')?.isFailed()
+                                    matchedOptions.find((o) => o.id === 'AskAiCard')?.isFailed() ||
+                                    matchedOptions.find((o) => o.id === 'AskAiCard')?.isError()
                                   )
                                 }
                                 onClick={() => {
