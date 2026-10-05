@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ const claimGuidanceFinalRound = "This is the last review: your next answer will 
 type claimGuidanceCapture struct {
 	Status         string  `json:"status"`
 	FinalRound     bool    `json:"final_round"`
+	Mode           string  `json:"mode,omitempty"`
 	LatencySeconds float64 `json:"latency_seconds"`
 	ErrorDetail    string  `json:"error_detail,omitempty"`
 	RawResponse    string  `json:"raw_response,omitempty"`
@@ -42,10 +44,19 @@ type claimGuidanceItem struct {
 	DiscriminatingCheck string `json:"discriminating_check"`
 }
 
+// claimGuidanceContinuation carries a continuation audit's request so guidance
+// continues it: by then the planner's conversation, the audit instruction and
+// the audit's reply are a prefix the provider has just cached.
+type claimGuidanceContinuation struct {
+	conv             *critiqueConversation
+	auditInstruction string
+	auditResponse    string
+}
+
 // claimGuidanceFeedback asks a second call to explain the claims the audit
 // already rejected. It never changes the verdict: on any failure it returns an
 // error and the caller keeps the audit's legacy feedback.
-func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest, detail claimCaptureDetail, audit claimAudit, finalRound bool) (string, *claimGuidanceCapture) {
+func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest, detail claimCaptureDetail, audit claimAudit, finalRound bool, cont *claimGuidanceContinuation) (string, *claimGuidanceCapture) {
 	started := time.Now()
 	capture := &claimGuidanceCapture{FinalRound: finalRound}
 	finish := func(status string, err error) (string, *claimGuidanceCapture) {
@@ -67,14 +78,6 @@ func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest,
 		return finish("no_flagged_claims", nil)
 	}
 
-	var packet map[string]json.RawMessage
-	if err := json.Unmarshal(detail.InputPacket, &packet); err != nil {
-		return finish("prepare_error", fmt.Errorf("decode claim critique packet: %w", err))
-	}
-	if packet == nil {
-		// A JSON null packet carries no evidence to explain the claims against.
-		return finish("prepare_error", fmt.Errorf("claim critique packet is empty"))
-	}
 	type flaggedClaim struct {
 		Index   int    `json:"index"`
 		Support string `json:"support"`
@@ -88,33 +91,64 @@ func claimGuidanceFeedback(ctx *security.RequestContext, request NBAgentRequest,
 	if err != nil {
 		return finish("prepare_error", fmt.Errorf("encode flagged claims: %w", err))
 	}
-	packet["flagged_claims"] = encoded
-	input, err := json.Marshal(packet)
-	if err != nil {
-		return finish("prepare_error", fmt.Errorf("encode guidance packet: %w", err))
-	}
 
 	prompt, err := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReactClaimCritiqueGuidance, request.AccountId)
 	if err != nil {
 		return finish("prompt_error", fmt.Errorf("load claim guidance prompt: %w", err))
 	}
 
-	bounded, cancel := context.WithTimeout(ctx.GetContext(), claimGuidanceTimeout)
-	defer cancel()
-	bounded = context.WithValue(bounded, ContextKeyModelTier, ModelTierReasoning)
-	// Like the audit, send the evidence exactly as captured: a pre-flight trim
-	// would let guidance cite observations the model never saw. If the input
-	// cannot be sent unaltered, the call fails and legacy feedback stays.
-	bounded = context.WithValue(bounded, contextKeyPreserveInput, true)
-	guidanceCtx := security.NewRequestContext(bounded, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
-	messages := []llms.MessageContent{
-		llms.TextParts(llms.ChatMessageTypeSystem, prompt),
-		llms.TextParts(llms.ChatMessageTypeHuman, string(input)),
-	}
-	response, err := GenerateAndTrackLLMContent(guidanceCtx, request.UserId, request.AccountId, request.ConversationId,
-		request.MessageId, request.AgentId, false, messages, false, llms.WithTemperature(0), llms.WithJSONMode())
-	if err != nil {
-		return finish("generation_error", fmt.Errorf("generate claim guidance: %w", err))
+	var response *llms.ContentResponse
+	if cont != nil && cont.conv != nil {
+		// Continue the audit's own request: same conversation, the audit
+		// instruction and its reply, then the guidance instruction.
+		capture.Mode = claimModeContinuation
+		bounded, cancel := context.WithTimeout(cont.conv.ctx.GetContext(), claimGuidanceTimeout)
+		defer cancel()
+		response, err = cont.conv.generate(cont.conv.derive(bounded), request,
+			llms.TextParts(llms.ChatMessageTypeHuman, cont.auditInstruction),
+			llms.TextParts(llms.ChatMessageTypeAI, cont.auditResponse),
+			llms.TextParts(llms.ChatMessageTypeHuman, prompt+"\n\nflagged_claims: "+string(encoded)))
+		if errors.Is(err, errCritiqueToolCall) {
+			return finish("tool_call", err)
+		}
+		if err != nil {
+			return finish("generation_error", fmt.Errorf("generate claim guidance: %w", err))
+		}
+		if response != nil && len(response.Choices) == 1 && response.Choices[0] != nil {
+			response.Choices[0].Content = stripJSONFence(response.Choices[0].Content)
+		}
+	} else {
+		var packet map[string]json.RawMessage
+		if err := json.Unmarshal(detail.InputPacket, &packet); err != nil {
+			return finish("prepare_error", fmt.Errorf("decode claim critique packet: %w", err))
+		}
+		if packet == nil {
+			// A JSON null packet carries no evidence to explain the claims against.
+			return finish("prepare_error", fmt.Errorf("claim critique packet is empty"))
+		}
+		packet["flagged_claims"] = encoded
+		input, err := json.Marshal(packet)
+		if err != nil {
+			return finish("prepare_error", fmt.Errorf("encode guidance packet: %w", err))
+		}
+
+		bounded, cancel := context.WithTimeout(ctx.GetContext(), claimGuidanceTimeout)
+		defer cancel()
+		bounded = context.WithValue(bounded, ContextKeyModelTier, ModelTierReasoning)
+		// Like the audit, send the evidence exactly as captured: a pre-flight trim
+		// would let guidance cite observations the model never saw. If the input
+		// cannot be sent unaltered, the call fails and legacy feedback stays.
+		bounded = context.WithValue(bounded, contextKeyPreserveInput, true)
+		guidanceCtx := security.NewRequestContext(bounded, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+		messages := []llms.MessageContent{
+			llms.TextParts(llms.ChatMessageTypeSystem, prompt),
+			llms.TextParts(llms.ChatMessageTypeHuman, string(input)),
+		}
+		response, err = GenerateAndTrackLLMContent(guidanceCtx, request.UserId, request.AccountId, request.ConversationId,
+			request.MessageId, request.AgentId, false, messages, false, llms.WithTemperature(0), llms.WithJSONMode())
+		if err != nil {
+			return finish("generation_error", fmt.Errorf("generate claim guidance: %w", err))
+		}
 	}
 	capture.RawResponse, _ = captureClaimResponse(response)
 	if response == nil || len(response.Choices) != 1 || response.Choices[0] == nil {

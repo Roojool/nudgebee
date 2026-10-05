@@ -159,9 +159,9 @@ func TestClaimShadowDisabledAndSubagentDoNotCallLLM(t *testing.T) {
 	withFakeLLMModel(t, fake)
 	ctx := llmOverrideContext()
 	config.Config.ClaimCritiqueFeedbackEnabled = false
-	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "legacy", "why", "answer", "", nil, false)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "legacy", "why", "answer", "", nil, false, nil)
 	config.Config.ClaimCritiqueFeedbackEnabled = true
-	runClaimCritiqueShadow(ctx, NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react3", "test_agent", "accept", "legacy", "why", "answer", "", nil, false)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react3", "test_agent", "accept", "legacy", "why", "answer", "", nil, false, nil)
 	require.Zero(t, fake.callCount())
 }
 
@@ -231,7 +231,7 @@ func TestClaimFeedbackBothPlannersValidateAudit(t *testing.T) {
 				var decision, feedback string
 				if planner == "react4" {
 					p := &NBReActPlanner4{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{}}
-					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps)
+					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps, nil)
 				} else {
 					p := &NBReActPlanner3{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{}}
 					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps, ctx.GetLogger())

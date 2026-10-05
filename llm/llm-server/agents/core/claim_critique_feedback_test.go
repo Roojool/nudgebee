@@ -56,7 +56,7 @@ func TestClaimFeedbackBothPlanners(t *testing.T) {
 				var d, f string
 				if planner == "react4" {
 					p := &NBReActPlanner4{ctx: ctx, request: req, nbAgent: notebookOptOutAgent{}}
-					d, f = p.runCritique(req.Query, "metrics", "answer", steps)
+					d, f = p.runCritique(req.Query, "metrics", "answer", steps, nil)
 				} else {
 					p := &NBReActPlanner3{ctx: ctx, request: req, nbAgent: notebookOptOutAgent{}}
 					d, f = p.runCritique(req.Query, "metrics", "answer", steps, ctx.GetLogger())
@@ -142,7 +142,7 @@ func TestClaimFeedbackSkipsChildAgent(t *testing.T) {
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
 	withFakeLLMModel(t, fake)
-	d, f := runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react4", "test", "accept", "legacy", "why", "answer", "", nil, false)
+	d, f := runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react4", "test", "accept", "legacy", "why", "answer", "", nil, false, nil)
 	require.Equal(t, "accept", d)
 	require.Equal(t, "legacy", f)
 	require.Zero(t, fake.callCount())

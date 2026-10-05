@@ -54,7 +54,17 @@ type claimCaptureDetail struct {
 	// Guidance is the step-2 outcome when the audit rejected an answer with
 	// actionable feedback enabled; absent otherwise.
 	Guidance *claimGuidanceCapture `json:"guidance,omitempty"`
+	// Mode is how the audit ran: continuation (of the planner's request, evidence
+	// refs are E-numbers), continuation_fallback (continuation failed, then the
+	// standalone packet audit ran) or empty for the standalone packet audit.
+	Mode              string `json:"mode,omitempty"`
+	ContinuationError string `json:"continuation_error,omitempty"`
 }
+
+const (
+	claimModeContinuation = "continuation"
+	claimModeFallback     = "continuation_fallback"
+)
 
 func claimHash(data []byte) string {
 	hash := sha256.Sum256(data)
@@ -186,8 +196,8 @@ func (chat *ConversationDao) SaveClaimCritiqueAudit(ctx context.Context, record 
           (id, token_usage_id, account_id, conversation_id, message_id, agent_name,
            input, critiqued_content, critique_type, decision, feedback, audit_metadata)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
-        ON CONFLICT (id) DO UPDATE SET decision=EXCLUDED.decision, feedback=EXCLUDED.feedback,
-          audit_metadata=EXCLUDED.audit_metadata
+        ON CONFLICT (id) DO UPDATE SET token_usage_id=EXCLUDED.token_usage_id, decision=EXCLUDED.decision,
+          feedback=EXCLUDED.feedback, audit_metadata=EXCLUDED.audit_metadata
         WHERE llm_conversation_agent_critiques.critique_type = 'claim_shadow'`,
 		record.ID, record.TokenUsageID, record.AccountID, record.ConversationID, record.MessageID, record.AgentName,
 		record.Input, record.Answer, claimShadowCritiqueType, decision, record.Detail.Feedback, string(detail))

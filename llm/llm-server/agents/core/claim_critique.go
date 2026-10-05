@@ -12,6 +12,7 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 
+	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -206,6 +207,10 @@ type claimShadowResult struct {
 	Audit             *claimAudit
 	RawResponse       string
 	ResponseTruncated bool
+	// Instruction and Content are the continuation audit's final user turn and
+	// the model's reply exactly as returned, so guidance continues the same request.
+	Instruction string
+	Content     string
 }
 
 func evaluateClaimShadow(ctx *security.RequestContext, request NBAgentRequest, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) claimShadowResult {
@@ -232,6 +237,48 @@ func generateClaimShadow(ctx *security.RequestContext, request NBAgentRequest, d
 	return evaluateClaimResponse(response, detail.ObservationCount)
 }
 
+// generateClaimFallback runs the standalone packet audit after a failed
+// continuation, on a fresh budget (a slow continuation may have spent the first)
+// and a fresh usage id (an explicit id belongs to a single attempt), which the
+// record then points at because its verdict is the one used.
+func generateClaimFallback(ctx *security.RequestContext, request NBAgentRequest, record *ClaimCritiqueAuditRecord) claimShadowResult {
+	bounded, cancel := context.WithTimeout(ctx.GetContext(), claimCritiqueTimeout)
+	defer cancel()
+	record.TokenUsageID = uuid.NewString()
+	bounded = context.WithValue(bounded, ContextKeyModelTier, ModelTierReasoning)
+	bounded = context.WithValue(bounded, contextKeyPreserveInput, true)
+	bounded = context.WithValue(bounded, contextKeyClaimUsageID, record.TokenUsageID)
+	fallbackCtx := security.NewRequestContext(bounded, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+	return generateClaimShadow(fallbackCtx, request, record.Detail)
+}
+
+// generateClaimContinuation runs the audit as a continuation of the planner's
+// request: same messages, tools and model, so the provider cache covers them.
+// Evidence references are the planner's E-numbers rather than packet ids.
+func generateClaimContinuation(conv *critiqueConversation, usageID string, request NBAgentRequest, detail claimCaptureDetail) claimShadowResult {
+	bounded, cancel := context.WithTimeout(conv.ctx.GetContext(), claimCritiqueTimeout)
+	defer cancel()
+	ctx := conv.derive(context.WithValue(bounded, contextKeyClaimUsageID, usageID))
+	instruction := conv.instruction(detail.Prompt)
+	response, err := conv.generate(ctx, request, llms.TextParts(llms.ChatMessageTypeHuman, instruction))
+	switch {
+	case errors.Is(err, errCritiqueToolCall):
+		return claimShadowResult{Status: "tool_call", ErrorStage: "generation", ErrorDetail: "Continuation audit called a tool"}
+	case errors.Is(err, errPreservedPromptChanged):
+		return claimShadowResult{Status: "input_limit", ErrorStage: "preflight", ErrorDetail: TruncateHead(err.Error(), 2048)}
+	case err != nil:
+		return claimShadowResult{Status: "generation_error", ErrorStage: "generation", ErrorDetail: TruncateHead(err.Error(), 2048)}
+	}
+	content := ""
+	if response != nil && len(response.Choices) == 1 && response.Choices[0] != nil {
+		content = response.Choices[0].Content
+		response.Choices[0].Content = stripJSONFence(content)
+	}
+	result := evaluateClaimResponse(response, conv.maxEvidence)
+	result.Instruction, result.Content = instruction, content
+	return result
+}
+
 func evaluateClaimResponse(response *llms.ContentResponse, count int) (result claimShadowResult) {
 	defer func() { result.RawResponse, result.ResponseTruncated = captureClaimResponse(response) }()
 	if response == nil || len(response.Choices) != 1 || response.Choices[0] == nil {
@@ -256,7 +303,9 @@ func evaluateClaimResponse(response *llms.ContentResponse, count int) (result cl
 // but can never clear an incumbent rejection or create a separate retry budget.
 // finalRound marks the critique whose rejection spends the planner's last
 // refinement: the answer that follows is accepted without another review.
-func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep, finalRound bool) (effectiveDecision, effectiveFeedback string) {
+// conv, when set, runs the audit and guidance as continuations of the planner's
+// request; any failure there falls back to the standalone packet audit.
+func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep, finalRound bool, conv *critiqueConversation) (effectiveDecision, effectiveFeedback string) {
 	effectiveDecision, effectiveFeedback = baseline, baselineFeedback
 	if !config.Config.ClaimCritiqueFeedbackEnabled || ctx == nil ||
 		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId) {
@@ -283,12 +332,26 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 	if record.Status == "started" {
 		auditCtx = security.NewRequestContext(context.WithValue(bounded, contextKeyClaimUsageID, record.TokenUsageID),
 			ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
-		result = generateClaimShadow(auditCtx, request, record.Detail)
+		if conv != nil {
+			result = generateClaimContinuation(conv, record.TokenUsageID, request, record.Detail)
+			record.Detail.Mode = claimModeContinuation
+			if result.Status != "ok" {
+				record.Detail.Mode = claimModeFallback
+				record.Detail.ContinuationError = TruncateHead(strings.TrimSpace(result.Status+": "+result.ErrorDetail), 2048)
+				result = generateClaimFallback(ctx, request, record)
+			}
+		} else {
+			result = generateClaimShadow(auditCtx, request, record.Detail)
+		}
 	}
 	// Step 2: explain the rejected claims. The verdict is already fixed; guidance
 	// only replaces the feedback text, and any failure keeps the legacy text.
 	if config.Config.ClaimCritiqueActionableFeedbackEnabled && result.Status == "ok" && result.Decision == "refine" && result.Audit != nil {
-		guided, capture := claimGuidanceFeedback(ctx, request, record.Detail, *result.Audit, finalRound)
+		var guidanceConv *claimGuidanceContinuation
+		if record.Detail.Mode == claimModeContinuation {
+			guidanceConv = &claimGuidanceContinuation{conv: conv, auditInstruction: result.Instruction, auditResponse: result.Content}
+		}
+		guided, capture := claimGuidanceFeedback(ctx, request, record.Detail, *result.Audit, finalRound, guidanceConv)
 		record.Detail.Guidance = capture
 		if guided != "" {
 			result.Feedback = guided

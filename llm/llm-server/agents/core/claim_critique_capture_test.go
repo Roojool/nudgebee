@@ -76,7 +76,7 @@ func TestClaimCapturePersistsWithTracingDisabled(t *testing.T) {
 			withFakeLLMModel(t, fake)
 			request := NBAgentRequest{AccountId: uuid.NewString(), ConversationId: uuid.NewString(), MessageId: uuid.NewString(), AgentId: uuid.NewString()}
 			runClaimCritiqueShadow(llmOverrideContext(), request, "react4", "test_agent", "accept", "baseline feedback", "why", "answer", "notes",
-				[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false)
+				[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false, nil)
 			require.Equal(t, 1, fake.callCount())
 			require.Len(t, dao.rows, 2)
 			initial, final := dao.rows[0], dao.rows[1]
@@ -118,7 +118,7 @@ func TestClaimCaptureStorageFailureSkipsInference(t *testing.T) {
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
 	withFakeLLMModel(t, fake)
-	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "", nil, false)
+	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "", nil, false, nil)
 	require.Zero(t, fake.callCount())
 	require.Empty(t, dao.rows)
 }
@@ -135,7 +135,7 @@ func TestClaimCaptureOversizeAndCancellationRemainVisible(t *testing.T) {
 	cancelled, cancel := context.WithCancel(base.GetContext())
 	cancel()
 	ctx := security.NewRequestContext(cancelled, base.GetSecurityContext(), base.GetLogger(), base.GetTracer(), base.GetMeter())
-	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", strings.Repeat("x", claimCritiqueInputLimit), "", nil, false)
+	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", strings.Repeat("x", claimCritiqueInputLimit), "", nil, false, nil)
 	require.Zero(t, fake.callCount())
 	require.Len(t, dao.rows, 2)
 	require.Equal(t, "input_limit", dao.rows[1].Status)
@@ -155,8 +155,9 @@ func TestClaimCaptureDAOAndUsageID(t *testing.T) {
 	record := &ClaimCritiqueAuditRecord{ID: uuid.NewString(), TokenUsageID: uuid.NewString(), Status: "started"}
 	mock.ExpectExec("INSERT INTO llm_conversation_agent_critiques").WithArgs(record.ID, record.TokenUsageID, "", "", "", "", "", "", claimShadowCritiqueType, "skipped", "", claimMetadataArgument{status: "started"}).WillReturnResult(sqlmock.NewResult(0, 1))
 	require.NoError(t, dao.SaveClaimCritiqueAudit(context.Background(), record))
-	record.Status, record.Decision, record.Completed = "ok", "refine", true
-	mock.ExpectExec("INSERT INTO llm_conversation_agent_critiques").WithArgs(record.ID, record.TokenUsageID, "", "", "", "", "", "", claimShadowCritiqueType, "refine", "", claimMetadataArgument{status: "ok", completed: true}).WillReturnResult(sqlmock.NewResult(0, 1))
+	// A fallback audit runs under a new usage id; the completed row must point at it.
+	record.Status, record.Decision, record.Completed, record.TokenUsageID = "ok", "refine", true, uuid.NewString()
+	mock.ExpectExec(`INSERT INTO llm_conversation_agent_critiques[\s\S]*DO UPDATE SET token_usage_id=EXCLUDED\.token_usage_id`).WithArgs(record.ID, record.TokenUsageID, "", "", "", "", "", "", claimShadowCritiqueType, "refine", "", claimMetadataArgument{status: "ok", completed: true}).WillReturnResult(sqlmock.NewResult(0, 1))
 	require.NoError(t, dao.SaveClaimCritiqueAudit(context.Background(), record))
 	mock.ExpectExec("INSERT INTO llm_conversation_token_usage").WithArgs(
 		nil, nil, nil, "", nil, nil, "", "", 0, 0, 0, 0, false, nil, 0, nil, nil, nil, "", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, record.TokenUsageID,
@@ -193,7 +194,7 @@ func TestClaimCaptureCompletionFailureLeavesStarted(t *testing.T) {
 	fake := &fakeLLMModel{turns: []fakeTurn{{content: validClaimAudit}}}
 	withFakeLLMModel(t, fake)
 	runClaimCritiqueShadow(llmOverrideContext(), NBAgentRequest{}, "react3", "test_agent", "accept", "", "why", "answer", "",
-		[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false)
+		[]NBAgentPlannerToolActionStep{{Action: NBAgentPlannerToolAction{Tool: "metrics"}, Observation: "CPU high"}}, false, nil)
 	require.Equal(t, 1, fake.callCount())
 	require.Len(t, dao.rows, 1)
 	require.Equal(t, "started", dao.rows[0].Status)

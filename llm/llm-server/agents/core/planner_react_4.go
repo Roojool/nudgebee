@@ -589,7 +589,17 @@ func (o *NBReActPlanner4) Plan(
 			return nil, finish, nil
 		}
 
-		decision, feedback := o.runCritique(plannerInput, o.flattenTranscript(intermediateSteps), finish.Data, intermediateSteps)
+		// Continuing this exact request lets the critiques reuse its prompt
+		// cache and see earlier refinement rounds; nil keeps the standalone path.
+		var conv *critiqueConversation
+		if config.Config.CritiqueContinuationEnabled {
+			answer := result.Choices[0].Content
+			if strings.TrimSpace(answer) == "" {
+				answer = finish.Data
+			}
+			conv = newCritiqueConversation(agentCtx, o.request.AccountId, messages, answer, opts, intermediateSteps, o.compressionActive(intermediateSteps))
+		}
+		decision, feedback := o.runCritique(plannerInput, o.flattenTranscript(intermediateSteps), finish.Data, intermediateSteps, conv)
 		if !strings.EqualFold(decision, "refine") || strings.TrimSpace(feedback) == "" {
 			o.ctx.GetLogger().Info("react4: critique accepted answer",
 				"decision", decision, "attempts", len(o.refinementData), "agent", o.agentName())
@@ -1853,10 +1863,10 @@ func (o *NBReActPlanner4) flattenTranscript(steps []NBAgentPlannerToolActionStep
 // (saveCritique / saveCritiqueAsToolCall), which the seam map flagged as
 // optional (errors there are swallowed and never affect the decision). Wiring
 // analytics persistence for react_4 is a follow-up.
-func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, intermediateSteps []NBAgentPlannerToolActionStep) (resultDecision, resultFeedback string) {
+func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, intermediateSteps []NBAgentPlannerToolActionStep, conv *critiqueConversation) (resultDecision, resultFeedback string) {
 	defer func() {
 		resultDecision, resultFeedback = runClaimCritiqueShadow(o.ctx, o.request, "react4", o.nbAgent.GetName(), resultDecision, resultFeedback, input, finalAnswer, o.Notebook, intermediateSteps,
-			len(o.refinementData)+1 >= o.maxRefinementAttempts)
+			len(o.refinementData)+1 >= o.maxRefinementAttempts, conv)
 	}()
 	logger := o.ctx.GetLogger()
 
@@ -1877,7 +1887,7 @@ func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, int
 		critiquerPrompt,
 		reactCritiquerInputVariables,
 	)
-	critiquePromptStr, promptErr := critiquePrompt.Format(map[string]any{
+	critiqueVars := map[string]any{
 		"input":                        input,
 		"scratchpad":                   scratchpad,
 		"final_answer":                 finalAnswer,
@@ -1890,7 +1900,13 @@ func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, int
 		"hypothesis_mode_enabled":      resolveHypothesisModeEnabled(o.request, o.nbAgent),
 		"sdg_grounding_enabled":        config.Config.LlmServerSDGGroundingContractEnabled && HasServiceDependencyGraphTool(o.tools),
 		"premise_verification_enabled": resolvePremiseVerificationEnabled(o.request, o.nbAgent),
-	})
+	}
+	if conv != nil {
+		if decision, feedback, ok := o.continuationCritique(conv, critiquePrompt, critiqueVars); ok {
+			return decision, feedback
+		}
+	}
+	critiquePromptStr, promptErr := critiquePrompt.Format(critiqueVars)
 	if promptErr != nil {
 		logger.Error("react4: failed to format critique prompt, accepting answer", "error", promptErr)
 		return "", ""
@@ -1941,4 +1957,42 @@ func (o *NBReActPlanner4) runCritique(input, scratchpad, finalAnswer string, int
 	}
 
 	return decision, common.XmlExtractTagContent(critiqueResult.Choices[0].Content, "feedback")
+}
+
+// critiqueScratchpadPointer replaces the inlined transcript in the critiquer
+// prompt: in a continuation the transcript is the conversation itself.
+const critiqueScratchpadPointer = "(The tool calls and their results are earlier in this conversation; cite them by the evidence index below. Do not call tools.)"
+
+// continuationCritique runs the answer critique as a continuation of the
+// planner's request, with the same rules as the standalone critiquer. ok=false
+// means the caller should run the standalone critique instead.
+func (o *NBReActPlanner4) continuationCritique(conv *critiqueConversation, tmpl prompts.PromptTemplate, vars map[string]any) (decision, feedback string, ok bool) {
+	logger := o.ctx.GetLogger()
+	cvars := make(map[string]any, len(vars))
+	for k, v := range vars {
+		cvars[k] = v
+	}
+	cvars["scratchpad"] = critiqueScratchpadPointer
+	cvars["tool_descriptions"] = "(declared in this conversation)"
+	rendered, err := tmpl.Format(cvars)
+	if err != nil {
+		logger.Warn("react4: continuation critique prompt failed to render, using standalone critique", "error", err)
+		return "", "", false
+	}
+	response, err := conv.generate(conv.ctx, o.request, llms.TextParts(llms.ChatMessageTypeHuman, conv.instruction(rendered)))
+	if err != nil {
+		logger.Warn("react4: continuation critique failed, using standalone critique", "error", err)
+		return "", "", false
+	}
+	if response == nil || len(response.Choices) == 0 || response.Choices[0] == nil {
+		logger.Warn("react4: continuation critique returned no choice, using standalone critique")
+		return "", "", false
+	}
+	content := response.Choices[0].Content
+	decision = common.XmlExtractTagContent(content, "decision")
+	if decision == "" {
+		logger.Warn("react4: continuation critique had no decision, using standalone critique")
+		return "", "", false
+	}
+	return decision, common.XmlExtractTagContent(content, "feedback"), true
 }

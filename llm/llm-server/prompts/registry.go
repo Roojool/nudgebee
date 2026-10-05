@@ -42,6 +42,7 @@ const (
 	PromptReact4CustomBase                   = "react_4_custom_base"
 	PromptReactClaimCritiquer                = "react_claim_critiquer"
 	PromptReactClaimCritiqueGuidance         = "react_claim_critique_guidance"
+	PromptReactCritiqueContinuation          = "react_critique_continuation"
 	PromptReactCritiquer                     = "react_critiquer"
 	PromptConfigAutoSelection                = "config_auto_selection"
 	PromptRemediationGenerate                = "remediation_generate"
@@ -108,6 +109,7 @@ var promptCategories = map[string]PromptCategory{
 	PromptReactCritiquer:                     CategoryPlanners,
 	PromptReactClaimCritiquer:                CategoryPlanners,
 	PromptReactClaimCritiqueGuidance:         CategoryPlanners,
+	PromptReactCritiqueContinuation:          CategoryPlanners,
 	PromptConfigAutoSelection:                CategoryTools,
 	PromptRemediationGenerate:                CategoryTools,
 	PromptRemediationGenerateJson:            CategoryTools,
