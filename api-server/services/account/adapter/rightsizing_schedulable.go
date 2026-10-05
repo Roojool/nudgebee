@@ -58,28 +58,37 @@ func loadNodeMemory(accountId string) (map[string]*nodeMemory, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rows []struct {
-		Name              string `db:"name"`
-		MemoryAllocatable int64  `db:"memory_allocatable"`
-	}
+	var rows []nodeRow
 	if err := dbms.Db.Select(&rows, `
 		SELECT name, coalesce(memory_allocatable, 0) AS memory_allocatable
 		FROM k8s_nodes
 		WHERE cloud_account_id = $1 AND is_active AND name <> ''`, accountId); err != nil {
 		return nil, err
 	}
+	return nodeMemoryFromRows(rows), nil
+}
+
+// nodeRow is one k8s_nodes row as loadNodeMemory reads it.
+type nodeRow struct {
+	Name              string `db:"name"`
+	MemoryAllocatable int64  `db:"memory_allocatable"`
+}
+
+// nodeMemoryFromRows turns the node rows into the map the check works on, or
+// into nothing at all when any node's allocatable is unknown. Leaving just that
+// node out would make the cluster look smaller than it is — it may be the one
+// node large enough — and could produce a refusal on a cluster that had room.
+// So a partial inventory is returned as no inventory, which the caller reads as
+// unknown rather than as a verdict.
+func nodeMemoryFromRows(rows []nodeRow) map[string]*nodeMemory {
 	nodes := make(map[string]*nodeMemory, len(rows))
 	for _, r := range rows {
 		if r.MemoryAllocatable <= 0 {
-			// A node whose allocatable we do not know cannot be reasoned about.
-			// Leaving it out would make the cluster look smaller than it is and
-			// could produce a refusal on a cluster that had room, so the caller
-			// treats a partial inventory as unknown rather than as a verdict.
-			continue
+			return nil
 		}
 		nodes[r.Name] = &nodeMemory{name: r.Name, allocatable: float64(r.MemoryAllocatable) * MiB}
 	}
-	return nodes, nil
+	return nodes
 }
 
 // loadContainerRequests reads the per-container memory requests of every active
@@ -254,10 +263,12 @@ func checkMemoryHeadroom(
 		}
 	}
 	if len(ownCurrent) == 0 {
-		// The workload is not in the pod inventory — it may never have run, or
-		// collection may be behind. Without its current shape we cannot say what
-		// the new pod would total, so this is unknown, not a refusal.
-		return nil, false
+		// The workload has no placed pod in the inventory — it may never have
+		// run, its pods may be Pending, or collection may be behind. Without its
+		// current shape we cannot total the new pod, and we cannot tell which of
+		// a node's reservations are its own, so free memory is not a yardstick
+		// we can trust here. A node's size still is.
+		return checkLargestNode(nodes, workload, newRequests)
 	}
 
 	// The new pod's total request: every container it has today, with the ones
@@ -295,12 +306,7 @@ func checkMemoryHeadroom(
 		}
 	}
 
-	target := workload
-	if len(newRequests) == 1 {
-		for name := range newRequests {
-			target = name
-		}
-	}
+	target := resizeTarget(workload, newRequests)
 	bestNode := nodes[best]
 	if bestNode == nil {
 		// No node survived the inventory filter, so there is nothing to compare
@@ -317,5 +323,48 @@ func checkMemoryHeadroom(
 		humanBytes(bestNode.allocatable),
 		humanBytes(bestNode.committed-ownByNode[best]),
 		humanBytes(bestFree),
+	), true
+}
+
+// resizeTarget is what a refusal names: the container when only one is being
+// changed, otherwise the workload.
+func resizeTarget(workload string, newRequests map[string]float64) string {
+	if len(newRequests) == 1 {
+		for name := range newRequests {
+			return name
+		}
+	}
+	return workload
+}
+
+// checkLargestNode is the verdict left when the workload's own pods are not in
+// the inventory. The containers being changed are part of the new pod whatever
+// else it holds, so if their requests alone exceed the allocatable memory of
+// every node, none of the nodes the cluster has can take it — and that holds
+// however stale or incomplete the pod inventory is. Anything smaller stays
+// unknown: it might fit once the workload's own reservation is handed back, and
+// we cannot see that reservation.
+func checkLargestNode(nodes map[string]*nodeMemory, workload string, newRequests map[string]float64) (err error, known bool) {
+	requested := 0.0
+	for _, next := range newRequests {
+		requested += next
+	}
+	var largest *nodeMemory
+	for _, n := range nodes {
+		// Name breaks a tie so the refusal names the same node every time.
+		if largest == nil || n.allocatable > largest.allocatable ||
+			(n.allocatable == largest.allocatable && n.name < largest.name) {
+			largest = n
+		}
+	}
+	if largest == nil || requested <= largest.allocatable {
+		return nil, false
+	}
+	return fmt.Errorf(
+		"%s needs %s of memory but no node in this cluster is that large — the largest is %s, with %s allocatable. Lower the request, or add a larger node",
+		resizeTarget(workload, newRequests),
+		humanBytes(requested),
+		largest.name,
+		humanBytes(largest.allocatable),
 	), true
 }

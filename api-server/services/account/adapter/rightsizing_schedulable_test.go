@@ -111,21 +111,108 @@ func TestCheckMemoryHeadroom_TotalsEveryContainerInThePod(t *testing.T) {
 	}
 }
 
-// A workload the inventory has never seen gives us no way to total the new pod,
-// so the guard must return unknown and let the apply through rather than
-// refusing on data it does not have.
+// A workload the inventory has never seen gives us no way to total the new pod
+// or to hand its own reservation back, so a value that is above every node's
+// free memory but below a node's size must read as unknown and let the apply
+// through rather than refusing on data it does not have. 10Gi is that value
+// here: more than the 5.35Gi free anywhere, less than a 14.45Gi node.
 func TestCheckMemoryHeadroom_UnknownWhenWorkloadNotInInventory(t *testing.T) {
 	nodes, requests := devCluster()
-	_, known := checkMemoryHeadroom(nodes, requests, "nudgebee-agent", "not-collected-yet",
+	err, known := checkMemoryHeadroom(nodes, requests, "nudgebee-agent", "not-collected-yet",
 		map[string]float64{"app": 10 * GiB})
 	if known {
 		t.Fatal("a workload absent from the pod inventory must read as unknown, not as a verdict")
 	}
+	if err != nil {
+		t.Fatalf("an unknown workload below node size must not be refused: %v", err)
+	}
+}
+
+// A workload with no placed pod in the inventory, asked for 60000Mi on a
+// cluster whose nodes hold 12345Mi each. No inventory is needed to know that
+// cannot schedule, so it is refused on node size alone — with the pod inventory
+// empty, as it is when collection is behind.
+func TestCheckMemoryHeadroom_RefusesValueLargerThanAnyNodeWithoutItsPods(t *testing.T) {
+	nodes := map[string]*nodeMemory{
+		"node-b": {name: "node-b", allocatable: 12345 * MiB},
+		"node-a": {name: "node-a", allocatable: 12345 * MiB},
+		"node-c": {name: "node-c", allocatable: 8000 * MiB},
+	}
+	err, known := checkMemoryHeadroom(nodes, nil, "shop", "checkout",
+		map[string]float64{"app": 60000 * MiB})
+	if !known {
+		t.Fatal("a request larger than every node is a verdict even without the workload's pods")
+	}
+	if err == nil {
+		t.Fatal("expected 60000Mi to be refused on a cluster whose largest node holds 12345Mi")
+	}
+	// The container, what it asked for, and the largest node — the first by name
+	// of the two that tie, so the message does not change between attempts.
+	for _, want := range []string{"app needs 58.6Gi", "no node in this cluster is that large", "node-a", "12.1Gi"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal should mention %q, got: %v", want, err)
+		}
+	}
+}
+
+// Other pods' reservations must not turn the node-size check into a free-memory
+// one. With the workload's own pods unseen we cannot tell which reservations
+// are its own, so a full cluster is no reason to refuse a value a node could
+// hold: 10Gi on 12Gi nodes that are 11Gi committed stays unknown.
+func TestCheckMemoryHeadroom_NodeSizeCheckIgnoresWhatOtherPodsReserve(t *testing.T) {
+	nodes := map[string]*nodeMemory{
+		"node-a": {name: "node-a", allocatable: 12 * GiB},
+	}
+	requests := []containerRequest{
+		{node: "node-a", namespace: "other", workload: "filler", container: "app", bytes: 11 * GiB},
+	}
+	err, known := checkMemoryHeadroom(nodes, requests, "ns", "unseen",
+		map[string]float64{"app": 10 * GiB})
+	if known || err != nil {
+		t.Fatalf("10Gi fits a 12Gi node by size; without the workload's pods that must stay unknown, got known=%v err=%v", known, err)
+	}
+}
+
+// Several containers changed at once are one pod, so they are judged together:
+// 8Gi + 8Gi cannot share a 12Gi node even though each alone could.
+func TestCheckMemoryHeadroom_NodeSizeCheckTotalsTheChangedContainers(t *testing.T) {
+	nodes := map[string]*nodeMemory{
+		"node-a": {name: "node-a", allocatable: 12 * GiB},
+	}
+	err, known := checkMemoryHeadroom(nodes, nil, "ns", "unseen",
+		map[string]float64{"app": 8 * GiB, "sidecar": 8 * GiB})
+	if !known || err == nil {
+		t.Fatalf("16Gi across two containers exceeds a 12Gi node; expected a refusal, got known=%v err=%v", known, err)
+	}
+	if !strings.Contains(err.Error(), "unseen needs 16.0Gi") {
+		t.Errorf("with more than one container changed the refusal names the workload and the total, got: %v", err)
+	}
+}
+
+// A node whose allocatable is unknown may be the one node large enough, so the
+// rest of the list cannot stand in for the cluster: the whole inventory reads as
+// empty, and the caller skips the check.
+func TestNodeMemoryFromRows_UnknownNodeSizeMakesTheInventoryUnusable(t *testing.T) {
+	got := nodeMemoryFromRows([]nodeRow{
+		{Name: "node-a", MemoryAllocatable: 12345},
+		{Name: "node-b", MemoryAllocatable: 0},
+	})
+	if len(got) != 0 {
+		t.Fatalf("a node of unknown size must leave no usable inventory, got %d nodes", len(got))
+	}
+	got = nodeMemoryFromRows([]nodeRow{
+		{Name: "node-a", MemoryAllocatable: 12345},
+		{Name: "node-b", MemoryAllocatable: 26500},
+	})
+	// k8s_nodes stores MiB; the check works in bytes.
+	if len(got) != 2 || got["node-b"].allocatable != 26500*MiB {
+		t.Fatalf("a complete inventory must come through whole and in bytes, got %v", got)
+	}
 }
 
 // Stale or partial inventory must never turn into a refusal. loadNodeMemory
-// drops any node whose allocatable it does not know, so the decision can end up
-// with no nodes at all — which has to read as unknown, not as "nothing fits".
+// returns no nodes when any node's allocatable is unknown, so the decision can
+// be handed no nodes at all — which has to read as unknown, not as "nothing fits".
 func TestCheckMemoryHeadroom_EmptyNodeInventoryIsUnknown(t *testing.T) {
 	err, known := checkMemoryHeadroom(map[string]*nodeMemory{}, nil, "ns", "app",
 		map[string]float64{"app": 1 * GiB})

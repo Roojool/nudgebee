@@ -390,12 +390,16 @@ func (k *kuberntesAdapter) ApplyRecommendation(ctx AccountAdapterContext, reques
 		// Then the same question against this cluster: is there a node that could
 		// take the new pod at all? A request nothing can schedule leaves the
 		// workload Pending with the old pod already gone, so it is refused here —
-		// the one place every rightsizing apply passes through, whoever produced
-		// the number (the stored krr recommendation, the event card's own
+		// the one place every pod_right_sizing apply passes through, whoever
+		// produced the number (the stored krr recommendation, the event card's own
 		// calculation, or a value typed into the form).
+		//
+		// The workload name comes from the typed field rather than back out of
+		// resourceMeta: asString would render a *string there as its address, a
+		// name that matches no pod and so switches this check off without a trace.
 		if err := validateSchedulableMemory(ctx, request.Recommendation.CloudAccountId,
 			strings.TrimSpace(asString(resourceMeta["namespace"])),
-			strings.TrimSpace(asString(resourceMeta["controller"])),
+			strings.TrimSpace(lo.FromPtr(request.Resource.Name)),
 			containers); err != nil {
 			return ApplyRecommendationResponse{}, fmt.Errorf("recommendation apply rejected: %w", err)
 		}
