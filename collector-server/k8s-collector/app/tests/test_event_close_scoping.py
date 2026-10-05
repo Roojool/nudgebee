@@ -128,16 +128,72 @@ class TestDiscoveryCleanupScoping(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["resource_type"], "Pod")
 
 
+# utc_from_epoch_millis() returns NAIVE UTC and WorkloadDetails.last_seen carries
+# its .isoformat(), so naive is the shape production actually delivers.
+OBSERVED_AT = datetime(2026, 8, 19, 8, 30)
+
+
+def _go_container(started_ago, ready=True, last_reason=None, name="app"):
+    """A Go agent containerStatuses entry (Kubernetes PodStatus, RFC 3339 `Z` times)."""
+    status = {
+        "name": name,
+        "ready": ready,
+        "restartCount": 0,
+        "state": {"running": {"startedAt": (OBSERVED_AT - started_ago).strftime("%Y-%m-%dT%H:%M:%SZ")}},
+    }
+    if last_reason:
+        finished = OBSERVED_AT - started_ago - timedelta(seconds=10)
+        status["restartCount"] = 6
+        status["lastState"] = {
+            "terminated": {"reason": last_reason, "exitCode": 1, "finishedAt": finished.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        }
+    return status
+
+
+def _go_status(*containers):
+    return {"phase": "Running", "containerStatuses": list(containers)}
+
+
+def _python_status(started_ago, ready=True, last_reason=None):
+    """The Python agent's shape: snake_case keys, `+00:00` times, explicit nulls."""
+    terminated = None
+    if last_reason:
+        finished = OBSERVED_AT - started_ago - timedelta(seconds=10)
+        terminated = {
+            "reason": last_reason,
+            "exit_code": 1,
+            "finished_at": finished.strftime("%Y-%m-%d %H:%M:%S+00:00"),
+        }
+    return {
+        "phase": "Running",
+        "container_statuses": [
+            {
+                "name": "app",
+                "ready": ready,
+                "state": {
+                    "running": {"started_at": (OBSERVED_AT - started_ago).strftime("%Y-%m-%d %H:%M:%S+00:00")},
+                    "waiting": None,
+                    "terminated": None,
+                },
+                "last_state": {"running": None, "waiting": None, "terminated": terminated},
+            }
+        ],
+    }
+
+
+# A pod one second into a crash cycle: Ready, running, restarted seconds ago -- what
+# the agent's Deployment 1/1 actually coincides with.
+CRASHLOOPING = _go_status(_go_container(timedelta(seconds=2), last_reason="Error"))
+STABLE = _go_status(_go_container(timedelta(hours=3)))
+
+
 class TestWorkloadRecoveryClose(unittest.TestCase):
     """The recovery close is DEFAULT ON (see Configs.EVENT_CLOSE_ON_WORKLOAD_RECOVERY).
 
-    Readiness on its own is a single sample and closed live crashloops: measured on
-    dev, 39 of the 43 events it closed went within ten minutes of being raised and 17
-    re-fired within two hours. It is on anyway, by product decision -- without it the
-    agent's findings have no resolve path at all. These tests pin the three checks
-    that bound that: the workload counts, the per-pod readiness (a stuck rollout),
-    and the restart delta against the previous snapshot (a live crashloop, which the
-    first two cannot see because both read the same snapshot).
+    Readiness on its own is a single sample and closed live crashloops. These tests
+    pin the checks that bound that: the workload counts, the per-pod readiness (a
+    stuck rollout), and how long the containers have been running (a live crashloop
+    sampled in the seconds its container is up, which the first two cannot see).
     """
 
     def setUp(self):
@@ -145,23 +201,35 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
         enabled.start()
         self.addCleanup(enabled.stop)
         self.unready_rows = []
-        pods = mock.patch.object(dh.database, "run_query", side_effect=lambda *a, **k: self.unready_rows)
+        # None = every queried workload has one long-running pod.
+        self.pod_rows = None
+
+        def _query(query, params=None, *_, **__):
+            if "status_info" in query:
+                if self.pod_rows is not None:
+                    return self.pod_rows
+                return [(ns, name, STABLE) for ns in params[2] for name in params[3]]
+            return self.unready_rows
+
+        pods = mock.patch.object(dh.database, "run_query", side_effect=_query)
         self.pod_query = pods.start()
         self.addCleanup(pods.stop)
 
-    # utc_from_epoch_millis() returns NAIVE UTC and WorkloadDetails.last_seen carries
-    # its .isoformat(), so naive is the shape production actually delivers.
-    OBSERVED_AT = datetime(2026, 8, 19, 8, 30)
+    OBSERVED_AT = OBSERVED_AT
 
     def _workload(self, resource_id, total, ready, last_seen="default", name="web"):
         w = mock.Mock()
         w.cloud_resource_id = resource_id
+        w.tenant_id = TENANT
         w.namespace = "default"
         w.name = name
         w.total_pods = total
         w.ready_pods = ready
         w.last_seen = self.OBSERVED_AT.isoformat() if last_seen == "default" else last_seen
         return w
+
+    def _queries(self, needle):
+        return [c.args for c in self.pod_query.call_args_list if needle in c.args[0]]
 
     def test_all_pods_ready_closes_agent_events(self):
         with mock.patch.object(dh, "close_events_with_history") as closer:
@@ -238,7 +306,7 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
             )
         closer.assert_called_once()
         self.assertEqual(closer.call_args.kwargs["params"][0], [GONE_RESOURCE])
-        query, params = self.pod_query.call_args.args
+        query, params = self._queries("jsonb_array_length")[0]
         self.assertIn("FROM k8s_pods", query)
         self.assertIn("is_active", query)
         # A pod's ready_pods counts containers and total_pods is always 1, so the
@@ -258,19 +326,23 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
             dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 2, 2)])
         closer.assert_called_once()
 
-    def test_recent_restart_keeps_a_ready_workload_open(self):
-        """The crashloop-between-restarts case: every single-snapshot check says healthy.
-
-        Counts read 1/1, the pod row from the same batch reads all containers ready,
-        and only the restart delta against the previous snapshot says otherwise.
-        """
+    def test_crashloop_sampled_while_its_container_is_up_is_not_recovered(self):
+        """The live-crashloop case: the Deployment reads 1/1 and its pod row reads
+        Ready, because the container is in the two seconds it runs before exiting.
+        Only the start time says the pod restarted a moment ago."""
+        self.pod_rows = [("default", "web", CRASHLOOPING)]
         with mock.patch.object(dh, "close_events_with_history") as closer:
-            dh.close_events_for_recovered_workloads(
-                ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], {("default", "web")}
-            )
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
         closer.assert_not_called()
 
-    def test_restart_in_one_workload_does_not_hold_another(self):
+    def test_one_crashlooping_replica_holds_the_workload(self):
+        self.pod_rows = [("default", "web", STABLE), ("default", "web", CRASHLOOPING), ("default", "web", STABLE)]
+        with mock.patch.object(dh, "close_events_with_history") as closer:
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 3, 3)])
+        closer.assert_not_called()
+
+    def test_crashloop_in_one_workload_does_not_hold_another(self):
+        self.pod_rows = [("default", "web", CRASHLOOPING), ("default", "api", STABLE)]
         with mock.patch.object(dh, "close_events_with_history") as closer:
             dh.close_events_for_recovered_workloads(
                 ACCOUNT,
@@ -278,25 +350,67 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
                     self._workload(LIVE_RESOURCE, 1, 1),
                     self._workload(GONE_RESOURCE, 1, 1, name="api"),
                 ],
-                {("default", "web")},
             )
         closer.assert_called_once()
         self.assertEqual(closer.call_args.kwargs["params"][0], [GONE_RESOURCE])
 
-    def test_restart_in_another_namespace_does_not_block(self):
+    def test_crashloop_in_another_namespace_does_not_block(self):
+        self.pod_rows = [("staging", "web", CRASHLOOPING), ("default", "web", STABLE)]
         with mock.patch.object(dh, "close_events_with_history") as closer:
-            dh.close_events_for_recovered_workloads(
-                ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], {("staging", "web")}
-            )
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
         closer.assert_called_once()
 
-    def test_no_restart_view_keeps_the_previous_behaviour(self):
-        """A caller with no previous-snapshot view still closes on readiness alone."""
-        for restarts in (None, set()):
-            with self.subTest(restarts=restarts):
-                with mock.patch.object(dh, "close_events_with_history") as closer:
-                    dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)], restarts)
-                closer.assert_called_once()
+    def test_stability_is_measured_against_the_observation_time(self):
+        """Started 11 minutes before the agent saw the workload ready: stable, even if
+        the request is processed much later."""
+        self.pod_rows = [("default", "web", _go_status(_go_container(timedelta(minutes=11), last_reason="Error")))]
+        with mock.patch.object(dh, "close_events_with_history") as closer:
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
+        closer.assert_called_once()
+
+    def test_unreadable_pod_status_holds_and_says_so(self):
+        """An agent too old to send container status cannot prove recovery."""
+        self.pod_rows = [("default", "web", None)]
+        with mock.patch.object(dh, "close_events_with_history") as closer, self.assertLogs(level="WARNING") as logs:
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
+        closer.assert_not_called()
+        self.assertIn("Holding recovery close for acct-1: 1 workloads", logs.output[0])
+
+    def test_workload_with_no_stored_pod_is_held(self):
+        """A Deployment's 1/1 can arrive before its pods are stored; nothing to judge by yet."""
+        self.pod_rows = []
+        with mock.patch.object(dh, "close_events_with_history") as closer, self.assertLogs(level="WARNING"):
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
+        closer.assert_not_called()
+
+    def test_stability_query_reads_the_stored_live_pods(self):
+        with mock.patch.object(dh, "close_events_with_history"):
+            dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
+        query, params = self._queries("status_info")[0]
+        self.assertIn("FROM k8s_pods", query)
+        # tenant_id + this exact is_active predicate let the planner use the partial
+        # index idx_k8s_pods_active_account_namespace instead of scanning every pod
+        # the account ever had.
+        self.assertIn("tenant_id = %s", query)
+        self.assertIn("is_active IS NOT FALSE", query)
+        self.assertIn("NOT IN ('completed', 'succeeded', 'failed')", query)
+        self.assertEqual(params, [ACCOUNT, TENANT, ["default"], ["web"]])
+
+    def test_close_reads_pods_stored_by_the_same_request(self):
+        """A snapshot carrying pods and workloads together must judge the pods it carries."""
+        calls = []
+        workload = mock.Mock(tenant_id=TENANT, namespace="default", name="web", total_pods=1, ready_pods=1)
+        with mock.patch.object(
+            dh.database, "insert_data", side_effect=lambda table, *a, **k: calls.append(table)
+        ), mock.patch.object(dh, "asdict", return_value={}), mock.patch.object(
+            dh, "_clean_stale_workloads"
+        ), mock.patch.object(
+            dh, "_deduplicate_workloads_by_identity", return_value=[workload]
+        ), mock.patch.object(
+            dh, "close_events_for_recovered_workloads", side_effect=lambda *a: calls.append("close")
+        ):
+            dh.process_services_updates(ACCOUNT, [mock.Mock()], [workload])
+        self.assertEqual(calls, ["k8s_pods", "k8s_workloads", "close"])
 
     def test_scaled_to_zero_is_not_recovered(self):
         with mock.patch.object(dh, "close_events_with_history") as closer:
@@ -320,121 +434,83 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
         self.assertTrue(Settings.model_fields["EVENT_CLOSE_ON_WORKLOAD_RECOVERY"].default)
 
 
-class TestWorkloadsWithNewPodRestarts(unittest.TestCase):
-    """The only check in the recovery close that spans two snapshots."""
+class TestPodIsStable(unittest.TestCase):
+    """How long a pod's containers have been running, from its stored status."""
 
-    def _pod(self, name, restart_count, namespace="default", workload_name="web"):
-        p = mock.Mock()
-        p.name = name
-        p.namespace = namespace
-        p.workload_name = workload_name
-        p.restart_count = restart_count
-        p.tenant_id = TENANT
-        return p
+    def _stable(self, status_info):
+        return dh._pod_is_stable(status_info, OBSERVED_AT)
 
-    def _run(self, pods, stored_rows):
-        with mock.patch.object(dh.database, "run_query", return_value=stored_rows):
-            return dh._workloads_with_new_pod_restarts(ACCOUNT, pods)
+    def test_windows_match_the_agent(self):
+        """10 minutes is the agent's podCrashLoopStableWindow; an hour is the OOM
+        matcher's rate limit. Diverging from the agent closes alerts it will not
+        re-raise, so a change here has to be made there too."""
+        self.assertEqual(dh.RECOVERY_STABLE_WINDOW, timedelta(minutes=10))
+        self.assertEqual(dh.RECOVERY_STABLE_WINDOW_AFTER_OOM, timedelta(minutes=60))
 
-    def test_restart_count_increase_flags_the_workload(self):
-        got = self._run([self._pod("web-0", {"app": 4})], [("default", "web-0", {"app": 3})])
-        self.assertEqual(got, {("default", "web")})
+    def test_running_past_the_window_is_stable(self):
+        self.assertTrue(self._stable(_go_status(_go_container(timedelta(minutes=11), last_reason="Error"))))
 
-    def test_unchanged_count_does_not_flag(self):
-        got = self._run([self._pod("web-0", {"app": 3})], [("default", "web-0", {"app": 3})])
-        self.assertEqual(got, set())
+    def test_restarted_inside_the_window_is_not(self):
+        self.assertFalse(self._stable(CRASHLOOPING))
+        self.assertFalse(self._stable(_go_status(_go_container(timedelta(minutes=9), last_reason="Error"))))
 
-    def test_sums_across_containers(self):
-        """A sidecar restarting is still a restart of the pod."""
-        got = self._run(
-            [self._pod("web-0", {"app": 2, "sidecar": 5})],
-            [("default", "web-0", {"app": 2, "sidecar": 4})],
+    def test_a_new_pod_has_to_earn_it_too(self):
+        """A rollout's first pod has no restarts yet but may be about to crash: the
+        agent keeps its rate limit armed until it has run 10 minutes, so closing
+        sooner would leave a broken rollout with no alert for up to an hour."""
+        self.assertFalse(self._stable(_go_status(_go_container(timedelta(seconds=2)))))
+        self.assertTrue(self._stable(_go_status(_go_container(timedelta(minutes=11)))))
+
+    def test_waiting_in_crashloopbackoff_is_not(self):
+        waiting = {
+            "name": "app",
+            "ready": False,
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+            "lastState": {"terminated": {"reason": "Error", "finishedAt": "2026-08-19T08:29:50Z"}},
+        }
+        self.assertFalse(self._stable(_go_status(waiting)))
+
+    def test_running_but_not_ready_is_not(self):
+        self.assertFalse(self._stable(_go_status(_go_container(timedelta(hours=1), ready=False))))
+
+    def test_every_container_must_qualify(self):
+        """A restarting sidecar is a restarting pod."""
+        status = _go_status(
+            _go_container(timedelta(hours=1)),
+            _go_container(timedelta(minutes=1), last_reason="Error", name="sidecar"),
         )
-        self.assertEqual(got, {("default", "web")})
+        self.assertFalse(self._stable(status))
 
-    def test_lower_count_does_not_flag(self):
-        """A removed container takes its count out of the sum; that is not a restart."""
-        got = self._run(
-            [self._pod("web-0", {"app": 2})],
-            [("default", "web-0", {"app": 2, "sidecar": 7})],
-        )
-        self.assertEqual(got, set())
+    def test_after_an_oom_kill_waits_an_hour(self):
+        self.assertFalse(self._stable(_go_status(_go_container(timedelta(minutes=30), last_reason="OOMKilled"))))
+        self.assertTrue(self._stable(_go_status(_go_container(timedelta(minutes=61), last_reason="OOMKilled"))))
 
-    def test_first_sighting_with_restarts_flags(self):
-        """No stored row means no way to date the restarts, so assume they are recent.
+    def test_python_agent_shape(self):
+        self.assertFalse(self._stable(_python_status(timedelta(seconds=2), last_reason="Error")))
+        self.assertTrue(self._stable(_python_status(timedelta(minutes=11), last_reason="Error")))
+        self.assertFalse(self._stable(_python_status(timedelta(minutes=30), last_reason="OOMKilled")))
+        self.assertFalse(self._stable(_python_status(timedelta(hours=1), ready=False)))
 
-        Costs one snapshot of the event staying open; the next snapshot compares
-        normally. Holding an event open too long is the recoverable direction.
-        """
-        got = self._run([self._pod("web-0", {"app": 2})], [])
-        self.assertEqual(got, {("default", "web")})
+    def test_init_containers_are_not_inspected(self):
+        """They exit in a healthy pod; one crashlooping keeps the app containers from running."""
+        status = _go_status(_go_container(timedelta(hours=1)))
+        status["initContainerStatuses"] = [_go_container(timedelta(minutes=1), ready=False, last_reason="Error")]
+        self.assertTrue(self._stable(status))
 
-    def test_first_sighting_without_restarts_does_not_flag(self):
-        got = self._run([self._pod("web-0", {"app": 0})], [])
-        self.assertEqual(got, set())
-
-    def test_bare_pods_are_skipped(self):
-        """A pod with no workload gates no workload's close."""
-        got = self._run([self._pod("loose", {"app": 9}, workload_name=None)], [])
-        self.assertEqual(got, set())
-
-    def test_unusable_restart_counts_are_ignored(self):
-        for value in (None, "3", {"app": "3"}, {"app": None}):
-            with self.subTest(value=value):
-                self.assertEqual(self._run([self._pod("web-0", value)], []), set())
-
-    def test_unusable_stored_count_falls_back_to_first_sighting(self):
-        got = self._run([self._pod("web-0", {"app": 1})], [("default", "web-0", None)])
-        self.assertEqual(got, {("default", "web")})
-
-    def test_no_pods_makes_no_query(self):
-        with mock.patch.object(dh.database, "run_query") as q:
-            self.assertEqual(dh._workloads_with_new_pod_restarts(ACCOUNT, []), set())
-        q.assert_not_called()
-
-    def test_query_is_scoped_to_the_account_and_the_incoming_pods(self):
-        with mock.patch.object(dh.database, "run_query", return_value=[]) as q:
-            dh._workloads_with_new_pod_restarts(ACCOUNT, [self._pod("web-0", {"app": 0})])
-        query, params = q.call_args.args
-        self.assertIn("FROM k8s_pods", query)
-        self.assertIn("restart_count", query)
-        self.assertEqual(params[0], ACCOUNT)
-        self.assertEqual(params[1], TENANT)
-        self.assertEqual(params[2], ["default"])
-        self.assertEqual(params[3], ["web-0"])
-
-    def test_query_matches_the_active_namespace_index(self):
-        """Runs on every snapshot. Without tenant_id and this exact is_active predicate
-        the planner cannot use the partial index idx_k8s_pods_active_account_namespace
-        and scans every pod the account ever had."""
-        with mock.patch.object(dh.database, "run_query", return_value=[]) as q:
-            dh._workloads_with_new_pod_restarts(ACCOUNT, [self._pod("web-0", {"app": 0})])
-        query = q.call_args.args[0]
-        self.assertIn("tenant_id = %s", query)
-        self.assertIn("is_active IS NOT FALSE", query)
-
-    def test_runs_before_the_pod_upsert(self):
-        """Ordering is the whole correctness argument: the upsert overwrites the
-        counts this reads, so reading after it would compare a value with itself and
-        never see a restart."""
-        calls = []
-        pod = self._pod("web-0", {"app": 1})
-        workload = mock.Mock(tenant_id=TENANT, namespace="default", name="web", total_pods=1, ready_pods=1)
-        with mock.patch.object(
-            dh, "_workloads_with_new_pod_restarts", side_effect=lambda *a: calls.append("read")
-        ), mock.patch.object(
-            dh.database, "insert_data", side_effect=lambda table, *a, **k: calls.append(table)
-        ), mock.patch.object(
-            dh, "asdict", return_value={}
-        ), mock.patch.object(
-            dh, "_clean_stale_workloads"
-        ), mock.patch.object(
-            dh, "_deduplicate_workloads_by_identity", return_value=[workload]
-        ), mock.patch.object(
-            dh, "close_events_for_recovered_workloads"
+    def test_unknown_when_the_status_cannot_answer(self):
+        unreadable_start = _go_status(_go_container(timedelta(hours=1)))
+        unreadable_start["containerStatuses"][0]["state"]["running"]["startedAt"] = "not-a-time"
+        for status_info in (
+            None,
+            {},
+            {"containerStatuses": []},
+            # A Pending pod as the Python agent stores it.
+            {"phase": "Pending", "container_statuses": None},
+            {"containerStatuses": ["app"]},
+            unreadable_start,
         ):
-            dh.process_services_updates(ACCOUNT, [pod], [workload])
-        self.assertEqual(calls[:2], ["read", "k8s_pods"])
+            with self.subTest(status_info=status_info):
+                self.assertIsNone(self._stable(status_info))
 
 
 class TestLegacyStatusUpdate(unittest.TestCase):

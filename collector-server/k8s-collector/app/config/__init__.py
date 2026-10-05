@@ -77,10 +77,10 @@ class Settings(BaseSettings):
     # genuinely recovered keeps a red alert indefinitely. A too-eager close re-fires
     # on the next occurrence; a missing close never corrects itself.
     #
-    # Recovery is now evidence over time: all pods ready AND no pod restart since the
-    # previous snapshot (k8s_pods.restart_count). The restart delta is the only one of
-    # the three checks that spans two snapshots, and so the only one that can tell a
-    # healthy pod from one sixty seconds into a crash cycle.
+    # Recovery is now evidence over time: all pods ready AND every container running
+    # for at least RECOVERY_STABLE_WINDOW (an hour after an OOM kill), read from the
+    # stored pod rows. A restart-count delta between snapshots was tried first and did
+    # not hold: the Deployment's 1/1 arrives in a request with no pods to compare.
     EVENT_CLOSE_ON_WORKLOAD_RECOVERY: bool = True
     K8S_COLLECTOR_CONSUMER_MAX_WORKERS: int = 2
     K8S_COLLECTOR_CONSUMER_HEARTBEAT: int = 120

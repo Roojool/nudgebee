@@ -2,7 +2,7 @@ import json
 import logging
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 from apis.model.namespace_details import NamespaceDetails
@@ -1207,9 +1207,6 @@ def handle_full_load_deleted_resources(cloud_account_id, active_resources, tenan
 
 
 def process_services_updates(cloud_account_id, pods, workloads):
-    # Must run BEFORE the k8s_pods upsert: the comparison is against the restart
-    # counts of the PREVIOUS snapshot, and the upsert below overwrites them.
-    restarted = _workloads_with_new_pod_restarts(cloud_account_id, pods)
     if len(pods) > 0:
         logging.debug("inserting k8s_pods for account_id {}".format(cloud_account_id))
         database.insert_data("k8s_pods", [asdict(p) for p in pods], on_conflict=pods_on_conflict)
@@ -1218,12 +1215,25 @@ def process_services_updates(cloud_account_id, pods, workloads):
         deduped_workloads = _deduplicate_workloads_by_identity(workloads)
         _clean_stale_workloads(cloud_account_id, deduped_workloads[0].tenant_id, deduped_workloads)
         database.insert_data("k8s_workloads", [asdict(p) for p in deduped_workloads], on_conflict=workload_on_conflict)
-        close_events_for_recovered_workloads(cloud_account_id, deduped_workloads, restarted)
+        close_events_for_recovered_workloads(cloud_account_id, deduped_workloads)
 
 
-def close_events_for_recovered_workloads(
-    cloud_account_id: str, workloads: List[Any], workloads_with_new_restarts: Optional[set] = None
-):
+# How long every container of a workload's pods must have been running before the
+# workload counts as recovered. The same value, for the same reason, as the agent's
+# own recovery rule (podCrashLoopStableWindow in the k8s-agent's
+# runner/pkg/triggers/predicates.go): the kubelet caps the CrashLoopBackOff delay at
+# 5 minutes, so a container that is only cycling restarts well inside 10 minutes.
+# Change the two together, or the collector closes alerts the agent will not re-raise.
+RECOVERY_STABLE_WINDOW = timedelta(minutes=10)
+# After an OOM kill the agent raises at most one finding per hour for the workload
+# (pod_oom_killed: 1h rate limit, hour bucket), and nothing resets that early. A
+# memory leak that kills the container every 20-40 minutes is Ready for most of each
+# cycle, so a 10-minute window would close its alert mid-loop and the next kill
+# would be suppressed. Wait out the agent's hour instead.
+RECOVERY_STABLE_WINDOW_AFTER_OOM = timedelta(minutes=60)
+
+
+def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[Any]):
     """Close the agent's open events for workloads whose pods are all ready again.
 
     This is the only recovery signal the agent's own findings have. Matchers like
@@ -1236,34 +1246,25 @@ def close_events_for_recovered_workloads(
     with `total_pods > 0` so a scaled-to-zero workload does not read as healthy,
     AND none of the workload's live pods is unready (see _workloads_with_unready_pods:
     the counts alone read a stuck rollout as healthy),
-    AND no pod of the workload restarted since the previous snapshot
-    (`workloads_with_new_restarts`, computed by _workloads_with_new_pod_restarts).
+    AND every container of every live pod has been running for at least
+    RECOVERY_STABLE_WINDOW (see _workloads_not_yet_stable).
     Deliberately NOT the pod phase: a pod stuck in CrashLoopBackOff reports
     `status.phase = Running` between restarts, which is what made the legacy
     status-diff path (run_status_update) close crashloop events on a live crashloop.
 
     Readiness is narrower than phase but was NOT immune to the same defect: a
-    crashlooping pod is genuinely Ready for the seconds its container runs, and a
-    change-driven snapshot lands on that flip often. Measured on dev, 17 of the 43
-    events this closed had the same alert fire again within two hours.
+    crashlooping pod is genuinely Ready for the seconds its container runs, and the
+    agent reports the Deployment's readyReplicas flipping to 1/1 on exactly that
+    moment. Observed: a Deployment whose container exits after two seconds had its
+    alert closed within a minute of being raised, again and again, without ever
+    having a working replica.
 
-    The unready-pod check does not help there. It compares the workload's counts
-    against the pod rows from the SAME batch, so it only catches a disagreement
-    between them -- a stuck rollout, where old pods carry the ready count while the
-    new pod is down. A single-replica crashlooping pod sampled between restarts makes
-    both agree: observed on production, a workload row reading `total_pods=1,
-    ready_pods=1` and its pod row reading 1 of 1 containers ready, while the pod was
-    mid-crashloop. Nothing WITHIN one snapshot separates "healthy" from "sixty seconds
-    into a crash cycle".
-
-    The restart delta is the signal that does, because it spans two snapshots. It is
-    why this function takes `workloads_with_new_restarts` from its caller instead of
-    querying for it: by the time this runs the k8s_pods upsert has already overwritten
-    the previous counts, so the comparison has to happen before that write.
-
-    Passing None (the default) skips the restart filter, for callers that have no
-    previous-snapshot view to offer. That is the pre-existing behaviour, not a
-    recommendation.
+    A restart-count delta between consecutive snapshots did not fix that, and cannot:
+    the agent sends Pod, ReplicaSet and Deployment changes as separate requests, so
+    the Deployment's 1/1 arrives with no pods beside it to compare. The running
+    container's start time does not need a second snapshot -- the kubelet stamps a
+    fresh one on every restart -- and it is read from the stored pod rows, so it
+    holds whichever request arrives first.
 
     Scoped to `kubernetes_api_server`, the source whose findings are derived from
     workload health and which has no resolve delivery of its own. Every other source
@@ -1303,29 +1304,12 @@ def close_events_for_recovered_workloads(
     recovered = [w for w in recovered if (w.namespace, w.name) not in unready]
     if not recovered:
         return
-    if workloads_with_new_restarts:
-        recovered = [w for w in recovered if (w.namespace, w.name) not in workloads_with_new_restarts]
-        if not recovered:
-            return
 
     observed_at = None
     for w in recovered:
-        seen = w.last_seen
-        if isinstance(seen, str):
-            try:
-                seen = datetime.fromisoformat(seen)
-            except ValueError:
-                continue
-        if not isinstance(seen, datetime):
-            continue
-        # Normalise to naive UTC. utc_from_epoch_millis already produces naive UTC and
-        # events.starts_at is `timestamp` (no zone), so an aware value here would make
-        # Postgres reinterpret the naive column through the session TimeZone -- a silent
-        # offset -- and mixing an aware with a naive value would make min() raise.
-        if seen.tzinfo is not None:
-            seen = seen.astimezone(timezone.utc).replace(tzinfo=None)
+        seen = _naive_utc(w.last_seen)
         # utc_from_epoch_millis(0) is the "agent sent no update_time" sentinel.
-        if seen.year <= 1970:
+        if seen is None or seen.year <= 1970:
             continue
         observed_at = seen if observed_at is None else min(observed_at, seen)
     if observed_at is None:
@@ -1334,6 +1318,11 @@ def close_events_for_recovered_workloads(
             cloud_account_id,
             len(recovered),
         )
+        return
+
+    unstable = _workloads_not_yet_stable(cloud_account_id, recovered, observed_at)
+    recovered = [w for w in recovered if (w.namespace, w.name) not in unstable]
+    if not recovered:
         return
 
     close_events_with_history(
@@ -1350,77 +1339,128 @@ def close_events_for_recovered_workloads(
     )
 
 
-def _pod_restart_total(restart_count: Any) -> Optional[int]:
-    """Sum of a pod's per-container restart counts, or None when unusable.
+def _naive_utc(value: Any) -> Optional[datetime]:
+    """A datetime or ISO-8601 string as naive UTC, or None when it is neither.
 
-    The agent sends `restart_count` as {container_name: count}. A container removed
-    from the pod spec takes its count out of the sum, so the total can legitimately
-    fall; only an increase is read as a restart.
+    utc_from_epoch_millis already produces naive UTC and events.starts_at is
+    `timestamp` (no zone), so an aware value would make Postgres reinterpret the naive
+    column through the session TimeZone -- a silent offset -- and comparing an aware
+    with a naive value raises.
     """
-    if not isinstance(restart_count, dict):
-        return None
-    total = 0
-    for value in restart_count.values():
-        if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
             return None
-        total += value
-    return total
+    if not isinstance(value, datetime):
+        return None
+    parsed: datetime = value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
-def _workloads_with_new_pod_restarts(cloud_account_id: str, pods: List[Any]) -> set:
-    """(namespace, workload_name) of workloads owning a pod that restarted since the last snapshot.
+def _pod_is_stable(status_info: Any, observed_at: datetime) -> Optional[bool]:
+    """Whether every container of a pod has run, ready, for the whole stable window.
 
-    MUST be called before the k8s_pods upsert, which overwrites the counts this reads.
+    True when it has, False when a container is not ready, not running, or started
+    inside the window, None when the stored status cannot answer -- no container list
+    or an unreadable start time.
 
-    A pod we have never stored is counted as restarted when it arrives with a non-zero
-    total: there is no earlier count to date those restarts against, so they could have
-    happened a second ago. This costs one extra snapshot of an event staying open --
-    the next snapshot has a stored row and compares normally -- and keeping an event
-    open too long is the recoverable direction, unlike closing one that is still live.
+    The window is RECOVERY_STABLE_WINDOW, or RECOVERY_STABLE_WINDOW_AFTER_OOM for a
+    container whose last exit was an OOM kill. Init containers are not inspected,
+    as in the agent: they exit in a healthy pod, and one stuck crashlooping keeps the
+    regular containers from running, which fails this check anyway.
 
-    Matched on namespace + workload_name, the same identity
-    _workloads_with_unready_pods uses, so the two filters compose over the same keys.
-    Pods with no workload_name (bare pods) are skipped: they own no workload row and
-    so can gate no close.
+    Reads both shapes agents store in meta.status_info: the Go agent sends the
+    Kubernetes PodStatus (`containerStatuses`, `startedAt`, `lastState`) and the
+    Python agent the client library's dict (`container_statuses`, `started_at`,
+    `last_state`).
     """
-    if not pods:
-        return set()
-    wanted = {(p.namespace, p.name): p for p in pods if getattr(p, "workload_name", None)}
-    if not wanted:
-        return set()
+    if not isinstance(status_info, dict):
+        return None
+    statuses = status_info.get("containerStatuses") or status_info.get("container_statuses")
+    if not isinstance(statuses, list) or not statuses:
+        return None
+    for status in statuses:
+        if not isinstance(status, dict):
+            return None
+        if status.get("ready") is not True:
+            return False
+        state = status.get("state")
+        running = state.get("running") if isinstance(state, dict) else None
+        if not isinstance(running, dict):
+            return False
+        started = _naive_utc(running.get("startedAt") or running.get("started_at"))
+        if started is None:
+            return None
+        last_state = status.get("lastState") or status.get("last_state")
+        terminated = last_state.get("terminated") if isinstance(last_state, dict) else None
+        oom = isinstance(terminated, dict) and terminated.get("reason") == "OOMKilled"
+        window = RECOVERY_STABLE_WINDOW_AFTER_OOM if oom else RECOVERY_STABLE_WINDOW
+        if started > observed_at - window:
+            return False
+    return True
+
+
+def _workloads_not_yet_stable(cloud_account_id: str, workloads: List[Any], observed_at: datetime) -> set:
+    """(namespace, name) of the given workloads that have not been stable for long enough.
+
+    A workload is held when any of its live pods fails _pod_is_stable at the time the
+    agent observed the workload ready, cannot answer, or when it has no stored pod.
+
+    Reads the stored pod rows rather than the pods in the incoming request: the agent
+    sends a Deployment's change and its pods' changes as separate requests, in no fixed
+    order, so the request that says "1/1 ready" usually carries no pods. A stored row
+    that lags behind still carries the recent start or the exit that holds the close;
+    one that runs ahead only adds a later start.
+
+    Unknown holds, as it does in the agent's own rule: a status that cannot say the
+    containers have been running is not evidence that they have. That leaves agents
+    too old to send the container status with no recovery close at all -- their
+    alerts stay open until the resource is deleted, the behaviour before this close
+    existed -- which is logged per request so it does not pass for a working check.
+
+    Same scoping as _workloads_with_unready_pods: namespace + workload name, live and
+    unfinished pods only.
+    """
+    wanted = {(w.namespace, w.name) for w in workloads}
     # tenant_id + `is_active IS NOT FALSE` match idx_k8s_pods_active_account_namespace.
-    # Without them this runs on every snapshot as a full scan of k8s_pods, which keeps
-    # every pod the account ever had (hundreds of thousands of inactive rows).
     rows = database.run_query(
-        "SELECT namespace, name, restart_count FROM k8s_pods "
+        "SELECT namespace, workload_name, meta->'status_info' FROM k8s_pods "
         "WHERE cloud_account_id = %s AND tenant_id = %s AND is_active IS NOT FALSE "
-        "AND namespace = ANY(%s) AND name = ANY(%s)",
+        "AND namespace = ANY(%s) AND workload_name = ANY(%s) "
+        "AND lower(status) NOT IN ('completed', 'succeeded', 'failed')",
         [
             cloud_account_id,
-            next(iter(wanted.values())).tenant_id,
+            workloads[0].tenant_id,
             list({ns for ns, _ in wanted}),
             list({name for _, name in wanted}),
         ],
     )
-    previous: Dict[Any, int] = {}
-    for row in rows or []:
-        total = _pod_restart_total(row[2])
-        if total is not None:
-            previous[(row[0], row[1])] = total
-
-    restarted: set = set()
-    for key, pod in wanted.items():
-        current = _pod_restart_total(pod.restart_count)
-        if current is None:
+    held: set = set()
+    unknown: set = set()
+    with_pods: set = set()
+    for namespace, workload_name, status_info in rows or []:
+        key = (namespace, workload_name)
+        if key not in wanted:
             continue
-        before = previous.get(key)
-        if before is None:
-            # First time we are storing this pod -- see the docstring.
-            if current > 0:
-                restarted.add((pod.namespace, pod.workload_name))
-        elif current > before:
-            restarted.add((pod.namespace, pod.workload_name))
-    return restarted
+        with_pods.add(key)
+        stable = _pod_is_stable(status_info, observed_at)
+        if stable is None:
+            unknown.add(key)
+        elif not stable:
+            held.add(key)
+    unknown |= wanted - with_pods
+    held |= unknown
+    if unknown:
+        logging.warning(
+            "Holding recovery close for %s: %d workloads have a pod with no usable container status stored, "
+            "or no stored pod (agent too old to send it, or pods not stored yet)",
+            cloud_account_id,
+            len(unknown),
+        )
+    return held
 
 
 def _workloads_with_unready_pods(cloud_account_id: str, workloads: List[Any]) -> set:
