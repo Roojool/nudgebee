@@ -437,7 +437,8 @@ const InsightRow = React.memo(({ item = {}, type = '', currencySymbol = '$' }) =
   const label = getActionLabel(item);
   const apps = item.applications;
   const hasApps = apps && apps !== 'null' && (typeof apps === 'string' ? apps.length > 0 : apps.length > 0);
-  const displayTitle = item.rawTitle ? replaceCurrencyInText(item.rawTitle, currencySymbol) : item.title;
+  // Only spend insights are in the billing currency; savings insights are USD.
+  const displayTitle = item.rawTitle ? replaceCurrencyInText(item.rawTitle, item.rule?.source === 'Spends' ? currencySymbol : '$') : item.title;
   return (
     <Box
       onClick={link ? () => window.open(link, '_blank') : undefined}

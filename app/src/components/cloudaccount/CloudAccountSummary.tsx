@@ -140,7 +140,8 @@ const toCanonicalSeverityLevel = (priority: string | undefined): CanonicalSeveri
   return 'info';
 };
 
-// Replaces currency symbols in text with the target currency symbol.
+// Replaces currency symbols in text with the target currency symbol. Only spend
+// insights are in the billing currency; savings insights are USD and keep `$`.
 const replaceCurrencyInText = (text: string, targetCurrencySymbol: string): string => {
   if (!text || targetCurrencySymbol === '$') return text;
   return text.replace(/\$(\d[\d,]*\.?\d*)/g, `${targetCurrencySymbol}$1`);
@@ -166,7 +167,7 @@ const ClusterSummary = ({ accountId = '', cloudProvider = '' }: any) => {
 
   // Process insights with correct currency symbol
   const insights = rawInsights.map((item: any) => {
-    const symbol = currencySymbol || '$';
+    const symbol = item.rule?.source === 'Spends' ? currencySymbol || '$' : '$';
     return {
       ...item,
       title: replaceCurrencyInText(item.rawTitle, symbol),
@@ -915,13 +916,17 @@ const CostSummary = ({ clusterSummary = {}, currencySymbol = '$' }: any) => {
               </Tooltip>
             </Box>
             {clusterSummary?.recommendation_aggregate?.aggregate?.sum?.estimated_savings ? (
-              <Currency prefix={currencySymbol} value={clusterSummary.recommendation_aggregate.aggregate.sum.estimated_savings * 12} suffix='/yr' />
+              <Currency prefix='$' value={clusterSummary.recommendation_aggregate.aggregate.sum.estimated_savings * 12} suffix='/yr' />
             ) : (
               <Typography sx={{ color: ds.gray[500], fontSize: ds.text.caption }}>No savings available</Typography>
             )}
-            <Typography sx={{ color: ds.gray[400], fontSize: ds.text.caption, whiteSpace: 'nowrap' }}>estimated 12 mos</Typography>
+            <Typography sx={{ color: ds.gray[400], fontSize: ds.text.caption, whiteSpace: 'nowrap' }}>
+              estimated 12 mos{currencySymbol !== '$' ? ' · USD' : ''}
+            </Typography>
           </Box>
           {(() => {
+            // A USD saving over a non-USD spend is not a percentage.
+            if (currencySymbol !== '$') return null;
             const savPct = (() => {
               if (!clusterSummary?.recommendation_aggregate?.aggregate?.sum?.estimated_savings) {
                 return 0;
