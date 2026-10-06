@@ -30,6 +30,54 @@ type llmServerRequest struct {
 	Tools     []llms.Tool        `json:"tools,omitempty"`
 }
 
+// llmServerResponse is llm-server's generation result. llm-server writes it as
+// langchaingo marshals it; it is decoded into these types rather than
+// langchaingo's, whose ToolCall decoder drops the function name and arguments.
+type llmServerResponse struct {
+	Choices []llmServerChoice `json:"Choices"`
+}
+
+type llmServerChoice struct {
+	Content          string
+	StopReason       string
+	GenerationInfo   map[string]any
+	FuncCall         *llms.FunctionCall
+	ToolCalls        []llmServerToolCall
+	ReasoningContent string
+}
+
+// llmServerToolCall is one tool call in langchaingo's JSON envelope:
+// {"type":"tool_call","tool_call":{"id":…,"type":…,"function":{…}}}.
+type llmServerToolCall struct {
+	ToolCall struct {
+		ID       string             `json:"id"`
+		Type     string             `json:"type"`
+		Function *llms.FunctionCall `json:"function"`
+	} `json:"tool_call"`
+}
+
+func (r llmServerResponse) contentResponse() *llms.ContentResponse {
+	response := &llms.ContentResponse{Choices: make([]*llms.ContentChoice, 0, len(r.Choices))}
+	for _, choice := range r.Choices {
+		converted := &llms.ContentChoice{
+			Content:          choice.Content,
+			StopReason:       choice.StopReason,
+			GenerationInfo:   choice.GenerationInfo,
+			FuncCall:         choice.FuncCall,
+			ReasoningContent: choice.ReasoningContent,
+		}
+		for _, call := range choice.ToolCalls {
+			converted.ToolCalls = append(converted.ToolCalls, llms.ToolCall{
+				ID:           call.ToolCall.ID,
+				Type:         call.ToolCall.Type,
+				FunctionCall: call.ToolCall.Function,
+			})
+		}
+		response.Choices = append(response.Choices, converted)
+	}
+	return response
+}
+
 type llmServerMessage struct {
 	Role  string          `json:"role"`
 	Parts []llmServerPart `json:"parts"`
@@ -101,11 +149,11 @@ func (m *llmServerModel) GenerateContent(ctx context.Context, messages []llms.Me
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("llm-server returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
-	var response llms.ContentResponse
+	var response llmServerResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
 		return nil, fmt.Errorf("decode llm-server response: %w", err)
 	}
-	return &response, nil
+	return response.contentResponse(), nil
 }
 
 func (m *llmServerModel) Call(ctx context.Context, prompt string, options ...llms.CallOption) (string, error) {
