@@ -171,13 +171,13 @@ Each call runs a full (expensive) analysis — decide the intended outcome first
 	codeAnalyzerFactory := func(accountId string) (core.NBAgent, error) {
 		return newCodeAgent(accountId), nil
 	}
-	core.RegisterNBAgentFactoryAndTool(AgentCodeAnalyzer, codeAnalyzerFactory, toolDescription, toolInput, toolOutput)
 	// Back-compat: keep the pre-rename "agent_code_2" name resolving as an agent.
 	// getSystemAgent does a direct registry lookup and does not honor
 	// GetNameAliases, so the legacy name must be a real factory key. Registered
-	// agent-only (not as a tool) so it is never re-offered to the model as a
-	// second tool — new tool callers use AgentCodeAnalyzer.
-	core.RegisterNBAgentFactory(agentCodeAnalyzerLegacyName, codeAnalyzerFactory)
+	// as an alias so it is never re-offered to the model as a second tool and
+	// ListAgents does not show it as a second picker entry — new tool callers
+	// use AgentCodeAnalyzer.
+	core.RegisterNBAgentFactoryAndToolWithAliases(AgentCodeAnalyzer, codeAnalyzerFactory, toolDescription, toolInput, toolOutput, agentCodeAnalyzerLegacyName)
 }
 
 func forwardedLLMConfigToMap(c *core.ForwardedLLMConfig) map[string]any {
