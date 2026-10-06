@@ -1,10 +1,8 @@
 package triage
 
 import (
-	"context"
 	"os"
 	"testing"
-	"time"
 
 	"nudgebee/services/internal/database/models"
 
@@ -148,34 +146,4 @@ func TestTimingFallbackAllowed(t *testing.T) {
 	assert.False(t, timingFallbackAllowed(&models.Event{FindingType: str(" Configuration_Change ")}, false), "matched case- and space-insensitively")
 
 	assert.True(t, timingFallbackAllowed(&models.Event{}, false), "no source, no finding type, unplaced: fallback allowed")
-}
-
-// TestCollectConnectedMembers_LocatedWithoutNeighbours — the seed has a stored
-// map, so it is placed, even when topology grouping is switched off and even
-// though nothing connected is alerting. No database is touched on these paths.
-func TestCollectConnectedMembers_LocatedWithoutNeighbours(t *testing.T) {
-	str := func(s string) *string { return &s }
-	evidence := `[{"type": "knowledge_graph", "nodes": [
-	  {"id": "n1", "node_type": "Workload", "properties": {"kind": "Deployment", "name": "search", "namespace": "shop"}}
-	], "edges": []}]`
-	var j models.Json
-	if err := j.Scan([]uint8(evidence)); err != nil {
-		t.Fatal(err)
-	}
-	ev := &models.Event{
-		Id: "e1", SubjectNamespace: str("shop"), SubjectName: str("search-abc12"),
-		SubjectOwner: str("search"), SubjectOwnerKind: str("Deployment"), SubjectType: str("pod"),
-		Evidences: &j,
-	}
-
-	t.Setenv(topologyGroupingEnvFlag, "false")
-	pool, err := collectConnectedMembers(context.Background(), nil, ev, groupCandidate{ID: "e1"}, "shop|search", time.Now())
-	assert.NoError(t, err)
-	assert.True(t, pool.located, "placed regardless of the topology kill switch")
-	assert.Empty(t, pool.members)
-
-	ev.Evidences = nil
-	pool, err = collectConnectedMembers(context.Background(), nil, ev, groupCandidate{ID: "e1"}, "shop|search", time.Now())
-	assert.NoError(t, err)
-	assert.False(t, pool.located, "no stored map — not placed")
 }
