@@ -38,6 +38,17 @@ type ServiceNowService struct{}
 
 var _ ticket.IncidentManager = (*ServiceNowService)(nil)
 
+// ServiceNowHost strips the scheme and any trailing slash from a configured
+// ServiceNow instance URL, so callers can append a path with a single leading
+// slash. Whitespace and a trailing slash on the saved URL otherwise survive
+// TrimPrefix and produce a double slash wherever the host is used (#40217).
+func ServiceNowHost(rawURL string) string {
+	host := strings.TrimSpace(rawURL)
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	return strings.TrimRight(host, "/")
+}
+
 func init() {
 	ticket.RegisterIncidentManager("servicenow", &ServiceNowService{})
 }
@@ -366,7 +377,7 @@ func (s *ServiceNowService) Get(ctx *gin.Context, config models.TicketConfigurat
 		Assignees:   assignees,
 		Reporter:    openedBy,
 		Platform:    "servicenow",
-		URL:         fmt.Sprintf("https://%s/incident.do?sys_id=%s", strings.TrimPrefix(config.URL, "https://"), sysID),
+		URL:         fmt.Sprintf("https://%s/incident.do?sys_id=%s", ServiceNowHost(config.URL), sysID),
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Raw:         record,
@@ -768,7 +779,7 @@ func (s *ServiceNowService) List(ctx *gin.Context, config models.TicketConfigura
 	}
 
 	tickets := make([]models.Ticket, 0, len(results))
-	host := strings.TrimPrefix(config.URL, "https://")
+	host := ServiceNowHost(config.URL)
 	for _, record := range results {
 		number, _ := getRecordStringValue(record, "number")
 		shortDesc, _ := getRecordStringValue(record, "short_description")
@@ -885,7 +896,7 @@ func serviceNowCreateBody(ticket models.Ticket) (map[string]string, error) {
 }
 
 func CreateServiceNowIncident(ctx *gin.Context, configuration models.TicketConfigurations, ticket models.Ticket) (models.Ticket, error) {
-	host := strings.TrimPrefix(configuration.URL, "https://")
+	host := ServiceNowHost(configuration.URL)
 	apiURL := "https://" + host + "/api/now/v1/table/incident"
 
 	body, err := serviceNowCreateBody(ticket)
