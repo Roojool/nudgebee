@@ -1902,7 +1902,7 @@ class Events:
                 LOG.debug("Skipping bot's own message")
                 return
 
-            user_email = await self.common_service.get_teams_user_info(aad_user_id, teams_account_id)
+            user_email = await self.common_service.get_teams_user_info(aad_user_id, teams_account_id, activity)
             if not user_email:
                 await self._reply_unidentified_user(activity, aad_user_id, teams_account_id)
                 return

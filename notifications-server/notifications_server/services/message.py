@@ -45,6 +45,14 @@ from notifications_server.services.slack.slack import retriable_slack_api_error,
 from notifications_server.message_templates import template_mapping
 from notifications_server.message_templates.google_chat.finding import get_markdown_message_template
 from notifications_server.message_templates.ms_teams.finding import get_ms_teams_finding_message_template
+from notifications_server.services.ms_teams.bot_sender import (
+    APP_NOT_IN_TEAM,
+    TeamsBotError,
+    card_activity,
+    get_sender,
+    load_team_async,
+    thread_conversation_id,
+)
 from notifications_server.message_templates.slack.finding import (
     get_slack_finding_message,
     get_slack_resolved_finding_reply,
@@ -646,39 +654,6 @@ class SlackSender(BaseSender):
         return notification
 
 
-class TeamsSender(BaseSender):
-    def __init__(self, teams_app, cache: Cache, engine):
-        super().__init__(cache=cache, teams_app=teams_app, engine=engine)
-
-    async def acquire_teams_access_token(self, session, ms_teams_installation):
-        async def _refresh(sess, ip):
-            response = self.teams_app.acquire_token_by_refresh_token(
-                ip.refresh_token,
-                scopes=settings.ms_teams.scopes,
-            )
-            if "error" in response and response["error"]:
-                if "AADSTS700082" in response.get("error_description", ""):
-                    LOG.warning(f"Refresh token expired for installation id {ms_teams_installation.id}")
-                    # Clear the expiry (origin-aware) to mark the install as needing re-auth.
-                    await persist_messaging_token_async(sess, ip, ip.token, token_expires_at=None)
-                    return None
-                LOG.exception(
-                    f"Unable to get access token for teams due to {response.get('error_description')} for "
-                    f"installation id {ms_teams_installation.id}"
-                )
-                return None
-
-            ip.token = response.get("access_token")
-            ip.refresh_token = response.get("refresh_token")
-            expires_in = response.get("expires_in")
-            ip.token_expires_at = utc_now() + timedelta(seconds=expires_in - 60) if expires_in else None
-            return ip.token
-
-        return await self._refresh_token_if_expired(
-            session, ms_teams_installation, PlatformTypes.MS_TEAMS.value, _refresh
-        )
-
-
 class GoogleChatSender(BaseSender):
     def __init__(self, cache: Cache):
         super().__init__(cache=cache)
@@ -901,7 +876,6 @@ class MessageService:
 
         # Senders
         self.slack_sender = SlackSender(slack_app, cache)
-        self.teams_sender = TeamsSender(teams_app, cache, engine)
         self.gchat_sender = GoogleChatSender(cache)
         self.discord_sender = DiscordSender(cache)
 
@@ -1411,35 +1385,36 @@ class MessageService:
 
         return responses or [system_response("dropped", "Resolved reply already delivered")]
 
-    async def _send_finding_to_teams(self, session, tenant_id, ip, finding, _):
-        token = await self.teams_sender.acquire_teams_access_token(session, ip)
-        if not token:
-            return None, None
+    async def _post_teams_card_as_bot(self, session, tenant_id, team_id, channel_id, card, root_message_id=None):
+        """Post a card through the bot to a channel of an installed team, or as a
+        reply under root_message_id. Returns the Teams message id."""
+        team = await load_team_async(session, tenant_id, team_id)
+        if team is None:
+            raise TeamsBotError(APP_NOT_IN_TEAM)
+        sender = get_sender()
+        await asyncio.to_thread(sender.check_channel, team, channel_id)
+        conversation_id = thread_conversation_id(channel_id, root_message_id) if root_message_id else channel_id
+        return await asyncio.to_thread(sender.send, team.service_url, conversation_id, card_activity(card))
 
+    async def _send_teams_template_as_bot(self, session, ip, card):
+        """Post to the mapping's first channel."""
         teams_channels = self._normalize_teams_channels(ip)
-
-        response = await asyncio.to_thread(
-            MsTeamsClient.post_to_ms_teams,
-            token,
-            teams_channels,
-            get_ms_teams_finding_message_template(finding),
-            tenant_id,
-        )
-        if not (response and response.status_code == 201):
-            return None, None
-
-        channels_list = teams_channels.get("channels", [])
+        channels_list = teams_channels.get("channels", []) if isinstance(teams_channels, dict) else []
         channel_id = channels_list[0].get("id") if channels_list else None
-        message_data = response.json() if hasattr(response, "json") else {}
+        team_id = teams_channels.get("team_id") if isinstance(teams_channels, dict) else None
+        if not (team_id and channel_id):
+            return failed_response("ms_teams", reason="No Microsoft Teams channel is mapped")
+        try:
+            message_id = await self._post_teams_card_as_bot(session, ip.tenant_id, team_id, channel_id, card)
+        except TeamsBotError as e:
+            LOG.warning("Teams bot send to team %s failed: %s", team_id, e)
+            return failed_response("ms_teams", reason=str(e))
+        return success_response("ms_teams", team_id=team_id, channel_id=channel_id, message_ts=message_id)
 
-        response_data = success_response(
-            "ms_teams",
-            team_id=teams_channels.get("team_id"),
-            channel_id=channel_id,
-            message_ts=message_data.get("id"),
-        )
-
-        return response_data, None
+    async def _send_finding_to_teams(self, session, tenant_id, ip, finding, _):
+        # A failure is returned too, so its reason reaches the delivery status.
+        response = await self._send_teams_template_as_bot(session, ip, get_ms_teams_finding_message_template(finding))
+        return response, None
 
     async def _send_finding_to_teams_webhook(self, session, tenant_id, ip, finding, _):
         """POST a finding card to ip.webhook_url. Returns (response, None) — webhooks
@@ -1795,29 +1770,7 @@ class MessageService:
             LOG.exception("weekly digest: attaching the PDF failed; the summary was delivered")
 
     async def send_teams_template_notification(self, ip, template_func, param_value, session, tenant):
-        token = await self.teams_sender.acquire_teams_access_token(session, ip)
-        if not token:
-            return failed_response("ms_teams", reason="Unable to authenticate teams installation")
-
-        teams_channels = self._normalize_teams_channels(ip)
-        response = await asyncio.to_thread(
-            MsTeamsClient.post_to_ms_teams, token, teams_channels, template_func(param_value), tenant
-        )
-
-        if response and response.status_code == 201:
-            channels_list = teams_channels.get("channels", [])
-            channel_id = channels_list[0].get("id") if channels_list else None
-            message_data = response.json() if hasattr(response, "json") else {}
-
-            return success_response(
-                "ms_teams",
-                team_id=teams_channels.get("team_id"),
-                channel_id=channel_id,
-                message_ts=message_data.get("id"),
-            )
-
-        reason = response.reason if response else "Unable to send teams notification"
-        return failed_response("ms_teams", reason=reason)
+        return await self._send_teams_template_as_bot(session, ip, template_func(param_value))
 
     async def send_teams_webhook_template_notification(self, ip, template_func, param_value, tenant):
         """Template send via webhook: same ms_teams card, POSTed to ip.webhook_url."""
@@ -2062,28 +2015,22 @@ class MessageService:
 
     async def _send_teams_threaded_reply(self, session, ip, team_id, channel_id, parent_message_id, template):
         """Send MS Teams threaded reply using generic template (adaptive card)."""
-        token = await self.teams_sender.acquire_teams_access_token(session, ip)
-        if not token:
-            return [failed_response("ms_teams", reason="Token acquisition failed")]
-
-        # Template is the adaptive card dict
-        response = await asyncio.to_thread(
-            MsTeamsClient.post_reply_to_thread, token, team_id, channel_id, parent_message_id, template
-        )
-
-        if response and getattr(response, "status_code", None) == 201:
-            message_data = response.json() if hasattr(response, "json") else {}
-            return [
-                success_response(
-                    "ms_teams",
-                    team_id=team_id,
-                    channel_id=channel_id,
-                    message_ts=message_data.get("id"),
-                    parent_message_id=parent_message_id,
-                )
-            ]
-
-        return [failed_response("ms_teams", reason="API call failed")]
+        try:
+            message_id = await self._post_teams_card_as_bot(
+                session, ip.tenant_id, team_id, channel_id, template, root_message_id=parent_message_id
+            )
+        except TeamsBotError as e:
+            LOG.warning("Teams bot thread reply in team %s failed: %s", team_id, e)
+            return [failed_response("ms_teams", reason=str(e))]
+        return [
+            success_response(
+                "ms_teams",
+                team_id=team_id,
+                channel_id=channel_id,
+                message_ts=message_id,
+                parent_message_id=parent_message_id,
+            )
+        ]
 
     @staticmethod
     def _convert_gchat_message_to_thread_name(message_name, space_id):

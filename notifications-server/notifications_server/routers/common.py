@@ -312,13 +312,13 @@ async def create_channel(request: Request, payload: Dict[Any, Any]):
                 status_code=400,
             )
 
-        if platform.lower() not in ["slack", "ms_teams", "google_chat"]:
+        if platform.lower() not in ["slack", "google_chat"]:
             return JSONResponse(
                 {
                     "error": {
                         "message": (
                             f"Platform {platform} is not supported for channel creation. "
-                            "Supported platforms: slack, ms_teams, google_chat"
+                            "Supported platforms: slack, google_chat"
                         )
                     }
                 },
@@ -375,13 +375,13 @@ async def add_channel_members(request: Request, payload: Dict[Any, Any]):
                 status_code=400,
             )
 
-        if platform.lower() not in ["slack", "ms_teams", "google_chat"]:
+        if platform.lower() not in ["slack", "google_chat"]:
             return JSONResponse(
                 {
                     "error": {
                         "message": (
                             f"Platform {platform} is not supported for adding members. "
-                            "Supported platforms: slack, ms_teams, google_chat"
+                            "Supported platforms: slack, google_chat"
                         )
                     }
                 },
@@ -473,13 +473,13 @@ async def send_direct_message(request: Request, payload: Dict[Any, Any]):
                 status_code=400,
             )
 
-        if platform.lower() not in ["slack", "ms_teams", "google_chat"]:
+        if platform.lower() not in ["slack", "google_chat"]:
             return JSONResponse(
                 {
                     "error": {
                         "message": (
                             f"Platform {platform} is not supported for direct messages. "
-                            "Supported platforms: slack, ms_teams, google_chat"
+                            "Supported platforms: slack, google_chat"
                         )
                     }
                 },
@@ -504,6 +504,14 @@ async def send_direct_message(request: Request, payload: Dict[Any, Any]):
         return JSONResponse({"error": {"message": "Unable to send direct message"}}, status_code=500)
 
 
+# The test send does blocking network I/O, so it runs off the event loop.
+def _send_test_notification_sync(platform, tenant_id, channel_id, team_id):
+    with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
+        return controller.send_test_notification(
+            platform=platform, tenant_id=tenant_id, channel_id=channel_id, team_id=team_id
+        )
+
+
 @router.post("/notifications/test", dependencies=[Depends(verify_action_token)])
 async def send_test_notification(request: Request, body: Dict[Any, Any]):
     try:
@@ -520,14 +528,8 @@ async def send_test_notification(request: Request, body: Dict[Any, Any]):
         if not platform or not channel_id:
             return JSONResponse({"success": False, "error": "Missing required fields: platform, channel_id"})
 
-        with CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app) as controller:
-            result = controller.send_test_notification(
-                platform=platform,
-                tenant_id=tenant,
-                channel_id=channel_id,
-                team_id=team_id,
-            )
-            return JSONResponse(content=result)
+        result = await run_in_threadpool(_send_test_notification_sync, platform, tenant, channel_id, team_id)
+        return JSONResponse(content=result)
     except Exception:
         LOG.exception("Error in send_test_notification endpoint")
         return JSONResponse({"success": False, "error": "Unexpected error"})

@@ -523,20 +523,9 @@ class MSTeamsSettings(BaseSettings):
     )
     # Path matches the Next.js callback route at /api/integrations/ms-teams/callback
     redirect_path: str = "/api/integrations/ms-teams/callback"
-    scopes: List[str] = [
-        "User.ReadBasic.All",
-        "User.Read.All",
-        "Team.ReadBasic.All",
-        "Channel.ReadBasic.All",
-        "Channel.Create",
-        "ChannelMessage.Send",
-        "Chat.Create",
-        "Chat.ReadWrite",
-        "ChatMessage.Send",
-    ]
-    max_rate_limit_retries: int = Field(
-        2, validation_alias=AliasChoices("MS_TEAMS_MAX_RATE_LIMIT_RETRIES", "ms_teams_max_rate_limit_retries")
-    )
+    # The bot sends with its own credentials, so Connect only needs the signed-in
+    # user's own profile, to learn which Microsoft tenant is connecting.
+    scopes: List[str] = ["User.Read"]
 
     model_config = SettingsConfigDict(env_prefix="", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -911,7 +900,6 @@ GOOGLE_CHAT_REDIRECT_URI = settings.google_chat_redirect_uri
 GOOGLE_AUTH_URL = settings.google_chat.auth_url
 TRACE_INCOMING_REQUESTS = settings.trace_incoming_requests
 RELAY_SERVER_SECRET_KEY = settings.relay_server_secret_key
-SCOPE = settings.ms_teams.scopes
 
 # Cache settings
 CACHE_EXPIRATION_MINUTES = settings.redis.cache_expiration_minutes

@@ -36,6 +36,7 @@ from notifications_server.services.common import CommonService
 from notifications_server.services.events import Events, event_cache
 from notifications_server.services.messaging_installations import load_installation, load_installation_by_team
 from notifications_server.services.ms_teams.bot_installations import record_team_installations
+from notifications_server.services.ms_teams.bot_sender import forget_changed_channels
 from notifications_server.services.bot_messages import get_bot_joined_message
 from notifications_server.utils.action_requests import ActionRequestBody, verify_action_request
 from notifications_server.utils.transformer import SLACK_SIGNIN_SECRET, Transformer
@@ -1451,6 +1452,10 @@ class MsTeamsEventsService(SlackActionsBaseService):
                     LOG.debug(f"Unhandled activity type: {activity_type}")
             finally:
                 # After the handlers, so recording never holds up a reply or the welcome card.
+                try:
+                    forget_changed_channels(activity)
+                except Exception as e:
+                    LOG.exception(f"Error refreshing Teams channels: {e}")
                 try:
                     await record_team_installations(activity, self.engine)
                 except Exception as e:

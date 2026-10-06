@@ -19,11 +19,11 @@ from notifications_server.services.messaging_installations import (
     _write_config_values,
     ms_teams_aad_tenant_owner,
 )
+from notifications_server.services.ms_teams.activity import TEAM_TYPE, channel_data_of
 from notifications_server.utils.datetime_utils import utc_now
 
 LOG = logging.getLogger(__name__)
 
-TEAM_TYPE = "ms_teams_team"
 TEAM_CONFIG_KEYS = ("team_thread_id", "team_name", "service_url", "aad_tenant_id", "app_id")
 
 INSTALL_ACTIONS = {"add", "add-upgrade"}
@@ -53,7 +53,7 @@ def _bot_in(members, activity: Activity) -> bool:
 
 
 def _actions(activity: Activity) -> List[str]:
-    channel_data = activity.channel_data if isinstance(activity.channel_data, dict) else {}
+    channel_data = channel_data_of(activity)
     if activity.type == "installationUpdate":
         if activity.action in INSTALL_ACTIONS:
             return ["upsert"]
@@ -80,7 +80,7 @@ def team_changes(activity: Activity) -> List[Dict[str, Any]]:
     count; personal and group chats are not recorded here."""
     if not activity.conversation or activity.conversation.conversation_type != "channel":
         return []
-    channel_data = activity.channel_data if isinstance(activity.channel_data, dict) else {}
+    channel_data = channel_data_of(activity)
     team = channel_data.get("team") or {}
     aad_tenant_id = (channel_data.get("tenant") or {}).get("id")
     if not (team.get("aadGroupId") and aad_tenant_id):

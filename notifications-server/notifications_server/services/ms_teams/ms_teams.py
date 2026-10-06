@@ -1,5 +1,4 @@
 import logging
-from datetime import timedelta
 
 from sqlalchemy.exc import IntegrityError
 
@@ -28,15 +27,11 @@ class MsTeamsService:
 
     def save_teams_installation(self, client_id, tenant_id, result, account, user_email):
         try:
-            expires_in = result.get("expires_in")
-            token_expires_at = utc_now() + timedelta(seconds=expires_in - 60) if expires_in else None
-            # MS Teams installs persist to the integrations table with the Graph access
-            # and refresh tokens encrypted at rest (one Teams install per tenant). The
-            # integration name is the Microsoft tenant id.
+            # One Teams install per tenant; the integration name is the Microsoft
+            # tenant id. The bot sends with its own credentials, so no user token
+            # is stored. Tokens from an earlier Graph connection are left as they
+            # were, unused.
             config = {
-                "access_token": result["access_token"],
-                "refresh_token": result["refresh_token"],
-                "token_expires_at": token_expires_at,
                 "client_id": account["local_account_id"],
                 "app_id": client_id,
                 "installed_by": result["id_token_claims"]["preferred_username"],
