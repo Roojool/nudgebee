@@ -20,16 +20,42 @@ from qdrant_client.models import Distance, VectorParams
 from rag.core.documents import embedding_migration as em
 
 
-@pytest.fixture
-def _holds_lock(monkeypatch):
-    """Grant the cross-replica lock. Tests of run() are about what gets rebuilt;
-    the locking itself is exercised separately below."""
+@pytest.fixture(autouse=True)
+def _no_older_worker(monkeypatch):
+    """No worker of the previous version is running unless a test says so."""
 
     @contextlib.contextmanager
     def _granted():
         yield lambda: True
 
+    monkeypatch.setattr(em, "_shared_run_lock", _granted)
+
+
+@pytest.fixture
+def _holds_lock(monkeypatch):
+    """Grant every lock. Tests of run() are about what gets rebuilt; the locking
+    itself is exercised separately below."""
+
+    @contextlib.contextmanager
+    def _granted(*_a):
+        yield lambda: True
+
     monkeypatch.setattr(em, "_exclusive_run", _granted)
+    monkeypatch.setattr(em, "_collection_lock", _granted)
+
+
+@pytest.fixture
+def _single_run_lock(monkeypatch):
+    """The migration-wide lock that per-collection locking replaced, still
+    available behind RAG_EMBEDDING_MIGRATION_PER_COLLECTION_LOCK=false."""
+    from utils.config import Config
+
+    monkeypatch.setattr(Config, "embedding_migration_per_collection_lock", False)
+
+
+def _staging_of(client, src):
+    names = [n for n in client.colls if em._staging_source(n) == src]
+    return client.colls[names[0]] if names else None
 
 
 class _Coll:
@@ -72,7 +98,17 @@ class _FakeClient:
         return window, (start + limit if start + limit < len(pts) else None)
 
     def upsert(self, collection_name, points, wait=True):
-        self.colls[collection_name].points.extend(points)
+        coll = self.colls[collection_name]
+        incoming = {pt.id for pt in points}
+        coll.points = [pt for pt in coll.points if pt.id not in incoming] + list(points)
+
+    def retrieve(self, collection_name, ids, with_payload=False, with_vectors=False):
+        wanted = set(ids)
+        return [pt for pt in self.colls[collection_name].points if pt.id in wanted]
+
+    def update_collection(self, collection_name, metadata=None):
+        self.events.append(("update", collection_name))
+        self.colls[collection_name].metadata.update(metadata or {})
 
 
 class _Point:
@@ -153,7 +189,7 @@ def test_original_is_only_deleted_after_staging_holds_the_data():
     p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
     em.rebuild(client, p, lambda: _Embeddings(384, "new"))
 
-    staged = client.events.index(("create", f"c{em.STAGING_SUFFIX}"))
+    staged = next(i for i, (op, n) in enumerate(client.events) if op == "create" and em._staging_source(n) == "c")
     dropped = client.events.index(("delete", "c"))
     assert staged < dropped, "staging must exist before the original is dropped"
 
@@ -166,7 +202,7 @@ def test_rebuilt_collection_keeps_every_point_and_records_the_model():
     assert len(client.colls["c"].points) == 7
     assert client.colls["c"].dim == 384
     assert client.colls["c"].metadata[em.MODEL_KEY] == "bge-small-en-v1.5"
-    assert f"c{em.STAGING_SUFFIX}" not in client.colls, "staging should be cleaned up"
+    assert _staging_of(client, "c") is None, "staging should be cleaned up"
 
 
 def test_rebuild_keeps_the_metadata_that_decides_which_searches_reach_it():
@@ -201,7 +237,7 @@ def test_interrupted_run_reuses_staging_instead_of_re_embedding():
     client = _FakeClient(
         {
             "c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(4)]),
-            f"c{em.STAGING_SUFFIX}": _Coll(384, staged),
+            f"c{em.STAGING_SUFFIX}": _Coll(384, staged, {em.MODEL_KEY: "new"}),
         }
     )
     p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
@@ -292,7 +328,7 @@ def test_explicit_migration_setting_overrides_the_provider_default(monkeypatch):
     assert em.is_enabled() is True
 
 
-def test_a_second_replica_rebuilds_nothing_while_another_holds_the_lock(monkeypatch):
+def test_a_second_replica_rebuilds_nothing_while_another_holds_the_lock(monkeypatch, _single_run_lock):
     """Replicas share one Qdrant. Two rebuilding the same collection would have
     one delete the original while the other is still reading it."""
 
@@ -351,7 +387,7 @@ def test_a_short_embedding_batch_stops_the_collection_instead_of_dropping_points
     assert len(client.colls["c"].points) == 3
 
 
-def test_losing_the_lock_mid_run_stops_before_the_next_collection(monkeypatch):
+def test_losing_the_lock_mid_run_stops_before_the_next_collection(monkeypatch, _single_run_lock):
     """A dropped connection releases the advisory lock, so another replica may
     already be working. Continuing would be the very race the lock prevents."""
     done = {"n": 0}
@@ -477,7 +513,7 @@ def test_staging_whose_original_was_already_deleted_is_restored(_holds_lock):
     assert "c" in client.colls, "the collection must be restored"
     assert len(client.colls["c"].points) == 4
     assert client.colls["c"].metadata["module"] == "knowledge_base"
-    assert f"c{em.STAGING_SUFFIX}" not in client.colls
+    assert _staging_of(client, "c") is None
 
 
 def test_restoring_an_orphan_does_not_re_embed(_holds_lock):
@@ -517,7 +553,7 @@ def test_the_lock_is_rechecked_immediately_before_the_swap():
     p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
 
     def lock_dies_once_staging_is_full():
-        staged = client.colls.get(f"c{em.STAGING_SUFFIX}")
+        staged = _staging_of(client, "c")
         return not (staged and len(staged.points) >= 3)
 
     with pytest.raises(RuntimeError, match="migration lock lost"):
@@ -528,7 +564,7 @@ def test_the_lock_is_rechecked_immediately_before_the_swap():
     assert len(client.colls["c"].points) == 3
 
 
-def test_losing_the_lock_on_the_last_collection_is_reported_as_a_stop_not_a_failure(monkeypatch):
+def test_losing_the_lock_on_the_last_collection_is_reported_as_a_stop_not_a_failure(monkeypatch, _single_run_lock):
     """The pre-loop check only runs before the *next* collection, so a lock
     lost on the final one would otherwise be recorded as a failed rebuild with
     a misleading traceback, and the stop would never be reported at all."""
@@ -537,7 +573,7 @@ def test_losing_the_lock_on_the_last_collection_is_reported_as_a_stop_not_a_fail
     @contextlib.contextmanager
     def _lock_dies_during_the_only_collection():
         def held():
-            staged = client.colls.get(f"c{em.STAGING_SUFFIX}")
+            staged = _staging_of(client, "c")
             if staged and len(staged.points) >= 2:
                 lost["yes"] = True
             return not lost["yes"]
@@ -703,7 +739,7 @@ def test_a_staging_cleanup_failure_does_not_undo_a_completed_rebuild(_holds_lock
 
     class _CleanupFails(_FakeClient):
         def delete_collection(self, name):
-            if name.endswith(em.STAGING_SUFFIX) and name in self.colls and self.colls[name].points:
+            if em._staging_source(name) and name in self.colls and self.colls[name].points:
                 raise RuntimeError("qdrant timeout on cleanup")
             return super().delete_collection(name)
 
@@ -714,3 +750,415 @@ def test_a_staging_cleanup_failure_does_not_undo_a_completed_rebuild(_holds_lock
 
     assert client.colls["c"].dim == 384, "the rebuild must stand"
     assert len(client.colls["c"].points) == 3
+
+
+# --- per-collection locking: several workers share one store ---
+
+
+def test_a_collection_another_worker_holds_is_skipped_and_the_rest_are_rebuilt(monkeypatch):
+    """Locks are per collection, so a busy collection costs the next worker
+    nothing but that collection."""
+
+    @contextlib.contextmanager
+    def _one_is_taken(name):
+        yield None if name == "a" else (lambda: True)
+
+    monkeypatch.setattr(em, "_collection_lock", _one_is_taken)
+    client = _FakeClient({"a": _Coll(3072, [_Point(1, "x")]), "b": _Coll(3072, [_Point(2, "y")])})
+    summary = em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert summary["skipped_locked"] == 1
+    assert summary["rebuilt"] == 1
+    assert client.colls["a"].dim == 3072, "a collection another worker holds must not be touched"
+    assert client.colls["b"].dim == 384
+
+
+def test_a_collection_finished_by_another_worker_after_registration_is_left_alone():
+    """Registration is a snapshot. Rebuilding a collection someone else has
+    already finished would re-embed it for nothing, and swap it while that
+    worker's searches are using it."""
+    client = _FakeClient({"c": _Coll(3072, [_Point(1, "x")])})
+    p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
+    client.colls["c"] = _stamped(384, "new", n=1)
+    client.events.clear()
+    emb = _Embeddings(384, "new")
+
+    assert em.rebuild(client, p, lambda: emb) == "already"
+    assert client.events == [] and emb.calls == 0
+
+
+def test_a_lock_lost_mid_rebuild_stops_that_collection_and_the_next_still_runs(monkeypatch):
+    """A dropped connection releases one collection's lock. That collection
+    stops before its original is touched; the others have locks of their own."""
+
+    @contextlib.contextmanager
+    def _lost_for_a(name):
+        yield (lambda: False) if name == "a" else (lambda: True)
+
+    monkeypatch.setattr(em, "_collection_lock", _lost_for_a)
+    client = _FakeClient({"a": _Coll(3072, [_Point(1, "x")]), "b": _Coll(3072, [_Point(2, "y")])})
+    summary = em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert summary["stopped_lock_lost"] == 1
+    assert summary["failed"] == 0
+    assert summary["rebuilt"] == 1
+    assert client.colls["a"].dim == 3072 and len(client.colls["a"].points) == 1
+
+
+def test_each_worker_stages_into_its_own_copy():
+    client = _FakeClient({"c": _Coll(3072, [_Point(1, "x")])})
+    p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
+    em.rebuild(client, p, lambda: _Embeddings(384, "new"), worker="w1")
+
+    created = [n for op, n in client.events if op == "create" and em._staging_source(n) == "c"]
+    assert created == [f"c{em.STAGING_SUFFIX}__w1"]
+
+
+def test_a_write_landing_during_the_rebuild_survives_the_swap(_holds_lock):
+    """Writes keep going to the original while it is re-embedded. Without the
+    catch-up pass they are dropped with the original at the swap."""
+
+    class _WriteDuringRebuild(_FakeClient):
+        written = False
+
+        def upsert(self, collection_name, points, wait=True):
+            super().upsert(collection_name, points, wait)
+            if em._staging_source(collection_name) == "c" and not self.written:
+                self.written = True
+                self.colls["c"].points.append(_Point(99, "written mid-rebuild"))
+
+    client = _WriteDuringRebuild({"c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(3)])})
+    em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert 99 in {pt.id for pt in client.colls["c"].points}
+    assert len(client.colls["c"].points) == 4
+
+
+def test_a_staging_copy_is_marked_complete_before_the_original_is_dropped():
+    client = _FakeClient({"c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(2)])})
+    p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
+    em.rebuild(client, p, lambda: _Embeddings(384, "new"))
+
+    marked = next(i for i, (op, n) in enumerate(client.events) if op == "update" and em._staging_source(n) == "c")
+    assert marked < client.events.index(("delete", "c"))
+
+
+def test_an_orphan_is_never_restored_from_a_copy_not_known_complete(_holds_lock):
+    """A worker that lost its lock can leave a partial copy of its own. Once
+    the original is gone, restoring from that copy would make the loss
+    permanent; only a copy marked complete may stand in for it."""
+    partial = f"c{em.STAGING_SUFFIX}__stale"
+    client = _FakeClient({partial: _Coll(384, [_Point(1, "x", vector=[0.1] * 384)], {em.MODEL_KEY: "m"})})
+
+    assert em.register(client, lambda _a: _Embeddings(384, "m")) == []
+    assert partial in client.colls, "the partial copy is all that is left; it must not be dropped"
+
+
+def test_an_orphan_is_restored_from_a_copy_marked_complete(_holds_lock):
+    done = f"c{em.STAGING_SUFFIX}__w1"
+    client = _FakeClient(
+        {
+            done: _Coll(
+                384,
+                [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(3)],
+                {em.MODEL_KEY: "m", em.COMPLETE_KEY: 3},
+            ),
+            f"c{em.STAGING_SUFFIX}__stale": _Coll(384, [_Point(0, "doc 0", vector=[0.1] * 384)], {em.MODEL_KEY: "m"}),
+        }
+    )
+    summary = em.run(client, lambda _a: _Embeddings(384, "m"))
+
+    assert summary["rebuilt"] == 1
+    assert len(client.colls["c"].points) == 3
+    assert em.COMPLETE_KEY not in client.colls["c"].metadata
+    assert _staging_of(client, "c") is None, "every copy is cleaned up once the collection is whole"
+
+
+def test_shared_collections_are_rebuilt_before_per_account_ones_then_smallest_first():
+    acct = "44444444-4444-4444-4444-444444444444"
+    client = _FakeClient(
+        {
+            f"{acct}_big": _Coll(3072, [_Point(i, "x") for i in range(5)]),
+            f"{acct}_small": _Coll(3072, [_Point(1, "x")]),
+            "nudgebee_docs": _Coll(3072, [_Point(i, "x") for i in range(9)]),
+        }
+    )
+    pending = em.register(client, lambda _a: _Embeddings(384, "new"))
+    assert [p.name for p in pending] == ["nudgebee_docs", f"{acct}_small", f"{acct}_big"]
+
+
+def test_collection_lock_keys_are_stable_and_distinct():
+    """Every worker must ask Postgres for the same key for the same collection;
+    Python's own str hash is salted per process and would not be."""
+    assert em._collection_lock_key("nudgebee_docs") == em._collection_lock_key("nudgebee_docs")
+    assert em._collection_lock_key("a") != em._collection_lock_key("b")
+    assert em._collection_lock_key("a") != em.LOCK_KEY
+    assert 0 < em._collection_lock_key("a") < 2**63
+
+
+def test_a_narrowed_run_does_not_look_up_collections_outside_it(_holds_lock):
+    """A worker pointed at a few collections must not resolve every account's
+    model across the whole store before starting."""
+    acct = "55555555-5555-5555-5555-555555555555"
+    client = _FakeClient({"wanted": _Coll(3072, [_Point(1, "x")]), f"{acct}_other": _Coll(3072, [_Point(2, "y")])})
+    asked = []
+
+    def embeddings_for(account):
+        asked.append(account)
+        return _Embeddings(384, "new")
+
+    summary = em.run(client, embeddings_for, lambda name: name == "wanted")
+
+    assert summary["rebuilt"] == 1
+    assert acct not in asked
+    assert client.colls[f"{acct}_other"].dim == 3072
+
+
+def test_writes_that_keep_arriving_right_up_to_the_swap_all_survive(_holds_lock):
+    """One catch-up pass leaves a gap between its end and the delete; in a
+    live run against dev three of forty writes fell into it."""
+
+    class _Busy(_FakeClient):
+        writes = 0
+
+        def get_collection(self, name):
+            if name == "c" and self.writes < 6 and any(em._staging_source(n) == "c" for n in self.colls):
+                self.writes += 1
+                self.colls["c"].points.append(_Point(1000 + self.writes, f"late write {self.writes}"))
+            return super().get_collection(name)
+
+    client = _Busy({"c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(3)])})
+    em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert len(client.colls["c"].points) == 3 + client.writes
+    assert client.writes == 6
+
+
+def test_repeated_text_in_a_collection_is_embedded_once():
+    """Prod recommendation collections hold about five copies of each text;
+    paying for every copy is most of the cost of rebuilding them."""
+    pts = [_Point(i, f"doc {i % 3}") for i in range(12)]
+    client = _FakeClient({"c": _Coll(3072, pts)})
+    p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
+    emb = _Embeddings(384, "new")
+    em.rebuild(client, p, lambda: emb)
+
+    assert emb.calls == 3
+    assert len(client.colls["c"].points) == 12, "every point keeps its own entry"
+
+
+def test_a_complete_copy_wins_over_a_stale_partial_one_after_a_crash_mid_copy_back(_holds_lock):
+    """A crash during copy-back leaves the original half restored, so its count
+    proves nothing; a stale worker's partial copy must not stand in for the
+    complete one, which would then be deleted as a leftover."""
+    client = _FakeClient(
+        {
+            "c": _Coll(384, [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(2)], {em.MODEL_KEY: "new"}),
+            f"c{em.STAGING_SUFFIX}__zombie": _Coll(
+                384, [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(3)], {em.MODEL_KEY: "new"}
+            ),
+            f"c{em.STAGING_SUFFIX}__a": _Coll(
+                384,
+                [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(6)],
+                {em.MODEL_KEY: "new", em.COMPLETE_KEY: 6},
+            ),
+        }
+    )
+    em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert len(client.colls["c"].points) == 6
+    assert _staging_of(client, "c") is None
+
+
+def test_a_half_restored_collection_from_the_previous_version_is_finished_from_its_copy(_holds_lock):
+    """The previous version names its copy without a worker suffix and never
+    marks it, but only dropped the original once that copy was full."""
+    client = _FakeClient(
+        {
+            "c": _Coll(384, [_Point(1, "doc 1", vector=[0.1] * 384)], {em.MODEL_KEY: "new"}),
+            f"c{em.STAGING_SUFFIX}": _Coll(
+                384, [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(4)], {em.MODEL_KEY: "new"}
+            ),
+        }
+    )
+    emb = _Embeddings(384, "new")
+    p = em.register(client, lambda _a: emb)[0]
+    em.rebuild(client, p, lambda: emb)
+
+    assert len(client.colls["c"].points) == 4
+    assert emb.calls == 0
+
+
+def test_a_half_restored_collection_with_no_known_complete_copy_is_left_alone(_holds_lock):
+    """Rebuilding from the half-restored original would make the loss permanent;
+    better to stop and leave every copy for a person to look at."""
+    partial = f"c{em.STAGING_SUFFIX}__zombie"
+    client = _FakeClient(
+        {
+            "c": _Coll(384, [_Point(1, "doc 1", vector=[0.1] * 384)], {em.MODEL_KEY: "new"}),
+            partial: _Coll(384, [_Point(i, f"doc {i}", vector=[0.1] * 384) for i in range(2)]),
+        }
+    )
+    summary = em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert summary["failed"] == 1
+    assert partial in client.colls and "c" in client.colls
+
+
+def test_nothing_runs_while_a_worker_of_the_previous_version_holds_the_migration_lock(monkeypatch):
+    """The previous version takes the migration-wide lock exclusively and knows
+    nothing of per-collection locks; during a rollout both may be alive."""
+
+    @contextlib.contextmanager
+    def _held_by_older_worker():
+        yield None
+
+    monkeypatch.setattr(em, "_shared_run_lock", _held_by_older_worker)
+    client = _FakeClient({"c": _Coll(3072, [_Point(1, "x")])})
+
+    with pytest.raises(RuntimeError, match="older migration worker"):
+        em.run(client, lambda _a: _Embeddings(384, "new"))
+    assert client.events == []
+
+
+def test_the_text_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(em, "EMBED_CACHE_MAX", 4)
+    cache = {}
+    emb = _Embeddings(384, "new")
+    for i in range(5):
+        em._embed_unique(emb, [f"t{i}-{j}" for j in range(3)], cache, "c")
+    assert len(cache) <= 4
+    assert "t4-2" in cache, "the most recent text stays cached"
+
+
+def test_writes_that_never_pause_do_not_hold_the_swap_off_forever(_holds_lock, monkeypatch):
+    monkeypatch.setattr(em, "DRAIN_MAX_PASSES", 3)
+
+    class _Firehose(_FakeClient):
+        n = 0
+
+        def get_collection(self, name):
+            if name == "c" and any(em._staging_source(k) == "c" for k in self.colls):
+                self.n += 1
+                self.colls["c"].points.append(_Point(5000 + self.n, f"write {self.n}"))
+            return super().get_collection(name)
+
+    client = _Firehose({"c": _Coll(3072, [_Point(1, "x")])})
+    summary = em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert summary["rebuilt"] == 1
+    assert client.colls["c"].dim == 384
+
+
+def test_the_staging_name_follows_the_process_that_builds_it(monkeypatch):
+    """A pre-forking server imports the module once and forks; a worker id
+    fixed at import would give every child the parent's pid and one shared
+    staging name."""
+    monkeypatch.setattr(em.os, "getpid", lambda: 4242)
+    client = _FakeClient({"c": _Coll(3072, [_Point(1, "x")])})
+    p = em.register(client, lambda _a: _Embeddings(384, "new"))[0]
+    em.rebuild(client, p, lambda: _Embeddings(384, "new"))
+
+    created = [n for op, n in client.events if op == "create" and em._staging_source(n) == "c"]
+    assert len(created) == 1 and created[0].endswith("-4242")
+
+
+def test_catch_up_passes_read_ids_not_payloads(_holds_lock):
+    """Nearly every point is already staged by then; reading every payload of
+    a large collection on each drain pass is the expensive part."""
+
+    class _Recording(_FakeClient):
+        def scroll(self, collection_name, limit, offset=None, with_payload=True, with_vectors=False):
+            self.events.append(("scroll", collection_name, with_payload))
+            return super().scroll(collection_name, limit, offset, with_payload, with_vectors)
+
+    client = _Recording({"c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(5)])})
+    em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    marked = next(i for i, e in enumerate(client.events) if e[0] == "update")
+    after = [e for e in client.events[marked:] if e[0] == "scroll" and e[1] == "c"]
+    assert after, "the drain runs after the copy is marked complete"
+    assert all(e[2] is False for e in after)
+
+
+def test_a_complete_copy_built_for_another_model_is_not_reused(_holds_lock):
+    """A crashed run toward another model (the model switched again, or an
+    account's embeddings integration changed) can leave a complete copy behind.
+    Swapping it in would stamp old vectors with the new model: wrong vectors,
+    no error."""
+    stale = f"c{em.STAGING_SUFFIX}__old"
+    client = _FakeClient(
+        {
+            "c": _Coll(3072, [_Point(i, f"doc {i}") for i in range(3)]),
+            stale: _Coll(
+                384,
+                [_Point(i, f"doc {i}", vector=[0.9] * 384) for i in range(3)],
+                {em.MODEL_KEY: "older", em.COMPLETE_KEY: 3},
+            ),
+        }
+    )
+    emb = _Embeddings(384, "new")
+    summary = em.run(client, lambda _a: emb)
+
+    assert summary["rebuilt"] == 1
+    assert emb.calls == 3, "the collection is re-embedded with this model, not copied from the stale one"
+    assert all(pt.vector == [0.1] * 384 for pt in client.colls["c"].points)
+    assert _staging_of(client, "c") is None
+
+
+def test_a_complete_copy_at_another_dimension_is_not_reused(_holds_lock):
+    client = _FakeClient(
+        {
+            "c": _Coll(3072, [_Point(1, "x")]),
+            f"c{em.STAGING_SUFFIX}__old": _Coll(
+                768, [_Point(1, "x", vector=[0.9] * 768)], {em.MODEL_KEY: "new", em.COMPLETE_KEY: 1}
+            ),
+        }
+    )
+    em.run(client, lambda _a: _Embeddings(384, "new"))
+    assert client.colls["c"].dim == 384 and len(client.colls["c"].points) == 1
+
+
+def test_losing_the_shared_lock_stops_the_run(monkeypatch):
+    """If the shared migration lock's connection drops, a worker of the previous
+    version can take it exclusively and rebuild with no per-collection locks."""
+
+    @contextlib.contextmanager
+    def _shared_then_lost():
+        yield lambda: False
+
+    monkeypatch.setattr(em, "_shared_run_lock", _shared_then_lost)
+
+    @contextlib.contextmanager
+    def _granted(_name):
+        yield lambda: True
+
+    monkeypatch.setattr(em, "_collection_lock", _granted)
+    client = _FakeClient({"c": _Coll(3072, [_Point(1, "x")])})
+    summary = em.run(client, lambda _a: _Embeddings(384, "new"))
+
+    assert summary["rebuilt"] == 0
+    assert summary["stopped_lock_lost"] == 1
+    assert client.colls["c"].dim == 3072
+
+
+def test_the_shared_lock_is_checked_with_every_collection_lock_check(monkeypatch):
+    checks = {"shared": 0}
+
+    @contextlib.contextmanager
+    def _counting_shared():
+        def held():
+            checks["shared"] += 1
+            return True
+
+        yield held
+
+    monkeypatch.setattr(em, "_shared_run_lock", _counting_shared)
+
+    @contextlib.contextmanager
+    def _granted(_name):
+        yield lambda: True
+
+    monkeypatch.setattr(em, "_collection_lock", _granted)
+    em.run(_FakeClient({"c": _Coll(3072, [_Point(i, "x") for i in range(3)])}), lambda _a: _Embeddings(384, "new"))
+    assert checks["shared"] > 2, "checked before the collection and at every lock check inside the rebuild"

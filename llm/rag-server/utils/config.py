@@ -176,6 +176,10 @@ class Config:
     _dimensions = os.environ.get("EMBEDDINGS_DIMENSIONS")
     embeddings_dimensions: int | None = int(_dimensions) if _dimensions else None
 
+    embedding_migration_per_collection_lock = (
+        os.environ.get("RAG_EMBEDDING_MIGRATION_PER_COLLECTION_LOCK", "true").strip().lower() == "true"
+    )
+
     # LLM
     # openai | aws_bedrock | sagemaker | azure | ollama | huggingface
     llm_provider = os.environ.get("LLM_PROVIDER_SUMMARY_AGENT") or os.environ.get("LLM_PROVIDER") or "bedrock"

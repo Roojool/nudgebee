@@ -29,6 +29,11 @@ Resumable and idempotent: a collection already stamped with the target model is
 skipped, and a complete staging collection from an interrupted run is reused
 rather than re-embedded, so a crash costs the collection in flight at worst.
 
+Concurrency: each collection has its own Postgres advisory lock, so any number of
+workers -- server replicas, or ``python -m rag.core.documents.embedding_migration``
+-- share the job. Each worker stages into a copy of its own, a copy is marked
+complete before the swap, and only a complete copy may replace a missing source.
+
 Gated behind ``RAG_EMBEDDING_MIGRATION_ENABLED``. It defaults ON only for the
 on-device provider, which is also the default provider: an install that
 inherits it has vectors from some other model, and for those the rewrite is
@@ -37,9 +42,13 @@ against known data and keeps the opt-in, because this rewrites every
 collection.
 """
 
+import argparse
 import contextlib
+import hashlib
 import logging
 import os
+import re
+import socket
 import threading
 import time
 import uuid
@@ -65,6 +74,9 @@ class MigrationUnavailable(RuntimeError):
 
 # Collection-metadata key holding the model that produced the vectors.
 MODEL_KEY = "embedding_model"
+# Set on a staging collection once it holds every point of its source. Only a
+# staging marked complete may stand in for a source that no longer exists.
+COMPLETE_KEY = "embmig_complete"
 
 # Collections that keep their payloads behind a fixed placeholder vector rather than
 # embeddings. Rebuilt at the embedder's dimension they can no longer be written to, and
@@ -81,7 +93,15 @@ PLACEHOLDER_MODULES = {SOURCE_MODULE, FIGURE_MODULE}
 # retag migration hit intermittent ReadTimeouts at 128 points per upsert.
 SCROLL_BATCH = 64
 EMBED_BATCH = 32
+EMBED_CACHE_MAX = 5000
+DRAIN_MAX_PASSES = 20
 STAGING_SUFFIX = "__embmig"
+
+
+def _worker_id() -> str:
+    raw = f"{socket.gethostname()}-{os.getpid()}".lower()
+    return re.sub(r"[^a-z0-9-]", "-", raw)[-48:]
+
 
 # Background retry. A rebuild that never runs is not a no-op: with the provider
 # already switched, queries land in the new space while the stored vectors are
@@ -95,10 +115,10 @@ RETRY_MAX_DELAY_SECONDS = 900
 # same one. Advisory locks are session-scoped, so a pod that dies mid-rebuild
 # releases it automatically rather than wedging every future deploy.
 LOCK_KEY = 8412771
-# pg_locks splits a bigint advisory key across (classid, objid); objsubid is 1
-# for the single-argument form of pg_try_advisory_lock.
-_LOCK_CLASSID = LOCK_KEY >> 32
-_LOCK_OBJID = LOCK_KEY & 0xFFFFFFFF
+# pg_locks splits a bigint advisory key across (classid = key >> 32,
+# objid = key & 0xFFFFFFFF); objsubid is 1 for the single-argument form of
+# pg_try_advisory_lock. Both columns are type oid (unsigned 32-bit), so the
+# unsigned values are what match; no sign conversion is needed.
 
 # Asking Postgres whether *this* backend still holds the lock. A bare SELECT 1
 # only proves the connection answers: SQLAlchemy can hand back a transparently
@@ -119,6 +139,39 @@ SELECT EXISTS (
 
 @contextlib.contextmanager
 def _exclusive_run() -> Iterator[Optional[Callable[[], bool]]]:
+    """The single migration-wide lock, used when per-collection locking is off."""
+    with _advisory_lock(LOCK_KEY, "the migration") as still_held:
+        yield still_held
+
+
+@contextlib.contextmanager
+def _shared_run_lock() -> Iterator[Optional[Callable[[], bool]]]:
+    """The migration-wide lock in shared mode: compatible with other workers of
+    this version, exclusive of a worker of the previous one."""
+    with _advisory_lock(LOCK_KEY, "the migration (an older worker is running)", shared=True) as held:
+        yield held
+
+
+def _collection_lock_key(name: str) -> int:
+    """A bigint advisory-lock key for one collection, stable across processes.
+
+    hashlib, not hash(): Python salts str hashes per process, and every worker
+    must ask for the same key for the same collection.
+    """
+    digest = hashlib.blake2b(f"embmig:{name}".encode(), digest_size=8).digest()
+    key = int.from_bytes(digest, "big") & 0x7FFFFFFFFFFFFFFF
+    return key if key != LOCK_KEY else key ^ 1
+
+
+@contextlib.contextmanager
+def _collection_lock(name: str) -> Iterator[Optional[Callable[[], bool]]]:
+    """Yield a liveness check if this worker now owns ``name``, else None."""
+    with _advisory_lock(_collection_lock_key(name), name) as still_held:
+        yield still_held
+
+
+@contextlib.contextmanager
+def _advisory_lock(key: int, what: str, shared: bool = False) -> Iterator[Optional[Callable[[], bool]]]:
     """Yield a liveness check to exactly one replica at a time, else None.
 
     Every pod runs this at startup, and they share one Qdrant. Two pods
@@ -156,9 +209,10 @@ def _exclusive_run() -> Iterator[Optional[Callable[[], bool]]]:
         # idle_in_transaction_session_timeout and most proxies kill first.
         # Advisory locks are session-scoped, so they outlive the statement.
         conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
-        acquired = bool(conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_KEY}).scalar())
+        take = "pg_try_advisory_lock_shared" if shared else "pg_try_advisory_lock"
+        acquired = bool(conn.execute(text(f"SELECT {take}(:k)"), {"k": key}).scalar())
         if not acquired:
-            logger.info("embedding_migration: another replica holds the migration lock, skipping this run")
+            logger.info("embedding_migration: another worker holds the lock for %s, skipping it", what)
     except Exception as exc:
         # Deliberately not swallowed: the caller has to be able to tell a
         # database failure from a healthy skip so it can retry.
@@ -169,7 +223,7 @@ def _exclusive_run() -> Iterator[Optional[Callable[[], bool]]]:
 
     def still_held() -> bool:
         try:
-            held = bool(conn.execute(text(_STILL_HELD_SQL), {"classid": _LOCK_CLASSID, "objid": _LOCK_OBJID}).scalar())
+            held = bool(conn.execute(text(_STILL_HELD_SQL), {"classid": key >> 32, "objid": key & 0xFFFFFFFF}).scalar())
             if not held:
                 logger.warning("embedding_migration: the advisory lock is no longer held by this session")
             return held
@@ -183,7 +237,8 @@ def _exclusive_run() -> Iterator[Optional[Callable[[], bool]]]:
         if conn is not None:
             if acquired:
                 with contextlib.suppress(Exception):
-                    conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_KEY})
+                    release = "pg_advisory_unlock_shared" if shared else "pg_advisory_unlock"
+                    conn.execute(text(f"SELECT {release}(:k)"), {"k": key})
             with contextlib.suppress(Exception):
                 conn.close()
 
@@ -201,6 +256,7 @@ class Pending(NamedTuple):
     # module/account/tenant_id, which decide which searches reach this
     # collection at all -- recreating without them makes the data invisible.
     metadata: Dict[str, Any]
+    points: int = 0
 
 
 def is_enabled() -> bool:
@@ -283,12 +339,28 @@ def _describe(client: QdrantClient, name: str) -> Optional[Tuple[int, Distance, 
     return params.size, params.distance, metadata, info.points_count or 0
 
 
-def _survey(client: QdrantClient) -> Tuple[List[Any], set, set]:
+def _staging_source(name: str) -> Optional[str]:
+    """The collection a staging collection is rebuilding, or None if not staging.
+
+    ``<src>__embmig`` is the single-worker name earlier versions used;
+    ``<src>__embmig__<worker>`` is one worker's copy.
+    """
+    idx = name.find(STAGING_SUFFIX)
+    return name[:idx] if idx > 0 else None
+
+
+def _survey(client: QdrantClient, only: Optional[Callable[[str], bool]] = None) -> Tuple[List[Any], set, set]:
     """Collections, the active names, and the sources with leftover staging."""
     cols = list(client.get_collections().collections)
-    active = {c.name for c in cols if not c.name.endswith(STAGING_SUFFIX)}
-    interrupted = {c.name[: -len(STAGING_SUFFIX)] for c in cols if c.name.endswith(STAGING_SUFFIX)}
+    if only is not None:
+        cols = [c for c in cols if only(_staging_source(c.name) or c.name)]
+    active = {c.name for c in cols if _staging_source(c.name) is None}
+    interrupted = {src for c in cols if (src := _staging_source(c.name)) is not None}
     return cols, active, interrupted
+
+
+def _stagings_for(client: QdrantClient, src: str) -> List[str]:
+    return [c.name for c in client.get_collections().collections if _staging_source(c.name) == src]
 
 
 def _target_for(
@@ -321,20 +393,42 @@ def _orphan_pending(client: QdrantClient, src: str) -> Optional[Pending]:
     The run died between dropping the original and recreating it, so staging
     holds the only copy of that data. Its own config describes what to restore.
     """
-    described = _describe(client, f"{src}{STAGING_SUFFIX}")
+    staging = _restorable_staging(client, src)
+    if staging is None:
+        logger.warning("embedding_migration: %s exists only as staging, and none of it is known complete", src)
+        return None
+    described = _describe(client, staging)
     if described is None:
         return None
-    dim, distance, metadata, _points = described
-    return Pending(src, _account_of(src), "interrupted", str(metadata.get(MODEL_KEY) or ""), dim, distance, metadata)
+    dim, distance, metadata, points = described
+    metadata = {k: v for k, v in metadata.items() if k != COMPLETE_KEY}
+    return Pending(
+        src,
+        _account_of(src),
+        "interrupted",
+        str(metadata.get(MODEL_KEY) or ""),
+        dim,
+        distance,
+        metadata,
+        points,
+    )
 
 
-def register(client: QdrantClient, embeddings_for: Callable[[str], Any]) -> List[Pending]:
-    """Decide what needs rebuilding. Reads metadata only — no embedding work."""
+def register(
+    client: QdrantClient,
+    embeddings_for: Callable[[str], Any],
+    only: Optional[Callable[[str], bool]] = None,
+) -> List[Pending]:
+    """Decide what needs rebuilding. Reads metadata only — no embedding work.
+
+    ``only`` limits the run to matching collection names. It is applied before
+    anything is looked up, so a narrow run does not pay for the whole store.
+    """
     pending: List[Pending] = []
     resolved: Dict[str, Optional[Tuple[str, int]]] = {}
     unstamped = 0
 
-    cols, active, interrupted = _survey(client)
+    cols, active, interrupted = _survey(client, only)
     # Staging left behind means a rebuild did not finish. Its source is rebuilt
     # again whatever its stamp says, because the crash may have come after the
     # new collection was created and stamped but before every point reached it.
@@ -352,13 +446,13 @@ def register(client: QdrantClient, embeddings_for: Callable[[str], Any]) -> List
 
     for c in cols:
         name = c.name
-        if name.endswith(STAGING_SUFFIX):
+        if _staging_source(name) is not None:
             continue
         try:
             described = _describe(client, name)
             if described is None:
                 continue
-            dim, distance, metadata, _points = described
+            dim, distance, metadata, points = described
             account = _account_of(name)
             target = _target_for(account, embeddings_for, resolved)
             if target is None:
@@ -380,7 +474,16 @@ def register(client: QdrantClient, embeddings_for: Callable[[str], Any]) -> List
                 unstamped += 1
                 continue
             pending.append(
-                Pending(name, account, stored_model or "unstamped", target_model, target_dim, distance, metadata)
+                Pending(
+                    name,
+                    account,
+                    stored_model or "unstamped",
+                    target_model,
+                    target_dim,
+                    distance,
+                    metadata,
+                    points,
+                )
             )
         except Exception as exc:
             logger.exception("embedding_migration: could not inspect %s (%s)", name, exc)
@@ -399,6 +502,9 @@ def register(client: QdrantClient, embeddings_for: Callable[[str], Any]) -> List
             "expected dimension; treating them as current",
             unstamped,
         )
+    # Shared collections first: every account's searches reach them. Then the
+    # smallest, so the most collections come back soonest.
+    pending.sort(key=lambda p: (p.account != "", p.points, p.name))
     return pending
 
 
@@ -412,6 +518,33 @@ def _still_mine(still_held: Callable[[], bool], what: str) -> None:
     """
     if not still_held():
         raise RuntimeError(f"migration lock lost during {what}; stopping before touching more data")
+
+
+def _embed_unique(embeddings: Any, texts: List[str], cache: Dict[str, List[float]], source: str) -> List[List[float]]:
+    """Vectors for ``texts``, embedding each distinct text once per collection.
+
+    Some collections hold the same text many times over (recommendation
+    collections in prod: ~5 copies of each), and re-embedding every copy is
+    most of the cost of rebuilding them.
+    """
+    missing = list(dict.fromkeys(t for t in texts if t not in cache))
+    for i in range(0, len(missing), EMBED_BATCH):
+        chunk = missing[i : i + EMBED_BATCH]
+        vectors = embeddings.embed_documents(chunk)
+        if len(vectors) != len(chunk):
+            # zip() would silently truncate or pair payloads with the wrong
+            # vectors, and the original collection is deleted once staging
+            # looks complete -- so a short batch has to stop this collection,
+            # not quietly shrink it.
+            raise RuntimeError(f"embedding returned {len(vectors)} vectors for {len(chunk)} documents in {source}")
+        cache.update(zip(chunk, vectors))
+    result = [cache[t] for t in texts]
+    # Each cached vector is a few KB of Python floats; an unbounded cache on a
+    # large collection would exhaust the pod. Oldest go first (dicts keep
+    # insertion order), so recently seen text stays cached.
+    while len(cache) > EMBED_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+    return result
 
 
 def _rebuild_into(
@@ -432,9 +565,10 @@ def _rebuild_into(
     client.create_collection(
         target,
         vectors_config=VectorParams(size=p.target_dim, distance=p.distance),
-        metadata={**p.metadata, MODEL_KEY: p.target_model},
+        metadata=_final_metadata(p),
     )
     moved, offset = 0, None
+    cache: Dict[str, List[float]] = {}
     while True:
         _still_mine(still_held, f"re-embedding {source}")
         points, offset = client.scroll(
@@ -453,21 +587,14 @@ def _rebuild_into(
                 source,
                 len(points) - len(usable),
             )
-        for i in range(0, len(usable), EMBED_BATCH):
-            chunk = usable[i : i + EMBED_BATCH]
-            vectors = embeddings.embed_documents([_text_of(pt.payload) for pt in chunk])
-            if len(vectors) != len(chunk):
-                # zip() would silently truncate or pair payloads with the wrong
-                # vectors, and the original collection is deleted once staging
-                # looks complete -- so a short batch has to stop this
-                # collection, not quietly shrink it.
-                raise RuntimeError(f"embedding returned {len(vectors)} vectors for {len(chunk)} documents in {source}")
+        if usable:
+            vectors = _embed_unique(embeddings, [_text_of(pt.payload) for pt in usable], cache, source)
             client.upsert(
                 collection_name=target,
-                points=[PointStruct(id=pt.id, vector=v, payload=pt.payload) for pt, v in zip(chunk, vectors)],
+                points=[PointStruct(id=pt.id, vector=v, payload=pt.payload) for pt, v in zip(usable, vectors)],
                 wait=True,
             )
-            moved += len(chunk)
+            moved += len(usable)
         if offset is None:
             break
     return moved
@@ -494,66 +621,239 @@ def _copy_vectors(client: QdrantClient, source: str, target: str, still_held: Ca
     return copied
 
 
+def _final_metadata(p: Pending) -> Dict[str, Any]:
+    metadata = {k: v for k, v in p.metadata.items() if k != COMPLETE_KEY}
+    metadata[MODEL_KEY] = p.target_model
+    return metadata
+
+
+def _staging_state(client: QdrantClient, name: str) -> Optional[Tuple[int, bool, str, Optional[int]]]:
+    """(points, marked complete, model, dimension) for a staging collection, or None."""
+    try:
+        info = client.get_collection(name)
+    except Exception:
+        return None
+    metadata = getattr(info.config, "metadata", None) or {}
+    dim = getattr(info.config.params.vectors, "size", None)
+    return info.points_count or 0, metadata.get(COMPLETE_KEY) is not None, str(metadata.get(MODEL_KEY) or ""), dim
+
+
+def _reusable_staging(client: QdrantClient, p: Pending, expected: int, source_is_partial: bool) -> Optional[str]:
+    """A staging copy of ``p.name`` that already holds every point, if any.
+
+    Only a copy built for this target qualifies -- same model, same dimension.
+    One left by a crashed run toward another model would otherwise be swapped in
+    and stamped with this one: wrong vectors, no error.
+
+    A copy marked complete wins, the fullest first. When the source is itself a
+    partial result -- a crash mid copy-back -- its point count proves nothing,
+    so an unmarked copy is accepted only under the single-worker name earlier
+    versions used: they dropped the original only once that copy was full.
+    Otherwise an unmarked copy qualifies by holding at least as many points as
+    the source.
+    """
+    src = p.name
+    marked: List[Tuple[int, str]] = []
+    unmarked: List[Tuple[int, str]] = []
+    for name in _stagings_for(client, src):
+        state = _staging_state(client, name)
+        if state is None or state[2] != p.target_model or state[3] != p.target_dim:
+            continue
+        (marked if state[1] else unmarked).append((state[0], name))
+    if marked:
+        return max(marked)[1]
+    if source_is_partial:
+        legacy = [c for c in unmarked if c[1] == f"{src}{STAGING_SUFFIX}"]
+        return max(legacy)[1] if legacy else None
+    if expected > 0:
+        fits = [c for c in unmarked if c[0] >= expected]
+        if fits:
+            return max(fits)[1]
+    return None
+
+
+def _restorable_staging(client: QdrantClient, src: str) -> Optional[str]:
+    """The staging copy to restore ``src`` from once the original is gone.
+
+    Only a copy marked complete qualifies: a worker that lost its lock can leave
+    a partial copy of its own behind. The single-worker name earlier versions
+    used is accepted as well -- they dropped the original only after staging
+    was full.
+    """
+    best: Optional[Tuple[str, int]] = None
+    for name in _stagings_for(client, src):
+        state = _staging_state(client, name)
+        if state is None or not (state[1] or name == f"{src}{STAGING_SUFFIX}"):
+            continue
+        if best is None or state[0] > best[1]:
+            best = (name, state[0])
+    return best[0] if best else None
+
+
+def _catch_up(
+    client: QdrantClient,
+    source: str,
+    staging: str,
+    load_embeddings: Callable[[], Any],
+    still_held: Callable[[], bool],
+) -> int:
+    """Re-embed points written to ``source`` after staging had read past them.
+
+    Writes keep landing in the source while it is being rebuilt. Without this
+    pass they would be dropped with the source at the swap.
+    """
+    added, offset, embeddings = 0, None, None
+    cache: Dict[str, List[float]] = {}
+    while True:
+        _still_mine(still_held, f"catching up {source}")
+        # Ids only: nearly every point is already staged, and payloads are what
+        # makes a pass over a large collection expensive.
+        points, offset = client.scroll(
+            collection_name=source, limit=SCROLL_BATCH, offset=offset, with_payload=False, with_vectors=False
+        )
+        if not points:
+            break
+        have = {
+            r.id
+            for r in client.retrieve(
+                collection_name=staging, ids=[pt.id for pt in points], with_payload=False, with_vectors=False
+            )
+        }
+        missing_ids = [pt.id for pt in points if pt.id not in have]
+        missing = []
+        if missing_ids:
+            fetched = client.retrieve(collection_name=source, ids=missing_ids, with_payload=True, with_vectors=False)
+            missing = [pt for pt in fetched if _text_of(pt.payload).strip()]
+        if missing:
+            embeddings = embeddings or load_embeddings()
+            vectors = _embed_unique(embeddings, [_text_of(pt.payload) for pt in missing], cache, source)
+            client.upsert(
+                collection_name=staging,
+                points=[PointStruct(id=pt.id, vector=v, payload=pt.payload) for pt, v in zip(missing, vectors)],
+                wait=True,
+            )
+            added += len(missing)
+        if offset is None:
+            break
+    if added:
+        logger.info("embedding_migration: caught up %d point(s) written to %s during its rebuild", added, source)
+    return added
+
+
+def _drain(
+    client: QdrantClient,
+    source: str,
+    staging: str,
+    load_embeddings: Callable[[], Any],
+    still_held: Callable[[], bool],
+) -> None:
+    """Catch up until a pass finds nothing new, then return for an immediate swap.
+
+    One pass is not enough while writes keep arriving: a point written behind
+    the scroll position, or after the pass ends, is dropped with the source.
+    The point count is compared as well, because new ids are random and land
+    anywhere in scroll order. What remains is the moment between the last count
+    and the delete.
+    """
+    for _ in range(DRAIN_MAX_PASSES):
+        before = client.get_collection(source).points_count or 0
+        added = _catch_up(client, source, staging, load_embeddings, still_held)
+        if not added and (client.get_collection(source).points_count or 0) == before:
+            return
+    # Writes that never pause would hold the swap off forever. Each pass just
+    # caught up, so swapping now leaves the same window a quiet finish does.
+    logger.warning(
+        "embedding_migration: writes to %s kept arriving through %d catch-up passes; swapping now",
+        source,
+        DRAIN_MAX_PASSES,
+    )
+
+
 def rebuild(
     client: QdrantClient,
     p: Pending,
     load_embeddings: Callable[[], Any],
     still_held: Callable[[], bool] = lambda: True,
+    worker: Optional[str] = None,
 ) -> str:
     """Rebuild one registered collection. Returns a status word.
 
-    ``load_embeddings`` is a factory, not a model, and is only called when
-    something actually has to be re-embedded. Restoring an orphan or resuming
-    from complete staging needs no embeddings at all -- and those are exactly
-    the recovery paths that should still work while the provider is down.
+    The caller holds this collection's lock. ``load_embeddings`` is a factory,
+    only called when something actually has to be re-embedded: restoring an
+    orphan or resuming complete staging needs no embeddings at all, and those
+    are the recovery paths that should still work while the provider is down.
     """
-    staging = f"{p.name}{STAGING_SUFFIX}"
     try:
-        expected = client.get_collection(p.name).points_count or 0
+        info = client.get_collection(p.name)
+        source_exists = True
+        expected = info.points_count or 0
+        stored = str((getattr(info.config, "metadata", None) or {}).get(MODEL_KEY) or "")
     except Exception:
-        # Restoring an orphan: the original was already dropped, so staging is
-        # the only copy and there is nothing to compare against.
-        expected = 0
+        # Restoring an orphan: the original was already dropped.
+        source_exists, expected, stored = False, 0, ""
 
-    reuse = False
-    try:
-        staged = client.get_collection(staging).points_count or 0
-        reuse = expected == 0 or staged >= expected
-    except Exception:
-        reuse = False
+    if source_exists and stored == p.target_model and not _stagings_for(client, p.name):
+        # Registration is a snapshot; another worker finished this one since.
+        logger.info("embedding_migration: %s is already on %s, skipping", p.name, p.target_model)
+        return "already"
 
-    if reuse:
-        logger.info("embedding_migration: reusing staged rebuild for %s", p.name)
+    if source_exists:
+        # Stamped with the target but still carrying staging: a crash during the
+        # copy-back left it half restored.
+        partial = stored == p.target_model
+        staging = _reusable_staging(client, p, expected, source_is_partial=partial)
+        if staging is None and partial:
+            # Rebuilding from a half-restored source would make the loss permanent.
+            raise RuntimeError(f"{p.name} was left half restored and no staging copy of it is known complete")
     else:
+        staging = _restorable_staging(client, p.name)
+        if staging is None:
+            raise RuntimeError(f"{p.name} is gone and no staging copy of it is known complete")
+
+    if staging is not None:
+        logger.info("embedding_migration: reusing staged rebuild %s for %s", staging, p.name)
+    else:
+        # Each worker stages into a copy of its own, so a worker that has lost its
+        # lock without knowing it can only ever touch its own copy. Resolved per
+        # call, not at import: a pre-forking server would hand every child the
+        # parent's pid.
+        staging = f"{p.name}{STAGING_SUFFIX}__{worker or _worker_id()}"
         moved = _rebuild_into(client, p.name, staging, load_embeddings(), p, still_held)
         logger.info("embedding_migration: staged %d/%d points for %s", moved, expected, p.name)
+
+    if source_exists:
+        _catch_up(client, p.name, staging, load_embeddings, still_held)
+        staged = client.get_collection(staging).points_count or 0
+        # Recorded before anything is destroyed, so a copy left behind by a run
+        # that dies mid-swap is known to be whole.
+        client.update_collection(collection_name=staging, metadata={COMPLETE_KEY: staged})
 
     # The last moment before anything is destroyed. Everything above this line
     # only added data; everything below removes the original.
     _still_mine(still_held, f"the swap for {p.name}")
+    if source_exists:
+        _drain(client, p.name, staging, load_embeddings, still_held)
 
-    # Only now is the original expendable: staging holds the data. It may
-    # already be gone when restoring an orphan.
     with contextlib.suppress(Exception):
         client.delete_collection(p.name)
     client.create_collection(
         p.name,
         vectors_config=VectorParams(size=p.target_dim, distance=p.distance),
-        metadata={**p.metadata, MODEL_KEY: p.target_model},
+        metadata=_final_metadata(p),
     )
     copied = _copy_vectors(client, staging, p.name, still_held)
-    try:
-        client.delete_collection(staging)
-    except Exception as exc:
-        # The collection is already rebuilt and correct at this point. Letting a
-        # failed cleanup mark the whole thing failed would retry work that is
-        # done; the leftover staging is picked up as interrupted next start,
-        # which is wasteful but harmless.
-        logger.warning(
-            "embedding_migration: %s rebuilt, but its staging collection could not be removed (%s)",
-            p.name,
-            exc,
-        )
+    for leftover in _stagings_for(client, p.name):
+        try:
+            client.delete_collection(leftover)
+        except Exception as exc:
+            # The collection is already rebuilt and correct. A leftover copy is
+            # picked up as interrupted next start: wasteful, not harmful.
+            logger.warning(
+                "embedding_migration: %s rebuilt, but its staging collection %s could not be removed (%s)",
+                p.name,
+                leftover,
+                exc,
+            )
     logger.info(
         "embedding_migration: %s rebuilt with %s (%d points, was %s)",
         p.name,
@@ -564,22 +864,49 @@ def rebuild(
     return "rebuilt"
 
 
-def run(client: QdrantClient, embeddings_for: Callable[[str], Any]) -> Dict[str, int]:
+def run(
+    client: QdrantClient,
+    embeddings_for: Callable[[str], Any],
+    only: Optional[Callable[[str], bool]] = None,
+) -> Dict[str, int]:
     """Register, then rebuild everything registered. Safe to call repeatedly.
 
-    Holds a cross-replica lock for the whole run; see ``_exclusive_run``.
+    By default each collection is locked on its own, so any number of workers
+    can share the job. With per-collection locking switched off, one lock covers
+    the whole run, as before; see ``_exclusive_run``.
     """
+    from utils.config import Config
+
+    if Config.embedding_migration_per_collection_lock:
+        # Workers of this version share the migration-wide lock; a worker of the
+        # previous version takes it exclusively and knows nothing of the
+        # per-collection locks. Holding it shared keeps the two from rebuilding
+        # the same collection while a rollout replaces one with the other.
+        with _shared_run_lock() as run_lock:
+            if run_lock is None:
+                raise RuntimeError("an older migration worker holds the migration lock; retrying later")
+            return _run_locked(client, embeddings_for, run_lock, only, per_collection=True)
     with _exclusive_run() as still_held:
         if still_held is None:
             return {"registered": 0, "rebuilt": 0, "failed": 0, "skipped_locked": 1}
-        return _run_locked(client, embeddings_for, still_held)
+        return _run_locked(client, embeddings_for, still_held, only, per_collection=False)
+
+
+def _both(a: Callable[[], bool], b: Callable[[], bool]) -> Callable[[], bool]:
+    return lambda: a() and b()
 
 
 def _run_locked(
-    client: QdrantClient, embeddings_for: Callable[[str], Any], still_held: Callable[[], bool]
+    client: QdrantClient,
+    embeddings_for: Callable[[str], Any],
+    run_lock: Callable[[], bool],
+    only: Optional[Callable[[str], bool]] = None,
+    per_collection: bool = False,
 ) -> Dict[str, int]:
+    """``run_lock`` is the migration-wide lock (exclusive, or shared when
+    ``per_collection``); it is checked together with each collection's lock."""
     started = time.monotonic()
-    pending = register(client, embeddings_for)
+    pending = register(client, embeddings_for, only)
     summary = {"registered": len(pending), "rebuilt": 0, "failed": 0}
     if not pending:
         logger.info("embedding_migration: nothing to rebuild")
@@ -590,30 +917,43 @@ def _run_locked(
         ", ".join(p.name for p in pending[:10]) + ("..." if len(pending) > 10 else ""),
     )
     for p in pending:
-        if not still_held():
+        if not run_lock():
             # Carrying on without the lock risks a second replica rebuilding the
             # same collection. Stopping leaves staging intact, so the next start
             # resumes rather than re-embedding.
             logger.warning("embedding_migration: stopping early, the migration lock is no longer held")
             summary["stopped_lock_lost"] = 1
             break
-        try:
-            rebuild(client, p, lambda: embeddings_for(p.account), still_held)
-            summary["rebuilt"] += 1
-        except Exception as exc:
-            if not still_held():
-                # Not this collection's fault: the lock went away mid-rebuild
-                # and rebuild() stopped on purpose. Counting it as a failure
-                # and printing a traceback would misreport a deliberate stop,
-                # and breaking only on the next iteration misses the case where
-                # this was the last collection.
-                logger.warning("embedding_migration: stopping early, the migration lock is no longer held")
-                summary["stopped_lock_lost"] = 1
-                break
-            # One bad collection must not strand the rest; the staging copy is
-            # left in place so a re-run resumes instead of re-embedding.
-            summary["failed"] += 1
-            logger.exception("embedding_migration: %s failed (%s)", p.name, exc)
+        with contextlib.ExitStack() as stack:
+            still_held: Callable[[], bool] = run_lock
+            if per_collection:
+                collection_held = stack.enter_context(_collection_lock(p.name))
+                if collection_held is None:
+                    summary["skipped_locked"] = summary.get("skipped_locked", 0) + 1
+                    continue
+                # Losing the shared lock lets a worker of the previous version in,
+                # which knows nothing of per-collection locks.
+                still_held = _both(run_lock, collection_held)
+            try:
+                if rebuild(client, p, lambda: embeddings_for(p.account), still_held) == "rebuilt":
+                    summary["rebuilt"] += 1
+                else:
+                    summary["already"] = summary.get("already", 0) + 1
+            except Exception as exc:
+                if not still_held():
+                    # Not this collection's fault: the lock went away mid-rebuild
+                    # and rebuild() stopped on purpose. Counting it as a failure
+                    # and printing a traceback would misreport a deliberate stop.
+                    logger.warning("embedding_migration: stopped %s, its lock is no longer held", p.name)
+                    if not run_lock():
+                        summary["stopped_lock_lost"] = 1
+                        break
+                    summary["stopped_lock_lost"] = summary.get("stopped_lock_lost", 0) + 1
+                    continue
+                # One bad collection must not strand the rest; the staging copy is
+                # left in place so a re-run resumes instead of re-embedding.
+                summary["failed"] += 1
+                logger.exception("embedding_migration: %s failed (%s)", p.name, exc)
     logger.info("embedding_migration: done in %.0fs - %s", time.monotonic() - started, summary)
     return summary
 
@@ -659,3 +999,38 @@ def start_background(
     thread = threading.Thread(target=_worker, daemon=True, name="embedding-migration")
     thread.start()
     return thread
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Run the migration as a standalone worker, alongside or instead of the server.
+
+    Workers share the job through per-collection locks in the same Postgres the
+    server uses, so point this at that Postgres and that Qdrant.
+    """
+    parser = argparse.ArgumentParser(description="Re-embed Qdrant collections built with another model.")
+    parser.add_argument("--shared-only", action="store_true", help="only collections shared by every account")
+    parser.add_argument("--collections", default="", help="comma-separated collection names to limit the run to")
+    args = parser.parse_args(argv)
+
+    from config import setup_logger
+
+    setup_logger()
+
+    from rag.core.embeddings.generator import get_embeddings
+    from rag.qdrant.client import get_qdrant_client
+    from utils.config import Config
+
+    if not Config.embedding_migration_per_collection_lock:
+        parser.error("RAG_EMBEDDING_MIGRATION_PER_COLLECTION_LOCK must be on to run more than one worker")
+    names = {n.strip() for n in args.collections.split(",") if n.strip()}
+
+    def only(name: str) -> bool:
+        return (not args.shared_only or _account_of(name) == "") and (not names or name in names)
+
+    summary = run(get_qdrant_client(), get_embeddings, only)
+    print(summary)
+    return 1 if summary.get("failed") else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
