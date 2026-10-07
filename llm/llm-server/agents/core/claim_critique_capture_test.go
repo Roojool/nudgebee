@@ -179,6 +179,22 @@ func TestClaimCaptureDAOAndUsageID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// A completed review without a verdict is stored apart from a review that never
+// ran because the refinement budget was spent (#40236).
+func TestClaimCaptureNoVerdictDecision(t *testing.T) {
+	dao, mock := setupConversationDAOMock(t)
+	for _, c := range []struct{ status, want string }{
+		{"generation_error", claimDecisionNoVerdict},
+		{"input_limit", claimDecisionNoVerdict},
+		{"budget_exhausted", "skipped"},
+	} {
+		record := &ClaimCritiqueAuditRecord{ID: uuid.NewString(), TokenUsageID: uuid.NewString(), Status: c.status, Completed: true}
+		mock.ExpectExec("INSERT INTO llm_conversation_agent_critiques").WithArgs(record.ID, record.TokenUsageID, "", "", "", "", "", "", claimShadowCritiqueType, c.want, "", claimMetadataArgument{status: c.status, completed: true}).WillReturnResult(sqlmock.NewResult(0, 1))
+		require.NoError(t, dao.SaveClaimCritiqueAudit(context.Background(), record), c.status)
+	}
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestClaimCaptureFailureUsageID(t *testing.T) {
 	dao := &claimCaptureDAO{usage: make(chan *TokenUsageRecord, 1)}
 	installClaimCaptureDAO(t, dao)

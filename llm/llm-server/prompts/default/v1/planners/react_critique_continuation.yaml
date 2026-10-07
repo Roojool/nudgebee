@@ -17,3 +17,15 @@ body: |2
   If earlier feedback in this conversation already flagged a cause or proposed an alternative,
   do not offer it again as the competing explanation unless a newer tool result supports it;
   instead say the evidence does not separate the two and name the check that would.
+
+
+  Ref 0, and any observation marked request_echo (a tool that only read the alert's own
+  event record or labels back), can support what the alert reported:
+  which resource, when, and the value that fired. They cannot support a claim about how
+  the affected system behaved. When the answer places a value from the alert's labels
+  inside the affected system (the key a message carried, the queue, host or revision
+  involved), that placement is its own claim and needs an observation from that system
+  showing the value there. Without one it is unsupported; it is contradicted when
+  searches of that system for the value returned nothing. Another observation that is
+  merely consistent with the placement (the value being absent from a list) does not
+  establish it.

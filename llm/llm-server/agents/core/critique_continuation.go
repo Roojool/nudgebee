@@ -73,10 +73,29 @@ func critiqueEvidenceIndex(steps []NBAgentPlannerToolActionStep) (string, int) {
 		if n > maxEvidence {
 			maxEvidence = n
 		}
-		fmt.Fprintf(&b, "E%d = %s(%s)\n", n, step.Action.Tool,
+		fmt.Fprintf(&b, "E%d = %s(%s)", n, step.Action.Tool,
 			strings.ReplaceAll(TruncateHead(step.Action.ToolInput, critiqueIndexInputLimit), "\n", " "))
+		if isRequestEcho(step.Action.Tool, step.Action.ToolInput) {
+			b.WriteString("  [request_echo]")
+		}
+		b.WriteString("\n")
 	}
 	return b.String(), maxEvidence
+}
+
+// isRequestEcho reports whether a step only read the alert's own record or labels
+// back. Such a result can show what the alert reported, not how the affected
+// system behaved (#40236). Collector-gathered evidence (the event's evidence file,
+// its captured logs) is a real observation of the system and is not tagged.
+// Tool and file names mirror tools.ToolGetEventById, get_event_evidence's
+// alert_labels type and api's event_labels_overflow_<id>.txt.
+func isRequestEcho(tool, input string) bool {
+	switch {
+	case tool == "get_event_by_id", strings.Contains(input, "event_labels_overflow_"):
+		return true
+	default:
+		return tool == "get_event_evidence" && strings.Contains(input, "alert_labels")
+	}
 }
 
 // instruction wraps a critique's own prompt with the reviewer adapter and the

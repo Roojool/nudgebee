@@ -61,6 +61,9 @@ type claimCaptureDetail struct {
 	ContinuationError string `json:"continuation_error,omitempty"`
 }
 
+// claimDecisionNoVerdict marks a completed review that produced no verdict.
+const claimDecisionNoVerdict = "no_verdict"
+
 const (
 	claimModeContinuation = "continuation"
 	claimModeFallback     = "continuation_fallback"
@@ -80,11 +83,12 @@ func prepareClaimCapture(ctx *security.RequestContext, accountID, input, answer,
 			detail.ObservationCount++
 		}
 	}
-	if err != nil {
-		detail.ErrorStage, detail.ErrorDetail = "prepare", "Evidence packet exceeds byte limit"
-		return detail, "input_limit"
+	if err == nil {
+		detail.InputPacket = packet
 	}
-	detail.InputPacket = packet
+	// The prompt is loaded even when the packet is too large: a continuation audit
+	// sends the planner's own request, not the packet, so it can still run.
+	packetTooLarge := err != nil
 	prompt, err := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReactClaimCritiquer, accountID)
 	if err != nil {
 		detail.ErrorStage, detail.ErrorDetail = "prompt", TruncateHead(err.Error(), 2048)
@@ -96,6 +100,10 @@ func prepareClaimCapture(ctx *security.RequestContext, accountID, input, answer,
 		return detail, "input_limit"
 	}
 	detail.Prompt = prompt
+	if packetTooLarge {
+		detail.ErrorStage, detail.ErrorDetail = "prepare", "Evidence packet exceeds byte limit"
+		return detail, "input_limit"
+	}
 	return detail, ""
 }
 
@@ -110,8 +118,12 @@ func newClaimCapture(ctx *security.RequestContext, request NBAgentRequest, plann
 	}
 	// The packet is bounded and produced by our own encoder. Oversized evidence
 	// retains only its size/hash; do not reintroduce it through legacy columns.
+	// The request and answer are kept either way, so reviews of oversized runs
+	// stay readable and countable.
 	if len(detail.InputPacket) > 0 {
 		_ = json.Unmarshal(detail.InputPacket, &content)
+	} else {
+		content.Request, content.Answer = input, answer
 	}
 	return &ClaimCritiqueAuditRecord{AgentName: agentName, Input: content.Request, Answer: content.Answer, ID: uuid.NewString(), TokenUsageID: uuid.NewString(),
 		AccountID: request.AccountId, ConversationID: request.ConversationId, MessageID: request.MessageId, AgentID: request.AgentId,
@@ -188,7 +200,14 @@ func (chat *ConversationDao) SaveClaimCritiqueAudit(ctx context.Context, record 
 		return fmt.Errorf("encode claim capture: %w", err)
 	}
 	decision := record.Decision
-	if decision == "" {
+	switch {
+	case decision != "":
+	case record.Completed && record.Status != "budget_exhausted":
+		// The review ran but gave no verdict (too large, model error, invalid
+		// output); the answer went out unreviewed. Keep it apart from a review
+		// that never ran because the refinement budget was spent.
+		decision = claimDecisionNoVerdict
+	default:
 		decision = "skipped"
 	}
 	_, err = chat.dbManager.Db.ExecContext(ctx, `

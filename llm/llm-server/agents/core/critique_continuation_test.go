@@ -210,3 +210,77 @@ func TestCritiqueContinuationOffKeepsStandalone(t *testing.T) {
 		require.NotContains(t, messageText(sent[len(sent)-1]), "STOP INVESTIGATING")
 	}
 }
+
+func TestIsRequestEcho(t *testing.T) {
+	cases := []struct {
+		tool, input string
+		want        bool
+	}{
+		{"get_event_by_id", `{"event_id":"e1"}`, true},
+		{"get_event_evidence", `{"event_id":"e1","evidence_type":"alert_labels"}`, true},
+		{"shell_execute", `{"command":"cat event_labels_overflow_e1.txt"}`, true},
+		// Collector-gathered evidence is an observation of the system, not an echo.
+		{"get_event_evidence", `{"event_id":"e1","evidence_type":"pod_metrics"}`, false},
+		{"shell_execute", `{"command":"jq . event_e1_evidence.json"}`, false},
+		{"get_event_incident_assembly", `{"event_id":"e1"}`, false},
+		{"metrics", "cpu for checkout", false},
+	}
+	for _, c := range cases {
+		require.Equal(t, c.want, isRequestEcho(c.tool, c.input), "%s(%s)", c.tool, c.input)
+	}
+	index, _ := critiqueEvidenceIndex([]NBAgentPlannerToolActionStep{
+		{Action: NBAgentPlannerToolAction{Tool: "get_event_by_id", ToolInput: `{"event_id":"e1"}`, DisplayID: "E1"}},
+		{Action: NBAgentPlannerToolAction{Tool: "metrics", ToolInput: "cpu", DisplayID: "E2"}},
+	})
+	require.Equal(t, "E1 = get_event_by_id({\"event_id\":\"e1\"})  [request_echo]\nE2 = metrics(cpu)\n", index)
+}
+
+// An evidence packet over the standalone limit no longer skips the audit: the
+// continuation sends the planner's own request, not the packet (#40236).
+func TestOversizedPacketStillRunsContinuationAudit(t *testing.T) {
+	installContinuationFlags(t)
+	pinClaimAuditOnly(t)
+	dao := &claimCaptureDAO{}
+	installClaimCaptureDAO(t, dao)
+	model := &critiqueRecordingModel{replies: []recordedReply{{content: fencedClaimAudit}}}
+	withFakeLLMModel(t, model)
+	ctx := llmOverrideContext()
+	conv := newCritiqueConversation(ctx, "", continuationPlannerMessages, "the answer", nil, continuationSteps, false)
+	require.NotNil(t, conv)
+
+	decision, _ := runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "",
+		strings.Repeat("x", claimCritiqueInputLimit), "the answer", "", continuationSteps, false, conv)
+
+	require.Equal(t, "refine", decision)
+	require.Len(t, model.requests(), 1)
+	final := dao.rows[len(dao.rows)-1]
+	require.Equal(t, "ok", final.Status)
+	require.Equal(t, claimModeContinuation, final.Detail.Mode)
+	require.Empty(t, final.Detail.InputPacket)
+	require.Empty(t, final.Detail.ErrorStage)
+	require.Equal(t, "the answer", final.Answer, "the reviewed answer is kept so the row stays countable")
+	require.Equal(t, strings.Repeat("x", claimCritiqueInputLimit), final.Input, "the request is kept too")
+}
+
+// Without a packet there is no standalone fallback: a failed continuation is the outcome.
+func TestOversizedPacketContinuationFailureHasNoFallback(t *testing.T) {
+	installContinuationFlags(t)
+	pinClaimAuditOnly(t)
+	dao := &claimCaptureDAO{}
+	installClaimCaptureDAO(t, dao)
+	model := &critiqueRecordingModel{replies: []recordedReply{{content: fencedClaimAudit, toolCall: true}}}
+	withFakeLLMModel(t, model)
+	ctx := llmOverrideContext()
+	conv := newCritiqueConversation(ctx, "", continuationPlannerMessages, "the answer", nil, continuationSteps, false)
+
+	decision, _ := runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "",
+		strings.Repeat("x", claimCritiqueInputLimit), "the answer", "", continuationSteps, false, conv)
+
+	require.Equal(t, "accept", decision, "no verdict keeps the incoming decision")
+	require.Len(t, model.requests(), 1, "no standalone fallback without a packet")
+	final := dao.rows[len(dao.rows)-1]
+	require.Equal(t, "tool_call", final.Status)
+	require.Equal(t, claimModeContinuation, final.Detail.Mode)
+	require.NotEmpty(t, final.Detail.ContinuationError)
+	require.True(t, final.Completed)
+}

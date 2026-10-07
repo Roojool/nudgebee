@@ -329,16 +329,26 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 		return
 	}
 	result := claimShadowResult{Status: record.Status}
-	if record.Status == "started" {
+	// An oversized packet only rules out the standalone audit: the continuation
+	// sends the planner's own request, which the model has already accepted.
+	oversizedContinuation := record.Status == "input_limit" && conv != nil && record.Detail.Prompt != "" && len(record.Detail.InputPacket) == 0
+	if record.Status == "started" || oversizedContinuation {
+		if oversizedContinuation {
+			record.Detail.ErrorStage, record.Detail.ErrorDetail = "", ""
+		}
 		auditCtx = security.NewRequestContext(context.WithValue(bounded, contextKeyClaimUsageID, record.TokenUsageID),
 			ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 		if conv != nil {
 			result = generateClaimContinuation(conv, record.TokenUsageID, request, record.Detail)
 			record.Detail.Mode = claimModeContinuation
 			if result.Status != "ok" {
-				record.Detail.Mode = claimModeFallback
 				record.Detail.ContinuationError = TruncateHead(strings.TrimSpace(result.Status+": "+result.ErrorDetail), 2048)
-				result = generateClaimFallback(ctx, request, record)
+				// No standalone fallback for an oversized packet: keep the
+				// continuation's own failure as the outcome.
+				if !oversizedContinuation {
+					record.Detail.Mode = claimModeFallback
+					result = generateClaimFallback(ctx, request, record)
+				}
 			}
 		} else {
 			result = generateClaimShadow(auditCtx, request, record.Detail)
