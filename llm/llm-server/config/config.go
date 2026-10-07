@@ -663,12 +663,14 @@ type appConfig struct {
 	// own provider-specific evidence recipe. Enabled by default; deployments may opt out.
 	OrchestratorGroundingEnabled bool `mapstructure:"llm_orchestrator_grounding_enabled"`
 	// ClaimCritiqueFeedbackEnabled lets captured claim gaps use the existing refinement budget.
-	ClaimCritiqueFeedbackEnabled bool `mapstructure:"llm_claim_critique_feedback_enabled"`
+	// Derived from CritiqueMode (not off); not set directly.
+	ClaimCritiqueFeedbackEnabled bool `mapstructure:"-"`
 	// ClaimCritiqueActionableFeedbackEnabled adds a second step to the claim critique: when the
 	// audit rejects an answer, a guidance call writes why each flagged claim is weak, a competing
 	// explanation and one discriminating check, replacing the "label hypotheses" template. The
-	// audit and its accept/refine verdict are unchanged (#39803).
-	ClaimCritiqueActionableFeedbackEnabled bool `mapstructure:"llm_claim_critique_actionable_feedback_enabled"`
+	// audit and its accept/refine verdict are unchanged (#39803). Derived from CritiqueMode
+	// (guided or continuation); not set directly.
+	ClaimCritiqueActionableFeedbackEnabled bool `mapstructure:"-"`
 	// CritiqueMode selects how answers are critiqued (llm_critique_mode):
 	//   off          — answer critique only, no claim audit
 	//   audit        — plus the claim audit, with its plain feedback
@@ -677,7 +679,7 @@ type appConfig struct {
 	//                  continuations of the ReAct4 planner's own request, so they reuse its
 	//                  prompt cache and see earlier refinement rounds. Any failure falls back to
 	//                  the standalone critique; ReAct3 always uses the standalone path.
-	// When unset it is derived from the two older flags above, which it replaces.
+	// Default continuation.
 	// ClaimCritiqueFeedbackEnabled, ClaimCritiqueActionableFeedbackEnabled and
 	// CritiqueContinuationEnabled are set from it at load time; the code reads those.
 	CritiqueMode string `mapstructure:"llm_critique_mode"`
@@ -1495,11 +1497,8 @@ func init() {
 	viper.SetDefault("llm_server_k8s_orchestrator_mode", "lean")
 	viper.SetDefault("llm_orchestrator_grounding_enabled", true)
 	viper.SetDefault("llm_premise_verification_enabled", true)
-	viper.SetDefault("llm_claim_critique_feedback_enabled", true)
-	viper.SetDefault("llm_claim_critique_actionable_feedback_enabled", false)
-	// Empty means "derive from the two flags above" (resolveCritiqueMode). The default
-	// also registers the key: viper.Unmarshal ignores env vars for keys it does not know.
-	viper.SetDefault("llm_critique_mode", "")
+	// The default also registers the key: viper.Unmarshal ignores env vars for keys it does not know.
+	viper.SetDefault("llm_critique_mode", CritiqueModeContinuation)
 	viper.SetDefault("llm_server_workspace_port", 8080)
 	viper.SetDefault("llm_server_workspace_local_url", "")   // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_local_token", "") // must match NB_WORKSPACE_TOKEN on the local code-analysis process
@@ -1802,14 +1801,9 @@ func init() {
 		panic(err.Error())
 	}
 
-	Config.CritiqueMode, err = resolveCritiqueMode(Config.CritiqueMode, configKeyExplicitlySet("llm_critique_mode"),
-		Config.ClaimCritiqueFeedbackEnabled, Config.ClaimCritiqueActionableFeedbackEnabled)
-	if err != nil {
+	if err := Config.deriveCritiqueFlags(); err != nil {
 		panic(err.Error())
 	}
-	Config.ClaimCritiqueFeedbackEnabled = Config.CritiqueMode != CritiqueModeOff
-	Config.ClaimCritiqueActionableFeedbackEnabled = Config.CritiqueMode == CritiqueModeGuided || Config.CritiqueMode == CritiqueModeContinuation
-	Config.CritiqueContinuationEnabled = Config.CritiqueMode == CritiqueModeContinuation
 
 	if Config.OtelExporterOtlpEndpoint == "" {
 		Config.OtelExporterOtlpEndpoint = "127.0.0.1:4317"
@@ -1872,22 +1866,25 @@ const (
 	CritiqueModeContinuation = "continuation"
 )
 
-// resolveCritiqueMode validates an explicit llm_critique_mode, or derives it from
-// the older flags (llm_claim_critique_feedback_enabled,
-// llm_claim_critique_actionable_feedback_enabled) when it is unset.
-func resolveCritiqueMode(rawMode string, explicitlySet, feedbackEnabled, actionableEnabled bool) (string, error) {
-	if !explicitlySet || strings.TrimSpace(rawMode) == "" {
-		switch {
-		case !feedbackEnabled:
-			return CritiqueModeOff, nil
-		case actionableEnabled:
-			return CritiqueModeGuided, nil
-		default:
-			return CritiqueModeAudit, nil
-		}
+// deriveCritiqueFlags resolves CritiqueMode and sets the flags the critique code reads.
+func (c *appConfig) deriveCritiqueFlags() error {
+	mode, err := resolveCritiqueMode(c.CritiqueMode)
+	if err != nil {
+		return err
 	}
+	c.CritiqueMode = mode
+	c.ClaimCritiqueFeedbackEnabled = mode != CritiqueModeOff
+	c.ClaimCritiqueActionableFeedbackEnabled = mode == CritiqueModeGuided || mode == CritiqueModeContinuation
+	c.CritiqueContinuationEnabled = mode == CritiqueModeContinuation
+	return nil
+}
+
+// resolveCritiqueMode validates llm_critique_mode; empty means the default, continuation.
+func resolveCritiqueMode(rawMode string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(rawMode))
 	switch mode {
+	case "":
+		return CritiqueModeContinuation, nil
 	case CritiqueModeOff, CritiqueModeAudit, CritiqueModeGuided, CritiqueModeContinuation:
 		return mode, nil
 	default:

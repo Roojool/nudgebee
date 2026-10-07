@@ -37,6 +37,7 @@ func TestClaimFeedbackDecision(t *testing.T) {
 }
 
 func TestClaimFeedbackBothPlanners(t *testing.T) {
+	pinClaimAuditOnly(t)
 	previousFeedback := config.Config.ClaimCritiqueFeedbackEnabled
 	t.Cleanup(func() {
 		config.Config.ClaimCritiqueFeedbackEnabled = previousFeedback
@@ -82,6 +83,7 @@ func TestClaimFeedbackBothPlanners(t *testing.T) {
 }
 
 func TestClaimFeedbackReAct4UsesExistingBudget(t *testing.T) {
+	pinClaimAuditOnly(t)
 	previous := config.Config.ClaimCritiqueFeedbackEnabled
 	config.Config.ClaimCritiqueFeedbackEnabled = true
 	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
@@ -150,6 +152,7 @@ func TestClaimFeedbackSkipsChildAgent(t *testing.T) {
 }
 
 func TestClaimFeedbackReAct3ToolContinuation(t *testing.T) {
+	pinClaimAuditOnly(t)
 	previous := config.Config.ClaimCritiqueFeedbackEnabled
 	config.Config.ClaimCritiqueFeedbackEnabled = true
 	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })

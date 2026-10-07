@@ -9,23 +9,19 @@ import (
 
 func TestResolveCritiqueMode(t *testing.T) {
 	tests := []struct {
-		name                      string
-		raw                       string
-		set, feedback, actionable bool
-		want                      string
-		wantErr                   bool
+		name, raw, want string
+		wantErr         bool
 	}{
-		{name: "unset, old flags off", feedback: false, want: CritiqueModeOff},
-		{name: "unset, feedback only (the default)", feedback: true, want: CritiqueModeAudit},
-		{name: "unset, feedback and actionable", feedback: true, actionable: true, want: CritiqueModeGuided},
-		{name: "explicit empty falls back to old flags", raw: " ", set: true, feedback: true, actionable: true, want: CritiqueModeGuided},
-		{name: "explicit continuation wins over old flags", raw: "Continuation", set: true, want: CritiqueModeContinuation},
-		{name: "explicit off wins over old flags", raw: "off", set: true, feedback: true, actionable: true, want: CritiqueModeOff},
-		{name: "unknown value", raw: "strict", set: true, wantErr: true},
+		{name: "unset defaults to continuation", raw: "", want: CritiqueModeContinuation},
+		{name: "blank defaults to continuation", raw: " ", want: CritiqueModeContinuation},
+		{name: "case-insensitive", raw: "Guided", want: CritiqueModeGuided},
+		{name: "off", raw: "off", want: CritiqueModeOff},
+		{name: "audit", raw: "audit", want: CritiqueModeAudit},
+		{name: "unknown value", raw: "strict", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveCritiqueMode(tt.raw, tt.set, tt.feedback, tt.actionable)
+			got, err := resolveCritiqueMode(tt.raw)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -44,4 +40,43 @@ func TestCritiqueModeEnvReachesConfig(t *testing.T) {
 	var cfg appConfig
 	require.NoError(t, viper.Unmarshal(&cfg))
 	require.Equal(t, CritiqueModeContinuation, cfg.CritiqueMode)
+
+	t.Setenv("LLM_CRITIQUE_MODE", "off")
+	require.NoError(t, viper.Unmarshal(&cfg))
+	require.Equal(t, CritiqueModeOff, cfg.CritiqueMode)
+}
+
+// The replaced flags no longer reach the struct: only llm_critique_mode decides.
+func TestReplacedCritiqueFlagsAreIgnored(t *testing.T) {
+	t.Setenv("LLM_CLAIM_CRITIQUE_FEEDBACK_ENABLED", "false")
+	t.Setenv("LLM_CLAIM_CRITIQUE_ACTIONABLE_FEEDBACK_ENABLED", "false")
+	var cfg appConfig
+	require.NoError(t, viper.Unmarshal(&cfg))
+	require.NoError(t, cfg.deriveCritiqueFlags())
+	require.Equal(t, CritiqueModeContinuation, cfg.CritiqueMode)
+	require.True(t, cfg.ClaimCritiqueFeedbackEnabled)
+	require.True(t, cfg.ClaimCritiqueActionableFeedbackEnabled)
+	require.True(t, cfg.CritiqueContinuationEnabled)
+}
+
+func TestDeriveCritiqueFlags(t *testing.T) {
+	tests := []struct {
+		mode                             string
+		feedback, guidance, continuation bool
+	}{
+		{CritiqueModeOff, false, false, false},
+		{CritiqueModeAudit, true, false, false},
+		{CritiqueModeGuided, true, true, false},
+		{CritiqueModeContinuation, true, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfg := appConfig{CritiqueMode: tt.mode}
+			require.NoError(t, cfg.deriveCritiqueFlags())
+			require.Equal(t, tt.feedback, cfg.ClaimCritiqueFeedbackEnabled)
+			require.Equal(t, tt.guidance, cfg.ClaimCritiqueActionableFeedbackEnabled)
+			require.Equal(t, tt.continuation, cfg.CritiqueContinuationEnabled)
+		})
+	}
+	require.Error(t, (&appConfig{CritiqueMode: "strict"}).deriveCritiqueFlags())
 }

@@ -54,6 +54,18 @@ func (d *claimCaptureDAO) InsertTokenUsage(r *TokenUsageRecord) error {
 	}
 	return nil
 }
+
+// pinClaimAuditOnly keeps a test on the audit-only path it was written for:
+// the default mode (continuation) also turns on guidance and continuation calls.
+func pinClaimAuditOnly(t *testing.T) {
+	t.Helper()
+	guidance, continuation := config.Config.ClaimCritiqueActionableFeedbackEnabled, config.Config.CritiqueContinuationEnabled
+	t.Cleanup(func() {
+		config.Config.ClaimCritiqueActionableFeedbackEnabled, config.Config.CritiqueContinuationEnabled = guidance, continuation
+	})
+	config.Config.ClaimCritiqueActionableFeedbackEnabled, config.Config.CritiqueContinuationEnabled = false, false
+}
+
 func installClaimCaptureDAO(t *testing.T, d *claimCaptureDAO) {
 	t.Helper()
 	previous := GetConversationDao()
@@ -65,6 +77,7 @@ func installClaimCaptureDAO(t *testing.T, d *claimCaptureDAO) {
 }
 
 func TestClaimCapturePersistsWithTracingDisabled(t *testing.T) {
+	pinClaimAuditOnly(t)
 	previous, tracing := config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled
 	config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled = true, false
 	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled = previous, tracing })
@@ -186,6 +199,7 @@ func TestClaimCaptureFailureUsageID(t *testing.T) {
 }
 
 func TestClaimCaptureCompletionFailureLeavesStarted(t *testing.T) {
+	pinClaimAuditOnly(t)
 	previous := config.Config.ClaimCritiqueFeedbackEnabled
 	config.Config.ClaimCritiqueFeedbackEnabled = true
 	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
