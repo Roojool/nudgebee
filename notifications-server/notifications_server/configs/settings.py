@@ -527,6 +527,17 @@ class MSTeamsSettings(BaseSettings):
         "",
         validation_alias=AliasChoices("MS_TEAMS_ACTION_SIGNING_KEY", "ms_teams_action_signing_key"),
     )
+    # Chat: a "Thinking…" message updated with Nubi's steps until the answer
+    # replaces it, and answers rendered as cards. Each falls back to plain
+    # text replies when off.
+    thinking_steps_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("MS_TEAMS_THINKING_STEPS_ENABLED", "ms_teams_thinking_steps_enabled"),
+    )
+    answer_cards_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices("MS_TEAMS_ANSWER_CARDS_ENABLED", "ms_teams_answer_cards_enabled"),
+    )
     # Path matches the Next.js callback route at /api/integrations/ms-teams/callback
     redirect_path: str = "/api/integrations/ms-teams/callback"
     # The bot sends with its own credentials, so Connect only needs the signed-in

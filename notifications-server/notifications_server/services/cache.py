@@ -272,6 +272,72 @@ class Cache:
             LOG.exception(f"Error removing keys from event entry {thread_ts}: {e}")
             return False
 
+    def take_teams_thinking(self, thread_ts, claim):
+        """Clear this turn's Teams Thinking card from the entry and return its
+        activity id, but only while claim is still the entry's claim, so a newer
+        turn's card is never taken. None when it isn't."""
+        self._ensure_connection()
+        if not self.redis_client or not claim:
+            return None
+        key = f"chat_event:{thread_ts}"
+        for _ in range(_UPDATE_EVENT_ENTRY_MAX_RETRIES):
+            try:
+                with self.redis_client.pipeline() as pipe:
+                    pipe.watch(key)
+                    event_json = pipe.get(key)
+                    event_entry = json.loads(event_json) if event_json else None
+                    if not event_entry or event_entry.get("thinking_claim") != claim:
+                        pipe.unwatch()
+                        return None
+                    activity_id = event_entry.pop("thinking_id", None)
+                    event_entry.pop("thinking_claim", None)
+                    event_entry.pop("thinking_at", None)
+                    event_entry["timestamp"] = time.time()
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event_entry, default=self._json_serializable))
+                    pipe.expire(key, settings.redis.conversation_cache_expiration_minutes * 60)
+                    pipe.execute()
+                    return activity_id
+            except redis.WatchError:
+                continue
+            except (redis.RedisError, json.JSONDecodeError) as e:
+                LOG.exception(f"Error taking the Teams Thinking card from {thread_ts}: {e}")
+                return None
+        return None
+
+    def lock_teams_message(self, activity_id, token, ttl_seconds):
+        """Serialises updates to one Teams message. True when token now holds it.
+        Fails open (True) when Redis is unavailable."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return True
+        try:
+            return bool(self.redis_client.set(f"teams_message_lock:{activity_id}", token, nx=True, ex=ttl_seconds))
+        except redis.RedisError as e:
+            LOG.exception(f"Error locking Teams message {activity_id}: {e}")
+            return True
+
+    def unlock_teams_message(self, activity_id, token):
+        """Releases the lock only if token still holds it."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return
+        key = f"teams_message_lock:{activity_id}"
+        try:
+            with self.redis_client.pipeline() as pipe:
+                pipe.watch(key)
+                value = pipe.get(key)
+                if (value.decode() if isinstance(value, bytes) else value) != token:
+                    pipe.unwatch()
+                    return
+                pipe.multi()
+                pipe.delete(key)
+                pipe.execute()
+        except redis.WatchError:
+            return
+        except redis.RedisError as e:
+            LOG.exception(f"Error unlocking Teams message {activity_id}: {e}")
+
     def remove_event_entry(self, thread_ts):
         self._ensure_connection()
         if not self.redis_client:

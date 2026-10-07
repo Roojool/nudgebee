@@ -182,7 +182,7 @@ def test_another_tenant_channel_or_card_has_no_stored_card(store):
     assert ca.begin((uuid.UUID(NB_TENANT), "19:ops", "9999"), ca.SUPPRESS, lambda c: c) is None
 
 
-def test_a_finding_card_with_buttons_is_returned_with_its_row():
+def test_a_sent_finding_card_is_returned_with_its_row():
     from notifications_server.services.message import MessageService
 
     service = MessageService.__new__(MessageService)
@@ -194,8 +194,15 @@ def test_a_finding_card_with_buttons_is_returned_with_its_row():
     assert (row.teams_message_id, row.fingerprint, row.teams_channel_id) == ("1700", "fp-1", "19:ops")
     assert ca.has_actions(json.loads(row.teams_metadata)["card"])
 
+    # Without buttons the card is still stored, so a reply in its thread can read it.
     settings.ms_teams.action_signing_key = ""
     with mock.patch.object(MessageService, "_send_teams_template_as_bot", mock.AsyncMock(return_value=sent)):
+        _, row = asyncio.run(service._send_finding_to_teams(None, NB_TENANT, ip, FINDING, "fp-1"))
+    assert row.teams_message_id == "1700"
+    assert not ca.has_actions(json.loads(row.teams_metadata)["card"])
+
+    failed = {"status": "failed", "reason": "x"}
+    with mock.patch.object(MessageService, "_send_teams_template_as_bot", mock.AsyncMock(return_value=failed)):
         assert asyncio.run(service._send_finding_to_teams(None, NB_TENANT, ip, FINDING, "fp-1"))[1] is None
 
 

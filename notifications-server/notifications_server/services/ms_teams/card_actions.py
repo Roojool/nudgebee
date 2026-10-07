@@ -47,6 +47,9 @@ ASK_NUBI_DATA = "nb_ask_nubi"
 ASK_NUBI_ID = "nb_ask_nubi"
 # Ask Nubi's own status line, so it and Suppress's never erase each other.
 ANALYSIS_STATUS_ID = "nb_analysis_status"
+FEEDBACK = "feedback"
+FEEDBACK_DATA = "nb_feedback"
+FEEDBACK_ID = "nb_feedback"
 # Analysis text past this is cut, with a link to the event in NudgeBee.
 WRITEUP_LIMIT = 20_000
 # Sections posted to the card's thread as they complete, in order.
@@ -92,6 +95,9 @@ APPROVAL_FAILED = "Couldn't record the decision. Please try again."
 STILL_ANALYZING = "Still analyzing. Results will appear in this card's thread."
 ANALYSIS_FAILED = "Something went wrong analyzing this. Try again in a moment."
 ANALYSIS_BUSY = "Nubi is analyzing a lot of alerts right now. Try again in a minute."
+FEEDBACK_ALREADY = "This answer was already rated."
+FEEDBACK_FAILED = "Couldn't record your feedback. Please try again."
+FEEDBACK_CARD_TOO_OLD = "This answer is too old to rate."
 ASK_NUBI_CARD_TOO_OLD = (
     "This card is more than 7 days old, so its buttons no longer work." " Ask Nubi about the event from NudgeBee."
 )
@@ -311,6 +317,34 @@ def with_status(card: dict, text: Optional[str]) -> dict:
     return {**card, "body": body}
 
 
+def feedback_actions(tenant_id, account_id, answer_id, session_id) -> list:
+    """👍/👎 buttons for a chat answer, or none without the signing key.
+    answer_id keys the feedback, so each answer in a thread is rated on its own;
+    session_id is the thread's Nubi session."""
+    if not buttons_enabled():
+        return []
+    params = {"tenant_id": str(tenant_id), "account_id": str(account_id), "answer_id": answer_id}
+    return [
+        {
+            "type": "Action.Submit",
+            "id": f"{FEEDBACK_ID}_{key}",
+            "title": title,
+            "data": {
+                ACTION_KEY: FEEDBACK,
+                FEEDBACK_DATA: sign(FEEDBACK, {**params, "session_id": session_id, "useful": useful}),
+            },
+        }
+        for key, title, useful in (("up", "👍 Helpful", True), ("down", "👎 Not helpful", False))
+    ]
+
+
+def without_feedback(card: dict) -> dict:
+    return {
+        **card,
+        "actions": [a for a in card.get("actions") or [] if not (a.get("id") or "").startswith(FEEDBACK_ID)],
+    }
+
+
 def without_action(card: dict, action_id: str) -> dict:
     return {**card, "actions": [a for a in card.get("actions") or [] if a.get("id") != action_id]}
 
@@ -319,9 +353,9 @@ def without_action(card: dict, action_id: str) -> dict:
 
 
 def card_row(tenant_id, account_id, fingerprint, channel_id, message_id, card, kind) -> Optional[SentNotifications]:
-    """The sent_notifications row for a card with buttons, returned by the sender
-    and committed with the rest of the notification. None without a message id,
-    since a click finds its card by that id."""
+    """The sent_notifications row for a bot card, returned by the sender and
+    committed with the rest of the notification. None without a message id,
+    since a click or a thread reply finds its card by that id."""
     if not (message_id and channel_id):
         return None
     return SentNotifications(
@@ -333,6 +367,66 @@ def card_row(tenant_id, account_id, fingerprint, channel_id, message_id, card, k
         teams_message_id=message_id,
         teams_metadata=json.dumps({"kind": kind, "card": card, "actions": {}}),
     )
+
+
+def store(row: SentNotifications) -> None:
+    """Commit a card row on its own, for cards sent outside a notification batch."""
+    with Session(sync_engine) as session:
+        session.add(row)
+        session.commit()
+
+
+def stored_card(tenant_id, channel_id, message_id) -> Optional[dict]:
+    """The stored card a message id names, as {kind, card, account_id}, or None."""
+    with Session(sync_engine) as session:
+        row = (
+            session.query(SentNotifications.account_id, SentNotifications.teams_metadata)
+            .filter(
+                SentNotifications.tenant_id == tenant_id,
+                SentNotifications.teams_channel_id == channel_id,
+                SentNotifications.teams_message_id == message_id,
+            )
+            .first()
+        )
+    if row is None:
+        return None
+    meta = json.loads(row.teams_metadata or "{}")
+    return {
+        "kind": meta.get("kind"),
+        "card": meta.get("card") or {},
+        "account_id": str(row.account_id) if row.account_id else None,
+    }
+
+
+def card_text(card: dict) -> str:
+    """A card's readable text, one line per block or fact, without its status lines."""
+    lines = []
+
+    def walk(items):
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict) or item.get("id") in (STATUS_ID, ANALYSIS_STATUS_ID):
+                continue
+            if item.get("type") == "TextBlock" and item.get("text"):
+                lines.append(str(item["text"]))
+            elif item.get("type") == "FactSet":
+                lines.extend(
+                    f"{f.get('title', '')}: {f.get('value', '')}"
+                    for f in item.get("facts") or []
+                    if isinstance(f, dict)
+                )
+            walk(item.get("items"))
+            walk(item.get("columns"))
+
+    walk(card.get("body"))
+    return "\n".join(lines)
+
+
+def thread_root_of(conversation_id: str) -> Optional[str]:
+    """The id of the message a thread hangs off, or None outside a thread."""
+    _, sep, root = (conversation_id or "").partition(";messageid=")
+    return root if sep and root else None
 
 
 def channel_of(conversation_id: str) -> str:
@@ -428,6 +522,8 @@ async def handle(common_service, activity, user_email, aad_tenant_id) -> None:
         await _ask_nubi(common_service, activity, user_email, aad_tenant_id)
     elif action == APPROVE:
         await _approve(common_service, activity, user_email, aad_tenant_id)
+    elif action == FEEDBACK:
+        await _feedback(common_service, activity, user_email, aad_tenant_id)
     else:
         LOG.info("Ignoring unknown Teams card action %s", action)
 
@@ -865,3 +961,101 @@ async def _analyze(job) -> None:
         await stamp("Still analyzing. Check the event in NudgeBee.")
     finally:
         service.close()
+
+
+# ------------------------------- feedback -------------------------------
+
+
+def _post_feedback(params, tenant_id, user_id) -> bool:
+    """Record the rating in api-server, as Slack's feedback does. False when it
+    wasn't recorded."""
+    from notifications_server.repositories.user_repository import get_llm_conversation_by_session
+
+    with Session(sync_engine) as session:
+        conversation = get_llm_conversation_by_session(session, params["session_id"])
+    if not conversation:
+        LOG.warning("No Nubi conversation for a Teams feedback click on session %s", params["session_id"])
+        return False
+    useful = bool(params["useful"])
+    request = {
+        "session_id": params["answer_id"],
+        "module": "new-investigation",
+        "question": "",
+        "llm_response": "",
+        "user_corrected_response": "",
+        "additional_notes": "User liked the Response" if useful else "User disliked the Response",
+        "conversation_id": conversation["id"],
+        "cloud_account_id": params["account_id"],
+        "useful": useful,
+    }
+    try:
+        response = requests.post(
+            settings.services.api_server + "/rpc/ai",
+            json={
+                "action": {"name": "ai_feedback_create"},
+                "input": {"request": request},
+                "session_variables": {"tenant_id": str(tenant_id), "user_id": str(user_id)},
+            },
+            headers={"X-ACTION-TOKEN": settings.action_api_server_token},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        LOG.warning("Recording Teams feedback failed: %s", e)
+        return False
+    if not response.ok:
+        LOG.warning("api-server refused Teams feedback: %s", response.status_code)
+    return response.ok
+
+
+async def _feedback(common_service, activity, user_email, aad_tenant_id) -> None:
+    # Imported here: actions_common imports events, which imports this module.
+    from notifications_server.services.actions import validate_and_get_user_tenants
+    from notifications_server.services.actions_common import UNABLE_TO_PROCESS_REQUEST, USER_NOT_FOUND_MESSAGE
+
+    async def reply(text):
+        await common_service.teams_reply(activity, text, aad_tenant_id)
+
+    raw = activity.value.get(FEEDBACK_DATA)
+    tenant_id = await asyncio.to_thread(_tenant_for, aad_tenant_id)
+    params = verify(raw, FEEDBACK, tenant_id) if raw else None
+    if not (params and params.get("answer_id") and params.get("account_id") and params.get("session_id")):
+        if raw and expired(raw, FEEDBACK, tenant_id):
+            return await reply(FEEDBACK_CARD_TOO_OLD)
+        LOG.warning("Rejecting a Teams feedback click with invalid data")
+        return await reply(UNABLE_TO_PROCESS_REQUEST)
+
+    user_id, tenants = await asyncio.to_thread(validate_and_get_user_tenants, user_email)
+    if not user_id or str(tenant_id) not in {str(t) for t in tenants or []}:
+        return await reply(USER_NOT_FOUND_MESSAGE)
+
+    message_id = activity.reply_to_id
+    channel_id = channel_of(activity.conversation.id if activity.conversation else "")
+    if not (message_id and channel_id):
+        LOG.warning("Rejecting a Teams feedback click that doesn't name its card")
+        return await reply(UNABLE_TO_PROCESS_REQUEST)
+    card_ref = (tenant_id, channel_id, message_id)
+    claim = f"{tenant_id}:{message_id}:{FEEDBACK}"
+    cache = Cache()
+    if not cache.claim_card_action(claim, CLAIM_SECONDS):
+        return await reply(FEEDBACK_ALREADY)
+    try:
+        started = await asyncio.to_thread(begin, card_ref, FEEDBACK, lambda c: c)
+        if started is REFUSED or started is BUSY:
+            return await reply(FEEDBACK_ALREADY)
+        if not await asyncio.to_thread(_post_feedback, params, tenant_id, user_id):
+            await asyncio.to_thread(finish, card_ref, FEEDBACK, None, lambda c: c)
+            return await reply(FEEDBACK_FAILED)
+        clicker = (activity.from_property.name if activity.from_property else None) or user_email
+        outcome = f"{'👍' if params['useful'] else '👎'} Rated by {clicker}. Thanks for the feedback."
+        card = await asyncio.to_thread(
+            finish, card_ref, FEEDBACK, DONE, lambda c: with_status(without_feedback(c), outcome)
+        )
+        if card:
+            await _show(activity, card)
+        else:
+            await reply(outcome)
+    except Exception as e:
+        LOG.exception("Recording Teams feedback failed: %s", e)
+        await reply(FEEDBACK_FAILED)
+    finally:
+        cache.release_card_action(claim)

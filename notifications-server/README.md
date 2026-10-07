@@ -188,7 +188,9 @@ Configure the Slack App's redirect URL to `${BASE_URL}/api/integrations/slack/ca
 | `MS_TEAMS_CLIENT_ID` | The bot's Entra app id: Connect sign-in and the bot identity |
 | `MS_TEAMS_CLIENT_SECRET` | The bot's Entra app secret |
 | `MS_TEAMS_BOT_TENANT_ID` | Home tenant of a SingleTenant Azure Bot; the Bot Connector token is issued there. Leave empty for a MultiTenant bot |
-| `MS_TEAMS_ACTION_SIGNING_KEY` | Signs the data on Teams card buttons (Suppress, Ask Nubi, workflow approvals). Leave empty to send Teams cards without action buttons |
+| `MS_TEAMS_ACTION_SIGNING_KEY` | Signs the data on Teams card buttons (Suppress, Ask Nubi, workflow approvals, answer feedback). Leave empty to send Teams cards without action buttons |
+| `MS_TEAMS_THINKING_STEPS_ENABLED` | `true`: a chat question gets a "Thinking…" message that shows Nubi's steps and becomes the answer. `false`: a plain "working on it" reply |
+| `MS_TEAMS_ANSWER_CARDS_ENABLED` | `true`: chat answers are cards, with tables and feedback buttons. `false`: plain text answers |
 | `MS_TEAMS_AUTHORITY` | `https://login.microsoftonline.com/common` |
 | `MS_TEAMS_BOT_ENDPOINT` | Bot Framework endpoint |
 

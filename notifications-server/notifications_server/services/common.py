@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -43,7 +44,9 @@ from notifications_server.services.messaging_installations import (
     load_installation_by_team,
     load_ms_teams_installation_by_aad_tenant,
     load_installations,
+    ms_teams_aad_tenant_owner,
 )
+from notifications_server.services.ms_teams.activity import channel_data_of
 
 from botbuilder.core import TurnContext, BotFrameworkAdapterSettings, BotFrameworkAdapter
 from botbuilder.schema import Activity, ActivityTypes, Attachment
@@ -2200,6 +2203,36 @@ class CommonService:
         }
 
     @staticmethod
+    def create_teams_account_picked_card(account_name, url):
+        """What the account picker becomes once an account is picked."""
+        return {
+            "type": "AdaptiveCard",
+            ADAPTIVE_CARD_SCHEMA_KEY: ADAPTIVE_CARD_SCHEMA_URL,
+            "version": "1.4",
+            "body": [{"type": "TextBlock", "text": f"Working with **{account_name}**", "wrap": True}],
+            "actions": [
+                {"type": "Action.OpenUrl", "title": f"View in {settings.urls.branding_name}", "url": url},
+            ],
+        }
+
+    async def teams_update_clicked_card(self, activity: Activity, card: dict) -> bool:
+        """Replace the card a click came from. False when Teams didn't take it."""
+        if not activity.reply_to_id:
+            return False
+        try:
+            await asyncio.to_thread(
+                get_sender().update,
+                activity.service_url,
+                activity.conversation.id,
+                activity.reply_to_id,
+                card_activity(card),
+            )
+            return True
+        except TeamsBotError as e:
+            LOG.warning("Updating Teams card %s failed: %s", activity.reply_to_id, e)
+            return False
+
+    @staticmethod
     def create_teams_followup_card(question, followup_options):
         """Create an Adaptive Card with clickable buttons for follow-up options."""
         card = {
@@ -2234,7 +2267,9 @@ class CommonService:
         return card
 
     @staticmethod
-    def create_teams_welcome_card():
+    def create_teams_welcome_card(connected: bool):
+        """The card shown when the app is added. A Microsoft tenant already
+        connected to NudgeBee gets how-to-use; otherwise, how to connect."""
         from notifications_server.services.bot_messages import SIGNUP_URL
 
         branding_name = settings.urls.branding_name
@@ -2289,22 +2324,41 @@ class CommonService:
                     ),
                     "wrap": True,
                 },
+            ],
+        }
+        if connected:
+            card["body"].append(
                 {
                     "type": "TextBlock",
-                    "text": f"Don't have an account yet? [Sign up here]({SIGNUP_URL})",
+                    "text": f"Mention **@{branding_name}** in a channel or a thread to ask a question.",
+                    "wrap": True,
+                }
+            )
+            card["actions"] = [
+                {"type": "Action.OpenUrl", "title": f"Open {branding_name}", "url": f"{settings.base_url}/home"}
+            ]
+        else:
+            card["body"] += [
+                {
+                    "type": "TextBlock",
+                    "text": f"Connect Microsoft Teams in {branding_name} to get alerts and ask questions here.",
+                    "wrap": True,
+                },
+                {
+                    "type": "TextBlock",
+                    "text": f"New to {branding_name}? [Sign up]({SIGNUP_URL})",
                     "wrap": True,
                     "size": "Small",
                     "isSubtle": True,
                 },
-            ],
-            "actions": [
+            ]
+            card["actions"] = [
                 {
                     "type": "Action.OpenUrl",
-                    "title": "Sign Up",
-                    "url": SIGNUP_URL,
+                    "title": "Connect Microsoft Teams",
+                    "url": f"{settings.base_url}/user-management#integrations",
                 }
-            ],
-        }
+            ]
 
         return card
 
@@ -2574,7 +2628,14 @@ class CommonService:
 
     async def teams_send_welcome_message(self, activity: Activity) -> bool:
         """Send welcome message when bot is added to a Teams conversation."""
-        card = self.create_teams_welcome_card()
+        aad_tenant_id = (channel_data_of(activity).get("tenant") or {}).get("id")
+        try:
+            connected = bool(ms_teams_aad_tenant_owner(self.session, aad_tenant_id, enabled_only=True))
+        except Exception as e:
+            LOG.warning("Checking the Teams connection for tenant %s failed: %s", aad_tenant_id, e)
+            self.session.rollback()
+            connected = False
+        card = self.create_teams_welcome_card(connected)
         return await self.teams_reply_with_card(activity, card, None)
 
     # ==================== Google Chat Bot Messaging Methods ====================

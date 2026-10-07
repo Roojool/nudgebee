@@ -1431,9 +1431,9 @@ class MessageService:
         # A failure is returned too, so its reason reaches the delivery status.
         card = get_ms_teams_finding_message_template(finding, ip.tenant_id)
         response = await self._send_teams_template_as_bot(session, ip, card)
-        if response.get("status") != "success" or not card_actions.has_actions(card):
+        if response.get("status") != "success":
             return response, None
-        # A card with buttons is stored, so a click can update it.
+        # Stored so a click can update it and a reply in its thread can read it.
         row = card_actions.card_row(
             ip.tenant_id,
             finding.get("cloud_account_id"),
