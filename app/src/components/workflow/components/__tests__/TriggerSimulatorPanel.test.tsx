@@ -64,4 +64,29 @@ describe('TriggerSimulatorPanel match verdict', () => {
     expect(mockCheck).not.toHaveBeenCalled();
     expect(screen.queryByTestId('trigger-simulator-match-verdict')).not.toBeInTheDocument();
   });
+
+  it("samples an event from the automation's own account when none is picked", async () => {
+    respond({ matched: true });
+
+    render(<TriggerSimulatorPanel triggerType='event' accountId='acct-own' triggerParams={{ event_type: 'KubePodCrashLooping' }} />);
+
+    await waitFor(() => expect(mockCheck).toHaveBeenCalled());
+    expect(JSON.parse((screen.getByTestId('trigger-simulator-payload-input') as HTMLTextAreaElement).value).cloud_account_id).toBe('acct-own');
+  });
+
+  it('keeps a picked account in the sample', async () => {
+    respond({ matched: true });
+
+    render(
+      <TriggerSimulatorPanel
+        triggerType='optimization'
+        accountId='acct-own'
+        optimizationOverrides={{ cloud_account_id: 'acct-picked' }}
+        triggerParams={{ clusters: ['acct-picked'] }}
+      />
+    );
+
+    await waitFor(() => expect(mockCheck).toHaveBeenCalled());
+    expect(JSON.parse((screen.getByTestId('trigger-simulator-payload-input') as HTMLTextAreaElement).value).cloud_account_id).toBe('acct-picked');
+  });
 });

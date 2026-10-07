@@ -21,9 +21,10 @@ func checkTriggerMatch(t *testing.T, req model.CheckTriggerMatchRequest) model.C
 
 func eventPayload() map[string]any {
 	return map[string]any{
-		"event_type": "KubePodCrashLooping",
-		"cluster":    "prod",
-		"priority":   "P1",
+		"event_type":       "KubePodCrashLooping",
+		"cluster":          "prod",
+		"priority":         "P1",
+		"cloud_account_id": "test-account",
 	}
 }
 
@@ -65,7 +66,7 @@ func TestCheckTriggerMatch_EventTypeFallsBackToAggregationKey(t *testing.T) {
 	resp := checkTriggerMatch(t, model.CheckTriggerMatchRequest{
 		TriggerType: model.WorkflowTriggerEvent,
 		Params:      map[string]any{"event_type": "Anomaly"},
-		Payload:     map[string]any{"aggregation_key": "Anomaly"},
+		Payload:     map[string]any{"aggregation_key": "Anomaly", "cloud_account_id": "test-account"},
 	})
 	assert.True(t, resp.Matched)
 }
@@ -121,7 +122,7 @@ func TestCheckTriggerMatch_Optimization(t *testing.T) {
 	resp := checkTriggerMatch(t, model.CheckTriggerMatchRequest{
 		TriggerType: model.WorkflowTriggerOptimization,
 		Params:      params,
-		Payload:     map[string]any{"category": "InfraUpgrade", "rule_name": "AWS Ec2 Idle Instance"},
+		Payload:     map[string]any{"category": "InfraUpgrade", "rule_name": "AWS Ec2 Idle Instance", "cloud_account_id": "test-account"},
 	})
 	assert.True(t, resp.Matched)
 	assert.Equal(t, "{{ event.category in ['RightSizing', 'InfraUpgrade'] }}", resp.Filter)
@@ -129,7 +130,7 @@ func TestCheckTriggerMatch_Optimization(t *testing.T) {
 	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{
 		TriggerType: model.WorkflowTriggerOptimization,
 		Params:      params,
-		Payload:     map[string]any{"category": "Configuration"},
+		Payload:     map[string]any{"category": "Configuration", "cloud_account_id": "test-account"},
 	})
 	assert.False(t, resp.Matched)
 	assert.Equal(t, model.CheckTriggerGateFilter, resp.Gate)
@@ -195,4 +196,55 @@ func TestCheckTriggerMatch_DeniesForeignAccount(t *testing.T) {
 		Payload:     map[string]any{},
 	})
 	assert.Error(t, err)
+}
+
+func TestCheckTriggerMatch_AccountGate(t *testing.T) {
+	foreign := eventPayload()
+	foreign["cloud_account_id"] = "other-account"
+
+	// No accounts param: only the workflow's own account's events fire it.
+	resp := checkTriggerMatch(t, model.CheckTriggerMatchRequest{
+		TriggerType: model.WorkflowTriggerEvent,
+		Params:      map[string]any{"event_type": "KubePodCrashLooping"},
+		Payload:     foreign,
+	})
+	assert.False(t, resp.Matched)
+	assert.Equal(t, model.CheckTriggerGateAccount, resp.Gate)
+	assert.Contains(t, resp.Reason, "'other-account'")
+
+	// Listed accounts fire it, the workflow's own included only when listed.
+	params := map[string]any{"event_type": "KubePodCrashLooping", "accounts": []any{"other-account"}}
+	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{TriggerType: model.WorkflowTriggerEvent, Params: params, Payload: foreign})
+	assert.True(t, resp.Matched)
+	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{TriggerType: model.WorkflowTriggerEvent, Params: params, Payload: eventPayload()})
+	assert.Equal(t, model.CheckTriggerGateAccount, resp.Gate)
+
+	// account_id wins over cloud_account_id, as in the consumer.
+	payload := eventPayload()
+	payload["account_id"] = "other-account"
+	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{TriggerType: model.WorkflowTriggerEvent, Params: params, Payload: payload})
+	assert.True(t, resp.Matched)
+
+	// The consumer drops events without an account, so they never match.
+	delete(payload, "account_id")
+	delete(payload, "cloud_account_id")
+	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{TriggerType: model.WorkflowTriggerEvent, Params: params, Payload: payload})
+	assert.Equal(t, model.CheckTriggerGateAccount, resp.Gate)
+}
+
+func TestCheckTriggerMatch_OptimizationClustersAreListenAccounts(t *testing.T) {
+	params := map[string]any{"clusters": []any{"other-account"}}
+	resp := checkTriggerMatch(t, model.CheckTriggerMatchRequest{
+		TriggerType: model.WorkflowTriggerOptimization,
+		Params:      params,
+		Payload:     map[string]any{"category": "RightSizing", "cloud_account_id": "other-account"},
+	})
+	assert.True(t, resp.Matched)
+
+	resp = checkTriggerMatch(t, model.CheckTriggerMatchRequest{
+		TriggerType: model.WorkflowTriggerOptimization,
+		Params:      params,
+		Payload:     map[string]any{"category": "RightSizing", "cloud_account_id": "test-account"},
+	})
+	assert.Equal(t, model.CheckTriggerGateAccount, resp.Gate)
 }

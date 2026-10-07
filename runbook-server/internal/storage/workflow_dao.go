@@ -819,12 +819,13 @@ func (s *WorkflowDao) FindByName(ctx context.Context, tenantID, accountID, name 
 
 func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEventTriggerRule, error) {
 	query := `
-		SELECT
+		SELECT DISTINCT
 			id, tenant_id, account_id,
 			COALESCE(event_type_item, '') as event_type,
 			COALESCE(trigger->'params'->>'filter', '') as filter,
 			'event' as trigger_type,
-			COALESCE(trigger->'params'->>'on', 'event.created') as lifecycle_phase
+			COALESCE(trigger->'params'->>'on', 'event.created') as lifecycle_phase,
+			listen_account
 		FROM workflows,
 			 jsonb_array_elements(
 				CASE
@@ -842,27 +843,52 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 						THEN jsonb_build_array(trigger->'params'->>'event_type')
 					ELSE '[null]'::jsonb
 				END
-			 ) as event_type_item
+			 ) as event_type_item,
+			 LATERAL jsonb_array_elements_text(
+				CASE
+					WHEN jsonb_typeof(trigger->'params'->'accounts') = 'array'
+						 AND jsonb_array_length(trigger->'params'->'accounts') > 0
+						THEN trigger->'params'->'accounts'
+					ELSE jsonb_build_array(account_id::text)
+				END
+			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'event'
+		  AND EXISTS (
+			SELECT 1 FROM cloud_accounts ca
+			WHERE ca.id::text = listen_account AND ca.tenant::text = workflows.tenant_id::text
+		  )
 
 		UNION ALL
 
-		SELECT
+		SELECT DISTINCT
 			id, tenant_id, account_id,
 			'optimization.recommendation' as event_type,
 			COALESCE((trigger->'params')::text, '') as filter,
 			'optimization' as trigger_type,
-			'event.created' as lifecycle_phase
+			'event.created' as lifecycle_phase,
+			listen_account
 		FROM workflows,
 			 jsonb_array_elements(
 				CASE
 					WHEN jsonb_typeof(definition->'triggers') = 'array' THEN definition->'triggers'
 					ELSE '[]'::jsonb
 				END
-			 ) as trigger
+			 ) as trigger,
+			 LATERAL jsonb_array_elements_text(
+				CASE
+					WHEN jsonb_typeof(trigger->'params'->'clusters') = 'array'
+						 AND jsonb_array_length(trigger->'params'->'clusters') > 0
+						THEN trigger->'params'->'clusters'
+					ELSE jsonb_build_array(account_id::text)
+				END
+			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'optimization'
+		  AND EXISTS (
+			SELECT 1 FROM cloud_accounts ca
+			WHERE ca.id::text = listen_account AND ca.tenant::text = workflows.tenant_id::text
+		  )
 	`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -877,7 +903,7 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 	var rules []model.WorkflowEventTriggerRule
 	for rows.Next() {
 		var rule model.WorkflowEventTriggerRule
-		if err := rows.Scan(&rule.WorkflowID, &rule.TenantID, &rule.AccountID, &rule.EventType, &rule.Filter, &rule.TriggerType, &rule.LifecyclePhase); err != nil {
+		if err := rows.Scan(&rule.WorkflowID, &rule.TenantID, &rule.AccountID, &rule.EventType, &rule.Filter, &rule.TriggerType, &rule.LifecyclePhase, &rule.ListenAccountID); err != nil {
 			return nil, fmt.Errorf("failed to scan event trigger rule: %w", err)
 		}
 		// For optimization triggers, build Jinja filter from structured params.

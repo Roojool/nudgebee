@@ -67,10 +67,16 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
   const eventOverrideKey = JSON.stringify(eventOverrides || {});
   const optimizationOverrideKey = JSON.stringify(optimizationOverrides || {});
 
-  const mockPayload = useMemo(
-    () => buildTriggerMock(triggerType, lifecyclePhase, JSON.parse(eventOverrideKey), JSON.parse(optimizationOverrideKey)),
-    [triggerType, lifecyclePhase, eventOverrideKey, optimizationOverrideKey]
-  );
+  const mockPayload = useMemo(() => {
+    // With no account picked, sample an event from the automation's own account, which it always listens to.
+    const withOwnAccount = <T extends { cloud_account_id?: string }>(o: T): T => ({ ...o, cloud_account_id: o.cloud_account_id || accountId });
+    return buildTriggerMock(
+      triggerType,
+      lifecyclePhase,
+      withOwnAccount(JSON.parse(eventOverrideKey)),
+      withOwnAccount(JSON.parse(optimizationOverrideKey))
+    );
+  }, [triggerType, lifecyclePhase, eventOverrideKey, optimizationOverrideKey, accountId]);
 
   const [payloadJson, setPayloadJson] = useState('');
   // Once the user edits the payload we stop re-seeding it from the config, so a

@@ -22,6 +22,7 @@ import (
 	"nudgebee/runbook/services/integrations"
 	"nudgebee/runbook/services/security"
 	"nudgebee/runbook/services/ticket"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1649,6 +1650,10 @@ func (s *Service) CheckTriggerMatch(ctx *security.RequestContext, accountId stri
 		return model.CheckTriggerMatchResponse{}, fmt.Errorf("trigger type '%s' cannot be checked against a payload", request.TriggerType)
 	}
 
+	if resp, done := checkTriggerAccountGate(request, accountId); done {
+		return resp, nil
+	}
+
 	if filter == "" {
 		return model.CheckTriggerMatchResponse{Matched: true, Gate: model.CheckTriggerGateFilter, Reason: "no filter is set, so every event of this type matches"}, nil
 	}
@@ -1668,6 +1673,29 @@ func (s *Service) CheckTriggerMatch(ctx *security.RequestContext, accountId stri
 		resp.Reason = "the filter did not evaluate to true for this payload"
 	}
 	return resp, nil
+}
+
+// checkTriggerAccountGate mirrors the registry's account check: the payload's account
+// (account_id, else cloud_account_id, as the consumer resolves it) must be one the trigger listens to.
+func checkTriggerAccountGate(request model.CheckTriggerMatchRequest, workflowAccountID string) (model.CheckTriggerMatchResponse, bool) {
+	payloadAccount, _ := request.Payload["account_id"].(string)
+	if payloadAccount == "" {
+		payloadAccount, _ = request.Payload["cloud_account_id"].(string)
+	}
+	if payloadAccount == "" {
+		return model.CheckTriggerMatchResponse{
+			Gate:   model.CheckTriggerGateAccount,
+			Reason: "this payload has no account_id or cloud_account_id, so it cannot be routed to any automation",
+		}, true
+	}
+	trigger := model.Trigger{Type: request.TriggerType, Params: request.Params}
+	if !slices.Contains(trigger.ListenAccounts(workflowAccountID), payloadAccount) {
+		return model.CheckTriggerMatchResponse{
+			Gate:   model.CheckTriggerGateAccount,
+			Reason: fmt.Sprintf("this event is from account '%s', which this automation does not listen to", payloadAccount),
+		}, true
+	}
+	return model.CheckTriggerMatchResponse{}, false
 }
 
 // checkEventTriggerGates applies the event-type and lifecycle-phase gates, returning
@@ -4045,6 +4073,10 @@ func (s *Service) ValidateWorkflow(ctx *security.RequestContext, accountId strin
 	// the Go reference layout) without blocking the save.
 	for _, w := range LintTemplates(wf.Definition.Tasks) {
 		ctx.GetLogger().Warn("workflow template lint", "workflow_id", wf.ID, "warning", w)
+	}
+
+	if err := validateTriggerAccounts(ctx, accountId, wf.Definition.Triggers); err != nil {
+		return err
 	}
 
 	return s.validateTaskTypes(ctx, accountId, wf)

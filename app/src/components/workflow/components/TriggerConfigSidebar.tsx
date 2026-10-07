@@ -883,14 +883,17 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
     filterAccountProvider
   ).toLowerCase()}, ${structuredFieldLabel('namespace', filterAccountProvider).toLowerCase()}, source, priority, or advanced expression)`;
 
-  const saveEventTrigger = (filter: string): boolean => {
+  // Accounts the event trigger listens to, as the next save would write them (unsaved edits first).
+  const currentEventAccounts = (): string[] | undefined => (pendingTriggerConfig ?? selectedNode?.data?.trigger)?.params?.accounts;
+
+  const saveEventTrigger = (filter: string, accounts: string[] | undefined): boolean => {
     const trimmedFilter = filter?.trim() || '';
     if (!trimmedFilter) {
       setEventFilterError(AT_LEAST_ONE_FILTER_MSG);
       return false;
     }
     setEventFilterError('');
-    commitTriggerConfig({ type: 'event', params: { filter: trimmedFilter } });
+    commitTriggerConfig({ type: 'event', params: { filter: trimmedFilter, ...(accounts?.length ? { accounts } : {}) } });
     return true;
   };
 
@@ -900,7 +903,7 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
     setEventFilterError('');
 
     if (triggerType === 'event' && validateEventFilter(safeValue, setEventFilterError)) {
-      saveEventTrigger(safeValue);
+      saveEventTrigger(safeValue, currentEventAccounts());
     }
   };
 
@@ -924,7 +927,11 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
     setEventFilter(newFilter);
 
     if (triggerType === 'event') {
-      saveEventTrigger(newFilter);
+      // The picked cluster is also the account the trigger listens to; a list that already holds it is kept as is.
+      const cluster = overrides.cluster ?? filterCluster;
+      const existing = currentEventAccounts();
+      const known = accountOptions.some((o) => o.value === cluster);
+      saveEventTrigger(newFilter, !known ? undefined : existing?.includes(cluster) ? existing : [cluster]);
     }
   };
 
@@ -1522,7 +1529,13 @@ const TriggerConfigSidebar: React.FC<TriggerConfigSidebarProps> = ({
                     }
               }
               accountId={accountId}
-              triggerParams={{ filter: eventFilter, on: lifecyclePhase, event_type: selectedNode?.data?.trigger?.params?.event_type }}
+              triggerParams={{
+                filter: eventFilter,
+                on: lifecyclePhase,
+                event_type: selectedNode?.data?.trigger?.params?.event_type,
+                // The server gates on the accounts the trigger listens to, so the check must see them.
+                accounts: currentEventAccounts(),
+              }}
               onSimulateRun={onSimulateRun}
             />
           </FormCard>

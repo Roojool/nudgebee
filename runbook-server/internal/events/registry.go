@@ -123,8 +123,13 @@ func (r *EventRegistry) Match(eventType string, accountID string, payload any, p
 
 func (r *EventRegistry) evaluateRules(candidates []CompiledRule, accountID string, payload any, phase string, matches []model.WorkflowEventTriggerRule) []model.WorkflowEventTriggerRule {
 	for _, c := range candidates {
-		// Strict tenancy check
-		if c.Rule.AccountID != accountID {
+		// Strict tenancy check: the event must come from an account this rule listens to.
+		// Listen accounts outside the workflow's own are access-checked at save time.
+		listenAccountID := c.Rule.ListenAccountID
+		if listenAccountID == "" {
+			listenAccountID = c.Rule.AccountID
+		}
+		if listenAccountID != accountID {
 			continue
 		}
 
