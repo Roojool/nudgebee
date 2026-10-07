@@ -521,6 +521,12 @@ class MSTeamsSettings(BaseSettings):
         "",
         validation_alias=AliasChoices("MS_TEAMS_BOT_TENANT_ID", "ms_teams_bot_tenant_id"),
     )
+    # Signs the data carried by buttons on Teams cards. When unset, cards are
+    # sent without action buttons.
+    action_signing_key: str = Field(
+        "",
+        validation_alias=AliasChoices("MS_TEAMS_ACTION_SIGNING_KEY", "ms_teams_action_signing_key"),
+    )
     # Path matches the Next.js callback route at /api/integrations/ms-teams/callback
     redirect_path: str = "/api/integrations/ms-teams/callback"
     # The bot sends with its own credentials, so Connect only needs the signed-in

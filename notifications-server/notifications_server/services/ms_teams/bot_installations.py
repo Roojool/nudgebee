@@ -157,6 +157,9 @@ def _apply_team_change(session, change: Dict[str, Any]) -> str:
         )
         if unchanged:
             return UNCHANGED
+        # A team is one row, keyed by name. When its Microsoft tenant is connected
+        # to another workspace, the row moves with it, so its id is not a stable
+        # identity across workspaces and nothing may store it.
         integ.tenant_id = owner_tenant
         integ.status = "enabled"
         integ.updated_at = now

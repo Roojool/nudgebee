@@ -202,6 +202,15 @@ class TeamsBotSender:
             raise
         return getattr(response, "id", None) or ""
 
+    def update(self, service_url: str, conversation_id: str, activity_id: str, activity: Activity) -> None:
+        """Replace a message the bot posted, e.g. a card after one of its buttons
+        was used. Retries like a read: sending the same update twice is harmless."""
+        activity.id = activity_id
+        self._call(
+            lambda: self._connector(service_url).conversations.update_activity(conversation_id, activity_id, activity),
+            target=f"an update of {activity_id}",
+        )
+
     def get_member(self, service_url: str, conversation_id: str, member_id: str) -> Dict[str, str]:
         """Name and email of a member of a conversation the bot is in. Email can
         be empty: Teams doesn't always return it."""

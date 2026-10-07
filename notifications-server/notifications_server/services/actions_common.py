@@ -56,6 +56,62 @@ _DM_IGNORED_SUBTYPES = {"message_changed", "message_deleted", "message_replied"}
 LOG = logging.getLogger(__name__)
 
 
+# Shared by the Slack and Microsoft Teams suppress actions.
+def can_manage_triage_rules(user_id, tenant_id, account_id):
+    try:
+        response = requests.post(
+            settings.services.api_server + ACCOUNT_SECURITY_CONTEXT,
+            json={"user_id": user_id, "tenant_id": tenant_id},
+            headers={"X-ACTION-TOKEN": settings.action_api_server_token},
+            timeout=10,
+        )
+        response.raise_for_status()
+        context = (response.json() or {}).get("context") or {}
+        if account_id not in (context.get("AccountIds") or []):
+            return False
+        return bool(set(context.get("Roles") or []) & SUPPRESS_ALLOWED_ROLES)
+    except Exception as e:
+        LOG.warning("Failed to check suppress permission for user %s: %s", user_id, e)
+        return False
+
+
+def build_suppress_rule_input(account_id, scope, fingerprint, alertname, until, name):
+    """The event_create_triage_rule input for a time-boxed suppression, or None
+    when the scope has nothing to match on."""
+    rule_input = {
+        "cloud_account_id": account_id,
+        "rule_type": "suppression",
+        "action": "suppress",
+        "effective_until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "apply_to_existing": True,
+        "name": name,
+    }
+    if scope == "alertname" and alertname:
+        # match_alertname is evaluated as a regex against aggregation_key.
+        rule_input["match_alertname"] = f"^{re.escape(alertname)}$"
+    elif fingerprint:
+        rule_input["match_fingerprint"] = fingerprint
+    else:
+        return None
+    return rule_input
+
+
+def create_suppress_rule(tenant_id, user_id, rule_input):
+    """Creates the triage rule; True when api-server reports success."""
+    response = requests.post(
+        settings.services.api_server + "/rpc/triage",
+        json={
+            "action": {"name": "event_create_triage_rule"},
+            "input": rule_input,
+            "session_variables": {"tenant_id": tenant_id, "user_id": user_id},
+        },
+        headers={"X-ACTION-TOKEN": settings.action_api_server_token},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return bool((response.json() or {}).get("success"))
+
+
 class SlackActionsBaseService:
     def __init__(self, engine, slack_app, teams_app):
         self.slack_app = slack_app
@@ -460,34 +516,12 @@ class SlackInteractiveActionsService(SlackActionsBaseService):
                 return self.reply_with_error(channel_id, team_id, message_ts, SUPPRESS_NOT_ALLOWED_MESSAGE)
 
             until = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
-            rule_input = {
-                "cloud_account_id": account_id,
-                "rule_type": "suppression",
-                "action": "suppress",
-                "effective_until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "apply_to_existing": True,
-                "name": f"Suppressed via Slack by {user_email}",
-            }
-            if scope == "alertname" and alertname:
-                # match_alertname is evaluated as a regex against aggregation_key.
-                rule_input["match_alertname"] = f"^{re.escape(alertname)}$"
-            elif fingerprint:
-                rule_input["match_fingerprint"] = fingerprint
-            else:
-                return self.reply_with_error(channel_id, team_id, message_ts, UNABLE_TO_PROCESS_REQUEST)
-
-            response = requests.post(
-                settings.services.api_server + "/rpc/triage",
-                json={
-                    "action": {"name": "event_create_triage_rule"},
-                    "input": rule_input,
-                    "session_variables": {"tenant_id": tenant_id, "user_id": user_id},
-                },
-                headers={"X-ACTION-TOKEN": settings.action_api_server_token},
-                timeout=15,
+            rule_input = build_suppress_rule_input(
+                account_id, scope, fingerprint, alertname, until, f"Suppressed via Slack by {user_email}"
             )
-            response.raise_for_status()
-            if not (response.json() or {}).get("success"):
+            if rule_input is None:
+                return self.reply_with_error(channel_id, team_id, message_ts, UNABLE_TO_PROCESS_REQUEST)
+            if not create_suppress_rule(tenant_id, user_id, rule_input):
                 return self.reply_with_error(channel_id, team_id, message_ts, UNABLE_TO_PROCESS_REQUEST)
 
             slack_user_id = data["user"]["id"]
@@ -519,21 +553,7 @@ class SlackInteractiveActionsService(SlackActionsBaseService):
 
     @staticmethod
     def _can_manage_triage_rules(user_id, tenant_id, account_id):
-        try:
-            response = requests.post(
-                settings.services.api_server + ACCOUNT_SECURITY_CONTEXT,
-                json={"user_id": user_id, "tenant_id": tenant_id},
-                headers={"X-ACTION-TOKEN": settings.action_api_server_token},
-                timeout=10,
-            )
-            response.raise_for_status()
-            context = (response.json() or {}).get("context") or {}
-            if account_id not in (context.get("AccountIds") or []):
-                return False
-            return bool(set(context.get("Roles") or []) & SUPPRESS_ALLOWED_ROLES)
-        except Exception as e:
-            LOG.warning("Failed to check suppress permission for user %s: %s", user_id, e)
-            return False
+        return can_manage_triage_rules(user_id, tenant_id, account_id)
 
     def _mark_finding_suppressed(self, channel_id, team_id, message, status_line):
         message_ts = message.get("ts")

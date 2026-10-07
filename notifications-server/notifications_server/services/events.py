@@ -23,6 +23,7 @@ from notifications_server.services import channel_analysis
 from notifications_server.services.channel_context import ChannelContextService
 from notifications_server.services.common import THREAD_CONTEXT_MARKER
 from notifications_server.services.messaging_installations import load_installation_by_team
+from notifications_server.services.ms_teams import card_actions
 from notifications_server.services.slack_images import collect_slack_images
 from notifications_server.services import slack_progress
 from notifications_server.services.actions import (
@@ -1923,6 +1924,10 @@ class Events:
                     )
                 else:
                     LOG.warning("Follow-up selection activity received without a followup_option value.")
+                return
+
+            if card_actions.is_card_action(activity):
+                await card_actions.handle(self.common_service, activity, user_email, teams_account_id)
                 return
 
             cleaned_text = message_text.strip()

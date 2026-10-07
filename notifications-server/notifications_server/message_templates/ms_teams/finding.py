@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime
 
+from notifications_server.services.ms_teams import card_actions
 from notifications_server.utils.evidence import flatten_evidence_rows
 from notifications_server.utils.transformer import Transformer
 from notifications_server.configs.settings import DEFAULT_EVIDENCES, settings
@@ -47,7 +48,9 @@ def add_filtered_evidences_teams(evidence_list, data: dict):
             )
 
 
-def get_ms_teams_finding_message_template(finding):
+def get_ms_teams_finding_message_template(finding, tenant_id=None):
+    """The finding card. With a tenant, for the bot (not webhooks, which can't
+    receive clicks), it also carries the action buttons."""
     parameters = {"title": finding.get("title")}
     if finding.get("description"):
         parameters["description"] = finding.get("description")
@@ -69,7 +72,15 @@ def get_ms_teams_finding_message_template(finding):
     parameters["evidences"] = add_evidences(finding)
     parameters["viewUrl"] = f"{os.environ.get('BASE_URL')}/investigate?id={finding.get('id')}"
 
-    return get_adaptive_card_template(parameters)
+    card = get_adaptive_card_template(parameters)
+    suppress = card_actions.suppress_action(finding, tenant_id) if tenant_id else None
+    if suppress:
+        with_menu = {**card, "actions": [*(card.get("actions") or []), suppress]}
+        # An alert must still be delivered when its evidence leaves no room for the menu.
+        if card_actions.fits(with_menu):
+            return with_menu
+        LOG.info("Teams card for finding %s is too large for the Suppress menu", finding.get("id"))
+    return card
 
 
 def add_evidences(finding):

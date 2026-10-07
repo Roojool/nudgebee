@@ -45,6 +45,7 @@ from notifications_server.services.slack.slack import retriable_slack_api_error,
 from notifications_server.message_templates import template_mapping
 from notifications_server.message_templates.google_chat.finding import get_markdown_message_template
 from notifications_server.message_templates.ms_teams.finding import get_ms_teams_finding_message_template
+from notifications_server.services.ms_teams import card_actions
 from notifications_server.services.ms_teams.bot_sender import (
     APP_NOT_IN_TEAM,
     TeamsBotError,
@@ -1321,6 +1322,8 @@ class MessageService:
 
         async with BaseDB.async_session(self.engine)() as session:
             query = select(SentNotifications).filter_by(tenant_id=tenant_id, fingerprint=fingerprint)
+            # Only Slack rows have a thread to reply in; skip the rest in the query.
+            query = query.filter(SentNotifications.slack_thread_id.isnot(None))
             if account_id:
                 query = query.filter_by(account_id=account_id)
             rows = (await session.execute(query)).scalars().all()
@@ -1411,10 +1414,23 @@ class MessageService:
             return failed_response("ms_teams", reason=str(e))
         return success_response("ms_teams", team_id=team_id, channel_id=channel_id, message_ts=message_id)
 
-    async def _send_finding_to_teams(self, session, tenant_id, ip, finding, _):
+    async def _send_finding_to_teams(self, session, tenant_id, ip, finding, fingerprint):
         # A failure is returned too, so its reason reaches the delivery status.
-        response = await self._send_teams_template_as_bot(session, ip, get_ms_teams_finding_message_template(finding))
-        return response, None
+        card = get_ms_teams_finding_message_template(finding, ip.tenant_id)
+        response = await self._send_teams_template_as_bot(session, ip, card)
+        if response.get("status") != "success" or not card_actions.has_actions(card):
+            return response, None
+        # A card with buttons is stored, so a click can update it.
+        row = card_actions.card_row(
+            ip.tenant_id,
+            finding.get("cloud_account_id"),
+            fingerprint,
+            response.get("channel_id"),
+            response.get("message_ts"),
+            card,
+            "finding",
+        )
+        return response, row
 
     async def _send_finding_to_teams_webhook(self, session, tenant_id, ip, finding, _):
         """POST a finding card to ip.webhook_url. Returns (response, None) — webhooks

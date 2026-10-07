@@ -188,6 +188,7 @@ Configure the Slack App's redirect URL to `${BASE_URL}/api/integrations/slack/ca
 | `MS_TEAMS_CLIENT_ID` | The bot's Entra app id: Connect sign-in and the bot identity |
 | `MS_TEAMS_CLIENT_SECRET` | The bot's Entra app secret |
 | `MS_TEAMS_BOT_TENANT_ID` | Home tenant of a SingleTenant Azure Bot; the Bot Connector token is issued there. Leave empty for a MultiTenant bot |
+| `MS_TEAMS_ACTION_SIGNING_KEY` | Signs the data on Teams card buttons (Suppress). Leave empty to send Teams cards without action buttons |
 | `MS_TEAMS_AUTHORITY` | `https://login.microsoftonline.com/common` |
 | `MS_TEAMS_BOT_ENDPOINT` | Bot Framework endpoint |
 

@@ -139,6 +139,26 @@ def test_install_rename_uninstall_and_reinstall():
     assert _team(session)[0].status == "enabled"
 
 
+def test_a_team_row_moves_with_its_microsoft_tenant():
+    other_tenant = "bbbbbbbb-2222-4222-8222-222222222222"
+    session = _session_with(_teams_integration("tenant-a", NB_TENANT))
+    assert bi.apply_team_change(session, _change()) == bi.RECORDED
+    before = _team(session)[0]
+    row_id = before.id
+
+    from notifications_server.models.models import Integration
+
+    connection = session.query(Integration).filter(Integration.type == "ms_teams").one()
+    session.delete(connection)
+    session.add(_teams_integration("tenant-a", other_tenant))
+    session.commit()
+
+    assert bi.apply_team_change(session, _change()) == bi.RECORDED
+    after = _team(session)[0]
+    assert (after.id, after.name) == (row_id, "group-1"), "one row per team: the id is not stable across workspaces"
+    assert str(after.tenant_id) == other_tenant
+
+
 def test_a_concurrent_insert_is_retried_as_an_update():
     from sqlalchemy.exc import IntegrityError
 

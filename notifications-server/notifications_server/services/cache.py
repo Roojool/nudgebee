@@ -580,6 +580,30 @@ class Cache:
             LOG.exception(f"Error deduping event {event_id}: {e}")
             return True
 
+    def claim_card_action(self, key, ttl_seconds):
+        """First click on a card action wins (True) until the claim expires.
+        Only a fast path: the stored card is what refuses repeats. Fails open
+        (True) when Redis is unavailable."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return True
+        try:
+            return bool(self.redis_client.set(f"card_action:{key}", "1", nx=True, ex=ttl_seconds))
+        except redis.RedisError as e:
+            LOG.exception(f"Error claiming card action {key}: {e}")
+            return True
+
+    def release_card_action(self, key):
+        """Drops a claim taken by claim_card_action, so a retry after a failure
+        isn't ignored until the claim expires."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return
+        try:
+            self.redis_client.delete(f"card_action:{key}")
+        except redis.RedisError as e:
+            LOG.exception(f"Error releasing card action {key}: {e}")
+
     def claim_event_analysis_poller(self, event_id, ttl_seconds):
         """First claim for event_id wins (True); a second, still-live claim
         gets False -- guards against two overlapping clicks on the same event
