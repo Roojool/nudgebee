@@ -15,6 +15,7 @@ from notifications_server.message_templates.ms_teams.finding import get_ms_teams
 from notifications_server.services import actions as actions_module
 from notifications_server.services import actions_common
 from notifications_server.services import events as events_module
+from notifications_server.services import message as message_module
 from notifications_server.services.ms_teams import card_actions as ca
 
 NB_TENANT = "aaaaaaaa-1111-4111-8111-111111111111"
@@ -398,3 +399,301 @@ def test_an_unexpected_error_replies_and_releases_the_claim(store):
         result = _run(_click())
     assert result.replies == [actions_common.UNABLE_TO_PROCESS_REQUEST]
     result.release.assert_called_once()
+
+
+# ------------------------------- approvals -------------------------------
+
+
+def _approval_params(options=("approve", "reject"), token="run-1:task-2"):
+    from notifications_server.message_templates.slack.generic import get_generic_message_params
+
+    return get_generic_message_params(message="Restart the API?", approval_token=token, approval_options=list(options))
+
+
+def _approval_card(options=("approve", "reject")):
+    from notifications_server.message_templates.ms_teams.generic import get_ms_teams_generic_message_template
+
+    params = _approval_params(options)
+    return ca.with_approval_buttons(get_ms_teams_generic_message_template(params), params, NB_TENANT)
+
+
+def test_an_approval_card_gets_one_signed_button_per_option():
+    card = _approval_card()
+    buttons = [a for a in card["actions"] if a["id"].startswith(ca.APPROVAL_ID)]
+    assert [b["title"] for b in buttons] == ["Approve", "Reject"]
+    signed = [ca.verify(b["data"][ca.APPROVAL_DATA], ca.APPROVE, NB_TENANT) for b in buttons]
+    assert [(p["token"], p["status"]) for p in signed] == [("run-1:task-2", "approve"), ("run-1:task-2", "reject")]
+    assert ca.has_actions(card)
+    assert not ca.has_actions(ca.without_approval(card))
+
+
+def test_more_than_three_options_become_a_choice_set():
+    card = _approval_card(("approve", "reject", "defer", "escalate"))
+    (choice_set,) = [b for b in card["body"] if b.get("id") == ca.APPROVAL_CHOICE]
+    assert len(choice_set["choices"]) == 4
+    assert [a["title"] for a in card["actions"]] == ["Submit"]
+    cleared = ca.without_approval(card)
+    assert not ca.has_actions(cleared) and all(b.get("id") != ca.APPROVAL_CHOICE for b in cleared["body"])
+
+
+def test_cards_without_a_token_options_or_key_get_no_approval_buttons():
+    from notifications_server.message_templates.ms_teams.generic import get_ms_teams_generic_message_template
+    from notifications_server.message_templates.slack.generic import get_generic_message_params
+
+    plain = get_generic_message_params(message="FYI")
+    card = get_ms_teams_generic_message_template(plain)
+    assert ca.with_approval_buttons(card, plain, NB_TENANT) == card
+    no_options = _approval_params(options=())
+    assert not ca.has_actions(ca.with_approval_buttons(card, no_options, NB_TENANT))
+    settings.ms_teams.action_signing_key = ""
+    assert not ca.has_actions(_approval_card())
+
+
+def test_a_template_send_with_approval_buttons_stores_its_card():
+    from notifications_server.message_templates.ms_teams.generic import get_ms_teams_generic_message_template
+    from notifications_server.services.message import MessageService
+
+    service = MessageService.__new__(MessageService)
+    session = mock.Mock(info={})
+    ip = SimpleNamespace(tenant_id=NB_TENANT)
+    sent = {"status": "success", "team_id": "group-1", "channel_id": "19:ops", "message_ts": "1800"}
+    with mock.patch.object(MessageService, "_send_teams_template_as_bot", mock.AsyncMock(return_value=sent)) as send:
+        response = asyncio.run(
+            service.send_teams_template_notification(
+                ip, get_ms_teams_generic_message_template, _approval_params(), session, NB_TENANT
+            )
+        )
+    assert response is sent
+    assert ca.has_actions(send.call_args.args[2]), "the buttons are on the card that was sent"
+    (row,) = [c.args[0] for c in session.add.call_args_list]
+    assert (row.teams_message_id, row.teams_channel_id, row.fingerprint) == ("1800", "19:ops", "ms_teams:1800")
+    assert session.info[message_module.STORED_TEAMS_CARDS] is True
+
+
+def test_a_template_send_without_buttons_stores_nothing():
+    from notifications_server.message_templates.ms_teams.generic import get_ms_teams_generic_message_template
+    from notifications_server.message_templates.slack.generic import get_generic_message_params
+    from notifications_server.services.message import MessageService
+
+    service = MessageService.__new__(MessageService)
+    session = mock.Mock(info={})
+    sent = {"status": "success", "channel_id": "19:ops", "message_ts": "1800"}
+    with mock.patch.object(MessageService, "_send_teams_template_as_bot", mock.AsyncMock(return_value=sent)):
+        asyncio.run(
+            service.send_teams_template_notification(
+                SimpleNamespace(tenant_id=NB_TENANT),
+                get_ms_teams_generic_message_template,
+                get_generic_message_params(message="FYI"),
+                session,
+                NB_TENANT,
+            )
+        )
+    session.add.assert_not_called()
+    assert session.info == {}
+
+
+def test_the_template_branch_commits_stored_cards():
+    from notifications_server.services.message import MessageService
+
+    service = MessageService.__new__(MessageService)
+    session = SimpleNamespace(info={message_module.STORED_TEAMS_CARDS: True}, commit=mock.AsyncMock())
+    with mock.patch.object(MessageService, "send_template_notification", mock.AsyncMock(return_value=[{"ok": 1}])):
+        result = asyncio.run(service.trigger_notification(session, "fp", [], {}, {}, [], NB_TENANT, "generic"))
+    assert result == [{"ok": 1}]
+    session.commit.assert_awaited_once()
+    assert message_module.STORED_TEAMS_CARDS not in session.info
+
+    untouched = SimpleNamespace(info={}, commit=mock.AsyncMock())
+    with mock.patch.object(MessageService, "send_template_notification", mock.AsyncMock(return_value=[])):
+        asyncio.run(service.trigger_notification(untouched, "fp", [], {}, {}, [], NB_TENANT, "generic"))
+    untouched.commit.assert_not_awaited()
+
+
+def test_a_threaded_approval_stores_its_card():
+    from notifications_server.services.message import MessageService
+
+    service = MessageService.__new__(MessageService)
+    session = SimpleNamespace(add=mock.Mock(), commit=mock.AsyncMock())
+    with mock.patch.object(MessageService, "_post_teams_card_as_bot", mock.AsyncMock(return_value="1900")):
+        response = asyncio.run(
+            service._send_teams_threaded_reply(
+                session, SimpleNamespace(tenant_id=NB_TENANT), "group-1", "19:ops", "1700", _approval_card()
+            )
+        )
+    assert response[0]["status"] == "success"
+    (row,) = [c.args[0] for c in session.add.call_args_list]
+    assert (row.teams_message_id, row.teams_channel_id) == ("1900", "19:ops")
+    session.commit.assert_awaited_once()
+
+
+def test_a_threaded_approval_that_cant_be_stored_is_still_a_successful_send():
+    from notifications_server.services.message import MessageService
+
+    service = MessageService.__new__(MessageService)
+    session = SimpleNamespace(
+        add=mock.Mock(), commit=mock.AsyncMock(side_effect=RuntimeError("db down")), rollback=mock.AsyncMock()
+    )
+    with mock.patch.object(MessageService, "_post_teams_card_as_bot", mock.AsyncMock(return_value="1900")):
+        response = asyncio.run(
+            service._send_teams_threaded_reply(
+                session, SimpleNamespace(tenant_id=NB_TENANT), "group-1", "19:ops", "1700", _approval_card()
+            )
+        )
+    assert response[0]["status"] == "success" and response[0]["message_ts"] == "1900"
+    session.rollback.assert_awaited_once()
+
+
+@pytest.fixture
+def approval_store(store):
+    from sqlalchemy.orm import Session
+
+    from notifications_server.models.models import SentNotifications
+
+    card = _approval_card()
+    row = ca.card_row(uuid.UUID(NB_TENANT), None, None, "19:ops", "1800", card, "approval")
+    row.id = uuid.uuid4()
+    with Session(store.engine) as session:
+        session.add(row)
+        session.commit()
+
+    def stored():
+        with Session(store.engine) as session:
+            row = session.query(SentNotifications).filter(SentNotifications.teams_message_id == "1800").one()
+            return json.loads(row.teams_metadata)
+
+    return SimpleNamespace(card=card, stored=stored)
+
+
+def _approval_click(card, option=0):
+    button = [a for a in card["actions"] if a["id"].startswith(ca.APPROVAL_ID)][option]
+    return SimpleNamespace(
+        value=dict(button["data"]),
+        reply_to_id="1800",
+        service_url=SERVICE_URL,
+        conversation=SimpleNamespace(id="19:ops;messageid=1800"),
+        from_property=SimpleNamespace(name="Dana"),
+    )
+
+
+def _run_approval(activity, *, status_code=200, user=("user-1", [NB_TENANT]), claimed=True):
+    common = SimpleNamespace(teams_reply=mock.AsyncMock())
+    sender = mock.Mock()
+    with (
+        mock.patch.object(ca, "_tenant_for", return_value=uuid.UUID(NB_TENANT)),
+        mock.patch.object(actions_module, "validate_and_get_user_tenants", return_value=user),
+        mock.patch.object(ca, "_post_approval", return_value=status_code) as post,
+        mock.patch.object(ca.Cache, "claim_card_action", return_value=claimed),
+        mock.patch.object(ca.Cache, "release_card_action") as release,
+        mock.patch.object(ca, "get_sender", return_value=sender),
+    ):
+        asyncio.run(ca.handle(common, activity, "dana@example.com", "aad-tenant"))
+    replies = [c.args[1] for c in common.teams_reply.call_args_list]
+    return SimpleNamespace(replies=replies, post=post, sender=sender, release=release)
+
+
+def test_approving_records_the_decision_and_stamps_the_card(approval_store):
+    result = _run_approval(_approval_click(approval_store.card))
+    assert result.post.call_args.args == ("run-1:task-2", "approve")
+    last = result.sender.update.call_args_list[-1].args[3].attachments[0].content
+    assert last["body"][-1]["text"] == "Dana chose **Approve**"
+    assert not ca.has_actions(last), "the buttons are gone once it's answered"
+    assert result.replies == ["Dana chose **Approve**"]
+    assert approval_store.stored()["actions"][ca.APPROVE]["state"] == ca.DONE
+
+
+def test_a_second_decision_on_the_same_card_is_refused(approval_store):
+    _run_approval(_approval_click(approval_store.card))
+    again = _run_approval(_approval_click(approval_store.card, option=1))
+    again.post.assert_not_called()
+    assert again.replies == [ca.APPROVAL_ANSWERED]
+
+
+def test_an_answered_or_expired_approval_is_shown_as_such(approval_store):
+    answered = _run_approval(_approval_click(approval_store.card), status_code=409)
+    assert answered.replies == [ca.APPROVAL_ANSWERED]
+
+
+def test_an_expired_approval_is_shown_as_expired(approval_store):
+    expired = _run_approval(_approval_click(approval_store.card), status_code=404)
+    assert expired.replies == [ca.APPROVAL_EXPIRED]
+    assert not ca.has_actions(approval_store.stored()["card"])
+
+
+def test_a_failed_decision_can_be_retried(approval_store):
+    for status_code in (500, None):
+        result = _run_approval(_approval_click(approval_store.card), status_code=status_code)
+        assert result.replies == [ca.APPROVAL_FAILED]
+        result.release.assert_called_once()
+        assert approval_store.stored()["actions"] == {}
+        assert ca.has_actions(approval_store.stored()["card"])
+
+
+def test_someone_outside_the_workspace_cannot_decide(approval_store):
+    result = _run_approval(_approval_click(approval_store.card), user=("user-9", [OTHER_TENANT]))
+    result.post.assert_not_called()
+    assert result.replies == [actions_common.USER_NOT_FOUND_MESSAGE]
+
+
+def test_tampered_approval_data_is_refused(approval_store):
+    activity = _approval_click(approval_store.card)
+    forged = json.loads(activity.value[ca.APPROVAL_DATA])
+    forged["body"]["action_params"]["token"] = "someone-elses-run:task"
+    activity.value[ca.APPROVAL_DATA] = json.dumps(forged)
+    result = _run_approval(activity)
+    result.post.assert_not_called()
+    assert result.replies == [actions_common.UNABLE_TO_PROCESS_REQUEST]
+
+
+def test_a_choice_set_approval_reads_the_picked_option(approval_store):
+    card = _approval_card(("approve", "reject", "defer", "escalate"))
+    (choice_set,) = [b for b in card["body"] if b.get("id") == ca.APPROVAL_CHOICE]
+    activity = _approval_click(card)
+    activity.value = {ca.ACTION_KEY: ca.APPROVE, ca.APPROVAL_CHOICE: choice_set["choices"][2]["value"]}
+    result = _run_approval(activity)
+    assert result.post.call_args.args == ("run-1:task-2", "defer")
+
+
+def test_an_approval_prompt_too_large_for_its_buttons_is_still_sent():
+    from notifications_server.message_templates.ms_teams.generic import get_ms_teams_generic_message_template
+    from notifications_server.message_templates.slack.generic import get_generic_message_params
+
+    params = get_generic_message_params(
+        message="details " * 3500, approval_token="run-1:task-2", approval_options=["approve", "reject"]
+    )
+    card = get_ms_teams_generic_message_template(params)
+    assert ca.with_approval_buttons(card, params, NB_TENANT) == card
+
+
+def test_a_decision_on_a_card_older_than_its_buttons_says_so(approval_store):
+    with mock.patch.object(ca.time, "time", return_value=time.time() - ca.MAX_AGE_SECONDS - 3600):
+        activity = _approval_click(_approval_card())
+    result = _run_approval(activity)
+    result.post.assert_not_called()
+    assert result.replies == [ca.APPROVAL_CARD_TOO_OLD]
+
+
+def test_a_decision_while_another_is_being_recorded_says_so(approval_store):
+    result = _run_approval(_approval_click(approval_store.card), claimed=False)
+    result.post.assert_not_called()
+    assert result.replies == [ca.STILL_RECORDING]
+
+
+def test_a_decision_releases_its_claim_and_an_unexpected_error_replies(approval_store):
+    assert _run_approval(_approval_click(approval_store.card)).release.call_count == 1
+    with mock.patch.object(ca, "begin", side_effect=RuntimeError("db down")):
+        failed = _run_approval(_approval_click(approval_store.card))
+    assert failed.replies == [ca.APPROVAL_FAILED]
+    failed.release.assert_called_once()
+
+
+def test_the_approval_token_is_escaped_in_the_url(monkeypatch):
+    monkeypatch.setattr(settings.services, "workflow_server", "http://workflow-server/")
+    with mock.patch.object(ca.requests, "post", return_value=SimpleNamespace(status_code=200)) as post:
+        assert ca._post_approval("run-1:task-2", "approve") == 200
+        ca._post_approval("run/../x?y#z w", "approve")
+    urls = [c.args[0] for c in post.call_args_list]
+    assert urls == [
+        "http://workflow-server/approvals/run-1:task-2",
+        "http://workflow-server/approvals/run%2F..%2Fx%3Fy%23z%20w",
+    ]
+    assert post.call_args.kwargs["json"] == {"status": "approve"}

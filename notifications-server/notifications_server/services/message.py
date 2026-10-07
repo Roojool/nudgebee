@@ -86,6 +86,17 @@ cache = Cache()
 # ----------------------------- Utility functions -----------------------------
 
 
+# Set on the session when a Teams card with buttons was added to it, so the
+# caller knows to commit.
+STORED_TEAMS_CARDS = "stored_teams_cards"
+
+
+def _approval_account_id(params):
+    """The account a workflow approval belongs to, when its params name one."""
+    metadata = getattr(params, "workflow_metadata", None)
+    return getattr(metadata, "account_id", None) if metadata else None
+
+
 def get_fingerprint(type_, kwargs):
     parameters = kwargs.get("parameters", {})
     if type_ == "finding":
@@ -1046,6 +1057,8 @@ class MessageService:
             platform_responses = await self.send_template_notification(
                 session, tenant_id, kwargs, type_, installed_platforms
             )
+            if session.info.pop(STORED_TEAMS_CARDS, False):
+                await session.commit()
         else:
             LOG.warning("No template found for notification type '%s' — notification not delivered", type_)
         return platform_responses
@@ -1786,7 +1799,24 @@ class MessageService:
             LOG.exception("weekly digest: attaching the PDF failed; the summary was delivered")
 
     async def send_teams_template_notification(self, ip, template_func, param_value, session, tenant):
-        return await self._send_teams_template_as_bot(session, ip, template_func(param_value))
+        card = card_actions.with_approval_buttons(template_func(param_value), param_value, ip.tenant_id)
+        response = await self._send_teams_template_as_bot(session, ip, card)
+        # A card with buttons is stored, so a click can update it. It's committed
+        # by the caller with the rest of the notification (trigger_notification).
+        if session is not None and response.get("status") == "success" and card_actions.has_actions(card):
+            row = card_actions.card_row(
+                ip.tenant_id,
+                _approval_account_id(param_value),
+                None,
+                response.get("channel_id"),
+                response.get("message_ts"),
+                card,
+                "approval",
+            )
+            if row is not None:
+                session.add(row)
+                session.info[STORED_TEAMS_CARDS] = True
+        return response
 
     async def send_teams_webhook_template_notification(self, ip, template_func, param_value, tenant):
         """Template send via webhook: same ms_teams card, POSTed to ip.webhook_url."""
@@ -1975,6 +2005,8 @@ class MessageService:
                     return [failed_response(platform, reason="Unsupported platform")]
 
                 template = template_factories[platform](generic_params)
+                if platform == PlatformTypes.MS_TEAMS.value:
+                    template = card_actions.with_approval_buttons(template, generic_params, ip.tenant_id)
 
                 handlers = {
                     PlatformTypes.SLACK.value: lambda: self._send_slack_threaded_reply(
@@ -2038,6 +2070,17 @@ class MessageService:
         except TeamsBotError as e:
             LOG.warning("Teams bot thread reply in team %s failed: %s", team_id, e)
             return [failed_response("ms_teams", reason=str(e))]
+        if card_actions.has_actions(template):
+            row = card_actions.card_row(ip.tenant_id, None, None, channel_id, message_id, template, "approval")
+            if row is not None:
+                # The card is already posted: a failed save only means clicks on it
+                # reply in the thread, so it doesn't fail the send.
+                try:
+                    session.add(row)
+                    await session.commit()
+                except Exception as e:
+                    await session.rollback()
+                    LOG.warning("Storing Teams approval card %s failed: %s", message_id, e)
         return [
             success_response(
                 "ms_teams",

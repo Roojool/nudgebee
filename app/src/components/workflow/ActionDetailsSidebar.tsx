@@ -402,6 +402,9 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   // State for Approval task IM channel dropdown (core.approval task)
   const [approvalChannelOptions, setApprovalChannelOptions] = useState<{ label: string; value: string }[]>([]);
   const [approvalChannelLoading, setApprovalChannelLoading] = useState(false);
+  const [approvalTeamOptions, setApprovalTeamOptions] = useState<{ label: string; value: string; channels?: { label: string; value: string }[] }[]>(
+    []
+  );
 
   // Time Range mode (Relative vs Absolute) for tasks exposing duration + start_time + end_time
   const [timeMode, setTimeMode] = useState<'relative' | 'absolute'>(() => {
@@ -1090,34 +1093,56 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   useEffect(() => {
     if (!isApprovalTask) {
       setApprovalChannelOptions([]);
+      setApprovalTeamOptions([]);
       return;
     }
 
     const provider = localData?.im_provider;
     if (!provider) {
       setApprovalChannelOptions([]);
+      setApprovalTeamOptions([]);
       return;
     }
 
+    let cancelled = false;
     setApprovalChannelLoading(true);
     apiAccount
       .getNotificationChannelList(provider)
       .then((res: any) => {
+        if (cancelled) return;
         const response = res?.data?.data || [];
-        const channels = response.map((item: any) => ({
-          label: item.name,
-          value: item.id,
-        }));
-        setApprovalChannelOptions(channels);
+        if (provider === 'ms_teams') {
+          // Teams lists teams, each with its channels; channels follow the picked team.
+          setApprovalTeamOptions(response.map((item: any) => ({ label: item.name, value: item.id, channels: mapMsTeamsChannels(item.channels) })));
+          setApprovalChannelOptions([]);
+        } else {
+          setApprovalChannelOptions(response.map((item: any) => ({ label: item.name, value: item.id })));
+          setApprovalTeamOptions([]);
+        }
       })
       .catch((error) => {
+        if (cancelled) return;
         console.error('Failed to fetch approval channels:', error);
         setApprovalChannelOptions([]);
+        setApprovalTeamOptions([]);
       })
       .finally(() => {
+        if (cancelled) return;
         setApprovalChannelLoading(false);
       });
-  }, [selectedActionType, localData?.im_provider]);
+    return () => {
+      cancelled = true;
+    };
+  }, [isApprovalTask, localData?.im_provider, mapMsTeamsChannels]);
+
+  // Teams approval channels come from the picked team
+  useEffect(() => {
+    if (!isApprovalTask || localData?.im_provider !== 'ms_teams') {
+      return;
+    }
+    const selectedTeam = approvalTeamOptions.find((t) => t.value === localData?.im_team_id);
+    setApprovalChannelOptions(selectedTeam?.channels || []);
+  }, [isApprovalTask, localData?.im_provider, localData?.im_team_id, approvalTeamOptions]);
 
   // Clean up dependent field values when a controlling field changes
   const cleanupDependentFields = useCallback((data: Record<string, any>, changedField: string, newValue: any) => {
@@ -2508,9 +2533,14 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
         if (fieldName === 'im_channel') {
           const provider = localData?.im_provider;
 
+          const needsTeam = provider === 'ms_teams' && !localData?.im_team_id;
+
           const getChannelPlaceholder = () => {
             if (!provider) {
               return 'Select a provider first';
+            }
+            if (needsTeam) {
+              return 'Select a team first';
             }
             if (approvalChannelLoading) {
               return 'Loading channels...';
@@ -2542,7 +2572,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                   value={fieldValue}
                   onChange={(newValue: string) => handleDataChange(fieldName, newValue)}
                   placeholder={getChannelPlaceholder()}
-                  disabled={isReadOnly || viewOnlyMode || !provider}
+                  disabled={isReadOnly || viewOnlyMode || !provider || needsTeam}
                   error={validationErrors[fieldName] || ''}
                   required={isRequired}
                   options={approvalChannelOptions}
@@ -2565,12 +2595,64 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           );
         }
 
-        // Handle im_team_id - hide for non-MS Teams providers (only Slack for now)
+        // Handle im_team_id - a team dropdown for MS Teams, hidden for other providers
         if (fieldName === 'im_team_id') {
           const provider = localData?.im_provider;
           if (provider !== 'ms_teams') {
             return null;
           }
+
+          const getApprovalTeamPlaceholder = () => {
+            if (approvalChannelLoading) return 'Loading teams...';
+            if (approvalTeamOptions.length === 0) return 'No teams available';
+            return 'Select team';
+          };
+
+          return (
+            <Box key={fieldName} sx={{ mb: ds.space[4], display: 'flex', alignItems: 'flex-start', gap: ds.space[4], flexWrap: 'wrap' }}>
+              <Typography
+                sx={{
+                  fontSize: 'var(--ds-text-body)',
+                  fontWeight: 'var(--ds-font-weight-medium)',
+                  color: ds.gray[700],
+                  minWidth: '120px',
+                  maxWidth: '120px',
+                  pt: ds.space[2],
+                }}
+              >
+                Team<span style={{ color: ds.red[500] }}> *</span>
+              </Typography>
+              <Box sx={{ flex: '1 1 300px', minWidth: '200px' }}>
+                <HybridField
+                  fieldName={fieldName}
+                  value={fieldValue}
+                  onChange={(newValue: string) => {
+                    // A channel belongs to one team, so picking a team clears the channel
+                    const updatedData = { ...localDataRef.current, im_channel: '', [fieldName]: newValue };
+                    setLocalData(updatedData);
+                  }}
+                  placeholder={getApprovalTeamPlaceholder()}
+                  disabled={isReadOnly || viewOnlyMode || approvalChannelLoading}
+                  error={validationErrors[fieldName] || ''}
+                  required={true}
+                  options={approvalTeamOptions.map((t) => ({ label: t.label, value: t.value }))}
+                  optionsLoading={approvalChannelLoading}
+                  previousTasks={previousTasks}
+                  workflowInputs={workflowInputs}
+                  workflowConfigs={workflowConfigs}
+                  onDrop={viewOnlyMode ? undefined : (e) => handleDrop(e, fieldName, fieldValue)}
+                  onDragOver={viewOnlyMode ? undefined : (e) => handleDragOver(e, fieldName)}
+                  onDragLeave={viewOnlyMode ? undefined : handleDragLeave}
+                  isDropTarget={isDraggingOver === fieldName}
+                />
+                {fieldSchema.description && (
+                  <Typography variant='caption' color='text.secondary' sx={{ mt: ds.space[1], display: 'block' }}>
+                    {fieldSchema.description}
+                  </Typography>
+                )}
+              </Box>
+            </Box>
+          );
         }
 
         // Handle im_provider field - clear im_channel when changed
