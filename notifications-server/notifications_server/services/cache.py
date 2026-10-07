@@ -15,6 +15,10 @@ LOG = logging.getLogger(__name__)
 _UPDATE_EVENT_ENTRY_MAX_RETRIES = 5
 
 
+def _teams_analysis_key(event_id):
+    return f"event_analysis_poll:ms_teams:{event_id}"
+
+
 class Cache:
     _redis_client = None
 
@@ -618,6 +622,48 @@ class Cache:
         except redis.RedisError as e:
             LOG.exception(f"Error claiming event analysis poller for {event_id}: {e}")
             return True
+
+    def claim_teams_analysis(self, event_id, ttl_seconds, token):
+        """First Teams Ask Nubi click on an event wins (True) while the claim
+        lives; it's the only "still analyzing" signal, kept alive by
+        refresh_teams_analysis. token identifies the worker that owns it.
+        Separate from Slack's claim, so neither platform silences the other.
+        Fails open (True) when Redis is unavailable."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return True
+        try:
+            return bool(self.redis_client.set(_teams_analysis_key(event_id), token, nx=True, ex=ttl_seconds))
+        except redis.RedisError as e:
+            LOG.exception(f"Error claiming Teams event analysis for {event_id}: {e}")
+            return True
+
+    def _teams_analysis_owner(self, event_id):
+        value = self.redis_client.get(_teams_analysis_key(event_id))
+        return value.decode() if isinstance(value, bytes) else value
+
+    def refresh_teams_analysis(self, event_id, ttl_seconds, token):
+        """Keeps a live worker's claim from expiring, re-taking it if it lapsed
+        and nobody else took it; a dead worker's runs out."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return
+        try:
+            if self._teams_analysis_owner(event_id) in (None, token):
+                self.redis_client.set(_teams_analysis_key(event_id), token, ex=ttl_seconds)
+        except redis.RedisError as e:
+            LOG.exception(f"Error refreshing Teams event analysis for {event_id}: {e}")
+
+    def release_teams_analysis(self, event_id, token):
+        """Releases the claim only if this worker still owns it."""
+        self._ensure_connection()
+        if not self.redis_client:
+            return
+        try:
+            if self._teams_analysis_owner(event_id) == token:
+                self.redis_client.delete(_teams_analysis_key(event_id))
+        except redis.RedisError as e:
+            LOG.exception(f"Error releasing Teams event analysis for {event_id}: {e}")
 
     def release_event_analysis_poller(self, event_id):
         """Releases a claim taken by claim_event_analysis_poller -- without

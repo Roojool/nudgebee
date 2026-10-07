@@ -32,6 +32,10 @@ FINDING = {
 }
 
 
+def _ids(card):
+    return [a.get("id") for a in card.get("actions") or []]
+
+
 @pytest.fixture(autouse=True)
 def signing_key(monkeypatch):
     monkeypatch.setattr(settings.ms_teams, "action_signing_key", "test-signing-key")
@@ -104,7 +108,7 @@ def test_status_lines_replace_each_other_and_actions_can_be_removed():
     card = ca.with_status(ca.with_status(card, "Suppressing…"), "Suppressed")
     assert [b["text"] for b in card["body"] if b.get("id") == ca.STATUS_ID] == ["Suppressed"]
     assert ca.with_status(card, None)["body"][-1].get("id") != ca.STATUS_ID
-    assert not ca.has_actions(ca.without_action(card, ca.SUPPRESS_ACTION_ID))
+    assert ca.SUPPRESS_ACTION_ID not in _ids(ca.without_action(card, ca.SUPPRESS_ACTION_ID))
 
 
 # ------------------------------- stored card -------------------------------
@@ -242,7 +246,7 @@ def test_an_admin_suppresses_the_alert_and_the_card_says_so(store):
     first, last = (u[3].attachments[0].content for u in updates)
     assert first["body"][-1]["text"] == "Suppressing…"
     assert last["body"][-1]["text"].startswith("Suppressed (this alert · 4h) by Dana · until ")
-    assert not ca.has_actions(last), "the menu is gone once it's done"
+    assert ca.SUPPRESS_ACTION_ID not in _ids(last), "the menu is gone once it's done"
     assert "Open Triage Rules" in result.replies[0]
     assert store.stored()["actions"][ca.SUPPRESS]["state"] == ca.DONE
     assert result.claim.call_args.args[0] == f"{NB_TENANT}:1700:{ca.SUPPRESS}"
@@ -697,3 +701,282 @@ def test_the_approval_token_is_escaped_in_the_url(monkeypatch):
         "http://workflow-server/approvals/run%2F..%2Fx%3Fy%23z%20w",
     ]
     assert post.call_args.kwargs["json"] == {"status": "approve"}
+
+
+# ------------------------------- Ask Nubi -------------------------------
+
+
+def test_a_bot_finding_card_offers_ask_nubi_with_signed_data():
+    card = get_ms_teams_finding_message_template(FINDING, NB_TENANT)
+    assert _ids(card)[1:] == [ca.ASK_NUBI_ID, ca.SUPPRESS_ACTION_ID]
+    ask = card["actions"][1]
+    params = ca.verify(ask["data"][ca.ASK_NUBI_DATA], ca.ASK_NUBI, NB_TENANT)
+    assert (params["event_id"], params["account_id"]) == ("event-1", ACCOUNT)
+    assert ask["data"][ca.ACTION_KEY] == ca.ASK_NUBI
+
+
+def test_a_tight_card_drops_ask_nubi_before_the_suppress_menu():
+    with mock.patch.object(ca, "fits", side_effect=lambda card: ca.ASK_NUBI_ID not in _ids(card)):
+        card = get_ms_teams_finding_message_template(FINDING, NB_TENANT)
+    assert _ids(card)[1:] == [ca.SUPPRESS_ACTION_ID]
+
+
+def test_analysis_and_suppress_lines_never_erase_each_other():
+    card = get_ms_teams_finding_message_template(FINDING, NB_TENANT)
+    one = ca.with_analysis_status(ca.with_status(card, "Suppressed"), "Analyzed")
+    two = ca.with_status(ca.with_analysis_status(card, "Analyzed"), "Suppressed")
+    for stamped in (one, two):
+        texts = {b.get("id"): b.get("text") for b in stamped["body"]}
+        assert texts[ca.STATUS_ID] == "Suppressed" and texts[ca.ANALYSIS_STATUS_ID] == "Analyzed"
+
+
+def _ask_click():
+    card = get_ms_teams_finding_message_template(FINDING, NB_TENANT)
+    return SimpleNamespace(
+        value=dict(card["actions"][1]["data"]),
+        reply_to_id="1700",
+        service_url=SERVICE_URL,
+        conversation=SimpleNamespace(id="19:ops;messageid=1700"),
+        from_property=SimpleNamespace(name="Dana"),
+    )
+
+
+def _run_ask(activity, *, user=("user-1", [NB_TENANT]), claimed=True):
+    common = SimpleNamespace(teams_reply=mock.AsyncMock())
+    sender = mock.Mock()
+    with (
+        mock.patch.object(ca, "_tenant_for", return_value=uuid.UUID(NB_TENANT)),
+        mock.patch.object(actions_module, "validate_and_get_user_tenants", return_value=user),
+        mock.patch.object(ca.Cache, "claim_teams_analysis", return_value=claimed),
+        mock.patch.object(ca.Cache, "release_teams_analysis") as release,
+        mock.patch.object(ca, "get_sender", return_value=sender),
+        mock.patch.object(ca, "_start_analysis") as thread,
+    ):
+        asyncio.run(ca.handle(common, activity, "dana@example.com", "aad-tenant"))
+    replies = [c.args[1] for c in common.teams_reply.call_args_list]
+    return SimpleNamespace(replies=replies, sender=sender, thread=thread, release=release)
+
+
+def test_ask_nubi_stamps_the_card_and_starts_the_analysis(store):
+    result = _run_ask(_ask_click())
+    (job,) = result.thread.call_args.args
+    assert (job["event_id"], job["account_id"], job["user_id"]) == ("event-1", ACCOUNT, "user-1")
+    shown = result.sender.update.call_args.args[3].attachments[0].content
+    analysis = [b for b in shown["body"] if b.get("id") == ca.ANALYSIS_STATUS_ID]
+    assert analysis[0]["text"].startswith("Analyzing")
+    assert store.stored()["actions"] == {}, "Ask Nubi records nothing that refuses a click"
+    result.release.assert_not_called(), "the worker owns the claim now"
+    with ca._analyses_lock:
+        ca._active_analyses = 0
+
+
+def test_ask_nubi_while_an_analysis_runs_says_so(store):
+    result = _run_ask(_ask_click(), claimed=False)
+    result.thread.assert_not_called()
+    assert result.replies == [ca.STILL_ANALYZING]
+
+
+def test_ask_nubi_when_too_many_run_says_so_and_frees_the_event(store, monkeypatch):
+    monkeypatch.setattr(settings.slack, "event_analysis_max_pollers", 0)
+    result = _run_ask(_ask_click())
+    result.thread.assert_not_called()
+    assert result.replies == [ca.ANALYSIS_BUSY]
+    assert result.release.call_args.args[0] == "event-1"
+
+
+def test_ask_nubi_from_outside_the_workspace_or_with_forged_data_is_refused(store):
+    outsider = _run_ask(_ask_click(), user=("user-9", [OTHER_TENANT]))
+    assert outsider.replies == [actions_common.USER_NOT_FOUND_MESSAGE]
+    forged = _ask_click()
+    data = json.loads(forged.value[ca.ASK_NUBI_DATA])
+    data["body"]["action_params"]["event_id"] = "someone-elses-event"
+    forged.value[ca.ASK_NUBI_DATA] = json.dumps(data)
+    assert _run_ask(forged).replies == [actions_common.UNABLE_TO_PROCESS_REQUEST]
+    with mock.patch.object(ca.time, "time", return_value=time.time() - ca.MAX_AGE_SECONDS - 3600):
+        old = _ask_click()
+    assert _run_ask(old).replies == [ca.ASK_NUBI_CARD_TOO_OLD]
+
+
+def _job():
+    return {
+        "activity": _ask_click(),
+        "aad_tenant_id": "aad-tenant",
+        "tenant_id": NB_TENANT,
+        "user_id": "user-1",
+        "event_id": "event-1",
+        "account_id": ACCOUNT,
+        "card_ref": (uuid.UUID(NB_TENANT), "19:ops", "1700"),
+        "token": "worker-1",
+        "deadline": time.monotonic() + 60,
+    }
+
+
+def _analyze(results, replies=None):
+    from notifications_server.services import common as common_module
+
+    posted = []
+
+    async def teams_reply(activity, text, aad):
+        posted.append(text)
+        return True if replies is None else replies.pop(0)
+
+    fake_service = SimpleNamespace(teams_reply=teams_reply, close=mock.Mock())
+    stamps = []
+    with (
+        mock.patch.object(common_module, "CommonService", return_value=fake_service),
+        mock.patch.object(events_module.Events, "call_event_analysis_api", side_effect=results) as call,
+        mock.patch.object(ca, "_stamp_analysis", side_effect=lambda ref, text: stamps.append(text) or None),
+        mock.patch.object(ca.Cache, "refresh_teams_analysis"),
+        mock.patch.object(ca.asyncio, "sleep", mock.AsyncMock()),
+    ):
+        asyncio.run(ca._analyze(_job()))
+    fake_service.close.assert_called_once()
+    _analyze.timeouts = [c.args[4] for c in call.call_args_list]
+    return posted, stamps
+
+
+def _result(status="IN_PROGRESS", **tasks):
+    return {
+        "status": status,
+        "task_statuses": {k: "COMPLETED" for k in tasks},
+        "summary": tasks.get("summary"),
+        "investigation": tasks.get("investigation"),
+        "detailed_response": tasks.get("detailed_response"),
+    }
+
+
+def test_the_analysis_posts_each_section_once_then_marks_the_card():
+    posted, stamps = _analyze(
+        [
+            _result(summary="Pods restart on OOM"),
+            _result(summary="Pods restart on OOM", investigation="Memory limit too low"),
+            _result(
+                "COMPLETED",
+                summary="Pods restart on OOM",
+                investigation="Memory limit too low",
+                detailed_response="Memory limit too low\n\nRaise it to 512Mi.",
+            ),
+        ]
+    )
+    assert [p.split("\n\n")[0] for p in posted] == [
+        "Here's a quick summary while I keep digging:",
+        "Here's what I'm finding on the likely root cause:",
+        "Here's the full write-up:",
+    ]
+    assert posted[2].endswith("Raise it to 512Mi."), "only what the write-up adds"
+    assert stamps == ["Analyzed by Nubi. See the thread."]
+
+
+def test_asking_again_after_it_finished_posts_only_the_write_up():
+    posted, stamps = _analyze([_result("COMPLETED", summary="s", investigation="i", detailed_response="i\n\nmore")])
+    assert posted == ["Here's the full write-up:\n\nmore"]
+    assert stamps == ["Analyzed by Nubi. See the thread."]
+
+
+def test_a_failed_post_is_retried_before_the_card_is_marked():
+    done = _result("COMPLETED", detailed_response="the write-up")
+    posted, stamps = _analyze([done, done], replies=[False, True])
+    assert len(posted) == 2 and stamps == ["Analyzed by Nubi. See the thread."]
+
+
+def test_a_failed_analysis_says_so_and_clears_the_card():
+    posted, stamps = _analyze([_result("FAILED")])
+    assert posted == [ca.ANALYSIS_FAILED]
+    assert stamps == [None]
+
+
+def test_an_analysis_that_cant_be_reached_stops_and_points_to_nudgebee():
+    posted, stamps = _analyze([None, RuntimeError("down"), None, None])
+    assert posted == []
+    assert stamps == ["Still analyzing. Check the event in NudgeBee."]
+
+
+def test_long_analysis_text_is_cut_by_size_with_a_link():
+    text = ca._cut("x" * (ca.WRITEUP_LIMIT + 500), "event-1")
+    assert len(text.encode()) < ca.WRITEUP_LIMIT + 200 and "investigate?id=event-1" in text
+    wide = ca._cut("é" * ca.WRITEUP_LIMIT, "event-1")
+    assert len(wide.encode()) < ca.WRITEUP_LIMIT + 200, "the limit is bytes, not characters"
+    fenced = ca._cut("```\n" + "log\n" * ca.WRITEUP_LIMIT, "event-1")
+    assert fenced.split("\n\n…")[0].count("```") == 2, "a cut code block is closed before the link"
+
+
+def test_a_slow_start_isnt_a_failure_and_gets_a_longer_timeout():
+    done = _result("COMPLETED", detailed_response="the write-up")
+    posted, stamps = _analyze([None, done])
+    assert stamps == ["Analyzed by Nubi. See the thread."]
+    assert _analyze.timeouts == [
+        ca.ANALYSIS_KICKOFF_TIMEOUT_SECONDS,
+        settings.slack.event_analysis_poll_timeout_seconds,
+    ]
+
+
+def test_a_click_that_cant_start_the_worker_clears_the_card(store):
+    with mock.patch.object(ca, "_start_analysis", side_effect=RuntimeError("no threads")):
+        with pytest.raises(RuntimeError):
+            _run_ask_raw(_ask_click())
+    assert all(b.get("id") != ca.ANALYSIS_STATUS_ID for b in store.stored()["card"]["body"])
+    assert ca._active_analyses == 0
+
+
+def _run_ask_raw(activity):
+    common = SimpleNamespace(teams_reply=mock.AsyncMock())
+    with (
+        mock.patch.object(ca, "_tenant_for", return_value=uuid.UUID(NB_TENANT)),
+        mock.patch.object(actions_module, "validate_and_get_user_tenants", return_value=("user-1", [NB_TENANT])),
+        mock.patch.object(ca.Cache, "claim_teams_analysis", return_value=True),
+        mock.patch.object(ca.Cache, "release_teams_analysis"),
+        mock.patch.object(ca, "get_sender", return_value=mock.Mock()),
+    ):
+        asyncio.run(ca.handle(common, activity, "dana@example.com", "aad-tenant"))
+
+
+def test_a_worker_that_dies_clears_the_card_and_frees_the_event():
+    with (
+        mock.patch.object(ca, "_analyze", side_effect=RuntimeError("boom")),
+        mock.patch.object(ca, "_clear_analysis_stamp") as clear,
+        mock.patch.object(ca.Cache, "release_teams_analysis") as release,
+    ):
+        with ca._analyses_lock:
+            ca._active_analyses = 1
+        ca._run_analysis(_job())
+    clear.assert_called_once()
+    assert release.call_args.args == ("event-1", "worker-1")
+    assert ca._active_analyses == 0
+
+
+def test_teams_analysis_claims_dont_touch_slacks():
+    from notifications_server.services.cache import Cache
+
+    store = {}
+
+    class FakeRedis:
+        def set(self, key, value, nx=False, ex=None):
+            if nx and key in store:
+                return False
+            store[key] = value
+            return True
+
+        def get(self, key):
+            return store.get(key)
+
+        def delete(self, key):
+            store.pop(key, None)
+
+    cache = Cache.__new__(Cache)
+    cache.redis_client = FakeRedis()
+    cache._ensure_connection = lambda: None
+    teams_key = "event_analysis_poll:ms_teams:event-1"
+    cache.claim_event_analysis_poller("event-1", 60)
+    assert "event_analysis_poll:event-1" in store, "Slack's key is unchanged"
+    assert cache.claim_teams_analysis("event-1", 50, "worker-1")
+    assert not cache.claim_teams_analysis("event-1", 50, "worker-2")
+    store.pop(teams_key)  # the claim lapsed
+    cache.refresh_teams_analysis("event-1", 50, "worker-1")
+    assert store[teams_key] == "worker-1", "a live worker re-takes a lapsed claim"
+    cache.release_teams_analysis("event-1", "worker-2")
+    assert store[teams_key] == "worker-1", "a worker only releases its own claim"
+    store[teams_key] = "worker-2"
+    cache.refresh_teams_analysis("event-1", 50, "worker-1")
+    assert store[teams_key] == "worker-2", "nor takes over another's"
+    cache.release_teams_analysis("event-1", "worker-2")
+    assert teams_key not in store

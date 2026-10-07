@@ -10,7 +10,9 @@ result back to Teams."""
 import asyncio
 import json
 import logging
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from typing import Callable, Optional
@@ -40,6 +42,21 @@ MAX_APPROVAL_BUTTONS = 3
 SUPPRESS_CHOICE = "nb_suppress_choice"
 SUPPRESS_ACTION_ID = "nb_suppress"
 STATUS_ID = "nb_status"
+ASK_NUBI = "ask_nubi"
+ASK_NUBI_DATA = "nb_ask_nubi"
+ASK_NUBI_ID = "nb_ask_nubi"
+# Ask Nubi's own status line, so it and Suppress's never erase each other.
+ANALYSIS_STATUS_ID = "nb_analysis_status"
+# Analysis text past this is cut, with a link to the event in NudgeBee.
+WRITEUP_LIMIT = 20_000
+# Sections posted to the card's thread as they complete, in order.
+ANALYSIS_SECTIONS = (
+    ("summary", "Here's a quick summary while I keep digging:"),
+    ("investigation", "Here's what I'm finding on the likely root cause:"),
+)
+ANALYSIS_MAX_POLL_FAILURES = 3
+# Starting an analysis can take much of a minute; later polls are quick reads.
+ANALYSIS_KICKOFF_TIMEOUT_SECONDS = 90
 
 # Identifies the signing key, so a later key can be verified alongside this one.
 KEY_ID = "1"
@@ -72,6 +89,12 @@ APPROVAL_ANSWERED = "This approval was already answered."
 STILL_RECORDING = "Still recording the decision on this approval."
 APPROVAL_EXPIRED = "This approval request has expired."
 APPROVAL_FAILED = "Couldn't record the decision. Please try again."
+STILL_ANALYZING = "Still analyzing. Results will appear in this card's thread."
+ANALYSIS_FAILED = "Something went wrong analyzing this. Try again in a moment."
+ANALYSIS_BUSY = "Nubi is analyzing a lot of alerts right now. Try again in a minute."
+ASK_NUBI_CARD_TOO_OLD = (
+    "This card is more than 7 days old, so its buttons no longer work." " Ask Nubi about the event from NudgeBee."
+)
 APPROVAL_CARD_TOO_OLD = (
     "This card is more than 7 days old, so its buttons no longer work."
     " Answer the approval from the automation's run in NudgeBee."
@@ -243,9 +266,33 @@ def with_approval_buttons(card: dict, params, tenant_id) -> dict:
     return with_buttons
 
 
+def ask_nubi_action(finding: dict, tenant_id) -> Optional[dict]:
+    """ "Ask Nubi" for a finding card: analyse the event and post the findings in
+    the card's thread."""
+    event_id = finding.get("id")
+    account_id = finding.get("cloud_account_id")
+    if not (buttons_enabled() and event_id and account_id and tenant_id):
+        return None
+    params = {"event_id": event_id, "account_id": account_id, "tenant_id": str(tenant_id)}
+    return {
+        "type": "Action.Submit",
+        "id": ASK_NUBI_ID,
+        "title": "Ask Nubi",
+        "data": {ACTION_KEY: ASK_NUBI, ASK_NUBI_DATA: sign(ASK_NUBI, params)},
+    }
+
+
 def has_actions(card: dict) -> bool:
     ids = [a.get("id") or "" for a in card.get("actions") or []]
-    return any(i == SUPPRESS_ACTION_ID or i.startswith(APPROVAL_ID) for i in ids)
+    return any(i in (SUPPRESS_ACTION_ID, ASK_NUBI_ID) or i.startswith(APPROVAL_ID) for i in ids)
+
+
+def with_analysis_status(card: dict, text: Optional[str]) -> dict:
+    """The card with Ask Nubi's status line set to text, or removed when None."""
+    body = [item for item in card.get("body") or [] if item.get("id") != ANALYSIS_STATUS_ID]
+    if text:
+        body.append({"type": "TextBlock", "id": ANALYSIS_STATUS_ID, "text": text, "wrap": True, "isSubtle": True})
+    return {**card, "body": body}
 
 
 def without_approval(card: dict) -> dict:
@@ -377,6 +424,8 @@ async def handle(common_service, activity, user_email, aad_tenant_id) -> None:
     action = activity.value.get(ACTION_KEY)
     if action == SUPPRESS:
         await _suppress(common_service, activity, user_email, aad_tenant_id)
+    elif action == ASK_NUBI:
+        await _ask_nubi(common_service, activity, user_email, aad_tenant_id)
     elif action == APPROVE:
         await _approve(common_service, activity, user_email, aad_tenant_id)
     else:
@@ -588,3 +637,231 @@ async def _approve_claimed(activity, reply, card_ref, params, user_email) -> Non
     if card:
         await _show(activity, card)
     await reply(outcome)
+
+
+# ------------------------------- Ask Nubi -------------------------------
+
+_active_analyses = 0
+_analyses_lock = threading.Lock()
+
+
+def _analysis_claim_ttl(kickoff: bool = False) -> int:
+    """Outlasts one poll (the call's timeout plus the wait between polls), so a
+    live worker's claim never lapses, yet a worker that dies (e.g. in a deploy)
+    frees the event within a minute or two. Refreshed before each call and each
+    wait."""
+    slack = settings.slack
+    timeout = ANALYSIS_KICKOFF_TIMEOUT_SECONDS if kickoff else slack.event_analysis_poll_timeout_seconds
+    return int(timeout + slack.event_analysis_poll_seconds + 30)
+
+
+def _stamp_analysis(card_ref, text):
+    """Set Ask Nubi's line on the stored card. Ask Nubi is safe to repeat, so
+    it records no state that refuses a click."""
+    return finish(card_ref, ASK_NUBI, None, lambda c: with_analysis_status(c, text))
+
+
+async def _ask_nubi(common_service, activity, user_email, aad_tenant_id) -> None:
+    # Imported here: actions_common imports events, which imports this module.
+    from notifications_server.services.actions import validate_and_get_user_tenants
+    from notifications_server.services.actions_common import UNABLE_TO_PROCESS_REQUEST, USER_NOT_FOUND_MESSAGE
+
+    global _active_analyses
+
+    async def reply(text):
+        await common_service.teams_reply(activity, text, aad_tenant_id)
+
+    raw = activity.value.get(ASK_NUBI_DATA)
+    tenant_id = await asyncio.to_thread(_tenant_for, aad_tenant_id)
+    params = verify(raw, ASK_NUBI, tenant_id) if raw else None
+    if not (params and params.get("event_id") and params.get("account_id")):
+        if raw and expired(raw, ASK_NUBI, tenant_id):
+            return await reply(ASK_NUBI_CARD_TOO_OLD)
+        LOG.warning("Rejecting a Teams Ask Nubi click with invalid data")
+        return await reply(UNABLE_TO_PROCESS_REQUEST)
+
+    # As on Slack, anyone in the workspace can ask: the alert is already
+    # visible in this channel.
+    user_id, tenants = await asyncio.to_thread(validate_and_get_user_tenants, user_email)
+    if not user_id or str(tenant_id) not in {str(t) for t in tenants or []}:
+        return await reply(USER_NOT_FOUND_MESSAGE)
+
+    message_id = activity.reply_to_id
+    channel_id = channel_of(activity.conversation.id if activity.conversation else "")
+    if not (message_id and channel_id):
+        LOG.warning("Rejecting a Teams Ask Nubi click that doesn't name its card")
+        return await reply(UNABLE_TO_PROCESS_REQUEST)
+    event_id = params["event_id"]
+    cache = Cache()
+    token = uuid.uuid4().hex
+    if not cache.claim_teams_analysis(event_id, _analysis_claim_ttl(kickoff=True), token):
+        return await reply(STILL_ANALYZING)
+    with _analyses_lock:
+        if _active_analyses >= settings.slack.event_analysis_max_pollers:
+            busy = True
+        else:
+            busy = False
+            _active_analyses += 1
+    if busy:
+        cache.release_teams_analysis(event_id, token)
+        return await reply(ANALYSIS_BUSY)
+
+    started = False
+    card_ref = (tenant_id, channel_id, message_id)
+    try:
+        card = await asyncio.to_thread(_stamp_analysis, card_ref, "Analyzing… results will appear in this thread.")
+        if card:
+            await _show(activity, card)
+        job = {
+            "activity": activity,
+            "aad_tenant_id": aad_tenant_id,
+            "tenant_id": str(tenant_id),
+            "user_id": user_id,
+            "event_id": event_id,
+            "account_id": params["account_id"],
+            "card_ref": card_ref,
+            "token": token,
+            "deadline": time.monotonic() + settings.slack.event_analysis_max_minutes * 60,
+        }
+        # The analysis can run for many minutes, so it doesn't hold the inbound
+        # handler's threadpool worker.
+        _start_analysis(job)
+        started = True
+    finally:
+        if not started:
+            cache.release_teams_analysis(event_id, token)
+            with _analyses_lock:
+                _active_analyses -= 1
+            await asyncio.to_thread(_clear_analysis_stamp, card_ref)
+
+
+def _start_analysis(job) -> None:
+    threading.Thread(target=_run_analysis, args=(job,), daemon=True, name=f"teams-analysis-{job['event_id']}").start()
+
+
+def _clear_analysis_stamp(card_ref) -> None:
+    """Best effort: don't leave "Analyzing…" on a card nothing is analysing."""
+    try:
+        _stamp_analysis(card_ref, None)
+    except Exception as e:
+        LOG.warning("Clearing the Teams analysis line failed: %s", e)
+
+
+def _run_analysis(job) -> None:
+    global _active_analyses
+    try:
+        asyncio.run(_analyze(job))
+    except Exception as e:
+        LOG.exception("Teams event analysis for %s failed: %s", job["event_id"], e)
+        _clear_analysis_stamp(job["card_ref"])
+    finally:
+        Cache().release_teams_analysis(job["event_id"], job["token"])
+        with _analyses_lock:
+            _active_analyses -= 1
+
+
+def _cut(text: str, event_id) -> str:
+    """The text within WRITEUP_LIMIT bytes (Teams limits a message's size, not
+    its characters), ending with a link to the rest."""
+    data = text.encode()
+    if len(data) <= WRITEUP_LIMIT:
+        return text
+    head = data[:WRITEUP_LIMIT].decode(errors="ignore").rstrip()
+    if head.count("```") % 2:
+        head += "\n```"  # close a cut code block, so the link isn't inside it
+    url = f"{settings.base_url}/investigate?id={event_id}"
+    return f"{head}\n\n… [See the full analysis in NudgeBee]({url})"
+
+
+async def _take_result(result, progress, post, stamp) -> bool:
+    """Post what a poll result newly completed. True once the analysis ended."""
+    from notifications_server.services.actions_common import final_writeup
+
+    sent = progress["sent"]
+    statuses = result.get("task_statuses") or {}
+    status = (result.get("status") or "").upper()
+    if progress["first"] and status == "COMPLETED":
+        # Finished earlier: its sections are already in the thread.
+        sent.update(field for field, _ in ANALYSIS_SECTIONS)
+    progress["first"] = False
+    for field, preamble in ANALYSIS_SECTIONS:
+        if field not in sent and statuses.get(field) == "COMPLETED":
+            if await post(result.get(field), preamble):
+                sent.add(field)
+    if statuses.get("detailed_response") == "COMPLETED":
+        content, preamble = final_writeup(
+            result.get("detailed_response"), result.get("investigation"), result.get("summary")
+        )
+        if await post(content, preamble):
+            await stamp("Analyzed by Nubi. See the thread.")
+            return True
+    elif status == "FAILED":
+        await post(ANALYSIS_FAILED)
+        await stamp(None)
+        return True
+    return False
+
+
+async def _analyze(job) -> None:
+    """Poll the event analysis, post each section to the card's thread as it
+    completes, then mark the card. regenerate is False, so this only reads
+    llm-server's state; a repeat after it finished re-posts just the write-up,
+    as on Slack."""
+    from notifications_server import slack_app, teams_app
+    from notifications_server.services.common import CommonService
+    from notifications_server.services.events import Events
+
+    activity, event_id = job["activity"], job["event_id"]
+    service = CommonService(engine=sync_engine, slack_app=slack_app, teams_app=teams_app)
+    cache = Cache()
+
+    async def post(content, preamble=""):
+        content = (content or "").strip()
+        if not content:
+            return True
+        text = _cut(f"{preamble}\n\n{content}" if preamble else content, event_id)
+        return await service.teams_reply(activity, text, job["aad_tenant_id"])
+
+    async def stamp(text):
+        card = await asyncio.to_thread(_stamp_analysis, job["card_ref"], text)
+        if card:
+            await _show(activity, card)
+
+    try:
+        progress = {"sent": set(), "first": True}
+        failures, calls = 0, 0
+        token = job["token"]
+        while time.monotonic() < job["deadline"]:
+            kickoff = calls == 0
+            cache.refresh_teams_analysis(event_id, _analysis_claim_ttl(kickoff=kickoff), token)
+            timeout = (
+                ANALYSIS_KICKOFF_TIMEOUT_SECONDS if kickoff else settings.slack.event_analysis_poll_timeout_seconds
+            )
+            calls += 1
+            try:
+                result = await asyncio.to_thread(
+                    Events.call_event_analysis_api,
+                    event_id,
+                    job["account_id"],
+                    job["user_id"],
+                    job["tenant_id"],
+                    timeout,
+                )
+            except Exception as e:
+                LOG.debug("Teams event analysis poll failed: %s", e)
+                result = None
+            if not isinstance(result, dict):
+                # A slow start isn't a failure: the next poll finds the analysis running.
+                if not kickoff:
+                    failures += 1
+                if failures >= ANALYSIS_MAX_POLL_FAILURES:
+                    break
+            else:
+                failures = 0
+                if await _take_result(result, progress, post, stamp):
+                    return
+            cache.refresh_teams_analysis(event_id, _analysis_claim_ttl(), token)
+            await asyncio.sleep(settings.slack.event_analysis_poll_seconds)
+        await stamp("Still analyzing. Check the event in NudgeBee.")
+    finally:
+        service.close()

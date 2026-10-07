@@ -73,13 +73,20 @@ def get_ms_teams_finding_message_template(finding, tenant_id=None):
     parameters["viewUrl"] = f"{os.environ.get('BASE_URL')}/investigate?id={finding.get('id')}"
 
     card = get_adaptive_card_template(parameters)
-    suppress = card_actions.suppress_action(finding, tenant_id) if tenant_id else None
-    if suppress:
-        with_menu = {**card, "actions": [*(card.get("actions") or []), suppress]}
-        # An alert must still be delivered when its evidence leaves no room for the menu.
-        if card_actions.fits(with_menu):
-            return with_menu
-        LOG.info("Teams card for finding %s is too large for the Suppress menu", finding.get("id"))
+    if not tenant_id:
+        return card
+    ask = card_actions.ask_nubi_action(finding, tenant_id)
+    suppress = card_actions.suppress_action(finding, tenant_id)
+    # An alert must still be delivered when its evidence leaves no room for the
+    # buttons: Ask Nubi is dropped first, then the Suppress menu.
+    for added in ([ask, suppress], [suppress]):
+        added = [a for a in added if a]
+        if not added:
+            continue
+        with_buttons = {**card, "actions": [*(card.get("actions") or []), *added]}
+        if card_actions.fits(with_buttons):
+            return with_buttons
+    LOG.info("Teams card for finding %s is too large for its buttons", finding.get("id"))
     return card
 
 

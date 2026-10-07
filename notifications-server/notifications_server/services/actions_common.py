@@ -961,6 +961,14 @@ def _post_final_writeup(service, context, detailed, investigation, summary):
     the write-up adds; when it adds nothing, still close with a one-line ping so
     the user learns the analysis finished. Returns True iff settled.
     """
+    content, preamble = final_writeup(detailed, investigation, summary)
+    return _post_investigation_content(service, context, content, preamble, mention=True)
+
+
+def final_writeup(detailed, investigation, summary):
+    """(content, preamble) closing an analysis thread: what the write-up adds
+    to the investigation already posted, "That's everything" when it adds
+    nothing, or the summary when there's no write-up. Shared with Teams."""
     detailed = (detailed or "").strip()
     investigation = (investigation or "").strip()
 
@@ -969,11 +977,11 @@ def _post_final_writeup(service, context, detailed, investigation, summary):
         added = detailed[len(investigation) :].strip()
 
     if added:
-        return _post_investigation_content(service, context, added, "Here's the full write-up:", mention=True)
+        return added, "Here's the full write-up:"
     if detailed:
-        return _post_investigation_content(service, context, "That's everything I found.", "", mention=True)
+        return "That's everything I found.", ""
     # No write-up at all -- fall back to the initial summary, as before.
-    return _post_investigation_content(service, context, summary, "Here's the full write-up:", mention=True)
+    return summary, "Here's the full write-up:"
 
 
 def _post_investigation_content(service, context, content, preamble, mention=False):
