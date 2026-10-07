@@ -2,11 +2,13 @@ package integrations
 
 import (
 	"fmt"
+	"net/url"
 	"nudgebee/services/common"
 	"nudgebee/services/event"
 	"nudgebee/services/eventrule"
 	"nudgebee/services/integrations/core"
 	"nudgebee/services/security"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,8 +49,13 @@ func init() {
 //	  "link": "{{context.link}}",
 //	  "conditions": "{{context.conditions}}",
 //	  "timestamp": "{{date}}",
-//	  "labels": { "namespace": "prod", "pod": "checkout-7d9f" }
+//	  "labels": { "namespace": "prod" }
 //	}
+//
+// `labels` is optional. `{{alert.id}}` is the rule's group value — or, for a rule
+// grouped by several fields, the values joined by a comma — and each value is
+// tried as a pod and as a workload name. An explicit workload label (`pod`,
+// `deployment`, …) still wins when it holds a single name.
 //
 // `status` is templated per action group by the operator — "firing" on the
 // rule's "Query matched" action and "resolved" on its "Recovered" action —
@@ -131,7 +138,7 @@ func (m ElasticsearchWebhook) ProcessEventWebook(sc *security.RequestContext, se
 		// with) the Kibana rule it came from. MetricProvider/Source use the
 		// keys the alertrule registry resolves on (getAlertRuleSource: ES/user).
 		providerConfig := map[string]any{
-			"kibana_rule_id":   parsed.Investigation.RuleId,
+			"kibana_rule_id":   labels["rule_id"],
 			"kibana_rule_type": labels["rule_type"],
 		}
 		if v := labels["rule_url"]; v != "" {
@@ -227,7 +234,10 @@ func mapElasticsearchAlertToEvent(accountId string, payload map[string]any) (*co
 	))
 	severity := mapElasticsearchSeverity(stringValue(payload["severity"]))
 
-	eventUrl := firstNonEmpty(
+	// Kibana renders `{{context.link}}` as a path and `{{rule.url}}` as "" unless
+	// server.publicBaseUrl is set. A path would be opened against this server, so
+	// only an absolute link is kept.
+	eventUrl := firstAbsoluteURL(
 		stringValue(payload["link"]),
 		nestedString(payload, "rule", "url"),
 	)
@@ -259,20 +269,39 @@ func mapElasticsearchAlertToEvent(accountId string, payload map[string]any) (*co
 		nestedString(payload, "context", "conditions"),
 	))
 
-	subjectKind, subjectName := extractElasticsearchSubject(labels)
+	subjectKey, subjectKind, subjectName := extractElasticsearchSubject(labels)
 	namespace := firstNonEmpty(labels["namespace"], labels["kubernetes.namespace"])
-	// A rule grouped by container (the common shape for a log-spike rule over
-	// logs-kubernetes.container_logs-*) carries no workload label at all, so the
-	// container name is the only identity in the payload. It is offered as a
-	// *candidate* rather than assigned to the subject: container name equals the
-	// workload name for the app container but not for sidecars (istio-proxy,
-	// filebeat, …), and core.MatchWorkloadAndEnrich only promotes a candidate
-	// that exactly matches a k8s_workloads row — so an unmatched sidecar leaves
-	// the subject empty instead of persisting a wrong one.
-	if subjectName == "" {
-		if candidates := elasticsearchWorkloadCandidates(labels); len(candidates) > 0 {
-			labels[core.WorkloadCandidatesLabel] = strings.Join(candidates, ",")
-		}
+	// The payload often cannot name the workload outright. A rule grouped by
+	// container carries only the container name, which equals the workload name for
+	// the app container but not for a sidecar (istio-proxy, filebeat, …). A rule
+	// grouped by several fields carries its group values joined by a comma, whether
+	// in `{{alert.id}}` or in whichever label the operator templated it into. So
+	// every such value is offered as a *candidate* rather than assigned:
+	// core.MatchWorkloadAndEnrich promotes one only on an exact k8s_workloads match,
+	// and core.ResolveSubjectFromPodCandidates only on an exact pod name.
+	var names []string
+	for strings.Contains(subjectName, ",") {
+		// A group id, not a name. Left in the label it would be stored as the pod
+		// the alert named; it stays available as alert_id. The next subject label,
+		// if any, is then considered in its place.
+		names = append(names, splitKibanaGroup(subjectName)...)
+		delete(labels, subjectKey)
+		subjectKey, subjectKind, subjectName = extractElasticsearchSubject(labels)
+	}
+	names = append(names, elasticsearchWorkloadCandidates(labels)...)
+	names = append(names, splitKibanaGroup(alertId)...)
+	candidates := elasticsearchCandidateNames(names, subjectName)
+	if len(candidates) > 0 {
+		labels[core.WorkloadCandidatesLabel] = strings.Join(candidates, ",")
+	}
+	// An explicit non-pod workload label is the operator naming the subject; a pod
+	// found among the candidates must not replace it.
+	var podCandidates []string
+	switch subjectKind {
+	case "pod":
+		podCandidates = append([]string{subjectName}, candidates...)
+	case "":
+		podCandidates = candidates
 	}
 
 	eventCreatedAt := parseElasticsearchTime(firstNonEmpty(
@@ -301,12 +330,17 @@ func mapElasticsearchAlertToEvent(accountId string, payload map[string]any) (*co
 		EventSubjectKind:      subjectKind,
 		EventSubjectName:      subjectName,
 		EventSubjectNamespace: namespace,
+		PodNameCandidates:     podCandidates,
 		Investigation: core.EventIncomingWebhookInvestigation{
 			RuleName:    ruleName,
 			Labels:      labels,
 			Annotations: map[string]string{},
 			RuleType:    "elasticsearch",
-			RuleId:      ruleId,
+			// RuleId becomes the event's aggregation_key, which is what the rule
+			// column shows and what event_rules.alert is matched on — so it is the
+			// rule name, as for the other name-keyed sources. The Kibana id stays
+			// in labels["rule_id"] and in the fingerprint.
+			RuleId:      ruleName,
 			Fingerprint: fingerprint,
 			Status:      status,
 			Severity:    severity,
@@ -315,43 +349,87 @@ func mapElasticsearchAlertToEvent(accountId string, payload map[string]any) (*co
 	}, nil
 }
 
-// extractElasticsearchSubject picks the K8s workload subject from alert labels.
+// extractElasticsearchSubject picks the K8s workload subject from alert labels,
+// and reports which label key held it.
 // Accepts both the short label keys an operator would hand-write and the ECS
 // dotted keys that Elastic Agent puts on the underlying documents.
 // Priority: pod > deployment > statefulset > daemonset > replicaset > job > cronjob.
-func extractElasticsearchSubject(labels map[string]string) (kind, name string) {
+func extractElasticsearchSubject(labels map[string]string) (key, kind, name string) {
 	for _, k := range []string{"pod", "deployment", "statefulset", "daemonset", "replicaset", "job", "cronjob"} {
 		if v := labels[k]; v != "" {
-			return k, v
+			return k, k, v
 		}
 		if v := labels["kubernetes."+k]; v != "" {
-			return k, v
+			return "kubernetes." + k, k, v
 		}
 	}
 	if v := labels["kubernetes.pod.name"]; v != "" {
-		return "pod", v
+		return "kubernetes.pod.name", "pod", v
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // elasticsearchWorkloadCandidates returns the container names an alert carries,
-// deduplicated and in label-key priority order. They are handed to
-// core.MatchWorkloadAndEnrich via the nb_workload_candidates label, which
-// promotes one to the subject only on an exact k8s_workloads match. Accepts the
-// short key an operator would hand-write plus the ECS dotted key Elastic Agent
-// puts on container_logs documents.
+// deduplicated and in label-key priority order. Accepts the short key an operator
+// would hand-write plus the ECS dotted key Elastic Agent puts on container_logs
+// documents. A value that is a group id contributes each of its parts.
 func elasticsearchWorkloadCandidates(labels map[string]string) []string {
 	candidates := []string{}
 	seen := map[string]bool{}
 	for _, k := range []string{"container", "container.name", "kubernetes.container", "kubernetes.container.name"} {
-		v := labels[k]
-		if v == "" || seen[v] {
-			continue
+		for _, v := range splitKibanaGroup(labels[k]) {
+			if seen[v] {
+				continue
+			}
+			seen[v] = true
+			candidates = append(candidates, v)
 		}
-		seen[v] = true
-		candidates = append(candidates, v)
 	}
 	return candidates
+}
+
+// splitKibanaGroup splits a Kibana group id into its values. A rule grouped by
+// one field renders `{{alert.id}}` as that field's value; grouped by several, as
+// the values joined by a comma.
+func splitKibanaGroup(groupId string) []string {
+	var values []string
+	for _, v := range strings.Split(groupId, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			values = append(values, v)
+		}
+	}
+	return values
+}
+
+// kubernetesNameRegex is the shape of a Kubernetes object name (RFC 1123
+// subdomain). It keeps values that cannot be a pod or workload — the alert id of
+// an ungrouped rule is the literal "query matched" — out of the inventory lookups.
+var kubernetesNameRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
+// elasticsearchCandidateNames narrows names to distinct values that could be a
+// Kubernetes object name, in order, leaving out the subject already chosen.
+func elasticsearchCandidateNames(names []string, subject string) []string {
+	candidates := []string{}
+	seen := map[string]bool{subject: true}
+	for _, n := range names {
+		if seen[n] || len(n) > 253 || !kubernetesNameRegex.MatchString(n) {
+			continue
+		}
+		seen[n] = true
+		candidates = append(candidates, n)
+	}
+	return candidates
+}
+
+// firstAbsoluteURL returns the first value that is an absolute http(s) URL.
+func firstAbsoluteURL(values ...string) string {
+	for _, v := range values {
+		u, err := url.Parse(v)
+		if err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https") {
+			return v
+		}
+	}
+	return ""
 }
 
 // elasticsearchAlertType maps a Kibana rule type onto event_rules.alert_type,

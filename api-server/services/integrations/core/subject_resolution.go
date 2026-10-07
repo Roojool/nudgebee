@@ -775,6 +775,86 @@ func ResolveSubjectFromTitlePodName(sc *security.RequestContext, e *EventIncomin
 	return false
 }
 
+// lookupPodOwnerInOnlyNamespace is lookupPodOwnerByName for a pod whose namespace
+// is unknown. A name present in more than one namespace of the account ("redis-0")
+// is a miss: picking the most recently seen one would link the alert to a workload
+// in a namespace the alert never named.
+func lookupPodOwnerInOnlyNamespace(sc *security.RequestContext, dbms *database.DatabaseManager, tenantId, accountId, podName string) (ownerName, ownerKind, ns string, ok bool) {
+	var rows []struct {
+		WorkloadName string  `db:"workload_name"`
+		WorkloadType *string `db:"workload_type"`
+		Namespace    string  `db:"namespace"`
+	}
+	query := `
+		SELECT DISTINCT ON (namespace) workload_name, workload_type, namespace
+		FROM k8s_pods
+		WHERE tenant_id = $1
+		  AND cloud_account_id = $2
+		  AND name = $3
+		  AND workload_name IS NOT NULL AND workload_name <> ''
+		ORDER BY namespace, last_seen DESC NULLS LAST
+		LIMIT 2`
+	if err := dbms.Db.Select(&rows, query, tenantId, accountId, podName); err != nil {
+		sc.GetLogger().Error("subject_resolution: pod-candidate owner lookup failed", "error", err, "pod", podName)
+		return "", "", "", false
+	}
+	if len(rows) != 1 {
+		return "", "", "", false
+	}
+	var workloadType string
+	if rows[0].WorkloadType != nil {
+		workloadType = *rows[0].WorkloadType
+	}
+	return rows[0].WorkloadName, strings.ToLower(workloadType), rows[0].Namespace, true
+}
+
+// ResolveSubjectFromPodCandidates resolves the subject from e.PodNameCandidates:
+// the first candidate that is a pod in the inventory names the alert's pod, and its
+// owning workload becomes the subject, as ResolveSubjectFromTitlePodName does for a
+// pod named in the title. A candidate is matched by exact name, so a value that is
+// not a pod (a container or service name in the same group id) is simply a miss.
+// Returns true on a match.
+func ResolveSubjectFromPodCandidates(sc *security.RequestContext, e *EventIncomingWebhook, accountId string) bool {
+	if sc == nil || sc.GetSecurityContext() == nil || e == nil || len(e.PodNameCandidates) == 0 || accountId == "" {
+		return false
+	}
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		sc.GetLogger().Error("subject_resolution: failed to get database manager", "error", err)
+		return false
+	}
+	tenantId := sc.GetSecurityContext().GetTenantId()
+
+	for _, pod := range e.PodNameCandidates {
+		if pod == "" {
+			continue
+		}
+		var owner, kind, ns string
+		var ok bool
+		if e.EventSubjectNamespace != "" {
+			owner, kind, ns, ok = lookupPodOwnerByName(sc, dbms, tenantId, accountId, e.EventSubjectNamespace, pod)
+		} else {
+			owner, kind, ns, ok = lookupPodOwnerInOnlyNamespace(sc, dbms, tenantId, accountId, pod)
+		}
+		if !ok {
+			continue
+		}
+		if e.Investigation.Labels == nil {
+			e.Investigation.Labels = map[string]string{}
+		}
+		e.Investigation.Labels["pod"] = pod
+		e.Investigation.Labels["nb_subject_resolution"] = "pod_candidate"
+		e.EventSubjectName = owner
+		e.EventSubjectKind = kind
+		if e.EventSubjectNamespace == "" {
+			e.EventSubjectNamespace = ns
+		}
+		MatchWorkloadAndEnrich(sc, e, accountId)
+		return true
+	}
+	return false
+}
+
 // hasWorkloadValidationInput reports whether an event carries anything the
 // k8s_workloads inventory can be asked about: a subject the webhook resolved
 // itself, or candidate names it offered via nb_workload_candidates (e.g. the
@@ -804,6 +884,12 @@ func enrichEventsWithSubjectResolution(sc *security.RequestContext, events []Eve
 		}
 		if events[i].Investigation.Labels == nil {
 			events[i].Investigation.Labels = map[string]string{}
+		}
+		// Pod candidates go first: a pod names its workload and namespace exactly,
+		// and resolving it here keeps the pod on the event. Only parsers that set
+		// PodNameCandidates take this path.
+		if ResolveSubjectFromPodCandidates(sc, &events[i], accountId) {
+			continue
 		}
 		if hasWorkloadValidationInput(&events[i]) {
 			MatchWorkloadAndEnrich(sc, &events[i], accountId)

@@ -51,7 +51,10 @@ func TestMapElasticsearchAlertToEvent_Firing(t *testing.T) {
 	// onto a single event.
 	assert.Equal(t, "baf85522-3bcb-41a7-bd3c-72942707a6fc:kubewatch", got.EventId)
 	assert.Equal(t, "baf85522-3bcb-41a7-bd3c-72942707a6fc:kubewatch", got.Investigation.Fingerprint)
-	assert.Equal(t, "baf85522-3bcb-41a7-bd3c-72942707a6fc", got.Investigation.RuleId)
+	// RuleId is what the event is keyed and shown by, so it is the rule name; the
+	// Kibana id stays in the fingerprint above and in the rule_id label.
+	assert.Equal(t, "Sample: stderr log spike by container", got.Investigation.RuleId)
+	assert.Equal(t, "baf85522-3bcb-41a7-bd3c-72942707a6fc", got.Investigation.Labels["rule_id"])
 	assert.Equal(t, "Sample: stderr log spike by container", got.Investigation.RuleName)
 	assert.Equal(t, "Sample: stderr log spike by container", got.EventType)
 	assert.Equal(t, "stderr spike on kubewatch", got.EventTitle)
@@ -120,7 +123,7 @@ func TestMapElasticsearchAlertToEvent_FlatAliases(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, "watch-disk-full", got.Investigation.RuleId)
+	assert.Equal(t, "Disk full", got.Investigation.RuleId)
 	assert.Equal(t, "watch-disk-full:node-3", got.EventId)
 	assert.Equal(t, "Disk full", got.EventTitle)
 	assert.Equal(t, string(event.EventPriorityHigh), got.EventPriority)
@@ -181,19 +184,22 @@ func TestElasticsearchAlertType(t *testing.T) {
 }
 
 func TestExtractElasticsearchSubject_ECSDottedKeys(t *testing.T) {
-	kind, name := extractElasticsearchSubject(map[string]string{
+	key, kind, name := extractElasticsearchSubject(map[string]string{
 		"kubernetes.pod.name": "checkout-7d9f",
 	})
+	assert.Equal(t, "kubernetes.pod.name", key)
 	assert.Equal(t, "pod", kind)
 	assert.Equal(t, "checkout-7d9f", name)
 
-	kind, name = extractElasticsearchSubject(map[string]string{
+	key, kind, name = extractElasticsearchSubject(map[string]string{
 		"kubernetes.deployment": "checkout",
 	})
+	assert.Equal(t, "kubernetes.deployment", key)
 	assert.Equal(t, "deployment", kind)
 	assert.Equal(t, "checkout", name)
 
-	kind, name = extractElasticsearchSubject(map[string]string{"cluster": "dev"})
+	key, kind, name = extractElasticsearchSubject(map[string]string{"cluster": "dev"})
+	assert.Equal(t, "", key)
 	assert.Equal(t, "", kind)
 	assert.Equal(t, "", name)
 }
@@ -216,16 +222,124 @@ func TestMapElasticsearchAlertToEvent_ContainerBecomesWorkloadCandidate(t *testi
 	assert.Equal(t, "", got.EventSubjectKind)
 	assert.Equal(t, "", got.EventSubjectName)
 	assert.Equal(t, "ecr-proxy-server", got.Investigation.Labels["nb_workload_candidates"])
+	assert.Equal(t, []string{"ecr-proxy-server"}, got.PodNameCandidates)
 }
 
-// A workload label identifies the subject directly, so no candidate list is
-// produced — the candidate path is a fallback, not an addition.
-func TestMapElasticsearchAlertToEvent_NoCandidatesWhenSubjectKnown(t *testing.T) {
+// A pod label names the subject, and the group value is still offered: when the
+// pod is not in the inventory, the container name can still match the workload.
+func TestMapElasticsearchAlertToEvent_CandidatesAlongsideAPodSubject(t *testing.T) {
 	got, err := mapElasticsearchAlertToEvent("acct-1", canonicalKibanaPayload())
 	require.NoError(t, err)
 
 	assert.Equal(t, "kubewatch-6d9f7c5b8-x2kqp", got.EventSubjectName)
+	assert.Equal(t, "kubewatch", got.Investigation.Labels["nb_workload_candidates"])
+	assert.Equal(t, []string{"kubewatch-6d9f7c5b8-x2kqp", "kubewatch"}, got.PodNameCandidates)
+}
+
+// A rule grouped by two fields renders {{alert.id}} as "value1,value2". Templated
+// into a subject label it is not a name: it must not become the subject, and it
+// must not stay in the pod label, where it would be stored as the alert's pod.
+func TestMapElasticsearchAlertToEvent_TwoFieldGroupIdInSubjectLabel(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["alert"] = map[string]any{"id": "checkout,checkout-54d6f745c5-9j599", "action_group": "query matched"}
+	payload["labels"] = map[string]any{"pod": "checkout,checkout-54d6f745c5-9j599"}
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+
+	assert.Equal(t, "", got.EventSubjectKind)
+	assert.Equal(t, "", got.EventSubjectName)
+	_, hasPod := got.Investigation.Labels["pod"]
+	assert.False(t, hasPod, "the group id must not be left in the pod label")
+	assert.Equal(t, "checkout,checkout-54d6f745c5-9j599", got.Investigation.Labels["alert_id"])
+	assert.Equal(t, "checkout,checkout-54d6f745c5-9j599", got.Investigation.Labels["nb_workload_candidates"])
+	assert.Equal(t, []string{"checkout", "checkout-54d6f745c5-9j599"}, got.PodNameCandidates)
+	// The fingerprint keeps the whole group id: one event per group.
+	assert.Equal(t, "baf85522-3bcb-41a7-bd3c-72942707a6fc:checkout,checkout-54d6f745c5-9j599", got.EventId)
+}
+
+// The same group id templated under two subject keys must leave neither behind.
+func TestMapElasticsearchAlertToEvent_GroupIdUnderSeveralSubjectLabels(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["alert"] = map[string]any{"id": "checkout,checkout-54d6f745c5-9j599", "action_group": "query matched"}
+	payload["labels"] = map[string]any{
+		"pod":                 "checkout,checkout-54d6f745c5-9j599",
+		"kubernetes.pod.name": "checkout,checkout-54d6f745c5-9j599",
+	}
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+
+	_, hasPod := got.Investigation.Labels["pod"]
+	_, hasECSPod := got.Investigation.Labels["kubernetes.pod.name"]
+	assert.False(t, hasPod)
+	assert.False(t, hasECSPod)
+	assert.Equal(t, "", got.EventSubjectName)
+	assert.Equal(t, []string{"checkout", "checkout-54d6f745c5-9j599"}, got.PodNameCandidates)
+}
+
+// The documented body needs no labels at all: the group values in {{alert.id}}
+// are the candidates.
+func TestMapElasticsearchAlertToEvent_GroupIdWithoutLabels(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["alert"] = map[string]any{"id": "checkout,checkout-54d6f745c5-9j599", "action_group": "query matched"}
+	delete(payload, "labels")
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+
+	assert.Equal(t, "", got.EventSubjectName)
+	assert.Equal(t, "checkout,checkout-54d6f745c5-9j599", got.Investigation.Labels["nb_workload_candidates"])
+	assert.Equal(t, []string{"checkout", "checkout-54d6f745c5-9j599"}, got.PodNameCandidates)
+}
+
+// An ungrouped rule's alert id is the literal "query matched" — not a name, so it
+// is never looked up.
+func TestMapElasticsearchAlertToEvent_UngroupedRuleOffersNoCandidates(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["alert"] = map[string]any{"id": "query matched", "action_group": "query matched"}
+	delete(payload, "labels")
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+
 	assert.Equal(t, "", got.Investigation.Labels["nb_workload_candidates"])
+	assert.Empty(t, got.PodNameCandidates)
+}
+
+// An explicit workload label is the operator naming the subject. A pod found
+// among the group values must not replace it.
+func TestMapElasticsearchAlertToEvent_ExplicitWorkloadLabelKeepsPodsOut(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["alert"] = map[string]any{"id": "checkout-54d6f745c5-9j599", "action_group": "query matched"}
+	payload["labels"] = map[string]any{"deployment": "checkout"}
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+
+	assert.Equal(t, "deployment", got.EventSubjectKind)
+	assert.Equal(t, "checkout", got.EventSubjectName)
+	assert.Empty(t, got.PodNameCandidates)
+}
+
+// Kibana renders {{context.link}} as a path, and {{rule.url}} as "", unless
+// server.publicBaseUrl is set. A path stored as the alert URL opens a page on
+// this server, so only an absolute link is kept.
+func TestMapElasticsearchAlertToEvent_OnlyAnAbsoluteLinkIsKept(t *testing.T) {
+	payload := canonicalKibanaPayload()
+	payload["link"] = "/app/r?l=DISCOVER_APP_LOCATOR&v=8.19.11"
+	payload["rule"] = map[string]any{"id": "rule-1", "name": "Rule one", "url": ""}
+
+	got, err := mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.EventUrl)
+	assert.Equal(t, "", got.Investigation.SourceUrl)
+
+	// A relative link falls back to an absolute rule URL.
+	payload["rule"] = map[string]any{"id": "rule-1", "name": "Rule one", "url": "https://kibana.example/app/rule/rule-1"}
+	got, err = mapElasticsearchAlertToEvent("acct-1", payload)
+	require.NoError(t, err)
+	assert.Equal(t, "https://kibana.example/app/rule/rule-1", got.EventUrl)
 }
 
 func TestElasticsearchWorkloadCandidates(t *testing.T) {
@@ -244,6 +358,11 @@ func TestElasticsearchWorkloadCandidates(t *testing.T) {
 	assert.Equal(t, []string{"app", "istio-proxy"}, elasticsearchWorkloadCandidates(map[string]string{
 		"container":      "app",
 		"container.name": "istio-proxy",
+	}))
+
+	// A group id templated into the container label contributes each value.
+	assert.Equal(t, []string{"app", "app-54d6f745c5-9j599"}, elasticsearchWorkloadCandidates(map[string]string{
+		"container": "app,app-54d6f745c5-9j599",
 	}))
 
 	assert.Empty(t, elasticsearchWorkloadCandidates(map[string]string{"cluster": "dev"}))

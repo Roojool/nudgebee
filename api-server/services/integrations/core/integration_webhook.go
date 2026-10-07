@@ -49,6 +49,12 @@ type EventIncomingWebhook struct {
 	// row (see firingFindingIDFor); leave it empty when the source offers no such
 	// key, or when EventId is already per firing.
 	FiringKey string `json:"firing_key,omitempty"`
+	// PodNameCandidates are names that may be pods, from a parser whose payload
+	// cannot say which of its values is the pod (a Kibana group id is the group
+	// values joined together). ResolveSubjectFromPodCandidates looks each one up in
+	// the pod inventory. A field rather than a label, so it never reaches the stored
+	// event.
+	PodNameCandidates []string `json:"-"`
 }
 
 type EventIncomingWebhookInvestigationSeverity string
