@@ -350,6 +350,8 @@ func (s *SignozSaasSource) QueryLabelValues(ctx *security.RequestContext, fetchL
 	if v, ok := fetchLogLabelValueRequest.Request["tagType"].(string); ok && v != "" {
 		tagType = v
 	}
+	attributeKey, resolvedTagType := signozLabelValueParams(fetchLogLabelValueRequest.LabelName, tagType)
+	tagType, _ = resolvedTagType.(string)
 
 	params := fmt.Sprintf(
 		"searchText=%s&dataSource=%s&filterAttributeKeyDataType=%s&aggregateOperator=noop&aggregateAttribute=%s&tagType=%s&attributeKey=%s",
@@ -358,7 +360,7 @@ func (s *SignozSaasSource) QueryLabelValues(ctx *security.RequestContext, fetchL
 		filterAttributeKeyDataType,
 		"",
 		tagType,
-		fetchLogLabelValueRequest.LabelName,
+		attributeKey,
 	)
 	resp, err := s.signozDo(ctx, fetchLogLabelValueRequest.AccountId, http.MethodGet, "/api/v3/autocomplete/attribute_values?"+params, nil)
 	if err != nil {
@@ -729,21 +731,7 @@ func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (Lo
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		points, _ := seriesMap["points"].([]any)
-		timestamps := make([]int64, 0, len(points))
-		values := make([]float64, 0, len(points))
-		for _, p := range points {
-			point, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			if ts, ok := point["timestamp"].(float64); ok {
-				timestamps = append(timestamps, int64(ts))
-			}
-			if val, ok := point["value"].(float64); ok {
-				values = append(values, val)
-			}
-		}
+		timestamps, values := signozSeriesPoints(seriesMap)
 
 		group.Timestamps = timestamps
 		group.Values = values

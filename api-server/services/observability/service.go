@@ -1665,17 +1665,24 @@ func normalizeOutputLogLabels(logs []OutputLog, labelMapping map[string]string) 
 	if len(labelMapping) == 0 {
 		return
 	}
-	// Build reverse map: providerKey → canonicalKey
-	reverseMap := make(map[string]string, len(labelMapping))
+	// Build reverse map: providerKey → every canonical key that reads it. Several
+	// canonical names can share one provider key (app and workload both read
+	// k8s.deployment.name); a single-valued reverse map kept whichever one the random
+	// map iteration wrote last, so the alias a log carried changed between requests.
+	reverseMap := make(map[string][]string, len(labelMapping))
 	for canonical, providerKey := range labelMapping {
-		reverseMap[providerKey] = canonical
+		reverseMap[providerKey] = append(reverseMap[providerKey], canonical)
 	}
 	for i := range logs {
 		if logs[i].Labels == nil {
 			continue
 		}
-		for providerKey, canonical := range reverseMap {
-			if val, ok := logs[i].Labels[providerKey]; ok {
+		for providerKey, canonicals := range reverseMap {
+			val, ok := logs[i].Labels[providerKey]
+			if !ok {
+				continue
+			}
+			for _, canonical := range canonicals {
 				if _, exists := logs[i].Labels[canonical]; !exists {
 					logs[i].Labels[canonical] = val
 				}

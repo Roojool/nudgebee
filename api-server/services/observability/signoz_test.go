@@ -982,22 +982,34 @@ func TestConvertSigNozLogLabelValues(t *testing.T) {
 	}
 }
 
-// TestSignozSource_GetLabelMapping pins the one entry SigNoz needs, and that it needs
-// only one.
+// TestSignozSource_GetLabelMapping pins the canonical -> SigNoz attribute names.
 //
-// FlattenSignozQuery passes a field straight through as an attribute key, and every
-// canonical name except the log line's text is already spelled the way SigNoz spells
-// it. `message` is the exception: SigNoz calls the log line `body`, so without this
-// entry a `message` filter reaches it as an attribute that does not exist, matches
-// nothing, and returns HTTP 200 with zero rows (#39573).
-//
-// This asserted an empty map before that change — a characterization of what the code
-// did, not of what it should do.
+// FlattenSignozQuery passes a field straight through as an attribute key, so a
+// canonical name SigNoz does not spell the same way matches nothing and returns
+// HTTP 200 with zero rows. This test used to pin `message` as the only entry, on
+// the belief that every other canonical name was already SigNoz's spelling; a live
+// run against SigNoz v0.51 and v0.145 disproved it — `level`, `namespace`, `pod`
+// and `service` each returned 0 rows where severity_text / k8s.namespace.name /
+// k8s.pod.name / service.name returned the data.
 func TestSignozSource_GetLabelMapping(t *testing.T) {
 	s := &SignozSource{}
 	mapping := s.GetLabelMapping()
 
-	assert.Equal(t, map[string]string{"message": "body"}, mapping)
+	assert.Equal(t, map[string]string{
+		"message":   "body",
+		"namespace": "k8s.namespace.name",
+		"pod":       "k8s.pod.name",
+		"container": "k8s.container.name",
+		"node":      "k8s.node.name",
+		"workload":  "k8s.deployment.name",
+		"app":       "k8s.deployment.name",
+		"cluster":   "k8s.cluster.name",
+		"host":      "host.name",
+		"hostname":  "host.name",
+		"service":   "service.name",
+		"severity":  "severity_text",
+		"level":     "severity_text",
+	}, mapping)
 
 	// Both sources share one table: SigNoz Cloud speaks the same attribute names.
 	assert.Equal(t, mapping, (&SignozSaasSource{}).GetLabelMapping())

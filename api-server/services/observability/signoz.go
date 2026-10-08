@@ -19,17 +19,100 @@ type SignozSource struct{}
 // signozLogLabelMapping maps the canonical log vocabulary onto SigNoz's own
 // attribute names.
 //
-// Only the log line's text needs remapping. Every other canonical name SigNoz
-// consumes verbatim — FlattenSignozQuery passes the field straight through as an
-// attribute key — so the rest are deliberately absent rather than mapped to
-// themselves.
+// SigNoz stores OTel resource attributes under their dotted semantic-convention
+// names (`k8s.namespace.name`) and the log level in the `severity_text` column.
+// FlattenSignozQuery passes a field straight through as an attribute key, so an
+// unmapped canonical name (`namespace`, `level`) reaches SigNoz as an attribute
+// that does not exist and matches nothing — with a success status and no error.
+// Measured on SigNoz v0.51 and v0.145: `level = ERROR` and `namespace = x` both
+// returned 0 rows where `severity_text` / `k8s.namespace.name` returned the data,
+// which is how Nubi answered "no ERROR logs" over logs that existed.
 //
 // `message` is the spelling every producer is moving to (#39573); SigNoz calls the
-// log line `body`. Without this entry a `message` filter reaches SigNoz as an
-// attribute that does not exist and matches nothing, with a success status and no
-// error — the same silent-empty failure Loki had with `_body`.
+// log line `body`. The rest mirrors cubeAPMLogLabelMapping (also dotted OTel
+// names), except `service` and the level, which SigNoz keeps as `service.name`
+// and `severity_text`. Deployments whose shipper uses other names remap
+// per-account via the label-mapping override rather than editing this table.
 var signozLogLabelMapping = map[string]string{
-	"message": "body",
+	"message":   "body",
+	"namespace": signozNamespaceKey,
+	"pod":       signozPodKey,
+	"container": "k8s.container.name",
+	"node":      "k8s.node.name",
+	"workload":  "k8s.deployment.name",
+	"app":       "k8s.deployment.name",
+	"cluster":   "k8s.cluster.name",
+	"host":      "host.name",
+	"hostname":  "host.name",
+	"service":   "service.name",
+	"severity":  "severity_text",
+	"level":     "severity_text",
+}
+
+// signozLabelValueParams resolves the attribute key and tag type for a label-value
+// lookup. A canonical name is mapped through signozLogLabelMapping and looked up
+// as a resource attribute: the caller's tag type described the canonical label,
+// not the SigNoz key it became. Every mapped key is an OTel resource attribute
+// except severity_text and body, which are columns SigNoz answers under any tag
+// type. Measured on v0.51 and v0.145: "resource" returned values for
+// k8s.namespace.name, service.name and severity_text; "tag" and an empty tag type
+// returned nothing for the resource attributes.
+func signozLabelValueParams(labelName string, tagType any) (string, any) {
+	if mapped, ok := signozLogLabelMapping[labelName]; ok {
+		return mapped, "resource"
+	}
+	return labelName, tagType
+}
+
+// signozSeriesPoints reads one aggregate series' points. SigNoz returns them as
+// `values: [{timestamp, value}]` with the value as a numeric STRING ("2");
+// `points` with float values is accepted too. Reading only `points` as floats
+// made every log-group count 0 on both v0.51 and v0.145, and the Log Groups
+// page — which hides zero-count groups — always empty.
+func signozSeriesPoints(series map[string]any) ([]int64, []float64) {
+	raw, ok := series["values"].([]any)
+	if !ok {
+		raw, _ = series["points"].([]any)
+	}
+	timestamps := make([]int64, 0, len(raw))
+	values := make([]float64, 0, len(raw))
+	for _, p := range raw {
+		point, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		val, okVal := signozNumber(point["value"])
+		ts, okTs := signozNumber(point["timestamp"])
+		if !okVal || !okTs {
+			continue
+		}
+		timestamps = append(timestamps, int64(ts))
+		values = append(values, val)
+	}
+	return timestamps, values
+}
+
+// signozNumber accepts a finite JSON number or numeric string. NaN and ±Inf
+// (ParseFloat accepts "NaN"/"Inf") are rejected: int64(math.Round(NaN)) is an
+// implementation-defined garbage count.
+func signozNumber(v any) (float64, bool) {
+	var f float64
+	switch n := v.(type) {
+	case float64:
+		f = n
+	case string:
+		parsed, err := strconv.ParseFloat(n, 64)
+		if err != nil {
+			return 0, false
+		}
+		f = parsed
+	default:
+		return 0, false
+	}
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return f, true
 }
 
 func (s *SignozSource) GetLabelMapping() map[string]string {
@@ -406,14 +489,15 @@ func (s *SignozSource) QueryLabels(ctx *security.RequestContext, fetchLogRequest
 }
 
 func (s *SignozSource) QueryLabelValues(ctx *security.RequestContext, fetchLogRequest FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
+	attributeKey, tagType := signozLabelValueParams(fetchLogRequest.LabelName, fetchLogRequest.Request["tagType"])
 	signozLogRequest := relay.ActionExecuteBody{
 		AccountID:  fetchLogRequest.AccountId,
 		ActionName: "signoz_value_suggest",
 		ActionParams: map[string]any{
-			"attributeKey":               fetchLogRequest.LabelName,
+			"attributeKey":               attributeKey,
 			"filterAttributeKeyDataType": fetchLogRequest.Request["filterAttributeKeyDataType"],
 			"searchText":                 fetchLogRequest.Request["searchText"],
-			"tagType":                    fetchLogRequest.Request["tagType"],
+			"tagType":                    tagType,
 		},
 		NoSinks: true,
 	}
@@ -790,22 +874,7 @@ func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime 
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		// Extract values: Signoz returns {points: [{timestamp, value}, ...]}
-		points, _ := seriesMap["points"].([]any)
-		timestamps := make([]int64, 0, len(points))
-		values := make([]float64, 0, len(points))
-		for _, p := range points {
-			point, ok := p.(map[string]any)
-			if !ok {
-				continue
-			}
-			if ts, ok := point["timestamp"].(float64); ok {
-				timestamps = append(timestamps, int64(ts))
-			}
-			if val, ok := point["value"].(float64); ok {
-				values = append(values, val)
-			}
-		}
+		timestamps, values := signozSeriesPoints(seriesMap)
 
 		group.Timestamps = timestamps
 		group.Values = values
