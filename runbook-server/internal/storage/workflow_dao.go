@@ -215,13 +215,11 @@ func (s *WorkflowDao) List(ctx context.Context, tenantID string, accountIDs []st
 			if key == "" {
 				continue
 			}
-			// Sanitize the key to prevent SQL injection
-			quotedKey := pq.QuoteIdentifier(key)
-			// Use ->> to extract value as text for comparison, matching the string input from query params
-			whereClause += fmt.Sprintf(" AND tags->>%s = $%d", quotedKey, argId)
-			whereClauseWithAlias += fmt.Sprintf(" AND w.tags->>%s = $%d", quotedKey, argId)
-			baseArgs = append(baseArgs, value)
-			argId++
+			// Bind the key as a text parameter: a quoted identifier (`tags->>"team"`) is read as a column.
+			whereClause += fmt.Sprintf(" AND tags->>$%d = $%d", argId, argId+1)
+			whereClauseWithAlias += fmt.Sprintf(" AND w.tags->>$%d = $%d", argId, argId+1)
+			baseArgs = append(baseArgs, key, value)
+			argId += 2
 		}
 	}
 

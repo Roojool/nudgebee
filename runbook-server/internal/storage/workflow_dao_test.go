@@ -2,11 +2,15 @@ package storage
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"nudgebee/runbook/internal/model"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildOptimizationFilter_Empty(t *testing.T) {
@@ -137,4 +141,26 @@ func TestWorkflowDaoGetWorkflowNames_DropsNonUUIDIDs(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Empty(t, names)
+}
+
+// A quoted tag key (`tags->>"team"`) is read by Postgres as a column and fails with
+// `column "team" does not exist`; the key must be bound as a text parameter.
+func TestWorkflowDaoList_BindsTagKeyAsParameter(t *testing.T) {
+	mockDB, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer func() { _ = mockDB.Close() }()
+	dao := &WorkflowDao{db: sqlx.NewDb(mockDB, "sqlmock")}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND account_id = ANY($2) AND tags->>$3 = $4")).
+		WithArgs("t1", sqlmock.AnyArg(), "team", "payments").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta("AND w.tags->>$3 = $4")).
+		WithArgs("t1", sqlmock.AnyArg(), "team", "payments").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	_, _, err = dao.List(context.Background(), "t1", []string{"acct-1"},
+		model.ListWorkflowRequest{Tags: map[string]string{"team": "payments"}})
+
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }
