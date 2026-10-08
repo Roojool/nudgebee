@@ -33,7 +33,7 @@ import k8sApi from '@api1/kubernetes';
 import apiUser from '@api1/user';
 import ticketsApi from '@api1/tickets';
 import { applyFiltersOnRouter } from '@lib/router';
-import { hasWriteAccess, hasPermission } from '@lib/auth';
+import { hasWriteAccess, hasPermission, getCurrentTenant } from '@lib/auth';
 import {
   convertToReadableFormat,
   titleCaseForAggregationKey,
@@ -44,6 +44,7 @@ import {
 import { Box, Typography } from '@mui/material';
 import useKubernetesEventFilters from '@hooks/useKubernetesEventFilters';
 import { useEventCloudFilter } from '@hooks/useCloudFilters';
+import { readPersistedFilters, writePersistedFilters } from '@hooks/usePersistedFilters';
 import EventClassifyModal, { type ClassifyUpdate } from '@components/events/EventClassifyModal';
 import { CLASSIFICATION_OPTIONS, TRIAGE_SCORE_INFO, getTriageStatusTooltip } from '@api1/triage';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
@@ -444,6 +445,22 @@ const normalizeOptionValue = (entry: any) => {
   return entry.value ?? entry.label ?? null;
 };
 
+// Seeds a multi-select filter's state directly from a raw query/persisted value, before its
+// option list (loaded async via useKubernetesEventFilters) has arrived. FilterDropdown resolves
+// the display label from its `options` prop by value, not from this placeholder, so a bare
+// `{ value }` renders correctly once options load — this just avoids an initial fetch with the
+// filter empty, followed by a second fetch once the matching option object resolves (#40107).
+const toPlaceholderOptions = (raw: string | string[] | undefined | null): Array<{ value: string }> => {
+  if (!raw) return [];
+  const values = Array.isArray(raw) ? raw : raw.split(',');
+  return values.filter(Boolean).map((value) => ({ value }));
+};
+
+// localStorage key for the grouped-events sub-tabs (Triage Inbox, Events by Type, Events by
+// App). They already share one router query-string on Troubleshoot, so the localStorage
+// fallback is shared too, matching KubernetesEvents.jsx's TROUBLESHOOT_EVENTS_FILTER_STORAGE_KEY.
+const TROUBLESHOOT_GROUPED_EVENTS_FILTER_STORAGE_KEY = 'troubleshoot:grouped-events:filters:v1';
+
 const ensureSelectedInOptions = (options: any[] = [], selectedValue: any) => {
   if (selectedValue == null || selectedValue === '') return options;
   const selectedValues = (Array.isArray(selectedValue) ? selectedValue : [selectedValue])
@@ -469,6 +486,13 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   const componentId = 'Grouped Events';
   const router = useRouter();
 
+  // Persist filters that the URL alone can't survive (#40107): layout/index.jsx strips query
+  // params on sidebar nav to /troubleshoot#all-events, so localStorage is what survives a
+  // "leave + come back" round-trip — same pattern as the sibling Events tab (KubernetesEvents.jsx).
+  const tenantId = getCurrentTenant()?.id;
+  const persistKey = isTroubleshootPage && tenantId ? `${TROUBLESHOOT_GROUPED_EVENTS_FILTER_STORAGE_KEY}:${tenantId}` : null;
+  const persisted = useMemo(() => readPersistedFilters(persistKey), [persistKey]);
+
   // --- State Management ---
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [totalRows, setTotalRows] = useState<number>(0);
@@ -492,17 +516,23 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     const param = router?.query?.eventSubjectName;
     return (Array.isArray(param) ? param[0] : param) ?? '';
   });
-  const [selectedAggregationKey, setSelectedAggregationKey] = useState<any[]>([]);
+  const [selectedAggregationKey, setSelectedAggregationKey] = useState<any[]>(() =>
+    toPlaceholderOptions(router?.query?.eventAggregationKey as string | string[] | undefined)
+  );
   const [selectedAccountId, setSelectedAccountId] = useState<string[]>(() => {
     const raw = accountId || (router.query.accountIds as string);
     return raw ? raw.split(',').filter(Boolean) : [];
   });
-  const [selectedStatus, setSelectedStatus] = useState<string>('');
-  const [selectedPriority, setSelectedPriority] = useState('');
-  const [selectedNbPriority, setSelectedNbPriority] = useState('');
+  const [selectedStatus, setSelectedStatus] = useState<string>(() => (router?.query?.eventStatus as string) || (persisted?.status as string) || '');
+  const [selectedPriority, setSelectedPriority] = useState(() => (router?.query?.eventPriority as string) || (persisted?.priority as string) || '');
+  const [selectedNbPriority, setSelectedNbPriority] = useState(
+    () => (router?.query?.eventComputedPriority as string) || (persisted?.computedPriority as string) || ''
+  );
 
-  const [selectedSource, setSelectedSource] = useState<any[]>([]);
-  const [selectedNBStatus, setSelectedNBStatus] = useState<Array<{ label: string; value: string }>>([]);
+  const [selectedSource, setSelectedSource] = useState<any[]>(() => toPlaceholderOptions(router?.query?.source as string | string[] | undefined));
+  const [selectedNBStatus, setSelectedNBStatus] = useState<Array<{ value: string }>>(() =>
+    toPlaceholderOptions((router?.query?.nbStatus as string | string[] | undefined) ?? (persisted?.nbStatus as string[] | undefined))
+  );
   const [selectedServiceName, setSelectedServiceName] = useState('');
   const [selectedIssueType, setSelectedIssueType] = useState<string>((router?.query?.issueType as string) || 'all');
 
@@ -565,6 +595,10 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   }, [accountId, router.query.accountIds]);
 
   useEffect(() => {
+    // Options load async — until they do, keep the placeholder the state was seeded with
+    // (from the URL/persisted value) rather than clobbering it back to empty, which would
+    // cause an extra fetch once the real options resolve a moment later (#40107).
+    if (!aggregationKeyFilter?.length) return;
     setSelectedAggregationKey((prev) => {
       const next = syncFilterFromQuery(aggregationKeyFilter, router?.query?.eventAggregationKey, (f: any) => f.value);
       if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
@@ -574,6 +608,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   }, [aggregationKeyFilter]);
 
   useEffect(() => {
+    if (!sourceFilter?.length) return;
     setSelectedSource((prev) => {
       const next = syncFilterFromQuery(sourceFilter, router?.query?.source, (f: any) => f.value);
       if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
@@ -582,10 +617,30 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceFilter]);
 
+  useEffect(() => {
+    if (!nbStatusFilter?.length) return;
+    setSelectedNBStatus((prev) => {
+      const queryValue = router?.query?.nbStatus as string | string[] | undefined;
+      const persistedValue = Array.isArray(persisted?.nbStatus) ? (persisted.nbStatus as string[]).join(',') : undefined;
+      const next = syncFilterFromQuery(nbStatusFilter, queryValue ?? persistedValue, (f: any) => f.value);
+      if (prev.length === next.length && prev.every((item, i) => item?.value === next[i]?.value)) return prev;
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nbStatusFilter]);
+
   // Sort state
-  const [sortConfig, setSortConfig] = useState<{ name: string; order: 'asc' | 'desc' }>(
-    groupEventType === 'app' || groupEventType === 'event_type' ? { name: 'Event Count', order: 'desc' } : { name: 'Priority', order: 'desc' }
-  );
+  const [sortConfig, setSortConfig] = useState<{ name: string; order: 'asc' | 'desc' }>(() => {
+    const defaultSort =
+      groupEventType === 'app' || groupEventType === 'event_type'
+        ? { name: 'Event Count', order: 'desc' as const }
+        : { name: 'Priority', order: 'desc' as const };
+    const validNames = sortByOptions.map((o) => o.value);
+    const queryName = router?.query?.sortBy as string;
+    const persistedName = persisted?.sortBy as string;
+    const name = [queryName, persistedName].find((n) => n && validNames.includes(n)) || defaultSort.name;
+    return { name, order: defaultSort.order };
+  });
 
   // Classify Modal State
   const [classifyModalOpen, setClassifyModalOpen] = useState(false);
@@ -1110,16 +1165,19 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
   };
 
   const handleSortChange = (sort: { name: string; order: string }) => {
-    setSortConfig({
-      name: sort.name,
-      order: sort.order as 'asc' | 'desc',
-    });
+    const next = { name: sort.name, order: sort.order as 'asc' | 'desc' };
+    setSortConfig(next);
     setCurrentPage(1);
+    applyFiltersOnRouter(router, { sortBy: next.name });
+    writePersistedFilters(persistKey, { sortBy: next.name });
   };
 
   const onSortByChange = (e: any) => {
-    setSortConfig({ name: e.target.value, order: 'desc' });
+    const next = { name: e.target.value, order: 'desc' as const };
+    setSortConfig(next);
     setCurrentPage(1);
+    applyFiltersOnRouter(router, { sortBy: next.name });
+    writePersistedFilters(persistKey, { sortBy: next.name });
   };
 
   const onServiceNamesFilterChange = (e: any) => {
@@ -1232,6 +1290,8 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
             onSelect: (e: any) => {
               setSelectedPriority(e.target.value);
               setCurrentPage(1);
+              applyFiltersOnRouter(router, { eventPriority: e.target.value });
+              writePersistedFilters(persistKey, { priority: e.target.value });
             },
             label: 'Source Severity',
             value: selectedPriority,
@@ -1246,6 +1306,8 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
             onSelect: (e: any) => {
               setSelectedStatus(e.target.value);
               setCurrentPage(1);
+              applyFiltersOnRouter(router, { eventStatus: e.target.value });
+              writePersistedFilters(persistKey, { status: e.target.value });
             },
             label: 'Status',
             value: selectedStatus,
@@ -1264,8 +1326,11 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
               { value: 'P3', label: 'P3' },
             ],
             onSelect: (e: any) => {
-              setSelectedNbPriority(e?.target?.value || '');
+              const next = e?.target?.value || '';
+              setSelectedNbPriority(next);
               setCurrentPage(1);
+              applyFiltersOnRouter(router, { eventComputedPriority: next });
+              writePersistedFilters(persistKey, { computedPriority: next });
             },
             label: 'Triage Priority',
             value: selectedNbPriority,
@@ -1301,8 +1366,11 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
       enabled: true,
       options: nbStatusFilter,
       onSelect: (_e: any, value: any) => {
-        setSelectedNBStatus(value || []);
+        const next = value || [];
+        setSelectedNBStatus(next);
         setCurrentPage(1);
+        applyFiltersOnRouter(router, { nbStatus: next.map((v: any) => v.value).join(',') });
+        writePersistedFilters(persistKey, { nbStatus: next.map((v: any) => v.value) });
       },
       label: 'Triage Status',
       value: selectedNBStatus,
