@@ -747,6 +747,8 @@ func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) (F
 	}
 	filteringMap := getMergedLabelMapping(ctx, fetchLogRequest.AccountId, source)
 	fetchLogRequest.SortFields = convertOrderByWithMapping(fetchLogRequest.SortFields, filteringMap)
+	var expandedKeys map[string]bool
+	fetchLogRequest.QueryRequest.Where, expandedKeys = expandCanonicalLabelKeys(fetchLogRequest.QueryRequest.Where, source, filteringMap)
 	fetchLogRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchLogRequest.QueryRequest.Where, filteringMap)
 
 	// Let the integration strip keys it does not support from the where clause.
@@ -798,8 +800,17 @@ func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) (F
 	if fetchLogRequest.ValidateRequest {
 		referencedLabels = map[string]struct{}{}
 		collectWhereFieldNames(fetchLogRequest.QueryRequest.Where, referencedLabels)
+		for k := range expandedSecondaryKeys(source) {
+			delete(referencedLabels, k)
+		}
 		referencedValues = map[string][]whereFieldValue{}
 		collectWhereFieldValues(fetchLogRequest.QueryRequest.Where, referencedValues)
+		// An expanded `app = redis` names redis under every workload kind; it is
+		// a value of one of them, so checking each key alone would call a right
+		// value unknown (e.g. "not a CronJob name").
+		for k := range expandedKeys {
+			delete(referencedValues, k)
+		}
 	}
 
 	logs, err := source.QueryLogs(ctx, fetchLogRequest)
@@ -3092,6 +3103,7 @@ func GetLogsQuery(ctx *security.RequestContext, fetchLogRequest FetchLogRequest)
 	// endpoint translates both WHERE and ORDER BY identifiers consistently with execution.
 	filteringMap := getMergedLabelMapping(ctx, fetchLogRequest.AccountId, source)
 	fetchLogRequest.SortFields = convertOrderByWithMapping(fetchLogRequest.SortFields, filteringMap)
+	fetchLogRequest.QueryRequest.Where, _ = expandCanonicalLabelKeys(fetchLogRequest.QueryRequest.Where, source, filteringMap)
 	fetchLogRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchLogRequest.QueryRequest.Where, filteringMap)
 	// Mirror FetchLogs' data-type reconciliation: this endpoint is the preview that
 	// seeds the builder's raw-query editor, so it must both fail on the same input and

@@ -14,6 +14,7 @@ import (
 	"nudgebee/services/security"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1083,6 +1084,131 @@ var signozOpToCanonical = map[string]query.BinaryWhereClauseType{
 	"nexists":   NotExist,
 	"regex":     RegEx,
 	"nregex":    NotRegEx,
+	"ilike":     ILike,
+	">":         Gt,
+	">=":        Gte,
+	"<":         Lt,
+	"<=":        Lte,
+}
+
+// signozRawQueryToWhereClause converts a raw_query (a SigNoz composite query, e.g.
+// from an alert's related-logs link) into a canonical where-clause, so it runs
+// through FetchLogs on whichever SigNoz source the account uses. Only plain log
+// lists convert: each enabled builder query must be a noop logs query whose
+// filter items are ANDed; several queries are ORed. Anything else reports false
+// and stays on the agent-relay path.
+func signozRawQueryToWhereClause(raw map[string]any) (query.QueryWhereClause, bool) {
+	composite, _ := raw["compositeQuery"].(map[string]any)
+	if composite == nil {
+		return query.QueryWhereClause{}, false
+	}
+	if panel, _ := composite["panelType"].(string); panel != "" && panel != "list" {
+		return query.QueryWhereClause{}, false
+	}
+	builderQueries, _ := composite["builderQueries"].(map[string]any)
+	names := make([]string, 0, len(builderQueries))
+	for name := range builderQueries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var clauses []query.QueryWhereClause
+	for _, name := range names {
+		q, ok := builderQueries[name].(map[string]any)
+		if !ok {
+			return query.QueryWhereClause{}, false
+		}
+		if disabled, _ := q["disabled"].(bool); disabled {
+			continue
+		}
+		if ds, _ := q["dataSource"].(string); ds != "" && ds != "logs" {
+			return query.QueryWhereClause{}, false
+		}
+		if agg, _ := q["aggregateOperator"].(string); agg != "" && agg != "noop" {
+			return query.QueryWhereClause{}, false
+		}
+		filters, _ := q["filters"].(map[string]any)
+		if op, _ := filters["op"].(string); op != "" && !strings.EqualFold(op, "AND") {
+			return query.QueryWhereClause{}, false
+		}
+		if !signozRawItemsConvertible(filters["items"]) {
+			return query.QueryWhereClause{}, false
+		}
+		where, err := signozFilterItemsToWhereClause(filters)
+		if err != nil {
+			return query.QueryWhereClause{}, false
+		}
+		clauses = append(clauses, where)
+	}
+	switch len(clauses) {
+	case 0:
+		return query.QueryWhereClause{}, false
+	case 1:
+		return clauses[0], true
+	}
+	return query.QueryWhereClause{Or: clauses}, true
+}
+
+// signozRawItemsConvertible reports whether every filter item converts without
+// losing meaning. The where-clause carries only the key name, so an item typed
+// as non-string (e.g. a float64 status code, compared numerically by SigNoz) or
+// one that cannot be read keeps the agent-relay path, which sends items verbatim.
+func signozRawItemsConvertible(raw any) bool {
+	items, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, it := range items {
+		item, ok := it.(map[string]any)
+		if !ok {
+			return false
+		}
+		key, ok := item["key"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if name, _ := key["key"].(string); name == "" {
+			return false
+		}
+		if dt, _ := key["dataType"].(string); dt != "" && dt != "string" {
+			return false
+		}
+	}
+	return true
+}
+
+// signozRawQueryWindow reads a raw_query's own start/end (Unix ms), falling back
+// to the given window for whichever is absent.
+func signozRawQueryWindow(raw map[string]any, start, end time.Time) (time.Time, time.Time) {
+	ms := func(v any) (time.Time, bool) {
+		var n float64
+		switch x := v.(type) {
+		case float64:
+			n = x
+		case int64:
+			n = float64(x)
+		case int:
+			n = float64(x)
+		case string:
+			f, err := strconv.ParseFloat(x, 64)
+			if err != nil {
+				return time.Time{}, false
+			}
+			n = f
+		default:
+			return time.Time{}, false
+		}
+		if n <= 0 {
+			return time.Time{}, false
+		}
+		return time.UnixMilli(int64(n)), true
+	}
+	if t, ok := ms(raw["start"]); ok {
+		start = t
+	}
+	if t, ok := ms(raw["end"]); ok {
+		end = t
+	}
+	return start, end
 }
 
 // signozFilterItemsToWhereClause converts SigNoz filter items (the "query" playbook
@@ -1218,14 +1344,20 @@ func (a *signozLogsAction) Execute(ctx playbooks.PlaybookActionContext, rawParam
 	}
 	startTime, endTime := a.resolveTimeWindow(ctx, params)
 
-	// raw_query / relatedLogsParams carry an opaque SigNoz composite query that
-	// cannot round-trip through the canonical where-clause — keep the legacy
-	// direct-relay path for those inputs only.
+	title, _ := rawParams["title"].(string)
+
+	// raw_query / relatedLogsParams carry a SigNoz composite query. A plain log
+	// list converts to a where-clause and runs through FetchLogs, which reaches a
+	// URL-connected SigNoz as well as one behind the agent; only shapes that cannot
+	// convert (aggregates, OR-ed filter items) keep the agent-relay path.
 	if params.RawQuery != nil {
+		if where, ok := signozRawQueryToWhereClause(params.RawQuery); ok {
+			start, end := signozRawQueryWindow(params.RawQuery, startTime, endTime)
+			return a.runSignozFetch(ctx, where, title, start, end, rawParams, params.RegexExtractors, params.LabelExtractors)
+		}
 		return a.executeRawQueryLegacy(ctx, rawParams, params, startTime, endTime)
 	}
 
-	title, _ := rawParams["title"].(string)
 	where, err := signozFilterItemsToWhereClause(params.Query)
 	if err != nil {
 		return nil, err

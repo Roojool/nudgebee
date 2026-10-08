@@ -36,8 +36,10 @@ func (s *SignozSaasSource) GetLabelMapping() map[string]string {
 }
 
 func (s *SignozSaasSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_like"}
+	return signozSupportedOperators
 }
+
+func (s *SignozSaasSource) ExpandedLabelKeys() map[string][]string { return signozExpandedLabelKeys }
 
 // GetSignozAuth loads the account's user-sourced SigNoz integration and returns
 // its credentials. Logging in is left to signozDo, which caches the token and
@@ -150,129 +152,38 @@ func (s *SignozSaasSource) signozDo(ctx *security.RequestContext, accountId, met
 }
 
 func (s *SignozSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
-	if fetchLogRequest.Query == "" {
-		flattenedClauses, err := FlattenSignozQuery(fetchLogRequest.QueryRequest.Where)
+	list, err := signozFetchLogRows(fetchLogRequest, func(body map[string]any) ([]any, error) {
+		resp, err := s.signozDo(ctx, fetchLogRequest.AccountId, http.MethodPost, "/api/v4/query_range", body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to flatten query: %w", err)
+			return nil, fmt.Errorf("failed to execute signoz log query: %w", err)
 		}
-		queryJSON, err := json.Marshal(flattenedClauses)
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 200 {
+			ctx.GetLogger().Error("signoz: log query failed", "status", resp.StatusCode)
+			return nil, fmt.Errorf("failed to get signoz logs, status code: %d", resp.StatusCode)
+		}
+		bodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal flattened query: %w", err)
+			return nil, fmt.Errorf("failed to read response body: %w", err)
 		}
-		fetchLogRequest.Query = string(queryJSON)
-	}
-
-	var parsedQuery any
-	if err := common.UnmarshalJson([]byte(fetchLogRequest.Query), &parsedQuery); err != nil {
-		return nil, fmt.Errorf("failed to parse Query JSON for signoz: %w", err)
-	}
-	orderBy := []map[string]any{
-		{"columnName": "timestamp", "order": "desc"},
-	}
-	if len(fetchLogRequest.SortFields) > 0 {
-		orderBy = make([]map[string]any, len(fetchLogRequest.SortFields))
-		for i, sf := range fetchLogRequest.SortFields {
-			orderBy[i] = map[string]any{
-				"columnName": sf.ColumnName,
-				"order":      sf.Order,
-			}
+		var decoded map[string]any
+		if err := common.UnmarshalJson(bodyBytes, &decoded); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal response body: %w", err)
 		}
-	}
-	limit := 1000
-	if fetchLogRequest.Limit > 0 {
-		limit = fetchLogRequest.Limit
-	}
-	steps := 60
-	if fetchLogRequest.StepInterval > 0 {
-		steps = fetchLogRequest.StepInterval
-	}
-	offset := 0
-	if fetchLogRequest.Offset > 0 {
-		offset = fetchLogRequest.Offset
-	}
-	var op = "AND"
-	if fetchLogRequest.Request != nil {
-		if val, ok := fetchLogRequest.Request["op"]; ok {
-			if opStr, ok := val.(string); ok && opStr != "" {
-				op = opStr
-			}
+		dataSection, ok := decoded["data"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("missing or invalid 'data' field in response")
 		}
-	}
-	signozLogRequest := map[string]any{
-		"start":     fetchLogRequest.StartTime,
-		"end":       fetchLogRequest.EndTime,
-		"step":      60,
-		"variables": map[string]any{},
-		"compositeQuery": map[string]any{
-			"queryType": "builder",
-			"panelType": "list",
-			"fillGaps":  false,
-			"builderQueries": map[string]any{
-				"A": map[string]any{
-					"dataSource":         "logs",
-					"queryName":          "A",
-					"aggregateOperator":  "noop",
-					"aggregateAttribute": map[string]any{},
-					"timeAggregation":    "rate",
-					"spaceAggregation":   "sum",
-					"functions":          []any{},
-					"filters": map[string]any{
-						"op":    op,
-						"items": parsedQuery,
-					},
-					"expression":   "A",
-					"disabled":     false,
-					"stepInterval": steps,
-					"having":       []any{},
-					"limit":        nil,
-					"orderBy":      orderBy,
-					"groupBy":      []any{},
-					"legend":       "",
-					"reduceTo":     "avg",
-					"offset":       offset,
-					"pageSize":     limit,
-				},
-			},
-		},
-	}
-
-	resp, err := s.signozDo(ctx, fetchLogRequest.AccountId, http.MethodPost, "/api/v4/query_range", signozLogRequest)
+		result, ok := dataSection["result"].([]any)
+		if !ok || result == nil {
+			return nil, fmt.Errorf("'result' field is not an array or is nil from response")
+		}
+		return result, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute signoz log labels: %w", err)
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != 200 {
-		ctx.GetLogger().Error("Failed to get signoz labels", "resp", resp)
-		return nil, fmt.Errorf("failed to get signoz labels, status code: %d", resp.StatusCode)
-	}
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-	var data3 map[string]any
-	if err := common.UnmarshalJson(bodyBytes, &data3); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response body: %w", err)
-	}
-
-	dataSection, ok := data3["data"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("missing or invalid 'data' field in response")
-	}
-
-	result, ok := dataSection["result"].([]any)
-	if !ok || result == nil {
-		return nil, fmt.Errorf("'result' field is not an array or is nil from response")
-	}
-	if len(result) == 0 {
-		return []OutputLog{}, nil
-	}
-	firstMap, ok := result[0].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("first element is not an object")
-	}
-	list, ok := firstMap["list"].([]any)
-	if !ok || list == nil {
+	if len(list) == 0 {
 		return []OutputLog{}, nil
 	}
 

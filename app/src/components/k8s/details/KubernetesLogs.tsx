@@ -554,6 +554,14 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
   // FIX: Removed the query argument. Always uses logQuery state.
   const handleSubmit = useCallback(
     async (fromOnSubmit = false) => {
+      // Builder mode never runs an unfiltered query: every builder branch below
+      // returns with this warning. On a Run Query click, check it before the table
+      // is cleared, so the rows on screen stay instead of turning into "No Data".
+      const noFilterChips = !logQueryItems || logQueryItems.length === 0;
+      if (fromOnSubmit && qLEditor === 'build' && noFilterChips && !(queryRequestFromProps && queryRequestFromProps.length > 0)) {
+        snackbar.warning('Please select at least one label filter');
+        return;
+      }
       setErrorMsg('');
       if (!pollLogs) {
         setData([]);

@@ -382,7 +382,7 @@ func TestFlattenSignozQuery(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "OR clause should return error",
+			name: "OR needs more than one query",
 			queryClause: query.QueryWhereClause{
 				Or: []query.QueryWhereClause{
 					{
@@ -399,10 +399,10 @@ func TestFlattenSignozQuery(t *testing.T) {
 			},
 			expectedClauses: nil,
 			expectError:     true,
-			errorContains:   "OR operator is not supported",
+			errorContains:   "needs 2 SigNoz queries",
 		},
 		{
-			name: "NOT clause should return error",
+			name: "NOT is pushed onto the condition",
 			queryClause: query.QueryWhereClause{
 				Not: &query.QueryWhereClause{
 					Binary: query.BinaryWhereClause{
@@ -410,9 +410,10 @@ func TestFlattenSignozQuery(t *testing.T) {
 					},
 				},
 			},
-			expectedClauses: nil,
-			expectError:     true,
-			errorContains:   "NOT operator is not supported",
+			expectedClauses: []FlattenedClause{
+				{Key: map[string]string{"key": "service"}, Value: "api", Op: "!="},
+			},
+			expectError: false,
 		},
 		{
 			name:            "Empty query clause",
@@ -424,7 +425,7 @@ func TestFlattenSignozQuery(t *testing.T) {
 			name: "Unsupported operator should error",
 			queryClause: query.QueryWhereClause{
 				Binary: query.BinaryWhereClause{
-					"field": {Lt: 100},
+					"field": {Between: []any{1, 2}},
 				},
 			},
 			expectedClauses: nil,
@@ -1061,7 +1062,7 @@ func TestFlattenSignozQuery_EdgeCases(t *testing.T) {
 			queryClause: query.QueryWhereClause{
 				Binary: query.BinaryWhereClause{
 					"field1": {Eq: "value"},
-					"field2": {Gt: 100}, // Unsupported
+					"field2": {Between: []any{1, 2}}, // Unsupported
 				},
 			},
 			expectError: true, // Should error on unsupported operator

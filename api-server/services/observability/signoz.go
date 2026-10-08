@@ -8,6 +8,7 @@ import (
 	"nudgebee/services/query"
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -219,8 +220,22 @@ func (s *SignozSource) GetLabelMapping() map[string]string {
 	return signozLogLabelMapping
 }
 
+// signozWorkloadKeys are the attributes the OTel k8sattributes processor stores a
+// workload's name under, one per kind. Deployment first: it is what
+// signozLogLabelMapping maps app and workload to.
+var signozWorkloadKeys = []string{
+	"k8s.deployment.name", "k8s.statefulset.name", "k8s.daemonset.name", "k8s.job.name", "k8s.cronjob.name",
+}
+
+// signozExpandedLabelKeys makes app and workload match a workload of any kind:
+// mapped to k8s.deployment.name alone they missed StatefulSets, DaemonSets, Jobs
+// and CronJobs.
+var signozExpandedLabelKeys = map[string][]string{"app": signozWorkloadKeys, "workload": signozWorkloadKeys}
+
+func (s *SignozSource) ExpandedLabelKeys() map[string][]string { return signozExpandedLabelKeys }
+
 func (s *SignozSource) GetSupportedOperators() []string {
-	return []string{"_eq", "_neq", "_contains", "_like"}
+	return signozSupportedOperators
 }
 
 const (
@@ -256,88 +271,238 @@ type FlattenedClause struct {
 	Op    string            `json:"op"`
 }
 
-func FlattenSignozQuery(q query.QueryWhereClause) ([]FlattenedClause, error) {
-	var result []FlattenedClause
+// signozOperators maps every where-clause operator SigNoz can run to its filter op.
+// Both the catalog tokens the UI and Nubi send (_nregex, _has_key, _icontains …)
+// and the SigNoz-local spellings the enricher's item conversion produces
+// (_not_regex, _exist …) are accepted. SigNoz's contains/ncontains are already
+// case-insensitive, so the i-variants map onto them. _is_null is handled in
+// signozLeaf because its op depends on the value.
+var signozOperators = map[query.BinaryWhereClauseType]string{
+	Eq: "=", EqF: "=", Nq: "!=", NqF: "!=",
+	In: "in", NotIn: "nin",
+	Like: "like", NLike: "nlike", ILike: "regex", // ILike: see signozILikeRegex
+	Contains: "contains", query.IContains: "contains",
+	NotContains: "ncontains", query.NIContains: "ncontains",
+	RegEx: "regex", query.NRegex: "nregex", NotRegEx: "nregex",
+	HasKey: "exists", Exist: "exists", NotExist: "nexists",
+	Lt: "<", Lte: "<=", Gt: ">", Gte: ">=",
+}
 
-	// Handle binary clause
-	for field, conds := range q.Binary {
-		for op, value := range conds {
-			if field == signozSeverityKey {
-				op, value = signozSeverityFilter(op, value)
-			}
-			var signozOp string
-			switch op {
-			case Eq, EqF:
-				signozOp = "="
-			case Nq, NqF:
-				signozOp = "!="
-			case In:
-				signozOp = "in"
-				if _, ok := value.([]any); !ok {
-					return nil, fmt.Errorf("value for 'in' operator must be an array")
-				}
-			case NotIn:
-				signozOp = "nin"
-				if _, ok := value.([]any); !ok {
-					return nil, fmt.Errorf("value for 'nin' operator must be an array")
-				}
-			case Like:
-				signozOp = "like"
-			case NLike:
-				signozOp = "nlike"
-			case Contains:
-				signozOp = "contains"
-			case NotContains:
-				signozOp = "ncontains"
-			case Exist:
-				signozOp = "exists"
-			case NotExist:
-				signozOp = "nexists"
-			case RegEx:
-				signozOp = "regex"
-			case NotRegEx:
-				signozOp = "nregex"
+// signozSupportedOperators is what both SigNoz sources advertise to the UI and
+// Nubi: the catalog token for every operator signozOperators runs.
+var signozSupportedOperators = []string{
+	"_eq", "_neq", "_in", "_not_in", "_like", "_nlike", "_ilike",
+	"_contains", "_icontains", "_nicontains", "_regex", "_nregex",
+	"_has_key", "_is_null", "_gt", "_gte", "_lt", "_lte",
+}
 
-			default:
-				return nil, fmt.Errorf("unsupported operator: %s", op)
-			}
-			result = append(result, FlattenedClause{
-				Key:   map[string]string{"key": field},
-				Value: value,
-				Op:    signozOp,
-			})
+// signozNegatedOperators gives each operator its complement, used to push a NOT
+// down to the leaves (SigNoz has no NOT). A negated filter on an attribute a row
+// lacks matches that row, as NOT(=) should: measured on v0.145, `user.tier != gold`
+// returned the 3 non-gold rows plus the 6 rows without the attribute.
+var signozNegatedOperators = map[query.BinaryWhereClauseType]query.BinaryWhereClauseType{
+	Eq: Nq, Nq: Eq, EqF: NqF, NqF: EqF,
+	In: NotIn, NotIn: In,
+	Like: NLike, NLike: Like,
+	Contains: query.NIContains, query.IContains: query.NIContains, NotContains: query.IContains, query.NIContains: query.IContains,
+	RegEx: query.NRegex, query.NRegex: RegEx, NotRegEx: RegEx,
+	HasKey: NotExist, Exist: NotExist, NotExist: Exist,
+	Lt: Gte, Gte: Lt, Lte: Gt, Gt: Lte,
+}
+
+// signozMaxQueries caps how many builder queries one where-clause may expand to.
+// Each OR branch is one SigNoz query (its builder filter cannot express OR), and
+// the queries run in a single request, so the cap bounds the ClickHouse work one
+// log fetch can cause.
+const signozMaxQueries = 25
+
+// signozLeaf translates one binary condition into a SigNoz filter item.
+func signozLeaf(field string, op query.BinaryWhereClauseType, value any) (FlattenedClause, error) {
+	if field == signozSeverityKey {
+		op, value = signozSeverityFilter(op, value)
+	}
+	if op == ILike {
+		pattern, isString := value.(string)
+		if !isString {
+			return FlattenedClause{}, fmt.Errorf("value for '_ilike' must be a string")
+		}
+		value = signozILikeRegex(pattern)
+	}
+	signozOp, ok := signozOperators[op]
+	switch {
+	case op == IsNull:
+		isNull, isBool := value.(bool)
+		if !isBool {
+			return FlattenedClause{}, fmt.Errorf("value for '_is_null' must be true or false")
+		}
+		signozOp = "exists"
+		if isNull {
+			signozOp = "nexists"
+		}
+	case !ok:
+		return FlattenedClause{}, fmt.Errorf("unsupported operator: %s", op)
+	case op == In || op == NotIn:
+		if _, isList := value.([]any); !isList {
+			return FlattenedClause{}, fmt.Errorf("value for '%s' operator must be an array", signozOp)
 		}
 	}
-	// Handle AND
+	return FlattenedClause{Key: map[string]string{"key": field}, Value: value, Op: signozOp}, nil
+}
+
+// signozILikeRegex turns a LIKE pattern into the case-insensitive regex SigNoz runs
+// for _ilike. SigNoz v0.51 has no ilike operator (HTTP 400, measured), while regex
+// with an inline (?i) works on v0.51 and v0.145: % is any run, _ any one character,
+// everything else literal, anchored like LIKE.
+func signozILikeRegex(pattern string) string {
+	var b strings.Builder
+	b.WriteString("(?i)^")
+	for _, r := range pattern {
+		switch r {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteByte('$')
+	return b.String()
+}
+
+// signozNegate returns NOT q, with the negation pushed onto the leaves by De Morgan.
+// A clause is the AND of its binary conditions, its And children, the OR of its Or
+// children, and its Not child; NOT of that is the OR of each part negated.
+func signozNegate(q query.QueryWhereClause) (query.QueryWhereClause, error) {
+	var parts []query.QueryWhereClause
+	for field, conds := range q.Binary {
+		for op, value := range conds {
+			if op == IsNull {
+				isNull, ok := value.(bool)
+				if !ok {
+					return query.QueryWhereClause{}, fmt.Errorf("value for '_is_null' must be true or false")
+				}
+				parts = append(parts, query.QueryWhereClause{Binary: query.BinaryWhereClause{field: {IsNull: !isNull}}})
+				continue
+			}
+			neg, ok := signozNegatedOperators[op]
+			if !ok {
+				return query.QueryWhereClause{}, fmt.Errorf("operator %s cannot be negated in SigNoz queries", op)
+			}
+			parts = append(parts, query.QueryWhereClause{Binary: query.BinaryWhereClause{field: {neg: value}}})
+		}
+	}
 	for _, sub := range q.And {
-		subResult, err := FlattenSignozQuery(sub)
+		n, err := signozNegate(sub)
+		if err != nil {
+			return query.QueryWhereClause{}, err
+		}
+		parts = append(parts, n)
+	}
+	if len(q.Or) > 0 {
+		var all []query.QueryWhereClause
+		for _, sub := range q.Or {
+			n, err := signozNegate(sub)
+			if err != nil {
+				return query.QueryWhereClause{}, err
+			}
+			all = append(all, n)
+		}
+		parts = append(parts, query.QueryWhereClause{And: all})
+	}
+	if q.Not != nil {
+		parts = append(parts, *q.Not)
+	}
+	return query.QueryWhereClause{Or: parts}, nil
+}
+
+// signozDNF rewrites a where-clause as an OR of AND-terms, one SigNoz builder
+// query per term. SigNoz's v3/v4 builder filter cannot express OR on any version:
+// a nested group is rejected with 400, and `filters.op: "OR"` is silently run as
+// AND (measured on v0.51 and v0.145: 0 rows where 6 matched). So OR becomes
+// separate queries whose rows are merged (signozMergeRows), and NOT is pushed to
+// the leaves. A clause with no conditions is one empty term (match everything).
+func signozDNF(q query.QueryWhereClause) ([][]FlattenedClause, error) {
+	terms := [][]FlattenedClause{{}}
+	and := func(other [][]FlattenedClause) error {
+		if len(terms)*len(other) > signozMaxQueries {
+			return fmt.Errorf("this filter needs %d SigNoz queries (OR branches multiply); the limit is %d — simplify the OR conditions", len(terms)*len(other), signozMaxQueries)
+		}
+		next := make([][]FlattenedClause, 0, len(terms)*len(other))
+		for _, a := range terms {
+			for _, b := range other {
+				term := make([]FlattenedClause, 0, len(a)+len(b))
+				next = append(next, append(append(term, a...), b...))
+			}
+		}
+		terms = next
+		return nil
+	}
+
+	for field, conds := range q.Binary {
+		for op, value := range conds {
+			leaf, err := signozLeaf(field, op, value)
+			if err != nil {
+				return nil, err
+			}
+			for i := range terms {
+				terms[i] = append(terms[i], leaf)
+			}
+		}
+	}
+	for _, sub := range q.And {
+		subTerms, err := signozDNF(sub)
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, subResult...)
+		if err := and(subTerms); err != nil {
+			return nil, err
+		}
 	}
-
-	// Handle OR
-	for range q.Or {
-		return nil, fmt.Errorf("OR operator is not supported in Signoz queries")
-		// subResult, err := FlattenSignozQuery(sub)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		// result = append(result, subResult...)
+	if len(q.Or) > 0 {
+		var alternatives [][]FlattenedClause
+		for _, sub := range q.Or {
+			subTerms, err := signozDNF(sub)
+			if err != nil {
+				return nil, err
+			}
+			alternatives = append(alternatives, subTerms...)
+			if len(alternatives) > signozMaxQueries {
+				return nil, fmt.Errorf("this filter needs more than %d SigNoz queries (OR branches multiply) — simplify the OR conditions", signozMaxQueries)
+			}
+		}
+		if err := and(alternatives); err != nil {
+			return nil, err
+		}
 	}
-
-	// Handle NOT
 	if q.Not != nil {
-		return nil, fmt.Errorf("NOT operator is not supported in Signoz queries")
-		// subResult, err := FlattenSignozQuery(*q.Not)
-		// if err != nil {
-		// 	return nil, err
-		// }
-		// result = append(result, subResult...)
+		negated, err := signozNegate(*q.Not)
+		if err != nil {
+			return nil, err
+		}
+		negTerms, err := signozDNF(negated)
+		if err != nil {
+			return nil, err
+		}
+		if err := and(negTerms); err != nil {
+			return nil, err
+		}
 	}
+	return terms, nil
+}
 
-	return result, nil
+// FlattenSignozQuery translates a where-clause that SigNoz can run as a single
+// builder query (no OR after NOT is pushed down) into its filter items. Callers
+// that can run several queries use signozDNF.
+func FlattenSignozQuery(q query.QueryWhereClause) ([]FlattenedClause, error) {
+	terms, err := signozDNF(q)
+	if err != nil {
+		return nil, err
+	}
+	if len(terms) != 1 {
+		return nil, fmt.Errorf("this filter needs %d SigNoz queries (it contains OR); a single query was required", len(terms))
+	}
+	return terms[0], nil
 }
 
 // signozResponseSnippet returns a truncated JSON rendering of a relay response
@@ -392,140 +557,52 @@ func extractSignozError(m map[string]any) string {
 }
 
 func (s *SignozSource) QueryLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) ([]OutputLog, error) {
-	if fetchLogRequest.Query == "" {
-		flattenedClauses, err := FlattenSignozQuery(fetchLogRequest.QueryRequest.Where)
-		if err != nil {
-			return nil, fmt.Errorf("failed to flatten query: %w", err)
-		}
-		queryJSON, err := json.Marshal(flattenedClauses)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal flattened query: %w", err)
-		}
-		fetchLogRequest.Query = string(queryJSON)
-	}
-	var parsedQuery any
-	if err := common.UnmarshalJson([]byte(fetchLogRequest.Query), &parsedQuery); err != nil {
-		return nil, fmt.Errorf("failed to parse Query JSON for signoz: %w", err)
-	}
-	orderBy := []map[string]any{
-		{"columnName": "timestamp", "order": "desc"},
-	}
-	if len(fetchLogRequest.SortFields) > 0 {
-		orderBy = make([]map[string]any, len(fetchLogRequest.SortFields))
-		for i, sf := range fetchLogRequest.SortFields {
-			orderBy[i] = map[string]any{
-				"columnName": sf.ColumnName,
-				"order":      sf.Order,
-			}
-		}
-	}
-	limit := 1000
-	if fetchLogRequest.Limit > 0 {
-		limit = fetchLogRequest.Limit
-	}
-	steps := 60
-	if fetchLogRequest.StepInterval > 0 {
-		steps = fetchLogRequest.StepInterval
-	}
-	offset := 0
-	if fetchLogRequest.Offset > 0 {
-		offset = fetchLogRequest.Offset
-	}
-	var op = "AND"
-	if fetchLogRequest.Request != nil {
-		if val, ok := fetchLogRequest.Request["op"]; ok {
-			if opStr, ok := val.(string); ok && opStr != "" {
-				op = opStr
-			}
-		}
-	}
-	signozLogRequest := relay.ActionExecuteBody{
-		AccountID:  fetchLogRequest.AccountId,
-		ActionName: "signoz_query_range",
-		ActionParams: map[string]any{
-			"start":     fetchLogRequest.StartTime,
-			"end":       fetchLogRequest.EndTime,
-			"step":      60,
-			"variables": map[string]any{},
-			"compositeQuery": map[string]any{
-				"queryType": "builder",
-				"panelType": "list",
-				"fillGaps":  false,
-				"builderQueries": map[string]any{
-					"A": map[string]any{
-						"dataSource":         "logs",
-						"queryName":          "A",
-						"aggregateOperator":  "noop",
-						"aggregateAttribute": map[string]any{},
-						"timeAggregation":    "rate",
-						"spaceAggregation":   "sum",
-						"functions":          []any{},
-						"filters": map[string]any{
-							"op":    op,
-							"items": parsedQuery,
-						},
-						"expression":   "A",
-						"disabled":     false,
-						"stepInterval": steps,
-						"having":       []any{},
-						"limit":        nil,
-						"orderBy":      orderBy,
-						"groupBy":      []any{},
-						"legend":       "",
-						"reduceTo":     "avg",
-						"offset":       offset,
-						"pageSize":     limit,
-					},
-				},
+	list, err := signozFetchLogRows(fetchLogRequest, func(body map[string]any) ([]any, error) {
+		resp, err := relay.Execute(relay.RelayExecuteRequest{
+			NoSinks: true,
+			Cache:   false,
+			Body: relay.ActionExecuteBody{
+				AccountID:    fetchLogRequest.AccountId,
+				ActionName:   "signoz_query_range",
+				ActionParams: body,
+				NoSinks:      true,
 			},
-		},
-		NoSinks: true,
-	}
-
-	resp, err := relay.Execute(relay.RelayExecuteRequest{
-		NoSinks: true,
-		Cache:   false,
-		Body:    signozLogRequest,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to execute signoz query: %w", err)
+		}
+		data1, ok := resp["data"].(map[string]any)
+		if !ok || data1 == nil {
+			ctx.GetLogger().Error("signoz: query_range response missing 'data'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: 'data' missing from relay response: %s", signozResponseSnippet(resp))
+		}
+		if errMsg := extractSignozError(data1); errMsg != "" {
+			return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
+		}
+		data2, ok := data1["data"].(map[string]any)
+		if !ok || data2 == nil {
+			ctx.GetLogger().Error("signoz: query_range response missing 'data.data'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: 'data.data' missing from relay response: %s", signozResponseSnippet(resp))
+		}
+		if errMsg := extractSignozError(data2); errMsg != "" {
+			return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
+		}
+		// signoz_query_range nests the rows at data.data.result (envelope→data→result),
+		// not data.data.data.result — read straight from data2.
+		result, ok := data2["result"].([]any)
+		if !ok || result == nil {
+			// Well-formed envelope but no result payload and no explicit error.
+			// Surface the actual body so a malformed query or an unexpected Signoz
+			// shape is diagnosable instead of silently degrading to the fallback.
+			ctx.GetLogger().Error("signoz: query_range response missing 'data.data.result'", "response", signozResponseSnippet(resp))
+			return nil, fmt.Errorf("signoz query_range: unexpected response shape (no result payload): %s", signozResponseSnippet(resp))
+		}
+		return result, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute signoz query: %w", err)
+		return nil, err
 	}
-
-	data1, ok := resp["data"].(map[string]any)
-	if !ok || data1 == nil {
-		ctx.GetLogger().Error("signoz: query_range response missing 'data'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: 'data' missing from relay response: %s", signozResponseSnippet(resp))
-	}
-	if errMsg := extractSignozError(data1); errMsg != "" {
-		return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
-	}
-	data2, ok := data1["data"].(map[string]any)
-	if !ok || data2 == nil {
-		ctx.GetLogger().Error("signoz: query_range response missing 'data.data'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: 'data.data' missing from relay response: %s", signozResponseSnippet(resp))
-	}
-	if errMsg := extractSignozError(data2); errMsg != "" {
-		return nil, fmt.Errorf("signoz query_range returned error: %s", errMsg)
-	}
-	// signoz_query_range nests the rows at data.data.result (envelope→data→result),
-	// not data.data.data.result — read straight from data2.
-	result, ok := data2["result"].([]any)
-	if !ok || result == nil {
-		// Well-formed envelope but no result payload and no explicit error.
-		// Surface the actual body so a malformed query or an unexpected Signoz
-		// shape is diagnosable instead of silently degrading to the fallback.
-		ctx.GetLogger().Error("signoz: query_range response missing 'data.data.result'", "response", signozResponseSnippet(resp))
-		return nil, fmt.Errorf("signoz query_range: unexpected response shape (no result payload): %s", signozResponseSnippet(resp))
-	}
-	if len(result) == 0 {
-		return []OutputLog{}, nil
-	}
-	firstMap, ok := result[0].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("first element is not an object")
-	}
-	list, ok := firstMap["list"].([]any)
-	if !ok || list == nil {
+	if len(list) == 0 {
 		return []OutputLog{}, nil
 	}
 
