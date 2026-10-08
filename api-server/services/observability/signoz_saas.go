@@ -567,7 +567,7 @@ func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 	queryBody := map[string]any{
 		"start":     req.StartTime,
 		"end":       req.EndTime,
-		"step":      3600,
+		"step":      signozLogGroupStepSeconds,
 		"variables": map[string]any{},
 		"compositeQuery": map[string]any{
 			"queryType": "builder",
@@ -588,7 +588,7 @@ func (s *SignozSaasSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 					},
 					"expression":   "A",
 					"disabled":     false,
-					"stepInterval": 3600,
+					"stepInterval": signozLogGroupStepSeconds,
 					"having":       []any{},
 					"limit":        100,
 					"orderBy": []map[string]any{
@@ -674,7 +674,7 @@ const (
 	signozLegacyPodKey       = "k8s_pod_name"
 )
 
-func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (LogGroupOutput, error) {
+func parseSignozSaasLogGroupResponse(respData map[string]any, endTimeMs int64) (LogGroupOutput, error) {
 	data, ok := respData["data"].(map[string]any)
 	if !ok {
 		return LogGroupOutput{}, nil
@@ -731,7 +731,7 @@ func parseSignozSaasLogGroupResponse(respData map[string]any, endTime int64) (Lo
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		timestamps, values := signozSeriesPoints(seriesMap)
+		timestamps, values := signozSeriesPoints(seriesMap, endTimeMs)
 
 		group.Timestamps = timestamps
 		group.Values = values

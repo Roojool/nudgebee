@@ -1842,7 +1842,36 @@ func FetchLogGroup(ctx *security.RequestContext, fetchLogGroupRequest FetchLogGr
 	if err != nil {
 		return LogGroupOutput{}, err
 	}
+	normalizeLogGroupTimestamps(&out)
 	return mergeLogGroupsByPattern(out), nil
+}
+
+// logGroupTimestampSeconds converts an epoch timestamp of any common precision to
+// Unix seconds, the unit LogGroup.Timestamps promises and the Log Groups page relies
+// on (it multiplies by 1000). Providers report seconds, milliseconds and nanoseconds,
+// and a unit slip has rendered "Last Time" as 1970 more than once (76da350f13,
+// 154fea1388, 4f3d8f4e77, SigNoz). Present-day seconds are ~1.8e9, so magnitude alone
+// tells the units apart until the year 5138.
+func logGroupTimestampSeconds(ts int64) int64 {
+	switch {
+	case ts > 1e17:
+		return ts / 1e9 // nanoseconds
+	case ts > 1e14:
+		return ts / 1e6 // microseconds
+	case ts > 1e11:
+		return ts / 1e3 // milliseconds
+	}
+	return ts
+}
+
+// normalizeLogGroupTimestamps enforces the seconds contract on the one path every
+// provider's groups take, so a parser that slips a unit cannot reach the page.
+func normalizeLogGroupTimestamps(out *LogGroupOutput) {
+	for i := range out.Groups {
+		for j, ts := range out.Groups[i].Timestamps {
+			out.Groups[i].Timestamps[j] = logGroupTimestampSeconds(ts)
+		}
+	}
 }
 
 // mergeLogGroupsByPattern collapses groups describing the same pattern in the same

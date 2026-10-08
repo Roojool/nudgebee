@@ -88,17 +88,20 @@ func TestSignozSeriesPoints_ValuesWithStringNumbers(t *testing.T) {
 			map[string]any{"timestamp": float64(1791457200000), "value": "2"},
 		},
 	}
-	ts, vals := signozSeriesPoints(series)
-	assert.Equal(t, []int64{1791453600000, 1791457200000}, ts)
+	// Hourly bucket starts 10:00 and 11:00 (ms) for a query ending 11:13:20.
+	ts, vals := signozSeriesPoints(series, 1791458000000)
+	assert.Equal(t, []int64{1791457200, 1791458000}, ts,
+		"Unix seconds, at each bucket's END (11:00), and the last one capped at the query end")
 	assert.Equal(t, []float64{1, 2}, vals)
 
-	// Numeric values and the legacy `points` key are read the same way.
-	ts, vals = signozSeriesPoints(map[string]any{"points": []any{map[string]any{"timestamp": float64(5), "value": float64(3)}}})
-	assert.Equal(t, []int64{5}, ts)
+	// Numeric values and the legacy `points` key are read the same way; with no end
+	// time the bucket end is not capped.
+	ts, vals = signozSeriesPoints(map[string]any{"points": []any{map[string]any{"timestamp": float64(1791453600000), "value": float64(3)}}}, 0)
+	assert.Equal(t, []int64{1791457200}, ts)
 	assert.Equal(t, []float64{3}, vals)
 
 	// A non-numeric value is skipped rather than counted as 0.
-	_, vals = signozSeriesPoints(map[string]any{"values": []any{map[string]any{"timestamp": float64(5), "value": "n/a"}}})
+	_, vals = signozSeriesPoints(map[string]any{"values": []any{map[string]any{"timestamp": float64(1791453600000), "value": "n/a"}}}, 0)
 	assert.Empty(t, vals)
 }
 
@@ -110,15 +113,16 @@ func TestSignozLogGroupParse_CountsFromValuesShape(t *testing.T) {
 			map[string]any{"timestamp": float64(1791457200000), "value": "1"},
 		},
 	}
-	saas, err := parseSignozSaasLogGroupResponse(map[string]any{"data": signozGroupResult(series)}, 1791457200000)
+	saas, err := parseSignozSaasLogGroupResponse(map[string]any{"data": signozGroupResult(series)}, 1791458000000)
 	require.NoError(t, err)
-	relayed, err := (&SignozSource{}).parseSignozLogGroupResponse(map[string]any{"data": map[string]any{"data": signozGroupResult(series)}}, 1791457200000)
+	relayed, err := (&SignozSource{}).parseSignozLogGroupResponse(map[string]any{"data": map[string]any{"data": signozGroupResult(series)}}, 1791458000000)
 	require.NoError(t, err)
 
 	for _, out := range []LogGroupOutput{saas, relayed} {
 		require.Len(t, out.Groups, 1)
 		assert.Equal(t, int64(2), out.Groups[0].Count)
 		assert.Equal(t, []float64{1, 1}, out.Groups[0].Values)
+		assert.Equal(t, []int64{1791457200, 1791458000}, out.Groups[0].Timestamps, "Unix seconds at bucket ends, last capped at the query end")
 	}
 }
 
@@ -143,11 +147,11 @@ func TestSignozLabelValueParams(t *testing.T) {
 func TestSignozSeriesPoints_SkipsUnusablePoints(t *testing.T) {
 	ts, vals := signozSeriesPoints(map[string]any{"values": []any{
 		map[string]any{"value": "3"},
-		map[string]any{"timestamp": float64(5), "value": "NaN"},
-		map[string]any{"timestamp": float64(6), "value": "+Inf"},
-		map[string]any{"timestamp": float64(7), "value": "2"},
-	}})
-	assert.Equal(t, []int64{7}, ts)
+		map[string]any{"timestamp": float64(1791446400000), "value": "NaN"},
+		map[string]any{"timestamp": float64(1791450000000), "value": "+Inf"},
+		map[string]any{"timestamp": float64(1791453600000), "value": "2"},
+	}}, 0)
+	assert.Equal(t, []int64{1791457200}, ts)
 	assert.Equal(t, []float64{2}, vals)
 }
 
@@ -166,4 +170,24 @@ func TestNormalizeOutputLogLabels_AliasesEveryCanonicalSharingAKey(t *testing.T)
 		assert.Equal(t, "ERROR", logs[0].Labels["level"])
 		assert.Equal(t, "ERROR", logs[0].Labels["severity"])
 	}
+}
+
+// The Log Groups page multiplies every timestamp by 1000, so FetchLogGroup enforces
+// Unix seconds for every provider: whatever precision a parser emits, the page gets
+// seconds — a slipped unit no longer reaches the screen as 1970 (or year 58000).
+func TestLogGroupTimestampSeconds(t *testing.T) {
+	const sec = int64(1791457200)
+	for name, in := range map[string]int64{
+		"seconds":      sec,
+		"milliseconds": sec * 1e3,
+		"microseconds": sec * 1e6,
+		"nanoseconds":  sec * 1e9,
+	} {
+		assert.Equal(t, sec, logGroupTimestampSeconds(in), name)
+	}
+
+	out := LogGroupOutput{Groups: []LogGroup{{Timestamps: []int64{sec * 1e3, sec}}, {Timestamps: []int64{sec * 1e9}}}}
+	normalizeLogGroupTimestamps(&out)
+	assert.Equal(t, []int64{sec, sec}, out.Groups[0].Timestamps)
+	assert.Equal(t, []int64{sec}, out.Groups[1].Timestamps)
 }

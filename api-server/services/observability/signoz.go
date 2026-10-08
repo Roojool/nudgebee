@@ -69,7 +69,14 @@ func signozLabelValueParams(labelName string, tagType any) (string, any) {
 // `points` with float values is accepted too. Reading only `points` as floats
 // made every log-group count 0 on both v0.51 and v0.145, and the Log Groups
 // page — which hides zero-count groups — always empty.
-func signozSeriesPoints(series map[string]any) ([]int64, []float64) {
+//
+// Timestamps come back in Unix SECONDS, the LogGroup contract every other
+// provider follows (the Log Groups page multiplies by 1000); SigNoz reports
+// milliseconds. Each point is moved from its bucket's start to its end, capped at
+// the query's end: the page shows the latest point as "Last Time" and anchors the
+// drill-down there, and a bucket start is up to an hour before the logs it counts.
+func signozSeriesPoints(series map[string]any, endTimeMs int64) ([]int64, []float64) {
+	endSec := logGroupTimestampSeconds(endTimeMs)
 	raw, ok := series["values"].([]any)
 	if !ok {
 		raw, _ = series["points"].([]any)
@@ -86,11 +93,19 @@ func signozSeriesPoints(series map[string]any) ([]int64, []float64) {
 		if !okVal || !okTs {
 			continue
 		}
-		timestamps = append(timestamps, int64(ts))
+		bucketEnd := logGroupTimestampSeconds(int64(ts)) + signozLogGroupStepSeconds
+		if endSec > 0 && bucketEnd > endSec {
+			bucketEnd = endSec
+		}
+		timestamps = append(timestamps, bucketEnd)
 		values = append(values, val)
 	}
 	return timestamps, values
 }
+
+// signozLogGroupStepSeconds is the bucket width of both SigNoz log-group queries;
+// signozSeriesPoints converts bucket starts to bucket ends with it.
+const signozLogGroupStepSeconds = 3600
 
 // signozNumber accepts a finite JSON number or numeric string. NaN and ±Inf
 // (ParseFloat accepts "NaN"/"Inf") are rejected: int64(math.Round(NaN)) is an
@@ -719,7 +734,7 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 		ActionParams: map[string]any{
 			"start":     req.StartTime,
 			"end":       req.EndTime,
-			"step":      3600,
+			"step":      signozLogGroupStepSeconds,
 			"variables": map[string]any{},
 			"compositeQuery": map[string]any{
 				"queryType": "builder",
@@ -740,7 +755,7 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 						},
 						"expression":   "A",
 						"disabled":     false,
-						"stepInterval": 3600,
+						"stepInterval": signozLogGroupStepSeconds,
 						"having":       []any{},
 						"limit":        100,
 						"orderBy": []map[string]any{
@@ -806,7 +821,7 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 }
 
 // parseSignozLogGroupResponse parses the Signoz query_range response for aggregation queries.
-func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime int64) (LogGroupOutput, error) {
+func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTimeMs int64) (LogGroupOutput, error) {
 	data1, ok := resp["data"].(map[string]any)
 	if !ok || data1 == nil {
 		return LogGroupOutput{}, nil
@@ -874,7 +889,7 @@ func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime 
 			group.PatternHash = generateRawHash(group.Workload)
 		}
 
-		timestamps, values := signozSeriesPoints(seriesMap)
+		timestamps, values := signozSeriesPoints(seriesMap, endTimeMs)
 
 		group.Timestamps = timestamps
 		group.Values = values
