@@ -730,6 +730,7 @@ const SummaryView = () => {
                   tableData={sortInsights(allFindingsItems, sortBy).map((item) => [
                     {
                       component: severityLabel(item.severity),
+                      drilldownQuery: { id: item.id },
                     },
                     {
                       component: (
@@ -831,7 +832,7 @@ const SummaryView = () => {
                     },
                   ])}
                   rowsPerPage={10}
-                  onRowClick={(_row: unknown, index: number) => handleOpenResource(sortInsights(allFindingsItems, sortBy)[index].id)}
+                  onRowClick={(query: any) => query?.id && handleOpenResource(query.id)}
                 />
               </Card>
             </>
