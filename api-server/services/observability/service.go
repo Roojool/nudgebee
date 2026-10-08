@@ -454,40 +454,23 @@ func getTraceSource(provider, integrationSource string) (TraceSource, error) {
 	}
 }
 
-// isOtelNativeTraceIndex reports whether a resolved ES trace index targets the
-// OTel-native traces-*.otel data streams (mapping.mode: otel) rather than the
-// Data Prepper otel-v1-apm-span-* schema.
-func isOtelNativeTraceIndex(index string) bool {
-	index = strings.TrimSpace(index)
-	if index == "" || strings.Contains(index, "otel-v1-apm-span") {
-		return false
-	}
-	return strings.Contains(index, ".otel") || strings.HasPrefix(index, "traces-")
-}
-
-// resolveTraceSource resolves the trace source for an account and, for ES, upgrades
-// to the OTel-native reader when the effective trace index targets the traces-*.otel
-// data streams. The effective index mirrors esTraceIndexFor's precedence: the
-// per-request index override (Traces-tab picker) wins over the account's stored
-// config — so pointing the picker at an OTel-native data stream selects the OTel
-// reader even when the saved trace index is still Data Prepper's. Non-ES providers
-// and non-OTel ES indices keep the source returned by getTraceSource. A config lookup
-// failure is non-fatal — it just leaves the base (Data Prepper) ES source in place.
-func resolveTraceSource(ctx *security.RequestContext, accountId, provider, integrationSource, indexOverride string) (TraceSource, error) {
+// resolveTraceSource resolves the trace source for an account and, for ES, picks
+// among the three ES readers by the layout the integration declares (see
+// ESTraceSchema). Non-ES providers keep the source returned by getTraceSource.
+//
+// It no longer takes the per-request Traces-tab index override: that picker selects
+// which index to read, not what shape that index is in. Dispatching on the declared
+// schema rather than on the index name is what lets the four callers with no index to
+// inspect — getProviderCapabilities, getTraceSourceForAccount, FetchTraceLabels and
+// GetTraceLabelMapping — resolve the right reader at all. Each still passes its
+// override on to the reader, which uses it to pick the index via esTraceIndexFor.
+func resolveTraceSource(ctx *security.RequestContext, accountId, provider, integrationSource string) (TraceSource, error) {
 	src, err := getTraceSource(provider, integrationSource)
 	if err != nil {
 		return nil, err
 	}
 	if provider == "ES" {
-		effectiveIndex := indexOverride
-		if effectiveIndex == "" {
-			if cfg, cerr := GetElasticsearchConfig(ctx, accountId); cerr == nil {
-				effectiveIndex = cfg.TraceIndex
-			}
-		}
-		if isOtelNativeTraceIndex(effectiveIndex) {
-			return &ElasticOtelTraceSource{}, nil
-		}
+		return esTraceSourceFor(resolveESTraceSchema(ctx, accountId)), nil
 	}
 	return src, nil
 }
@@ -2185,7 +2168,7 @@ func getProviderCapabilities(ctx *security.RequestContext, accountId, provider, 
 			slog.Warn("getProviderCapabilities: failed to get log source", "provider", provider, "error", err)
 		}
 	case "traces":
-		source, err := resolveTraceSource(ctx, accountId, provider, integrationSource, "")
+		source, err := resolveTraceSource(ctx, accountId, provider, integrationSource)
 		if err == nil {
 			resolvedSource = source
 			caps.SupportedOperators = source.GetSupportedOperators()
@@ -2437,7 +2420,7 @@ func getTraceSourceForAccount(ctx *security.RequestContext, accountId string, tr
 		return nil, fmt.Errorf("observability: trace provider (trace_provider) is required")
 	}
 
-	source, err := resolveTraceSource(ctx, accountId, traceProvider, integrationSource, "")
+	source, err := resolveTraceSource(ctx, accountId, traceProvider, integrationSource)
 	return source, err
 }
 
@@ -2454,7 +2437,7 @@ func GetTracesLabelValues(context *security.RequestContext, labelValuesRequest T
 	if traceProvider == "" {
 		return common.OpenTelemetryTraceLabelValues{}, fmt.Errorf("GetTracesLabelValues: trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, labelValuesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(labelValuesRequest.Request))
+	source, err := resolveTraceSource(context, labelValuesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return common.OpenTelemetryTraceLabelValues{}, err
 	}
@@ -2545,7 +2528,7 @@ func FetchTraceLabels(context *security.RequestContext, request FetchTraceLabelR
 	if traceProvider == "" {
 		return TraceLabelsResponse{}, fmt.Errorf("FetchTraceLabels: trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, request.AccountId, traceProvider, integrationSource, "")
+	source, err := resolveTraceSource(context, request.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return TraceLabelsResponse{}, err
 	}
@@ -2704,7 +2687,7 @@ func GetGroupedTraces(context *security.RequestContext, TraceQuery TracesV3Reque
 	if traceProvider == "" {
 		return []TraceGroupingValues{}, fmt.Errorf("GetTracesLabelValues: trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, TraceQuery.AccountId, traceProvider, integrationSource, traceIndexOverride(TraceQuery.Request))
+	source, err := resolveTraceSource(context, TraceQuery.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return []TraceGroupingValues{}, err
 	}
@@ -2735,7 +2718,7 @@ func GetGroupedTracesCount(context *security.RequestContext, TraceQuery TracesV3
 	if traceProvider == "" {
 		return common.OpenTelemetryTraceGroupCount{}, fmt.Errorf("GetGroupedTracesCount: trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, TraceQuery.AccountId, traceProvider, integrationSource, traceIndexOverride(TraceQuery.Request))
+	source, err := resolveTraceSource(context, TraceQuery.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return common.OpenTelemetryTraceGroupCount{}, err
 	}
@@ -2766,7 +2749,7 @@ func GetTraceHeatMap(context *security.RequestContext, TracesHeatMapRequest Trac
 	if traceProvider == "" {
 		return []common.OpenTelemetryTraceHeatMap{}, fmt.Errorf("GetGroupedTracesCount: trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, TracesHeatMapRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(TracesHeatMapRequest.Request))
+	source, err := resolveTraceSource(context, TracesHeatMapRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return []common.OpenTelemetryTraceHeatMap{}, err
 	}
@@ -2788,7 +2771,7 @@ func CountTraces(context *security.RequestContext, fetchTracesRequest TracesV3Re
 		return common.OpenTelemetryTraceCount{}, fmt.Errorf("CountTraces trace provider (trace_provider) is required")
 	}
 
-	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(fetchTracesRequest.Request))
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return common.OpenTelemetryTraceCount{}, err
 	}
@@ -2819,7 +2802,7 @@ func GetTraces(context *security.RequestContext, fetchTracesRequest TracesV3Requ
 	if traceProvider == "" {
 		return TracesResult{}, fmt.Errorf("GetTraces trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(fetchTracesRequest.Request))
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return TracesResult{}, err
 	}
@@ -2953,7 +2936,7 @@ func GetRootSpansByTrace(context *security.RequestContext, fetchTracesRequest Tr
 	if traceProvider == "" {
 		return nil, fmt.Errorf("GetRootSpansByTrace trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(fetchTracesRequest.Request))
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return nil, err
 	}
@@ -2987,7 +2970,7 @@ func CountTracesByTrace(context *security.RequestContext, fetchTracesRequest Tra
 		return common.OpenTelemetryTraceCount{}, fmt.Errorf("CountTracesByTrace trace provider (trace_provider) is required")
 	}
 
-	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(fetchTracesRequest.Request))
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return common.OpenTelemetryTraceCount{}, err
 	}
@@ -3023,7 +3006,11 @@ func GetTracesWithRawResult(context *security.RequestContext, fetchTracesRequest
 	if traceProvider == "" {
 		return TracesQueryResult{}, fmt.Errorf("GetTracesWithRawResult trace provider (trace_provider) is required")
 	}
-	source, err := getTraceSource(traceProvider, integrationSource)
+	// resolveTraceSource, not getTraceSource: the raw type assertion below means an
+	// unresolved ES source could never reach a query, so this was harmless — but it
+	// was the one trace path that skipped resolution, and a future provider added to
+	// the passthrough set would have inherited the wrong reader silently.
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return TracesQueryResult{}, err
 	}
@@ -3090,7 +3077,7 @@ func GetTracesQuery(context *security.RequestContext, fetchTracesRequest TracesV
 	if traceProvider == "" {
 		return "", fmt.Errorf("GetTraces trace provider (trace_provider) is required")
 	}
-	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource, traceIndexOverride(fetchTracesRequest.Request))
+	source, err := resolveTraceSource(context, fetchTracesRequest.AccountId, traceProvider, integrationSource)
 	if err != nil {
 		return "", err
 	}

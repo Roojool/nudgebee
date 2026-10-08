@@ -9,9 +9,32 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/integrations/core"
 	"nudgebee/services/security"
+	"slices"
 	"strings"
 	"time"
 )
+
+// Accepted values of the "trace_schema" config property: which of the three
+// mutually incompatible trace layouts an ES cluster stores. They share no field
+// names, so the reader is declared here rather than guessed from the index name.
+//
+// observability.ESTraceSchema is the typed form these map onto and holds the
+// per-layout documentation; it cannot be referenced from this package because
+// observability imports integrations, not the other way round.
+// TestIntegrationSchemaMatchesESTraceSchemas guards the two against drift.
+const (
+	ESTraceSchemaDataPrepper = "data_prepper"
+	ESTraceSchemaOtelNative  = "otel_native"
+	ESTraceSchemaElasticAPM  = "elastic_apm"
+
+	// ESTraceSchemaDefault is the layout assumed for an integration saved before
+	// the property existed. Data Prepper was the only layout the reader defaulted
+	// to, so this preserves that behaviour.
+	ESTraceSchemaDefault = ESTraceSchemaDataPrepper
+)
+
+// ESTraceSchemas is the accepted set, for the schema enum and ValidateConfig.
+var ESTraceSchemas = []string{ESTraceSchemaDataPrepper, ESTraceSchemaOtelNative, ESTraceSchemaElasticAPM}
 
 func init() {
 	// Register under "es:user" so that when the UI creates an ES integration
@@ -177,10 +200,26 @@ func (m Elasticsearch) ConfigSchema() core.IntegrationSchema {
 				Priority:         20,
 			},
 			"trace_index": {
-				Type:        core.ToolSchemaTypeString,
-				Description: "Index pattern or exact name for Data Prepper spans, e.g. otel-v1-apm-span-*. Leave blank to use otel-v1-apm-span-*.",
-				ShowWhen:    map[string]any{core.DefaultTraceProvider: true},
-				Priority:    19,
+				Type: core.ToolSchemaTypeString,
+				Description: "Index pattern or exact name holding the spans, e.g. traces-apm* (Elastic APM), " +
+					"traces-generic.otel-default (OTel native) or otel-v1-apm-span-* (Data Prepper). " +
+					"Must match the Trace Schema below. Leave blank to use that schema's default.",
+				ShowWhen: map[string]any{core.DefaultTraceProvider: true},
+				Priority: 19,
+			},
+			// The three trace layouts share no field names, so the reader cannot be
+			// inferred from the index name — traces-apm* in particular used to be
+			// misread as OTel-native. Declared rather than detected; see
+			// observability/es_trace_schema.go.
+			"trace_schema": {
+				Type: core.ToolSchemaTypeString,
+				Description: "Which trace layout this cluster stores. Elastic APM = traces-apm* written by APM Server. " +
+					"OTel native = traces-*.otel data streams written by the OpenTelemetry Collector. " +
+					"Data Prepper = otel-v1-apm-span-*.",
+				Default:  ESTraceSchemaDefault,
+				Enum:     []any{ESTraceSchemaDataPrepper, ESTraceSchemaOtelNative, ESTraceSchemaElasticAPM},
+				ShowWhen: map[string]any{core.DefaultTraceProvider: true},
+				Priority: 18,
 			},
 			"es_tls_skip_verify": {
 				Type:        core.ToolSchemaTypeBoolean,
@@ -265,13 +304,27 @@ func (m Elasticsearch) ValidateConfig(sc *security.SecurityContext, config []cor
 		errs = append(errs, fmt.Errorf("auth_type must be one of basic, cognito, api_key, bearer_token (got %q)", authType))
 	}
 
+	// There is no generic server-side enum validator, so membership is checked by
+	// hand as auth_type is above. Blank is accepted: an integration saved before
+	// this property existed carries no value and resolves to ESTraceSchemaDefault.
+	// An unrecognised value must be rejected here rather than reaching dispatch,
+	// which would otherwise fall back to a layout the operator did not choose and
+	// return zero hits with no explanation.
+	if schema := strings.TrimSpace(configMap["trace_schema"]); schema != "" && !slices.Contains(ESTraceSchemas, schema) {
+		errs = append(errs, fmt.Errorf("trace_schema must be one of %s (got %q)",
+			strings.Join(ESTraceSchemas, ", "), schema))
+	}
+
 	// Advanced Settings: per-account index mapping (optional). Validate only the
 	// shape — a JSON array whose entries each carry an account_id. Blank index
 	// strings and unknown account ids are tolerated (resolution falls back to the
 	// top-level index), mirroring the lenient webhook account_mapping contract.
+	// trace_schema rides in the same blob and gets the same treatment as above:
+	// blank falls back, but a value present and wrong is an error.
 	if raw := strings.TrimSpace(configMap["index_account_mapping"]); raw != "" {
 		var rows []struct {
-			AccountId string `json:"account_id"`
+			AccountId   string `json:"account_id"`
+			TraceSchema string `json:"trace_schema"`
 		}
 		if err := json.Unmarshal([]byte(raw), &rows); err != nil {
 			errs = append(errs, fmt.Errorf("index_account_mapping must be a JSON array: %w", err))
@@ -279,6 +332,10 @@ func (m Elasticsearch) ValidateConfig(sc *security.SecurityContext, config []cor
 			for i, r := range rows {
 				if strings.TrimSpace(r.AccountId) == "" {
 					errs = append(errs, fmt.Errorf("index_account_mapping[%d] is missing account_id", i))
+				}
+				if s := strings.TrimSpace(r.TraceSchema); s != "" && !slices.Contains(ESTraceSchemas, s) {
+					errs = append(errs, fmt.Errorf("index_account_mapping[%d] trace_schema must be one of %s (got %q)",
+						i, strings.Join(ESTraceSchemas, ", "), s))
 				}
 			}
 		}

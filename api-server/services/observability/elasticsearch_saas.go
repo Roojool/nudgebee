@@ -45,6 +45,10 @@ const (
 	ElasticsearchMetricsIndex   = "metrics_index"
 	ElasticsearchTraceIndex     = "trace_index"
 	ElasticsearchTLSSkipVerify  = "es_tls_skip_verify"
+	// ElasticsearchTraceSchema declares which of the three mutually incompatible
+	// trace layouts the cluster stores, so the reader is chosen from config rather
+	// than guessed from the index name. See es_trace_schema.go.
+	ElasticsearchTraceSchema = "trace_schema"
 	// ElasticsearchIndexAccountMapping is the "Advanced Settings" config value: a
 	// JSON array of per-account index overrides. When a bound account has an entry,
 	// its index wins over the top-level log_index / metrics_index / trace_index.
@@ -54,17 +58,24 @@ const (
 // esIndexOverride is one per-account row of the index_account_mapping blob.
 // Empty fields fall back to the integration's top-level index.
 type esIndexOverride struct {
-	AccountId    string `json:"account_id"`
-	LogIndex     string `json:"log_index"`
+	AccountId string `json:"account_id"`
+	LogIndex  string `json:"log_index"`
+	// TraceSchema is the declared trace layout for this account's trace index. It
+	// travels with TraceIndex because the layout is a property of what that index
+	// holds, so overriding one without the other would read the wrong schema.
+	TraceSchema  string `json:"trace_schema"`
 	MetricsIndex string `json:"metrics_index"`
 	TraceIndex   string `json:"trace_index"`
 }
 
-// resolveESIndexOverride returns the per-account index for the given indexType
-// ("logs" | "metrics" | "traces") from the index_account_mapping JSON blob, or ""
-// when the blob is empty/malformed or has no (matching, non-empty) entry for the
-// account. Tolerant by design: a bad blob must never break query resolution — the
-// caller falls back to the top-level index on "".
+// resolveESIndexOverride returns the per-account value for the given field
+// ("logs" | "metrics" | "traces" | "trace_schema") from the index_account_mapping
+// JSON blob, or "" when the blob is empty/malformed or has no (matching, non-empty)
+// entry for the account. Tolerant by design: a bad blob must never break query
+// resolution — the caller falls back to the top-level value on "".
+//
+// "trace_schema" is not an index; it rides in the same blob because the layout is a
+// property of the account's trace index and the two must be overridden together.
 func resolveESIndexOverride(mappingJSON, accountId, indexType string) string {
 	mappingJSON = strings.TrimSpace(mappingJSON)
 	if mappingJSON == "" || accountId == "" {
@@ -85,6 +96,8 @@ func resolveESIndexOverride(mappingJSON, accountId, indexType string) string {
 			return strings.TrimSpace(r.MetricsIndex)
 		case "traces":
 			return strings.TrimSpace(r.TraceIndex)
+		case "trace_schema":
+			return strings.TrimSpace(r.TraceSchema)
 		}
 	}
 	return ""
@@ -104,7 +117,13 @@ type ElasticsearchConfig struct {
 	LogIndex       string // index pattern for log queries; empty means the caller must supply one
 	MetricsIndex   string // index pattern for utilisation queries; defaults to "*"
 	TraceIndex     string // index pattern for trace queries; defaults to esTraceIndex
-	TLSSkipVerify  bool   // user-configured opt-in for self-signed certs
+	// TraceSchema is the declared trace layout for this cluster. Empty means the
+	// integration predates the property; resolveESTraceSchema then falls back to
+	// ESTraceSchemaDataPrepper, the historical default. Never inferred from the
+	// index name — that guess is what this property replaced.
+	TraceSchema   ESTraceSchema
+	TLSSkipVerify bool   // user-configured opt-in for self-signed certs
+	IntegrationID string // the integration this config was read from; empty when built from raw values
 }
 
 // BuildElasticsearchConfigFromValues maps already-decrypted config values into an
@@ -141,6 +160,8 @@ func BuildElasticsearchConfigFromValues(values []core.IntegrationConfigValue) *E
 			cfg.MetricsIndex = c.Value
 		case ElasticsearchTraceIndex:
 			cfg.TraceIndex = c.Value
+		case ElasticsearchTraceSchema:
+			cfg.TraceSchema = ESTraceSchema(strings.TrimSpace(c.Value))
 		case ElasticsearchTLSSkipVerify:
 			cfg.TLSSkipVerify = strings.EqualFold(strings.TrimSpace(c.Value), "true")
 		}
@@ -216,6 +237,7 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 	}
 
 	cfg := BuildElasticsearchConfigFromValues(values)
+	cfg.IntegrationID = integration.Id
 
 	// Advanced Settings: a per-account index override wins over the top-level
 	// log_index / metrics_index / trace_index for this account. These become the
@@ -228,6 +250,13 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 	}
 	if override := resolveESIndexOverride(indexAccountMapping, accountId, "traces"); override != "" {
 		cfg.TraceIndex = override
+	}
+	// The trace schema overrides independently of the index: an account may share the
+	// integration's index pattern but be the only one whose cluster writes a different
+	// layout. An unrecognised value is ignored rather than trusted — same fail-open
+	// contract as the index fields above.
+	if override := ESTraceSchema(resolveESIndexOverride(indexAccountMapping, accountId, "trace_schema")); override.Valid() {
+		cfg.TraceSchema = override
 	}
 
 	if err := validateESConfig(cfg); err != nil {

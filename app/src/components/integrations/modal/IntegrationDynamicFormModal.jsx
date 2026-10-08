@@ -167,7 +167,24 @@ const ENUM_VALUE_LABELS = {
   cloud_api_token: 'Confluence Cloud — email + API token',
   datacenter_pat: 'Data Center / Server — personal access token',
   datacenter_password: 'Data Center / Server — username + password',
+  // Elasticsearch trace_schema. snakeToTitleCase renders these as "Data Prepper",
+  // "Otel Native" and "Elastic Apm" — none of which names the thing that WROTE the
+  // data, which is what the operator actually knows. Each label pairs the writer
+  // with the index pattern it produces, since that is how they recognise it.
+  data_prepper: 'Data Prepper (otel-v1-apm-span-*)',
+  otel_native: 'OpenTelemetry native (traces-*.otel)',
+  elastic_apm: 'Elastic APM Server (traces-apm*)',
 };
+
+// Options for the per-account Trace Schema selector in the ES "Per-Account Index"
+// cards. The top-level trace_schema field is schema-driven and gets its options from
+// the integration's Enum automatically; these cards are hand-built, so the same set is
+// listed here. Keep in sync with ESTraceSchemas in
+// api-server/services/integrations/elasticsearch.go.
+const ES_TRACE_SCHEMA_OPTIONS = ['data_prepper', 'otel_native', 'elastic_apm'].map((value) => ({
+  label: ENUM_VALUE_LABELS[value],
+  value,
+}));
 
 const COMMON_WEBHOOK_LABEL_KEYS = [
   'alertname',
@@ -251,9 +268,10 @@ const IntegrationDynamicFormModal = ({
   // integration record commonly serves both logs and traces, so a shared list would
   // apply log filters to trace queries.
   const [defaultTraceFilterRules, setDefaultTraceFilterRules] = useState([emptyFilterCard()]);
-  // Per-account ES index override (Advanced Settings): each card maps an account to
-  // its own log/metrics/trace index; unmapped accounts fall back to the top-level index.
-  const [indexRules, setIndexRules] = useState([{ accountId: '', log_index: '', metrics_index: '', trace_index: '' }]);
+  // Per-account ES override (Advanced Settings): each card maps an account to its own
+  // log/metrics/trace index, plus the trace schema that index is in; unmapped accounts
+  // fall back to the top-level values.
+  const [indexRules, setIndexRules] = useState([{ accountId: '', log_index: '', metrics_index: '', trace_index: '', trace_schema: '' }]);
   // Per-account canonical -> provider log field mapping (Advanced Settings). Highest
   // precedence layer of the mapping merge, above the account and tenant settings.
   const [labelMappingCards, setLabelMappingCards] = useState([{ accountId: '', rows: [{ canonical: '', field: '' }] }]);
@@ -693,7 +711,9 @@ const IntegrationDynamicFormModal = ({
   }, [editData]);
 
   // Hydrate the ES per-account index override from the saved index_account_mapping
-  // blob (JSON array of { account_id, log_index?, metrics_index?, trace_index? }).
+  // blob (JSON array of { account_id, log_index?, metrics_index?, trace_index?,
+  // trace_schema? }). trace_schema rides in the same blob because the layout is a
+  // property of what that account's trace index holds.
   useEffect(() => {
     const raw = editData?.integration_config_values?.index_account_mapping;
     if (!raw) return;
@@ -706,6 +726,7 @@ const IntegrationDynamicFormModal = ({
         log_index: e.log_index || '',
         metrics_index: e.metrics_index || '',
         trace_index: e.trace_index || '',
+        trace_schema: e.trace_schema || '',
       }))
     );
   }, [editData]);
@@ -1184,7 +1205,7 @@ const IntegrationDynamicFormModal = ({
 
   // --- Per-account ES index (Advanced Settings) handlers ---
   const handleAddIndexCard = () => {
-    setIndexRules([...indexRules, { accountId: '', log_index: '', metrics_index: '', trace_index: '' }]);
+    setIndexRules([...indexRules, { accountId: '', log_index: '', metrics_index: '', trace_index: '', trace_schema: '' }]);
   };
   const handleRemoveIndexCard = (cardIdx) => {
     setIndexRules(indexRules.filter((_, i) => i !== cardIdx));
@@ -1525,9 +1546,13 @@ const IntegrationDynamicFormModal = ({
       }
     }
     if (integrationName === 'ES' || integrationName === 'elasticsearch') {
-      // Any index card with an index entered must have an account selected.
+      // Any index card with something entered must have an account selected —
+      // including a lone Trace Schema, which the serializer would otherwise drop
+      // without saying so.
       const indexCardMissingAccount = indexRules.some(
-        (c) => !c.accountId && ((c.log_index || '').trim() || (c.metrics_index || '').trim() || (c.trace_index || '').trim())
+        (c) =>
+          !c.accountId &&
+          ((c.log_index || '').trim() || (c.metrics_index || '').trim() || (c.trace_index || '').trim() || (c.trace_schema || '').trim())
       );
       if (indexCardMissingAccount) {
         snackbar.error('Per-Account Index: please select an account for each index card.');
@@ -1775,12 +1800,16 @@ const IntegrationDynamicFormModal = ({
           const log = (c.log_index || '').trim();
           const metrics = (c.metrics_index || '').trim();
           const trace = (c.trace_index || '').trim();
+          const traceSchema = (c.trace_schema || '').trim();
           if (log) row.log_index = log;
           if (metrics) row.metrics_index = metrics;
           if (trace) row.trace_index = trace;
+          if (traceSchema) row.trace_schema = traceSchema;
           return row;
         })
-        .filter((r) => r.account_id && (r.log_index || r.metrics_index || r.trace_index));
+        // trace_schema counts as content on its own: an account can share the
+        // top-level trace index and still need its own layout declared.
+        .filter((r) => r.account_id && (r.log_index || r.metrics_index || r.trace_index || r.trace_schema));
       const indexPreviouslySet = !!editData?.integration_config_values?.index_account_mapping;
       if (cleanedIndexRows.length > 0 || indexPreviouslySet) {
         transformedValues.push({
@@ -3255,6 +3284,23 @@ const IntegrationDynamicFormModal = ({
                                       onSelect={(_e, v) => handleIndexCardChange(cardIdx, 'trace_index', v?.value ?? v ?? '')}
                                       isOptionsLoading={esIndexesLoading}
                                       placeholder={formValues.trace_index ? `inherit: ${formValues.trace_index}` : 'inherit top-level'}
+                                    />
+                                  </Box>
+                                  {/* The three trace layouts share no field names, so the reader
+                                      cannot be inferred from the index above — it is declared. Only
+                                      needed when this account's cluster writes a different layout
+                                      than the integration's top-level Trace Schema. */}
+                                  <Box sx={{ flex: '1 1 30%', minWidth: 180 }}>
+                                    <FilterDropdown
+                                      label='Trace Schema'
+                                      options={ES_TRACE_SCHEMA_OPTIONS}
+                                      value={card.trace_schema}
+                                      onSelect={(_e, v) => handleIndexCardChange(cardIdx, 'trace_schema', v?.value ?? v ?? '')}
+                                      placeholder={
+                                        formValues.trace_schema
+                                          ? `inherit: ${ENUM_VALUE_LABELS[formValues.trace_schema] || formValues.trace_schema}`
+                                          : 'inherit top-level'
+                                      }
                                     />
                                   </Box>
                                 </Box>

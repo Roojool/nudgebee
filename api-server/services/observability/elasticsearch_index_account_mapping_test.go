@@ -14,19 +14,38 @@ func TestBuildElasticsearchConfigFromValues_Indexes(t *testing.T) {
 		{Name: ElasticsearchLogIndex, Value: "logs-generic.*"},
 		{Name: ElasticsearchMetricsIndex, Value: "metrics-*"},
 		{Name: ElasticsearchTraceIndex, Value: "otel-v1-apm-span-*"},
+		{Name: ElasticsearchTraceSchema, Value: string(ESTraceSchemaElasticAPM)},
 	})
 	assert.Equal(t, "https://es.example.com", cfg.Url) // trailing slash trimmed
 	assert.Equal(t, "logs-generic.*", cfg.LogIndex)
 	assert.Equal(t, "metrics-*", cfg.MetricsIndex)
 	assert.Equal(t, "otel-v1-apm-span-*", cfg.TraceIndex)
+	assert.Equal(t, ESTraceSchemaElasticAPM, cfg.TraceSchema)
 	assert.Equal(t, "basic", cfg.AuthType) // default
+}
+
+// TestBuildElasticsearchConfigFromValues_TraceSchemaAbsent pins the pre-property
+// behaviour: an integration saved before trace_schema existed carries no value, and
+// the zero value must stay empty here so resolveESTraceSchema — not this builder —
+// decides the fallback.
+func TestBuildElasticsearchConfigFromValues_TraceSchemaAbsent(t *testing.T) {
+	cfg := BuildElasticsearchConfigFromValues([]core.IntegrationConfigValue{
+		{Name: ElasticsearchUrl, Value: "https://es.example.com"},
+		{Name: ElasticsearchTraceIndex, Value: "traces-apm*"},
+	})
+	assert.Equal(t, ESTraceSchema(""), cfg.TraceSchema)
+	assert.False(t, cfg.TraceSchema.Valid())
+
+	// Specifically: the index name must NOT be used to infer the schema. This index
+	// is Elastic APM's, and the old heuristic would have mis-read it as OTel-native.
+	assert.NotEqual(t, ESTraceSchemaOtelNative, cfg.TraceSchema)
 }
 
 func TestResolveESIndexOverride(t *testing.T) {
 	const mapping = `[
-		{"account_id":"acc-a","log_index":"logs-a-*","metrics_index":"metrics-a-*","trace_index":"traces-a-*"},
+		{"account_id":"acc-a","log_index":"logs-a-*","metrics_index":"metrics-a-*","trace_index":"traces-a-*","trace_schema":"elastic_apm"},
 		{"account_id":"acc-b","log_index":"logs-b-*"},
-		{"account_id":"acc-c","metrics_index":"  ","trace_index":"traces-c-*"}
+		{"account_id":"acc-c","metrics_index":"  ","trace_index":"traces-c-*","trace_schema":"  "}
 	]`
 
 	cases := []struct {
@@ -50,6 +69,13 @@ func TestResolveESIndexOverride(t *testing.T) {
 		{"malformed json", `{not-an-array}`, "acc-a", "logs", ""},
 		{"object (not array) json", `{"account_id":"acc-a"}`, "acc-a", "logs", ""},
 		{"unknown index type", mapping, "acc-a", "spans", ""},
+		// trace_schema rides in the same blob as the indexes, so it gets the same
+		// fail-open treatment: present and set wins, blank or absent falls back.
+		{"trace_schema hit", mapping, "acc-a", "trace_schema", "elastic_apm"},
+		{"trace_schema unset falls back", mapping, "acc-b", "trace_schema", ""},
+		{"trace_schema whitespace falls back", mapping, "acc-c", "trace_schema", ""},
+		{"trace_schema unknown account falls back", mapping, "acc-z", "trace_schema", ""},
+		{"trace_schema malformed json", `{not-an-array}`, "acc-a", "trace_schema", ""},
 	}
 
 	for _, tc := range cases {

@@ -212,9 +212,10 @@ func InvalidateTraceLabelsCacheForTenant(tenantId string) {
 // `ref` is the RESOLVED (provider, source) pair the caller queried with, not one
 // derived from the source type. Logs can derive theirs (LogSource.ProviderRef) because
 // each log source is dispatched for exactly one pair; traces cannot — resolveTraceSource
-// returns ElasticSaasTraceSource *or* ElasticOtelTraceSource for the same ES/user
-// integration, and gcp matches on provider alone regardless of source. Every trace call
-// site already holds the resolved pair, so it is threaded instead.
+// returns one of THREE readers for the same ES/user integration (ElasticSaasTraceSource,
+// ElasticOtelTraceSource or ElasticAPMTraceSource, chosen by the declared trace_schema —
+// see es_trace_schema.go), and gcp matches on provider alone regardless of source. Every
+// trace call site already holds the resolved pair, so it is threaded instead.
 func resolveTraceLabelMapping(ctx *security.RequestContext, accountId string,
 	ref providerRef, source TraceSource, draft *labelMappingOverride) ResolvedLabelMapping {
 	byTier := map[LabelMappingTier]map[string]string{

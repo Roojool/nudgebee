@@ -18,10 +18,15 @@ const esTraceIndex = "otel-v1-apm-span-*"
 // esTraceIndexFor resolves the search target for trace queries in priority order:
 // an explicit per-request override (the index picked in the Traces tab) → the
 // integration's per-account trace_index (already resolved into cfg.TraceIndex by
-// GetElasticsearchConfig) → Data Prepper's default. The field mappings in
-// elasticTraceLabelMapping are Data Prepper's, so an override must point at an
-// index carrying that schema (e.g. a renamed otel-v1-apm-span-*); an OTel trace
-// data stream would resolve but match nothing.
+// GetElasticsearchConfig) → Data Prepper's default.
+//
+// Picking the index does NOT pick the reader: that comes from the account's declared
+// trace_schema (see es_trace_schema.go). The field mappings in
+// elasticTraceLabelMapping are Data Prepper's, so an override reaching this reader
+// must point at an index carrying that schema (e.g. a renamed otel-v1-apm-span-*).
+// An index holding a different layout resolves fine and then matches nothing —
+// mapLabelToESField passes unmapped names through unchanged, so the query asks for
+// fields that do not exist rather than erroring.
 func esTraceIndexFor(cfg *ElasticsearchConfig, override string) string {
 	if override != "" {
 		return override
