@@ -818,8 +818,12 @@ func (s *WorkflowDao) FindByName(ctx context.Context, tenantID, accountID, name 
 }
 
 func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEventTriggerRule, error) {
+	// The tenant/account check runs on the expanded rules, behind a MATERIALIZED CTE.
+	// Inside each branch the planner joined workflows to their tenant's accounts
+	// first and re-read every definition once per account.
 	query := `
-		SELECT DISTINCT
+		WITH rules AS MATERIALIZED (
+		SELECT
 			id, tenant_id, account_id,
 			COALESCE(event_type_item, '') as event_type,
 			COALESCE(trigger->'params'->>'filter', '') as filter,
@@ -854,14 +858,10 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'event'
-		  AND EXISTS (
-			SELECT 1 FROM cloud_accounts ca
-			WHERE ca.id::text = listen_account AND ca.tenant::text = workflows.tenant_id::text
-		  )
 
 		UNION ALL
 
-		SELECT DISTINCT
+		SELECT
 			id, tenant_id, account_id,
 			'optimization.recommendation' as event_type,
 			COALESCE((trigger->'params')::text, '') as filter,
@@ -885,10 +885,14 @@ func (s *WorkflowDao) FindEventTriggers(ctx context.Context) ([]model.WorkflowEv
 			 ) as listen_account
 		WHERE status = 'ACTIVE'
 		  AND trigger->>'type' = 'optimization'
-		  AND EXISTS (
+		)
+		SELECT DISTINCT
+			id, tenant_id, account_id, event_type, filter, trigger_type, lifecycle_phase, listen_account
+		FROM rules
+		WHERE EXISTS (
 			SELECT 1 FROM cloud_accounts ca
-			WHERE ca.id::text = listen_account AND ca.tenant::text = workflows.tenant_id::text
-		  )
+			WHERE ca.id::text = rules.listen_account AND ca.tenant::text = rules.tenant_id::text
+		)
 	`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
