@@ -5,6 +5,7 @@ import {
   eventAccountOverrides,
   flattenPayloadFields,
   EMITTED_LIFECYCLE_PHASES,
+  triggerInputFields,
 } from '../triggerPayloadMock';
 
 describe('buildEventTriggerMock', () => {
@@ -185,5 +186,30 @@ describe('flattenPayloadFields', () => {
     expect(paths).toContain('labels.team');
     expect(paths).toContain('score_factors.blast_radius');
     expect(paths).toContain('lifecycle_phase');
+  });
+});
+
+describe('triggerInputFields', () => {
+  const trigger = (type: string, params: Record<string, any> = {}) => ({ type: 'trigger', data: { trigger: { type, params } } });
+
+  it("lists the event trigger's payload fields for steps", () => {
+    const result = triggerInputFields([trigger('event'), { type: 'action', data: {} }]);
+    expect(result?.triggerType).toBe('event');
+    expect(result?.fields.map((f) => f.path)).toEqual(expect.arrayContaining(['cloud_account_id', 'event_type']));
+  });
+
+  it('follows the trigger phase, so investigation fields appear only when it fires on one', () => {
+    const created = triggerInputFields([trigger('event')])!.fields.map((f) => f.path);
+    const completed = triggerInputFields([trigger('event', { on: 'investigation.completed' })])!.fields.map((f) => f.path);
+    expect(created).not.toContain('analysis_summary');
+    expect(completed).toContain('analysis_summary');
+  });
+
+  it('describes the recommendation for an optimization trigger', () => {
+    expect(triggerInputFields([trigger('optimization')])?.triggerType).toBe('optimization');
+  });
+
+  it('is null when no trigger delivers an event', () => {
+    expect(triggerInputFields([trigger('schedule'), { type: 'action', data: {} }])).toBeNull();
   });
 });

@@ -189,6 +189,16 @@ const TriggerSimulatorPanel: React.FC<TriggerSimulatorPanelProps> = ({
         background: ds.amber[100],
       };
     }
+    // The account gate also rejects a payload with no account at all; only a named one is "another account".
+    const payloadAccount = parsedPayload?.account_id || parsedPayload?.cloud_account_id;
+    if (!matchResult.matched && matchResult.gate === 'account' && payloadAccount) {
+      return {
+        message: "Not matched — event is from an account this automation doesn't listen to.",
+        text: ds.red[700],
+        border: ds.red[300],
+        background: ds.red[100],
+      };
+    }
     if (matchResult.matched) {
       return {
         message: `This payload fires the automation.${matchResult.reason ? ` ${capitalize(matchResult.reason)}.` : ''}`,

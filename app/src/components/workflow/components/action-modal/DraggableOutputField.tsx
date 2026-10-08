@@ -15,6 +15,7 @@ interface DraggableOutputFieldProps {
   isConfig?: boolean; // true for workflow configs
   isSecret?: boolean; // true for secrets (uses Secret['key'] template)
   description?: string; // Optional description for the field
+  template?: string; // Template to drop, when none of the kinds above builds it (e.g. trigger fields)
 }
 
 const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
@@ -28,9 +29,13 @@ const DraggableOutputField: React.FC<DraggableOutputFieldProps> = ({
   isConfig = false,
   isSecret = false,
   description,
+  template,
 }) => {
   // Generate the template expression based on whether it's an input, config, secret, or task output
   const getTemplateExpression = () => {
+    if (template) {
+      return template;
+    }
     if (isSecret) {
       return `{{ Secrets['${fieldName}'] }}`;
     }

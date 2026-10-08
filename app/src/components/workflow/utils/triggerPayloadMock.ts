@@ -212,3 +212,13 @@ export const flattenPayloadFields = (payload: Record<string, any>, prefix = ''):
     }
     return [{ path, type: describeType(value), example: describeExample(value) }];
   });
+
+/**
+ * The fields the graph's event or optimization trigger hands every step as `Inputs.event.*`,
+ * read off the same mock the trigger simulator shows. Null when there is no such trigger.
+ */
+export const triggerInputFields = (nodes: { type?: string; data?: any }[]): { triggerType: string; fields: PayloadField[] } | null => {
+  const trigger = nodes.find((n) => n.type === 'trigger' && ['event', 'optimization'].includes(n.data?.trigger?.type))?.data?.trigger;
+  const mock = trigger ? buildTriggerMock(trigger.type, trigger.params?.on || DEFAULT_LIFECYCLE_PHASE) : null;
+  return mock ? { triggerType: trigger.type, fields: flattenPayloadFields(mock) } : null;
+};

@@ -41,6 +41,8 @@ import {
 } from './utils/fieldTypeUtils';
 import { getUpstreamSuggestedValues } from './utils/getUpstreamSuggestedValues';
 import { parseDurationToSeconds, sanitizeTaskId } from './utils/taskUtils';
+import { EVENT_ACCOUNT_TEMPLATE, listensToSeveralAccounts } from './utils/listenAccounts';
+import { triggerInputFields } from './utils/triggerPayloadMock';
 import apiWorkflow from '@api1/workflow';
 import apiAccount from '@api1/account';
 import { isTenantAdmin } from '@lib/auth';
@@ -202,6 +204,8 @@ interface ActionDetailsSidebarProps {
   // parent container (used by the standalone Task Runner page). Inline mode drops
   // the Previous Actions column — there is no surrounding workflow graph.
   variant?: 'dialog' | 'inline';
+  // Error the last server validation reported for this step, if any.
+  serverError?: string | null;
 }
 
 const DEFAULT_FORM_FIELD_PROPS = {
@@ -298,6 +302,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   pendingData,
   onPendingDataConsumed,
   variant = 'dialog',
+  serverError,
 }) => {
   const [localData, setLocalData] = useState(taskData || {});
 
@@ -333,6 +338,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
   // Workflow configs state
   const [workflowConfigs, setWorkflowConfigs] = useState<Array<{ key: string; value: string; type: string }>>([]);
   const [showAllConfigs, setShowAllConfigs] = useState(false);
+  const [showAllTriggerFields, setShowAllTriggerFields] = useState(false);
 
   // Default provider (logs / metrics / traces) for the currently selected
   // account, shown as a read-only chip below the account dropdown for any
@@ -411,6 +417,8 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
 
   // Find the current task definition
   const currentTaskDefinition = taskDefinitions.find((def) => def.name === selectedActionType);
+  // The server names the field when a multi-account automation leaves a step's account empty.
+  const serverErrorNamesAccount = !!serverError && serverError.includes('account_id');
   // Task descriptions come from runbook-server, which has no tenant branding
   const { title: brandTitle } = useBrandingConfig();
   const currentTaskDescription = currentTaskDefinition?.description?.replace(/\bNudgebee\b/g, () => brandTitle);
@@ -1473,6 +1481,37 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
     );
   };
 
+  // What the trigger delivers, as `Inputs.event.*` — every step can read it, not just the first.
+  const triggerInputs = useMemo(() => triggerInputFields(nodes), [nodes]);
+
+  const renderTriggerInputFields = () => {
+    if (!triggerInputs) return null;
+    const INITIAL_TRIGGER_FIELDS_COUNT = 8;
+    const displayed = showAllTriggerFields ? triggerInputs.fields : triggerInputs.fields.slice(0, INITIAL_TRIGGER_FIELDS_COUNT);
+    const remainingCount = triggerInputs.fields.length - INITIAL_TRIGGER_FIELDS_COUNT;
+
+    return (
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1] }}>
+        {displayed.map((field) => (
+          <DraggableOutputField
+            key={field.path}
+            taskId=''
+            taskName='Trigger'
+            fieldName={`event.${field.path}`}
+            fieldType={field.type}
+            value={field.example}
+            template={`{{ Inputs.event.${field.path} }}`}
+          />
+        ))}
+        {remainingCount > 0 && (
+          <Button id='action-sidebar-toggle-trigger-fields-btn' tone='ghost' size='xs' onClick={() => setShowAllTriggerFields(!showAllTriggerFields)}>
+            {showAllTriggerFields ? 'Show less' : `Show ${remainingCount} more`}
+          </Button>
+        )}
+      </Box>
+    );
+  };
+
   // ===================
   // LEFT COLUMN: Previous Actions Section
   // ===================
@@ -1535,6 +1574,29 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             gap: ds.space[4],
           }}
         >
+          {/* Trigger Section - the event or recommendation that started the run */}
+          {triggerInputs && (
+            <Box
+              data-testid='action-sidebar-trigger-inputs'
+              sx={{
+                p: ds.space[3],
+                bgcolor: 'var(--ds-background-100)',
+                border: '1px solid var(--ds-amber-300)',
+                borderRadius: ds.radius.sm,
+              }}
+            >
+              <Typography
+                sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700], mb: ds.space[1] }}
+              >
+                {triggerInputs.triggerType === 'optimization' ? 'Trigger recommendation' : 'Trigger event'}
+              </Typography>
+              <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mb: ds.space[2] }}>
+                Example values. Each run gets the real {triggerInputs.triggerType === 'optimization' ? 'recommendation' : 'event'}.
+              </Typography>
+              {renderTriggerInputFields()}
+            </Box>
+          )}
+
           {/* Workflow Inputs Section - Always show if inputs exist */}
           {workflowInputs && workflowInputs.length > 0 && (
             <Box
@@ -1663,11 +1725,14 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
           )}
 
           {/* Empty state - only show if no inputs, no configs and no previous tasks */}
-          {(!workflowInputs || workflowInputs.length === 0) && (!workflowConfigs || workflowConfigs.length === 0) && !hasPreviousTasks && (
-            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[400], fontStyle: 'italic' }}>
-              No workflow inputs, configs or previous actions available
-            </Typography>
-          )}
+          {!triggerInputs &&
+            (!workflowInputs || workflowInputs.length === 0) &&
+            (!workflowConfigs || workflowConfigs.length === 0) &&
+            !hasPreviousTasks && (
+              <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[400], fontStyle: 'italic' }}>
+                No workflow inputs, configs or previous actions available
+              </Typography>
+            )}
         </Box>
       </Box>
     );
@@ -3499,6 +3564,32 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 )}
               </Box>
             </Box>
+            {/* A trigger listening to several accounts leaves no default target for the step */}
+            {fieldName === 'account_id' && isAccountField && (listensToSeveralAccounts(nodes) || serverErrorNamesAccount) && (
+              <Box sx={{ display: 'flex', gap: ds.space[4], mb: ds.space[4] }}>
+                <Box sx={{ minWidth: '120px', flexShrink: 0 }} />
+                <Box sx={{ flex: 1 }}>
+                  <Callout
+                    tone={serverErrorNamesAccount ? 'critical' : 'info'}
+                    data-testid='action-sidebar-event-account-hint'
+                    message={
+                      serverErrorNamesAccount
+                        ? serverError
+                        : "This automation listens to several accounts, so this step must name the account it acts on. Use the event's account to act wherever the event came from."
+                    }
+                    action={
+                      fieldValue === EVENT_ACCOUNT_TEMPLATE || isReadOnly || viewOnlyMode
+                        ? undefined
+                        : {
+                            id: 'action-sidebar-use-event-account-btn',
+                            label: "Use the event's account",
+                            onClick: () => handleDataChange(fieldName, EVENT_ACCOUNT_TEMPLATE),
+                          }
+                    }
+                  />
+                </Box>
+              </Box>
+            )}
             {/* SSM permission guidance — shown directly below the executor_type dropdown */}
             {fieldName === 'executor_type' && selectedActionType === 'scripting.run_script' && localData?.executor_type === 'aws_ssm' && (
               <Box sx={{ display: 'flex', gap: ds.space[4], mb: ds.space[4] }}>

@@ -997,12 +997,14 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
       if (hasEventContext && taskDefinitions.length > 0 && !eventTriggerInitializedRef.current) {
         try {
           const filter = buildFilterExpression({
-            event_type: eventTypeQ,
-            priority: eventPriorityQ,
-            source: eventSourceQ,
-            cluster: eventClusterQ,
-            namespace: eventNamespaceQ,
+            event_type: [eventTypeQ],
+            priority: [eventPriorityQ],
+            source: [eventSourceQ],
+            namespace: [eventNamespaceQ],
           });
+          // The event's account is who the trigger listens to, not a filter clause; the
+          // automation's own account is the default, so only another one is saved.
+          const eventParams = { filter, ...(eventClusterQ && eventClusterQ !== accountId ? { accounts: [eventClusterQ] } : {}) };
 
           const eventWorkflowData: WorkflowData = {
             id: null,
@@ -1012,7 +1014,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
               timeout: '',
               inputs: [],
               tasks: [],
-              triggers: [{ type: 'event', params: { filter } }],
+              triggers: [{ type: 'event', params: eventParams }],
               output: {},
               retry_policy: {
                 maximum_attempts: 3,
@@ -4627,6 +4629,7 @@ const WorkflowBuilderNoteBook: React.FC<WorkflowBuilderNotebookProps> = ({ mode 
                     taskDefinitions={taskDefinitions}
                     taskData={sidebarTaskData}
                     validationErrors={sidebarValidationErrors}
+                    serverError={sidebarSelectedNode ? serverErrors[sidebarSelectedNode.id] : null}
                     viewOnlyMode={false}
                     previousNodeOutputSchema={sidebarPreviousNodeOutputSchema}
                     accountId={accountId}

@@ -65,6 +65,35 @@ describe('TriggerSimulatorPanel match verdict', () => {
     expect(screen.queryByTestId('trigger-simulator-match-verdict')).not.toBeInTheDocument();
   });
 
+  it("says plainly when the event comes from an account the automation doesn't listen to", async () => {
+    respond({ matched: false, gate: 'account', reason: "this event is from account 'acct-own', which this automation does not listen to" });
+
+    render(<TriggerSimulatorPanel triggerType='event' accountId='acct-own' triggerParams={{ accounts: ['acct-a', 'acct-b'] }} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('trigger-simulator-match-verdict')).toHaveTextContent(
+        "Not matched — event is from an account this automation doesn't listen to"
+      )
+    );
+  });
+
+  it('samples the event from the first listened account', async () => {
+    respond({ matched: true });
+
+    render(
+      <TriggerSimulatorPanel
+        triggerType='event'
+        accountId='acct-own'
+        eventOverrides={{ cloud_account_id: 'acct-a' }}
+        triggerParams={{ accounts: ['acct-a', 'acct-b'] }}
+      />
+    );
+
+    await waitFor(() => expect(mockCheck).toHaveBeenCalled());
+    expect(mockCheck.mock.calls[0][0].payload.cloud_account_id).toBe('acct-a');
+    expect(mockCheck.mock.calls[0][0].params.accounts).toEqual(['acct-a', 'acct-b']);
+  });
+
   it("samples an event from the automation's own account when none is picked", async () => {
     respond({ matched: true });
 
