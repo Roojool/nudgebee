@@ -25,6 +25,8 @@ const (
 	SignozUrl      = "signoz_url"
 	SignozUserName = "signoz_username"
 	SignozPassword = "signoz_password"
+	SignozAuthType = "signoz_auth_type"
+	SignozAPIKey   = "signoz_api_key"
 )
 
 // Same vocabulary as the agent-mode source: SigNoz Cloud speaks the same attribute
@@ -58,40 +60,72 @@ func (s *SignozSaasSource) GetSignozAuth(ctx *security.RequestContext, accountId
 		return signozclient.Credentials{}, errors.New("no signoz integrations found")
 	}
 
-	integration := userIntegrations[0]
+	return signozCredentials(userIntegrations[0].Configs)
+}
 
-	var creds signozclient.Credentials
-	for _, config := range integration.Configs {
-		switch config.Name {
-		case SignozMode:
-			creds.Mode = config.Value
-		case SignozUrl:
-			creds.BaseURL = config.Value
-		case SignozUserName:
-			creds.Email = config.Value
-		case SignozPassword:
-			// ListIntegrationConfigs returns config values raw — it does not
-			// decrypt. signoz_password is stored with is_encrypted=true (see the
-			// signoz integration schema), so the stored value is ciphertext.
-			// Pass it through Decrypt before using it as the login password;
-			// without this the SigNoz login receives ciphertext and 401s.
-			// (Legacy rows saved with is_encrypted=false are left untouched.)
-			if config.IsEncrypted && config.Value != "" {
-				decrypted, derr := common.Decrypt(config.Value)
-				if derr != nil {
-					return signozclient.Credentials{}, fmt.Errorf("failed to decrypt signoz password: %w", derr)
-				}
-				creds.Password = decrypted
-			} else {
-				creds.Password = config.Value
-			}
+// signozCredentials builds the credentials for one stored SigNoz integration.
+// Only the selected auth type's values are used: a row that switched type keeps
+// the other type's (now hidden) values, and they must never authenticate. A row
+// saved before API-key auth has no auth type and is a password row.
+func signozCredentials(configs []core.IntegrationConfigValue) (signozclient.Credentials, error) {
+	stored := map[string]core.IntegrationConfigValue{}
+	for _, config := range configs {
+		stored[config.Name] = config
+	}
+	// value reads one stored config value. ListIntegrationConfigs returns
+	// values raw — it does not decrypt — and secrets (signoz_password,
+	// signoz_api_key) are stored with is_encrypted=true, so without this SigNoz
+	// receives ciphertext and answers 401. (Legacy rows saved with
+	// is_encrypted=false are left untouched.) Only the selected type's secret
+	// is read, so an undecryptable leftover of the other type can't break a
+	// working row.
+	value := func(name string) (string, error) {
+		config := stored[name]
+		if !config.IsEncrypted || config.Value == "" {
+			return config.Value, nil
 		}
+		decrypted, err := common.Decrypt(config.Value)
+		if err != nil {
+			return "", fmt.Errorf("failed to decrypt signoz %s: %w", name, err)
+		}
+		return decrypted, nil
+	}
+	values := map[string]string{
+		SignozUrl:      stored[SignozUrl].Value,
+		SignozMode:     stored[SignozMode].Value,
+		SignozAuthType: stored[SignozAuthType].Value,
+		SignozUserName: stored[SignozUserName].Value,
 	}
 
-	if creds.BaseURL == "" || creds.Email == "" || creds.Password == "" {
-		return signozclient.Credentials{}, fmt.Errorf("missing required signoz configuration values")
+	creds := signozclient.Credentials{
+		BaseURL:  values[SignozUrl],
+		Mode:     values[SignozMode],
+		AuthType: values[SignozAuthType],
+	}
+	if creds.AuthType == "" {
+		creds.AuthType = signozclient.AuthPassword
 	}
 
+	var err error
+	switch creds.AuthType {
+	case signozclient.AuthAPIKey:
+		if creds.APIKey, err = value(SignozAPIKey); err != nil {
+			return signozclient.Credentials{}, err
+		}
+		if creds.BaseURL == "" || creds.APIKey == "" {
+			return signozclient.Credentials{}, fmt.Errorf("missing required signoz configuration values")
+		}
+	case signozclient.AuthPassword:
+		if creds.Password, err = value(SignozPassword); err != nil {
+			return signozclient.Credentials{}, err
+		}
+		creds.Email = values[SignozUserName]
+		if creds.BaseURL == "" || creds.Email == "" || creds.Password == "" {
+			return signozclient.Credentials{}, fmt.Errorf("missing required signoz configuration values")
+		}
+	default:
+		return signozclient.Credentials{}, fmt.Errorf("unknown signoz auth type %q", creds.AuthType)
+	}
 	return creds, nil
 }
 

@@ -38,6 +38,15 @@ const (
 	FlavorV2 = "v2"
 	FlavorV1 = "v1"
 
+	// AuthPassword logs in with an email/password and sends the resulting
+	// token as a Bearer; AuthAPIKey sends a SigNoz API key (a PAT on legacy
+	// releases, a service-account key on current ones and Cloud) on every
+	// request and never logs in. An empty AuthType means AuthPassword.
+	AuthPassword = "password"
+	AuthAPIKey   = "api_key"
+
+	apiKeyHeader = "SIGNOZ-API-KEY"
+
 	// ModeCloud skips detection: SigNoz Cloud is always the v2 sessions API.
 	// Any other mode (self_hosted, empty) detects the flow.
 	ModeCloud = "cloud"
@@ -58,6 +67,16 @@ var (
 	// ErrNoSupportedAuth means the URL answers neither login API, so it is
 	// not a SigNoz we can talk to (or not SigNoz at all).
 	ErrNoSupportedAuth = errors.New("SigNoz exposes neither /api/v2/sessions nor /api/v1/login")
+	// ErrInvalidAPIKey means SigNoz did not accept the API key (401).
+	ErrInvalidAPIKey = errors.New("SigNoz rejected the API key")
+	// ErrAPIKeyForbidden means the key is valid but its role may not read
+	// logs (403) — a role problem, not a wrong key.
+	ErrAPIKeyForbidden = errors.New("SigNoz API key is not allowed to read logs")
+	// ErrNotSigNozAPI means the URL did not answer like SigNoz's query API —
+	// a wrong URL, or a proxy in front of SigNoz answering with its own page.
+	ErrNotSigNozAPI = errors.New("URL did not answer like the SigNoz query API (wrong URL, or a proxy/login page in front of SigNoz)")
+	// errAPIKeyLogin is a programming error: API keys never log in.
+	errAPIKeyLogin = errors.New("signozclient: API-key credentials do not log in")
 )
 
 // RequestRejectedError is a 400 from SigNoz: the request contract drifted, not
@@ -71,12 +90,20 @@ func (e *RequestRejectedError) Error() string {
 	return fmt.Sprintf("SigNoz rejected %s: %s", e.Path, e.Message)
 }
 
-// Credentials identify one SigNoz login.
+// Credentials identify how to authenticate to one SigNoz. Only the fields of
+// AuthType are read: a row switched from one auth type to the other keeps the
+// old type's stored values, and they must never be used.
 type Credentials struct {
 	BaseURL  string
+	AuthType string
 	Email    string
 	Password string
 	Mode     string
+	APIKey   string
+}
+
+func (c Credentials) usesAPIKey() bool {
+	return c.AuthType == AuthAPIKey
 }
 
 // Token is a SigNoz access token and the login flow that produced it.
@@ -89,6 +116,9 @@ type Token struct {
 // Login returns a cached token for creds, logging in when there is none or it
 // is close to expiry.
 func Login(ctx context.Context, hc *http.Client, creds Credentials) (Token, error) {
+	if creds.usesAPIKey() {
+		return Token{}, errAPIKeyLogin
+	}
 	key := cacheKey(creds)
 	if tok, ok := cachedToken(key); ok {
 		return tok, nil
@@ -121,6 +151,9 @@ func Login(ctx context.Context, hc *http.Client, creds Credentials) (Token, erro
 // LoginFresh logs in without reading or writing the cache. Validation uses it
 // so a Test click always proves the credentials against the server.
 func LoginFresh(ctx context.Context, hc *http.Client, creds Credentials) (Token, error) {
+	if creds.usesAPIKey() {
+		return Token{}, errAPIKeyLogin
+	}
 	base := strings.TrimRight(creds.BaseURL, "/")
 
 	isV2, ctxData, err := sessionContext(ctx, hc, base, creds.Email)
@@ -145,16 +178,22 @@ func LoginFresh(ctx context.Context, hc *http.Client, creds Credentials) (Token,
 	return tok, nil
 }
 
-// Do sends an authenticated request. On a 401 it drops the cached token, logs
-// in again and retries once: a server restart or session revocation must not
-// leave a stale token failing until it expires.
+// Do sends an authenticated request. With an API key the key goes on the
+// request as-is: there is no login and nothing to refresh, so a 401 is
+// returned to the caller. With a password, on a 401 it drops the cached token,
+// logs in again and retries once: a server restart or session revocation must
+// not leave a stale token failing until it expires.
 func Do(ctx context.Context, hc *http.Client, creds Credentials, method, path string, body []byte) (*http.Response, error) {
+	if creds.usesAPIKey() {
+		return send(ctx, hc, creds.BaseURL, method, path, body, apiKeyHeader, creds.APIKey)
+	}
+
 	tok, err := Login(ctx, hc, creds)
 	if err != nil {
 		return nil, fmt.Errorf("signoz login: %w", err)
 	}
 
-	resp, err := send(ctx, hc, creds.BaseURL, method, path, body, tok.Value)
+	resp, err := send(ctx, hc, creds.BaseURL, method, path, body, "Authorization", "Bearer "+tok.Value)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
 	}
@@ -167,10 +206,48 @@ func Do(ctx context.Context, hc *http.Client, creds Credentials, method, path st
 	if err != nil {
 		return nil, fmt.Errorf("signoz login: %w", err)
 	}
-	return send(ctx, hc, creds.BaseURL, method, path, body, tok.Value)
+	return send(ctx, hc, creds.BaseURL, method, path, body, "Authorization", "Bearer "+tok.Value)
 }
 
-func send(ctx context.Context, hc *http.Client, baseURL, method, path string, body []byte, token string) (*http.Response, error) {
+// apiKeyProbePath is the label autocomplete the logs page loads first: the
+// cheapest call that proves a key may read logs.
+const apiKeyProbePath = "/api/v3/autocomplete/attribute_keys?searchText=&dataSource=logs&aggregateOperator=noop"
+
+// CheckAPIKey proves an API key the way queries will use it — through Do, on
+// a logs read — and tells a wrong key (401) apart from a key whose role may
+// not read logs (403).
+func CheckAPIKey(ctx context.Context, hc *http.Client, creds Credentials) error {
+	base := strings.TrimRight(creds.BaseURL, "/")
+	resp, err := Do(ctx, hc, creds, http.MethodGet, apiKeyProbePath, nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SigNoz at %s: %w", base, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("failed to read SigNoz response from %s: %w", base, err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var env envelope
+		if json.Unmarshal(body, &env) != nil || env.Status != "success" {
+			return fmt.Errorf("%w at %s", ErrNotSigNozAPI, base)
+		}
+		return nil
+	case http.StatusUnauthorized:
+		return ErrInvalidAPIKey
+	case http.StatusForbidden:
+		return ErrAPIKeyForbidden
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return fmt.Errorf("%w at %s", ErrNotSigNozAPI, base)
+	default:
+		msg, _ := errorMessage(body)
+		return fmt.Errorf("SigNoz %s returned HTTP %d: %s", apiKeyProbePath, resp.StatusCode, msg)
+	}
+}
+
+func send(ctx context.Context, hc *http.Client, baseURL, method, path string, body []byte, authHeader, authValue string) (*http.Response, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -179,7 +256,7 @@ func send(ctx context.Context, hc *http.Client, baseURL, method, path string, bo
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(authHeader, authValue)
 	req.Header.Set("Content-Type", "application/json")
 	return withTimeout(hc).Do(req)
 }
@@ -421,7 +498,9 @@ var (
 
 // cacheKey covers every input that determines the token. The password is
 // hashed so the raw secret is not held as a map key, and a rotated password
-// cannot be served a token minted from the old one.
+// cannot be served a token minted from the old one. APIKey is deliberately not
+// part of it: the API-key path sends the key itself and never reads or writes
+// this cache — keep it that way, or keys would share cached tokens.
 func cacheKey(c Credentials) string {
 	sum := sha256.Sum256([]byte(c.Password))
 	return strings.Join([]string{strings.TrimRight(c.BaseURL, "/"), c.Email, c.Mode, hex.EncodeToString(sum[:])}, "|")

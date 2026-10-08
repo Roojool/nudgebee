@@ -130,3 +130,90 @@ func TestSignoz_ValidateConfig_UnreachableHost(t *testing.T) {
 	require.Len(t, errs, 1)
 	assert.Contains(t, errs[0].Error(), "failed to connect")
 }
+
+const testSignozAPIKey = "key-1"
+
+// signozKeyServer emulates SigNoz's query API for API-key auth: the label
+// autocomplete answers the one valid key, and forbidden models a key whose role
+// may not read logs. Login routes are absent, as an API key never logs in.
+func signozKeyServer(t *testing.T, forbidden bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = fmt.Fprint(w, `{"version":"v0.145.0"}`)
+		case "/api/v3/autocomplete/attribute_keys":
+			switch {
+			case r.Header.Get("SIGNOZ-API-KEY") != testSignozAPIKey:
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = fmt.Fprint(w, `{"status":"error","error":{"type":"unauthenticated","message":"unauthenticated"}}`)
+			case forbidden:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = fmt.Fprint(w, `{"status":"error","error":{"type":"forbidden","message":"forbidden"}}`)
+			default:
+				_, _ = fmt.Fprint(w, `{"status":"success","data":{"attributeKeys":[]}}`)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func signozKeyCfg(url, key string) []core.IntegrationConfigValue {
+	return []core.IntegrationConfigValue{
+		{Name: "signoz_url", Value: url},
+		{Name: "signoz_mode", Value: SignozModeSelfHosted},
+		{Name: SignozAuthTypeKey, Value: SignozAuthTypeAPIKey},
+		{Name: "signoz_api_key", Value: key},
+	}
+}
+
+func TestSignoz_ValidateConfig_APIKey(t *testing.T) {
+	cases := []struct {
+		name      string
+		forbidden bool
+		key       string
+		wantErr   string
+	}{
+		{"valid key", false, testSignozAPIKey, ""},
+		{"wrong key", false, "nope", "invalid SigNoz API key"},
+		{"key whose role may not read logs", true, testSignozAPIKey, "not allowed to read logs"},
+		{"missing key", false, "", "signoz_api_key is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := signozKeyServer(t, tc.forbidden)
+			errs := Signoz{}.ValidateConfig(nil, signozKeyCfg(srv.URL, tc.key), "acc-1")
+			if tc.wantErr == "" {
+				assert.Empty(t, errs)
+				return
+			}
+			require.Len(t, errs, 1)
+			assert.Contains(t, errs[0].Error(), tc.wantErr)
+		})
+	}
+}
+
+// An API-key row does not need a username/password, and a password row that
+// still stores a stale key (switched back from API key) validates by password.
+func TestSignoz_ValidateConfig_UsesOnlyTheSelectedAuthType(t *testing.T) {
+	keySrv := signozKeyServer(t, false)
+	assert.Empty(t, Signoz{}.ValidateConfig(nil, signozKeyCfg(keySrv.URL, testSignozAPIKey), "acc-1"))
+
+	pwSrv := signozServer(t, "v0.145.0", false, true)
+	cfg := append(signozCfg(pwSrv.URL, testSignozPassword, SignozModeSelfHosted),
+		core.IntegrationConfigValue{Name: SignozAuthTypeKey, Value: SignozAuthTypePassword},
+		core.IntegrationConfigValue{Name: "signoz_api_key", Value: "stale-revoked-key"})
+	assert.Empty(t, Signoz{}.ValidateConfig(nil, cfg, "acc-1"))
+}
+
+func TestSignoz_ValidateConfig_UnknownAuthType(t *testing.T) {
+	cfg := append(signozCfg("http://signoz.example.com", testSignozPassword, SignozModeSelfHosted),
+		core.IntegrationConfigValue{Name: SignozAuthTypeKey, Value: "oauth"})
+	errs := Signoz{}.ValidateConfig(nil, cfg, "acc-1")
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "signoz_auth_type must be")
+}

@@ -36,7 +36,11 @@ type fakeSignoz struct {
 	contextStatus int
 	// noStatusField drops "status" from the sessions/context envelope.
 	noStatusField bool
-	expiresIn     int64
+	// apiKey is the one SIGNOZ-API-KEY the query routes accept; keyForbidden
+	// makes that key's role unable to read logs (403).
+	apiKey       string
+	keyForbidden bool
+	expiresIn    int64
 
 	contextHits, v1Hits, v2Hits, queryHits atomic.Int32
 	queryAlways401                         bool
@@ -134,14 +138,25 @@ func (f *fakeSignoz) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, fmt.Sprintf(`{"userId":"u-1","accessJwt":%q,"accessJwtExpiry":%d,"refreshJwt":"r"}`, f.mint(), expiry))
 
-	case r.URL.Path == "/api/v4/query_range":
+	case !f.spaAll && (r.URL.Path == "/api/v4/query_range" || r.URL.Path == "/api/v3/autocomplete/attribute_keys"):
 		f.queryHits.Add(1)
+		if key := r.Header.Get(apiKeyHeader); key != "" {
+			switch {
+			case key != f.apiKey:
+				writeJSON(w, http.StatusUnauthorized, `{"status":"error","errorType":"unauthorized","error":"found zero or multiple PATs with same token"}`)
+			case f.keyForbidden:
+				writeJSON(w, http.StatusForbidden, `{"status":"error","error":{"type":"forbidden","code":"forbidden","message":"forbidden"}}`)
+			default:
+				writeJSON(w, http.StatusOK, `{"status":"success","data":{"result":[],"attributeKeys":[]}}`)
+			}
+			return
+		}
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if f.queryAlways401 || f.reject401Next.CompareAndSwap(true, false) || !f.valid(tok) {
 			writeJSON(w, http.StatusUnauthorized, `{"status":"error","error":{"type":"unauthenticated","code":"unauthenticated","message":"unauthenticated"}}`)
 			return
 		}
-		writeJSON(w, http.StatusOK, `{"status":"success","data":{"result":[]}}`)
+		writeJSON(w, http.StatusOK, `{"status":"success","data":{"result":[],"attributeKeys":[]}}`)
 
 	case f.spaAll:
 		writeSPA(w)
@@ -417,4 +432,105 @@ func TestLogin_PrunesExpiredEntries(t *testing.T) {
 	defer tokenMu.Unlock()
 	assert.NotContains(t, tokenCache, "stale|entry")
 	assert.Contains(t, tokenCache, cacheKey(creds))
+}
+
+const testAPIKey = "key-1"
+
+func keyCreds(srvURL string) Credentials {
+	// Stale password-type values are present on purpose: a row switched to API
+	// keys keeps them, and they must not be used.
+	return Credentials{BaseURL: srvURL, AuthType: AuthAPIKey, APIKey: testAPIKey, Email: "admin@example.com", Password: testPassword}
+}
+
+func TestDo_APIKeySendsKeyAndNeverLogsIn(t *testing.T) {
+	for name, f := range map[string]*fakeSignoz{"legacy": legacy(), "modern": modern()} {
+		t.Run(name, func(t *testing.T) {
+			f.apiKey = testAPIKey
+			srv, _ := serve(t, f)
+
+			resp, err := Do(context.Background(), http.DefaultClient, keyCreds(srv.URL), http.MethodPost, "/api/v4/query_range", []byte(`{}`))
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Zero(t, f.contextHits.Load()+f.v1Hits.Load()+f.v2Hits.Load(), "an API key must not trigger a login")
+		})
+	}
+}
+
+func TestDo_APIKey401IsNotRetried(t *testing.T) {
+	f := modern()
+	f.apiKey = "a-different-key"
+	srv, _ := serve(t, f)
+
+	resp, err := Do(context.Background(), http.DefaultClient, keyCreds(srv.URL), http.MethodPost, "/api/v4/query_range", []byte(`{}`))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, int32(1), f.queryHits.Load())
+	assert.Zero(t, f.v1Hits.Load()+f.v2Hits.Load(), "a rejected key must not fall back to the stale password")
+}
+
+func TestDo_PasswordAuthIgnoresStaleAPIKey(t *testing.T) {
+	f := modern()
+	f.apiKey = testAPIKey
+	_, creds := serve(t, f)
+	creds.AuthType = AuthPassword
+	creds.APIKey = testAPIKey // left over from before the row switched back to password
+
+	resp, err := Do(context.Background(), http.DefaultClient, creds, http.MethodPost, "/api/v4/query_range", []byte(`{}`))
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, int32(1), f.v2Hits.Load(), "password auth logs in rather than sending the stale key")
+}
+
+func TestCheckAPIKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		server  *fakeSignoz
+		key     string
+		wantErr error
+	}{
+		{"valid key on legacy", &fakeSignoz{v1: true, apiKey: testAPIKey}, testAPIKey, nil},
+		{"valid key on current", &fakeSignoz{v2: true, v1HTML: true, apiKey: testAPIKey}, testAPIKey, nil},
+		{"wrong key", &fakeSignoz{v2: true, apiKey: testAPIKey}, "nope", ErrInvalidAPIKey},
+		{"key whose role may not read logs", &fakeSignoz{v2: true, apiKey: testAPIKey, keyForbidden: true}, testAPIKey, ErrAPIKeyForbidden},
+		{"URL serves a SPA, not SigNoz", &fakeSignoz{spaAll: true}, testAPIKey, ErrNotSigNozAPI},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := serve(t, tc.server)
+			creds := keyCreds(srv.URL)
+			creds.APIKey = tc.key
+
+			err := CheckAPIKey(context.Background(), http.DefaultClient, creds)
+			if tc.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCheckAPIKey_NotFoundIsNotSigNoz(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+
+	err := CheckAPIKey(context.Background(), http.DefaultClient, keyCreds(srv.URL))
+	assert.ErrorIs(t, err, ErrNotSigNozAPI)
+}
+
+func TestLogin_RefusesAPIKeyCredentials(t *testing.T) {
+	f := modern()
+	srv, _ := serve(t, f)
+
+	_, err := Login(context.Background(), http.DefaultClient, keyCreds(srv.URL))
+	assert.ErrorIs(t, err, errAPIKeyLogin)
+	_, err = LoginFresh(context.Background(), http.DefaultClient, keyCreds(srv.URL))
+	assert.ErrorIs(t, err, errAPIKeyLogin)
+	assert.Zero(t, f.contextHits.Load()+f.v1Hits.Load()+f.v2Hits.Load())
 }

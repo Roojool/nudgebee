@@ -25,6 +25,10 @@ const (
 
 	SignozModeSelfHosted = "self_hosted"
 	SignozModeCloud      = signozclient.ModeCloud
+
+	SignozAuthTypeKey      = "signoz_auth_type"
+	SignozAuthTypePassword = signozclient.AuthPassword
+	SignozAuthTypeAPIKey   = signozclient.AuthAPIKey
 )
 
 type Signoz struct {
@@ -40,9 +44,15 @@ func (m Signoz) ValidateConfig(ctx *security.SecurityContext, values []core.Inte
 	url := normalizeSignozURL(rawURL)
 	username := strings.TrimSpace(configMap["signoz_username"])
 	password := configMap["signoz_password"]
+	apiKey := strings.TrimSpace(configMap["signoz_api_key"])
 	mode := strings.TrimSpace(configMap["signoz_mode"])
 	if mode == "" {
 		mode = SignozModeSelfHosted
+	}
+	// Rows saved before API-key auth have no auth type: they are password rows.
+	authType := strings.TrimSpace(configMap[SignozAuthTypeKey])
+	if authType == "" {
+		authType = SignozAuthTypePassword
 	}
 
 	var errs []error
@@ -59,11 +69,20 @@ func (m Signoz) ValidateConfig(ctx *security.SecurityContext, values []core.Inte
 		// so the user stores a clean base URL rather than silently normalizing.
 		errs = append(errs, fmt.Errorf("signoz_url must not end with a trailing slash — remove it (use %q, not %q)", strings.TrimRight(rawURL, "/"), rawURL))
 	}
-	if username == "" {
-		errs = append(errs, fmt.Errorf("signoz_username is required"))
-	}
-	if password == "" {
-		errs = append(errs, fmt.Errorf("signoz_password is required"))
+	switch authType {
+	case SignozAuthTypePassword:
+		if username == "" {
+			errs = append(errs, fmt.Errorf("signoz_username is required"))
+		}
+		if password == "" {
+			errs = append(errs, fmt.Errorf("signoz_password is required"))
+		}
+	case SignozAuthTypeAPIKey:
+		if apiKey == "" {
+			errs = append(errs, fmt.Errorf("signoz_api_key is required"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("%s must be %q or %q", SignozAuthTypeKey, SignozAuthTypePassword, SignozAuthTypeAPIKey))
 	}
 	if mode != SignozModeSelfHosted && mode != SignozModeCloud {
 		errs = append(errs, fmt.Errorf("signoz_mode must be %q or %q", SignozModeSelfHosted, SignozModeCloud))
@@ -72,7 +91,15 @@ func (m Signoz) ValidateConfig(ctx *security.SecurityContext, values []core.Inte
 		return errs
 	}
 
-	return validateSignoz(url, username, password, mode)
+	// Only the selected auth type's values go into the credentials: a row that
+	// switched type still stores the other type's (now hidden) values.
+	creds := signozclient.Credentials{BaseURL: url, AuthType: authType, Mode: mode}
+	if authType == SignozAuthTypeAPIKey {
+		creds.APIKey = apiKey
+	} else {
+		creds.Email, creds.Password = username, password
+	}
+	return validateSignoz(creds)
 }
 
 // normalizeSignozURL trims whitespace and strips any path/query/fragment so
@@ -90,21 +117,27 @@ func normalizeSignozURL(raw string) string {
 	return parsed.Scheme + "://" + parsed.Host
 }
 
-// validateSignoz logs in exactly the way queries will: signozclient detects
-// the login API on self-hosted, so legacy (v1 login) and current (v2
-// sessions) SigNoz releases both validate, with no version cap to maintain.
-// It bypasses the token cache so a Test click always proves the credentials.
-func validateSignoz(url, username, password, mode string) []error {
-	tok, err := signozclient.LoginFresh(context.Background(), common.HttpClient(), signozclient.Credentials{
-		BaseURL:  url,
-		Email:    username,
-		Password: password,
-		Mode:     mode,
-	})
-	if err != nil {
-		return []error{signozValidationError(url, username, err)}
+// validateSignoz authenticates exactly the way queries will. A password logs
+// in through signozclient, which detects the login API on self-hosted, so
+// legacy (v1 login) and current (v2 sessions) SigNoz releases both validate,
+// with no version cap to maintain; it bypasses the token cache so a Test click
+// always proves the credentials. An API key is proven by a logs read through
+// the same request path queries use.
+func validateSignoz(creds signozclient.Credentials) []error {
+	ctx, hc := context.Background(), common.HttpClient()
+	auth := creds.AuthType
+	if creds.AuthType == SignozAuthTypeAPIKey {
+		if err := signozclient.CheckAPIKey(ctx, hc, creds); err != nil {
+			return []error{signozValidationError(creds.BaseURL, creds.Email, err)}
+		}
+	} else {
+		tok, err := signozclient.LoginFresh(ctx, hc, creds)
+		if err != nil {
+			return []error{signozValidationError(creds.BaseURL, creds.Email, err)}
+		}
+		auth = tok.Flavor
 	}
-	slog.Info("signoz: integration validated", "url", url, "mode", mode, "auth", tok.Flavor, "version", signozVersion(url))
+	slog.Info("signoz: integration validated", "url", creds.BaseURL, "mode", creds.Mode, "auth", auth, "version", signozVersion(creds.BaseURL))
 	return nil
 }
 
@@ -119,9 +152,13 @@ func signozValidationError(url, username string, err error) error {
 	case errors.Is(err, signozclient.ErrUnknownUser):
 		return fmt.Errorf("SigNoz at %s has no user %s", url, username)
 	case errors.Is(err, signozclient.ErrPasswordAuthDisabled):
-		return fmt.Errorf("the SigNoz organization of %s allows SSO login only — use a SigNoz user with email/password login enabled", username)
+		return fmt.Errorf("the SigNoz organization of %s allows SSO login only — switch the authentication type to API key, or use a SigNoz user with email/password login enabled", username)
 	case errors.As(err, &rejected):
 		return fmt.Errorf("SigNoz rejected the login request: %s", rejected.Message)
+	case errors.Is(err, signozclient.ErrInvalidAPIKey):
+		return fmt.Errorf("invalid SigNoz API key")
+	case errors.Is(err, signozclient.ErrAPIKeyForbidden):
+		return fmt.Errorf("the SigNoz API key is valid but not allowed to read logs — give its service account (or token) at least the Viewer role")
 	default:
 		return err
 	}
@@ -158,8 +195,11 @@ func (m Signoz) Category() core.IntegrationCategory {
 
 func (m Signoz) ConfigSchema() core.IntegrationSchema {
 	return core.IntegrationSchema{
-		Type:     core.ToolSchemaTypeObject,
-		Required: []string{"signoz_url", "signoz_username", "signoz_password", "signoz_mode"},
+		Type: core.ToolSchemaTypeObject,
+		// Credentials are required per auth type (RequiredWhen + ValidateConfig),
+		// not here: the form drops hidden fields from the payload, and the
+		// server checks Required by field name.
+		Required: []string{"signoz_url", "signoz_mode"},
 		Testable: true,
 		Properties: map[string]core.IntegrationSchemaProperty{
 			"signoz_mode": {
@@ -176,18 +216,39 @@ func (m Signoz) ConfigSchema() core.IntegrationSchema {
 				Priority:    85,
 				IsTestable:  true,
 			},
-			"signoz_username": {
+			SignozAuthTypeKey: {
 				Type:        core.ToolSchemaTypeString,
-				Description: "Email/username for authenticating with SigNoz.",
-				Priority:    72,
+				Description: "How Nudgebee authenticates to SigNoz: a user's email and password, or a SigNoz API key.",
+				Default:     SignozAuthTypePassword,
+				Enum:        []any{SignozAuthTypePassword, SignozAuthTypeAPIKey},
+				Priority:    80,
 				IsTestable:  true,
 			},
+			"signoz_username": {
+				Type:         core.ToolSchemaTypeString,
+				Description:  "Email/username for authenticating with SigNoz.",
+				Priority:     72,
+				IsTestable:   true,
+				ShowWhen:     map[string]any{SignozAuthTypeKey: SignozAuthTypePassword},
+				RequiredWhen: map[string]any{SignozAuthTypeKey: SignozAuthTypePassword},
+			},
 			"signoz_password": {
-				Type:        core.ToolSchemaTypeString,
-				Description: "Password for authenticating with SigNoz.",
-				IsEncrypted: true,
-				Priority:    70,
-				IsTestable:  true,
+				Type:         core.ToolSchemaTypeString,
+				Description:  "Password for authenticating with SigNoz.",
+				IsEncrypted:  true,
+				Priority:     70,
+				IsTestable:   true,
+				ShowWhen:     map[string]any{SignozAuthTypeKey: SignozAuthTypePassword},
+				RequiredWhen: map[string]any{SignozAuthTypeKey: SignozAuthTypePassword},
+			},
+			"signoz_api_key": {
+				Type:         core.ToolSchemaTypeString,
+				Description:  "SigNoz API key, sent as the SIGNOZ-API-KEY header. Current SigNoz and SigNoz Cloud: Settings → Service Accounts → add a key (Viewer role is enough for logs). Older self-hosted releases: Settings → Access Tokens.",
+				IsEncrypted:  true,
+				Priority:     70,
+				IsTestable:   true,
+				ShowWhen:     map[string]any{SignozAuthTypeKey: SignozAuthTypeAPIKey},
+				RequiredWhen: map[string]any{SignozAuthTypeKey: SignozAuthTypeAPIKey},
 			},
 			core.IntegrationConfigName: {
 				Type:             core.ToolSchemaTypeString,
