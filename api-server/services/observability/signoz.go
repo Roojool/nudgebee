@@ -664,8 +664,8 @@ func (s *SignozSource) QueryLogGroup(ctx *security.RequestContext, req FetchLogG
 						},
 						"groupBy": []map[string]any{
 							{"key": "severity_text", "dataType": "string", "type": "tag", "isColumn": false},
-							{"key": "k8s_namespace_name", "dataType": "string", "type": "resource", "isColumn": false},
-							{"key": "k8s_pod_name", "dataType": "string", "type": "resource", "isColumn": false},
+							{"key": signozNamespaceKey, "dataType": "string", "type": "resource", "isColumn": false},
+							{"key": signozPodKey, "dataType": "string", "type": "resource", "isColumn": false},
 						},
 						"legend":   "",
 						"reduceTo": "avg",
@@ -705,14 +705,14 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 
 	if selectedNamespace != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_namespace_name"},
+			"key":   map[string]string{"key": signozNamespaceKey},
 			"value": selectedNamespace,
 			"op":    "=",
 		})
 	}
 	if selectedWorkload != "" {
 		filters = append(filters, map[string]any{
-			"key":   map[string]string{"key": "k8s_pod_name"},
+			"key":   map[string]string{"key": signozPodKey},
 			"value": selectedWorkload,
 			"op":    "contains",
 		})
@@ -769,10 +769,10 @@ func (s *SignozSource) parseSignozLogGroupResponse(resp map[string]any, endTime 
 		group := LogGroup{}
 
 		// Map Signoz label names to standard names
-		if ns := labelMap["k8s_namespace_name"]; ns != "" {
+		if ns := firstNonEmpty(labelMap[signozNamespaceKey], labelMap[signozLegacyNamespaceKey]); ns != "" {
 			group.Namespace = ns
 		}
-		if pod := labelMap["k8s_pod_name"]; pod != "" {
+		if pod := firstNonEmpty(labelMap[signozPodKey], labelMap[signozLegacyPodKey]); pod != "" {
 			group.Workload = extractWorkloadFromPodName(pod)
 			group.Sample = pod // Use pod name as sample since Signoz groups by pod, not message
 		}
