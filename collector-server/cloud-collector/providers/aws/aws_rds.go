@@ -793,7 +793,11 @@ func (a *amazonRds) GetResources(ctx providers.CloudProviderContext, account pro
 		ctx.GetLogger().Error("failed to create aws session", "error", err, "accountNumber", account.AccountNumber, "region", region)
 		return []providers.Resource{}, err
 	}
-	svc := rds.NewFromConfig(cfg)
+	// Only the RDS client is regional. cfg keeps its own region for the pricing
+	// lookups below, because the price list API is not served from every region.
+	regionalCfg := cfg.Copy()
+	regionalCfg.Region = region
+	svc := rds.NewFromConfig(regionalCfg)
 	resources := []providers.Resource{}
 	instanceTypeMap := make(map[string]map[string]any) // Cache for pricing details
 
@@ -2454,6 +2458,9 @@ func (a *amazonRds) DescribeResource(ctx providers.CloudProviderContext, account
 	cfg, err := getAwsConfigFromAccount(ctx.GetContext(), account)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create aws session: %w", err)
+	}
+	if region != "" {
+		cfg.Region = region
 	}
 
 	rdsSvc := rds.NewFromConfig(cfg)

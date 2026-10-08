@@ -971,6 +971,7 @@ func (a *awsElb) GetServiceMap(ctx providers.CloudProviderContext, account provi
 		ctx.GetLogger().Error("failed to create aws session", "error", err, "accountNumber", account.AccountNumber)
 		return providers.ServiceMapApplication{}, err
 	}
+	cfg.Region = region
 	app := providers.ServiceMapApplication{
 		Id: providers.ServiceApplicationId{
 			Name:      resourceId,
@@ -1058,6 +1059,9 @@ func (a *awsElb) DescribeResource(ctx providers.CloudProviderContext, account pr
 	cfg, err := getAwsConfigFromAccount(ctx.GetContext(), account)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create aws session: %w", err)
+	}
+	if region != "" {
+		cfg.Region = region
 	}
 
 	elbv2Svc := elbv2.NewFromConfig(cfg)
