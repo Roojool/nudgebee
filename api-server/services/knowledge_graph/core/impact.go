@@ -42,6 +42,7 @@ var flowObservationSources = map[string]bool{
 	"gcp-cloud-traces": true,
 	"datadog-apm":      true,
 	"newrelic-apm":     true,
+	"elastic-apm":      true,
 }
 
 // ImpactedService is one dependent of a resource: an application-level node that

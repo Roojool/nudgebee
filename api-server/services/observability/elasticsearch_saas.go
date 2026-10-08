@@ -197,6 +197,10 @@ func validateESConfig(cfg *ElasticsearchConfig) error {
 	return nil
 }
 
+// ErrNoElasticsearchIntegration means the account has no user-configured
+// Elasticsearch integration — a normal state for callers that probe every account.
+var ErrNoElasticsearchIntegration = errors.New("no elasticsearch integrations found")
+
 func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*ElasticsearchConfig, error) {
 	integrationDto, err := core.ListIntegrationConfigs(ctx, accountId, "ES")
 	if err != nil {
@@ -212,7 +216,7 @@ func GetElasticsearchConfig(ctx *security.RequestContext, accountId string) (*El
 		}
 	}
 	if len(userIntegrations) == 0 {
-		return nil, errors.New("no elasticsearch integrations found")
+		return nil, ErrNoElasticsearchIntegration
 	}
 
 	integration := userIntegrations[0]
@@ -351,12 +355,18 @@ var esSkipVerifyClient = func() *http.Client {
 
 // esRequest executes an HTTP request to OpenSearch with the configured auth method.
 func esRequest(method, rawURL, body string, cfg *ElasticsearchConfig) (*http.Response, error) {
+	return esRequestCtx(context.Background(), method, rawURL, body, cfg)
+}
+
+// esRequestCtx is esRequest bound to ctx, so a caller that is itself cancellable (a
+// knowledge-graph build) stops waiting on Elasticsearch when it is cancelled.
+func esRequestCtx(ctx context.Context, method, rawURL, body string, cfg *ElasticsearchConfig) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
 
-	req, err := http.NewRequest(method, rawURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

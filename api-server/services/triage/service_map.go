@@ -135,6 +135,7 @@ var observedSourcesForWeighting = map[string]bool{
 	"traces":           true,
 	"datadog-apm":      true,
 	"newrelic-apm":     true,
+	"elastic-apm":      true,
 	"cloud":            true, // CentralizedExternalServiceEnricher edges
 	"cloud_enrichment": true,
 	"dns_resolver":     true,
