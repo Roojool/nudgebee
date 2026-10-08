@@ -635,7 +635,7 @@ func buildSignozSaasLogGroupFilters(req FetchLogGroupRequest) []map[string]any {
 	filters := []map[string]any{
 		{
 			"key":   map[string]string{"key": "severity_text"},
-			"value": []string{"ERROR", "CRITICAL", "FATAL", "error", "critical", "fatal"},
+			"value": signozErrorSeverities(),
 			"op":    "in",
 		},
 	}

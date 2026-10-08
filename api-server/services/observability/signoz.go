@@ -10,6 +10,7 @@ import (
 	"nudgebee/services/security"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -107,6 +108,90 @@ func signozSeriesPoints(series map[string]any, endTimeMs int64) ([]int64, []floa
 // signozSeriesPoints converts bucket starts to bucket ends with it.
 const signozLogGroupStepSeconds = 3600
 
+// signozSeverityKey is the SigNoz column canonical `level`/`severity` map to.
+const signozSeverityKey = "severity_text"
+
+// signozSeverityGroups maps each level mapSeverity DISPLAYS to the stored
+// severity_text spellings it displays them from (WARNING and WARN both show as
+// "warn"). TestSignozSeverityGroupsMatchDisplay keeps the two in step.
+var signozSeverityGroups = map[string][]string{
+	"debug": {"debug", "trace"},
+	"info":  {"info", "information"},
+	"warn":  {"warn", "warning"},
+	"error": {"error"},
+	"fatal": {"fatal", "critical"},
+}
+
+// signozSeverityFilter makes an equality or membership filter on severity_text
+// match every stored spelling of the level it names. SigNoz compares
+// severity_text case-sensitively and stores what the shipper sent (usually
+// "ERROR"), while Nudgebee displays the level lowercased and folded (mapSeverity),
+// so a filter copied from the screen — `level = error`, `level = warn` — matched
+// nothing: Nubi answered "0 ERROR logs" over logs that existed. A displayed level
+// expands to every stored spelling it is displayed from; any other value (an
+// explicit stored name such as "trace") only to its own case variants. Eq/Neq
+// become in/not-in over the expanded set. Anything else — other operators, a
+// non-string or empty value — is returned exactly as given.
+func signozSeverityFilter(op query.BinaryWhereClauseType, value any) (query.BinaryWhereClauseType, any) {
+	var values []any
+	newOp := op
+	unchanged := value // what an early return hands back
+	switch op {
+	case Eq, EqF:
+		newOp, values = In, []any{value}
+	case Nq, NqF:
+		newOp, values = NotIn, []any{value}
+	case In, NotIn:
+		switch v := value.(type) {
+		case []any:
+			values = v
+		case []string:
+			for _, s := range v {
+				values = append(values, s)
+			}
+			unchanged = values // FlattenSignozQuery only accepts []any for in/nin
+		default:
+			return op, value
+		}
+	default:
+		return op, value
+	}
+
+	seen := map[string]bool{}
+	var expanded []any
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			expanded = append(expanded, s)
+		}
+	}
+	for _, v := range values {
+		str, ok := v.(string)
+		if !ok || str == "" {
+			return op, unchanged
+		}
+		names, displayed := signozSeverityGroups[strings.ToLower(str)]
+		if !displayed {
+			names = []string{strings.ToLower(str)}
+		}
+		add(str)
+		for _, name := range names {
+			add(name)
+			add(strings.ToUpper(name))
+			first, size := utf8.DecodeRuneInString(name)
+			add(string(unicode.ToUpper(first)) + name[size:])
+		}
+	}
+	return newOp, expanded
+}
+
+// signozErrorSeverities is every stored severity_text spelling of the levels the
+// log-group queries count (error and fatal), from the same table filters use.
+func signozErrorSeverities() []any {
+	_, v := signozSeverityFilter(In, []any{"error", "fatal"})
+	return v.([]any)
+}
+
 // signozNumber accepts a finite JSON number or numeric string. NaN and ±Inf
 // (ParseFloat accepts "NaN"/"Inf") are rejected: int64(math.Round(NaN)) is an
 // implementation-defined garbage count.
@@ -177,6 +262,9 @@ func FlattenSignozQuery(q query.QueryWhereClause) ([]FlattenedClause, error) {
 	// Handle binary clause
 	for field, conds := range q.Binary {
 		for op, value := range conds {
+			if field == signozSeverityKey {
+				op, value = signozSeverityFilter(op, value)
+			}
 			var signozOp string
 			switch op {
 			case Eq, EqF:
@@ -794,7 +882,7 @@ func (s *SignozSource) buildLogGroupFilters(req FetchLogGroupRequest) []map[stri
 	filters := []map[string]any{
 		{
 			"key":   map[string]string{"key": "severity_text"},
-			"value": []string{"ERROR", "CRITICAL", "FATAL", "error", "critical", "fatal"},
+			"value": signozErrorSeverities(),
 			"op":    "in",
 		},
 	}

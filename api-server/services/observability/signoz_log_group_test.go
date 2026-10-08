@@ -1,7 +1,10 @@
 package observability
 
 import (
+	"strings"
 	"testing"
+
+	"nudgebee/services/query"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -190,4 +193,92 @@ func TestLogGroupTimestampSeconds(t *testing.T) {
 	normalizeLogGroupTimestamps(&out)
 	assert.Equal(t, []int64{sec, sec}, out.Groups[0].Timestamps)
 	assert.Equal(t, []int64{sec}, out.Groups[1].Timestamps)
+}
+
+// Nudgebee shows SigNoz levels lowercased and folded (WARNING -> warn), so the
+// filters Nubi and the UI build use those spellings; SigNoz compares severity_text
+// case-sensitively against what the shipper stored ("ERROR"). An equality filter
+// must match every stored spelling of the level it names.
+func TestSignozSeverityFilter(t *testing.T) {
+	op, v := signozSeverityFilter(Eq, "error")
+	assert.Equal(t, In, op)
+	assert.ElementsMatch(t, []any{"error", "ERROR", "Error"}, v)
+
+	op, v = signozSeverityFilter(Eq, "warn")
+	assert.Equal(t, In, op)
+	assert.ElementsMatch(t, []any{"warn", "WARN", "Warn", "warning", "WARNING", "Warning"}, v)
+
+	op, v = signozSeverityFilter(Nq, "fatal")
+	assert.Equal(t, NotIn, op)
+	assert.Contains(t, v, "CRITICAL")
+
+	op, v = signozSeverityFilter(In, []any{"info", "ERROR"})
+	assert.Equal(t, In, op)
+	assert.Subset(t, v, []any{"INFO", "INFORMATION", "error", "ERROR"})
+
+	// Other operators pass through untouched.
+	op, v = signozSeverityFilter(Contains, "err")
+	assert.Equal(t, Contains, op)
+	assert.Equal(t, "err", v)
+}
+
+func TestFlattenSignozQuery_SeverityIsCaseInsensitive(t *testing.T) {
+	clauses, err := FlattenSignozQuery(query.QueryWhereClause{Binary: query.BinaryWhereClause{signozSeverityKey: {Eq: "error"}}})
+	require.NoError(t, err)
+	require.Len(t, clauses, 1)
+	assert.Equal(t, "in", clauses[0].Op)
+	assert.ElementsMatch(t, []any{"error", "ERROR", "Error"}, clauses[0].Value)
+}
+
+// The review regressions: an empty or non-string level must reach SigNoz exactly
+// as before (it used to panic / fail flattening), and an explicit stored name is
+// not widened to its whole display group.
+func TestSignozSeverityFilter_EdgeCases(t *testing.T) {
+	op, v := signozSeverityFilter(Eq, "")
+	assert.Equal(t, Eq, op)
+	assert.Equal(t, "", v)
+
+	op, v = signozSeverityFilter(Eq, 17)
+	assert.Equal(t, Eq, op)
+	assert.Equal(t, 17, v)
+
+	op, v = signozSeverityFilter(Eq, "trace")
+	assert.Equal(t, In, op)
+	assert.ElementsMatch(t, []any{"trace", "TRACE", "Trace"}, v, "trace stays trace; only displayed names widen")
+
+	op, v = signozSeverityFilter(In, []string{"error"})
+	assert.Equal(t, In, op)
+	assert.ElementsMatch(t, []any{"error", "ERROR", "Error"}, v)
+}
+
+// signozSeverityGroups must agree with what mapSeverity displays, or the filter
+// and the screen drift apart again.
+func TestSignozSeverityGroupsMatchDisplay(t *testing.T) {
+	for displayed, stored := range signozSeverityGroups {
+		for _, name := range stored {
+			assert.Equal(t, displayed, (&SignozSource{}).mapSeverity(strings.ToUpper(name), 0), "agent source: %q", name)
+			assert.Equal(t, displayed, (&SignozSaasSource{}).mapSeverity(strings.ToUpper(name), 0), "user source: %q", name)
+		}
+	}
+}
+
+func TestSignozLogGroupFilters_CountEveryErrorSpelling(t *testing.T) {
+	for name, filters := range map[string][]map[string]any{
+		"user source":  buildSignozSaasLogGroupFilters(FetchLogGroupRequest{}),
+		"agent source": (&SignozSource{}).buildLogGroupFilters(FetchLogGroupRequest{}),
+	} {
+		assert.Subset(t, filters[0]["value"], []any{"ERROR", "Error", "error", "FATAL", "Critical"}, name)
+	}
+}
+
+func TestSignozSeverityFilter_StringSliceAndUnicode(t *testing.T) {
+	// A []string list with an unusable element is returned as []any, which is the
+	// only list type FlattenSignozQuery accepts.
+	op, v := signozSeverityFilter(In, []string{"error", ""})
+	assert.Equal(t, In, op)
+	assert.Equal(t, []any{"error", ""}, v)
+
+	// Title-casing a non-display value is rune-aware.
+	_, v = signozSeverityFilter(Eq, "élevé")
+	assert.Contains(t, v, "Élevé")
 }
