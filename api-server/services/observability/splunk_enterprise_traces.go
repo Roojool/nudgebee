@@ -225,27 +225,6 @@ func stripSplunkEnterpriseUnsupportedTraceFields(binary query.BinaryWhereClause)
 func prepareSplunkEnterpriseTraceGroup(binary query.BinaryWhereClause) (query.BinaryWhereClause, int, error) {
 	kept, dropped := stripSplunkEnterpriseUnsupportedTraceFields(binary)
 
-	if ops, ok := kept["trace_source"]; ok {
-		// Every span a Splunk index holds came from an OpenTelemetry exporter, so
-		// trace_source="otel" is always true (the service map sends it on every query)
-		// and anything else can never match. Dropping the tautology is what the New
-		// Relic and Datadog sources do; the impossible value fails loudly rather than
-		// rendering a bare field that silently matches nothing.
-		for op, v := range ops {
-			if op != query.Eq || !strings.EqualFold(fmt.Sprintf("%v", v), "otel") {
-				return nil, 0, fmt.Errorf(
-					"splunk enterprise: trace_source %s %v cannot match - every Splunk span is an OpenTelemetry span", op, v)
-			}
-		}
-		rest := make(query.BinaryWhereClause, len(kept)-1)
-		for field, fieldOps := range kept {
-			if field != "trace_source" {
-				rest[field] = fieldOps
-			}
-		}
-		kept = rest
-	}
-
 	if _, ok := kept["duration_ns"]; ok {
 		// Duration is end_time - start_time, computed after the search; the search
 		// clause has no field to compare, and rendering it bare would match no span.

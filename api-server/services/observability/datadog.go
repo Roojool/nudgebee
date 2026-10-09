@@ -926,10 +926,8 @@ func extractDatadogTimestampRange(binary query.BinaryWhereClause) (startTime, en
 }
 
 func (s *DatadogTraceSource) QueryTraces(sc *security.RequestContext, tracesRequest TracesV3Request) ([]common.OpenTelemetryTrace, error) {
-	// temp handling to be removed in future
-	if tracesRequest.QueryRequest.Where.Binary["trace_source"] != nil {
-		delete(tracesRequest.QueryRequest.Where.Binary, "trace_source")
-	}
+	// temp handling to be removed in future. trace_source never reaches here: the
+	// dispatch layer evaluates it (allProviderCaps TraceSource).
 	if tracesRequest.QueryRequest.Where.Binary["destination_workload_name"] != nil {
 		delete(tracesRequest.QueryRequest.Where.Binary, "destination_workload_name")
 	}

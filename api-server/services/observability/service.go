@@ -407,6 +407,9 @@ func getLogGroupSourceForAccount(ctx *security.RequestContext, accountId string,
 	return source, err
 }
 
+// getTraceSource maps a provider to its trace reader. Adding a provider here means adding
+// it to traceProviders (trace_source_filter_test.go) and declaring its trace_source
+// behaviour in allProviderCaps; TestEveryTraceProviderDeclaresTraceSource enforces both.
 func getTraceSource(provider, integrationSource string) (TraceSource, error) {
 	if integrationSource == "" {
 		integrationSource = "agent"
@@ -1991,6 +1994,17 @@ type providerStaticCaps struct {
 	SupportsHeatmap                bool
 	SupportsCrossZoneCommunication bool
 	SupportsRawQuery               bool
+	// TraceSource is the trace_source value every span from this trace provider carries
+	// ("otel": none came from the nudgebee node agent). When set, the dispatch layer
+	// evaluates a trace_source filter itself (resolveTraceSourceFilter) instead of
+	// sending a field the provider does not have.
+	TraceSource string
+	// TraceSourcePassthrough hands a trace_source filter to the reader unchanged.
+	// ClickHouse evaluates it in SQL. Chronosphere, Jaeger and GCP ignore it today — a
+	// known gap: Chronosphere can hold eBPF spans, so no constant is true for it. Every
+	// trace provider sets exactly one of TraceSource and TraceSourcePassthrough
+	// (TestEveryTraceProviderDeclaresTraceSource).
+	TraceSourcePassthrough bool
 }
 
 var allProviderCaps = map[string]providerStaticCaps{
@@ -1999,30 +2013,35 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"newrelic": {
 		SupportsServiceMap:    true,
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"dynatrace": {
 		SupportsServiceMap:    false,
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"splunk_observability_platform": {
 		SupportsServiceMap:    true,
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"solarwinds": {
 		SupportsServiceMap:    false,
 		SupportsRawQuery:      false,
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
+		TraceSource:           "otel",
 	},
 	"azure_app_insights": {
 		SupportsServiceMap: true,
@@ -2030,12 +2049,14 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsHeatmap:       false,
 		SupportsTraceGrouping: false,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"jaeger": {
-		SupportsServiceMap:    false,
-		SupportsTraceGrouping: true,
-		SupportsHeatmap:       true,
-		SupportsRawQuery:      false,
+		SupportsServiceMap:     false,
+		SupportsTraceGrouping:  true,
+		SupportsHeatmap:        true,
+		SupportsRawQuery:       false,
+		TraceSourcePassthrough: true,
 	},
 	"signoz": {
 		SupportsServiceMap:    true,
@@ -2051,12 +2072,14 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsServiceMap:    true,
 		SupportsTraceGrouping: true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
 	},
 	"otel_clickhouse": {
-		SupportsServiceMap:    true,
-		SupportsTraceGrouping: true,
-		SupportsHeatmap:       true,
-		SupportsRawQuery:      true,
+		SupportsServiceMap:     true,
+		SupportsTraceGrouping:  true,
+		SupportsHeatmap:        true,
+		SupportsRawQuery:       true,
+		TraceSourcePassthrough: true,
 	},
 	"observe": {
 		SupportsServiceMap:    true,
@@ -2076,9 +2099,10 @@ var allProviderCaps = map[string]providerStaticCaps{
 	"chronosphere": {
 		SupportsServiceMap: true,
 		// QueryGroupedTraces returns "grouped traces not supported"
-		SupportsTraceGrouping: false,
-		SupportsHeatmap:       true,
-		SupportsRawQuery:      false,
+		SupportsTraceGrouping:  false,
+		SupportsHeatmap:        true,
+		SupportsRawQuery:       false,
+		TraceSourcePassthrough: true,
 	},
 	"prometheus": {
 		SupportsServiceMap: true,
@@ -2102,6 +2126,7 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsRawQuery:      true,
 		SupportsHeatmap:       true,
 		SupportsTraceGrouping: true,
+		TraceSource:           "otel",
 	},
 	"cubeapm": {
 		SupportsServiceMap: true,
@@ -2112,6 +2137,7 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsHeatmap:       true,
 		// LogsQL for logs, PromQL for metrics — both are user-writable in Code mode.
 		SupportsRawQuery: true,
+		TraceSource:      "otel",
 	},
 	"openobserve": {
 		SupportsServiceMap: true,
@@ -2121,6 +2147,11 @@ var allProviderCaps = map[string]providerStaticCaps{
 		// even though the data is available.
 		SupportsHeatmap:       true,
 		SupportsTraceGrouping: false,
+		TraceSource:           "otel",
+	},
+	// GCP Cloud Trace: no other capability is declared for it.
+	"gcp": {
+		TraceSourcePassthrough: true,
 	},
 }
 
@@ -2444,6 +2475,11 @@ func GetTracesLabelValues(context *security.RequestContext, labelValuesRequest T
 	filteringMap := getMergedTraceLabelMapping(context, labelValuesRequest.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	labelValuesRequest.QueryRequest.Where = convertWhereClauseWithMApping(labelValuesRequest.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, labelValuesRequest.AccountId, traceProvider, &labelValuesRequest.QueryRequest.Where); err != nil {
+		return common.OpenTelemetryTraceLabelValues{}, err
+	} else if msg != "" {
+		return common.OpenTelemetryTraceLabelValues{}, nil
+	}
 
 	return source.GetLabelValues(context, labelValuesRequest)
 }
@@ -2701,6 +2737,11 @@ func GetGroupedTraces(context *security.RequestContext, TraceQuery TracesV3Reque
 	filteringMap := getMergedTraceLabelMapping(context, TraceQuery.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	TraceQuery.QueryRequest.Where = convertWhereClauseWithMApping(TraceQuery.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, TraceQuery.AccountId, traceProvider, &TraceQuery.QueryRequest.Where); err != nil {
+		return []TraceGroupingValues{}, err
+	} else if msg != "" {
+		return []TraceGroupingValues{}, nil
+	}
 
 	return source.QueryGroupedTraces(context, TraceQuery)
 }
@@ -2732,6 +2773,11 @@ func GetGroupedTracesCount(context *security.RequestContext, TraceQuery TracesV3
 	filteringMap := getMergedTraceLabelMapping(context, TraceQuery.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	TraceQuery.QueryRequest.Where = convertWhereClauseWithMApping(TraceQuery.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, TraceQuery.AccountId, traceProvider, &TraceQuery.QueryRequest.Where); err != nil {
+		return common.OpenTelemetryTraceGroupCount{}, err
+	} else if msg != "" {
+		return common.OpenTelemetryTraceGroupCount{}, nil
+	}
 
 	return source.QueryGroupedTracesCount(context, TraceQuery)
 }
@@ -2785,6 +2831,11 @@ func CountTraces(context *security.RequestContext, fetchTracesRequest TracesV3Re
 	filteringMap := getMergedTraceLabelMapping(context, fetchTracesRequest.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	fetchTracesRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchTracesRequest.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, fetchTracesRequest.AccountId, traceProvider, &fetchTracesRequest.QueryRequest.Where); err != nil {
+		return common.OpenTelemetryTraceCount{}, err
+	} else if msg != "" {
+		return common.OpenTelemetryTraceCount{}, nil
+	}
 
 	return source.CountTraces(context, fetchTracesRequest)
 }
@@ -2826,6 +2877,13 @@ func GetTraces(context *security.RequestContext, fetchTracesRequest TracesV3Requ
 	filteringMap := getMergedTraceLabelMapping(context, fetchTracesRequest.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	fetchTracesRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchTracesRequest.QueryRequest.Where, filteringMap)
+	// A trace_source filter this provider can never satisfy (e.g. eBPF on a provider with
+	// no eBPF spans) returns an explained empty result. Query stays empty: nothing ran.
+	if msg, err := applyTraceSourceFilter(context, fetchTracesRequest.AccountId, traceProvider, &fetchTracesRequest.QueryRequest.Where); err != nil {
+		return TracesResult{Provider: traceProvider}, err
+	} else if msg != "" {
+		return TracesResult{Traces: []common.OpenTelemetryTrace{}, Suggestion: msg, Provider: traceProvider}, nil
+	}
 
 	var referencedLabels map[string]struct{}
 	var referencedValues map[string][]whereFieldValue
@@ -2950,6 +3008,11 @@ func GetRootSpansByTrace(context *security.RequestContext, fetchTracesRequest Tr
 	filteringMap := getMergedTraceLabelMapping(context, fetchTracesRequest.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	fetchTracesRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchTracesRequest.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, fetchTracesRequest.AccountId, traceProvider, &fetchTracesRequest.QueryRequest.Where); err != nil {
+		return []common.OpenTelemetryTrace{}, err
+	} else if msg != "" {
+		return []common.OpenTelemetryTrace{}, nil
+	}
 
 	return source.QueryRootSpansByTrace(context, fetchTracesRequest)
 }
@@ -2984,6 +3047,11 @@ func CountTracesByTrace(context *security.RequestContext, fetchTracesRequest Tra
 	filteringMap := getMergedTraceLabelMapping(context, fetchTracesRequest.AccountId,
 		providerRef{Provider: traceProvider, Source: integrationSource}, source)
 	fetchTracesRequest.QueryRequest.Where = convertWhereClauseWithMApping(fetchTracesRequest.QueryRequest.Where, filteringMap)
+	if msg, err := applyTraceSourceFilter(context, fetchTracesRequest.AccountId, traceProvider, &fetchTracesRequest.QueryRequest.Where); err != nil {
+		return common.OpenTelemetryTraceCount{}, err
+	} else if msg != "" {
+		return common.OpenTelemetryTraceCount{}, nil
+	}
 
 	return source.CountTracesByTrace(context, fetchTracesRequest)
 }
@@ -3083,6 +3151,14 @@ func GetTracesQuery(context *security.RequestContext, fetchTracesRequest TracesV
 	}
 	if err := validateTraceWhere(source, fetchTracesRequest.QueryRequest.Where); err != nil {
 		return "", err
+	}
+	// Same trace_source evaluation as execution. The preview applies no label mapping
+	// (unchanged here), so a trace_source an account has mapped to a real field is
+	// evaluated rather than shown as that field.
+	if msg, err := applyTraceSourceFilter(context, fetchTracesRequest.AccountId, traceProvider, &fetchTracesRequest.QueryRequest.Where); err != nil {
+		return "", err
+	} else if msg != "" {
+		return "", nil
 	}
 
 	return source.GetQuery(context, fetchTracesRequest)

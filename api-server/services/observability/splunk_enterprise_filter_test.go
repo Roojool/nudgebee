@@ -123,10 +123,6 @@ func TestBuildSplunkEnterpriseFilter_Traces(t *testing.T) {
 			`{"_or":[{"_binary":{"workload_name":{"_eq":"ledger"}}},{"_binary":{"destination_workload_namespace":{"_eq":"demo"}}}]}`,
 			`service.name="ledger"`},
 		{"destination_name maps to the peer name", `{"_binary":{"destination_name":{"_eq":"ledger"}}}`, `attributes.net.peer.name="ledger"`},
-		// Every Splunk span is an OTel span, so trace_source=otel is a tautology.
-		{"trace_source otel alone is no restriction", `{"_binary":{"trace_source":{"_eq":"otel"}}}`, ``},
-		{"trace_source otel beside a filter", `{"_binary":{"trace_source":{"_eq":"OTEL"},"destination_workload_name":{"_eq":"payments"}}}`,
-			`attributes.net.peer.name="payments"`},
 		// The UI's operators.
 		{"in on workload", `{"_binary":{"workload_name":{"_in":["ledger","payments"]}}}`, `(service.name="ledger" OR service.name="payments")`},
 		{"like on resource", `{"_binary":{"resource":{"_like":"%/api/%"}}}`, `attributes.http.target="*/api/*"`},
@@ -159,8 +155,6 @@ func TestBuildSplunkEnterpriseFilter_TracesRefuseWhatCannotBeHonoured(t *testing
 		{"emptied group beside a sibling _and", `{"_binary":{"destination_workload_namespace":{"_eq":"demo"}},"_and":[{"_binary":{"workload_name":{"_eq":"ledger"}}}]}`, "no field this schema can express"},
 		{"emptied group beside a sibling _or", `{"_binary":{"destination_workload_namespace":{"_eq":"demo"}},"_or":[{"_binary":{"workload_name":{"_eq":"a"}}},{"_binary":{"workload_name":{"_eq":"b"}}}]}`, "no field this schema can express"},
 		{"emptied group beside a sibling _not", `{"_binary":{"destination_workload_namespace":{"_eq":"demo"}},"_not":{"_binary":{"workload_name":{"_eq":"ledger"}}}}`, "no field this schema can express"},
-		{"trace_source that cannot match", `{"_binary":{"trace_source":{"_eq":"ebpf"}}}`, "cannot match"},
-		{"trace_source negated", `{"_binary":{"trace_source":{"_neq":"otel"}}}`, "cannot match"},
 		{"duration is not a search field", `{"_binary":{"duration_ns":{"_gte":300000000}}}`, "duration_ns is not supported"},
 	}
 	for _, tc := range cases {

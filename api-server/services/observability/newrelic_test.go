@@ -1022,31 +1022,7 @@ func TestGetTimeRange(t *testing.T) {
 		assert.Nil(t, req.QueryRequest.Where.Binary["timestamp"])
 	})
 
-	t.Run("trace_source removed from Binary", func(t *testing.T) {
-		req := TracesV3Request{
-			StartTime: 1704067200,
-			EndTime:   1704070800,
-			QueryRequest: TracesQueryBuilderRequest{
-				Where: query.QueryWhereClause{
-					Binary: query.BinaryWhereClause{
-						"trace_source": {query.Eq: "otel"},
-						"service.name": {query.Eq: "api-service"},
-					},
-				},
-			},
-		}
-
-		start, end := s.getTimeRange(&req)
-
-		assert.Equal(t, int64(1704067200), start)
-		assert.Equal(t, int64(1704070800), end)
-		// trace_source should be removed
-		assert.Nil(t, req.QueryRequest.Where.Binary["trace_source"])
-		// other fields should remain
-		assert.NotNil(t, req.QueryRequest.Where.Binary["service.name"])
-	})
-
-	t.Run("Both timestamp and trace_source removed from Binary", func(t *testing.T) {
+	t.Run("timestamp removed, other fields kept", func(t *testing.T) {
 		req := TracesV3Request{
 			QueryRequest: TracesQueryBuilderRequest{
 				Where: query.QueryWhereClause{
@@ -1055,7 +1031,6 @@ func TestGetTimeRange(t *testing.T) {
 							query.Gte: float64(1704067200000),
 							query.Lte: float64(1704070800000),
 						},
-						"trace_source": {query.Eq: "otel"},
 						"service.name": {query.Eq: "api-service"},
 					},
 				},
@@ -1067,7 +1042,6 @@ func TestGetTimeRange(t *testing.T) {
 		assert.Equal(t, int64(1704067200), start)
 		assert.Equal(t, int64(1704070800), end)
 		assert.Nil(t, req.QueryRequest.Where.Binary["timestamp"])
-		assert.Nil(t, req.QueryRequest.Where.Binary["trace_source"])
 		assert.NotNil(t, req.QueryRequest.Where.Binary["service.name"])
 	})
 

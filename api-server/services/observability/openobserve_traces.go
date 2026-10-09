@@ -306,57 +306,10 @@ func openObserveNanosToMicros(v any) any {
 	return v
 }
 
-// openObserveTraceSource is the pipeline every OpenObserve span comes from. The service map
-// and the traces screen's Source Type filter both send trace_source (otel vs ebpf); there is
-// no such column, so every service-map query failed and the map rendered empty.
-const openObserveTraceSource = "otel"
-
-// resolveOpenObserveTraceSource evaluates a trace_source predicate against the constant
-// source instead of sending it to OpenObserve. It returns the rest of the group and whether
-// the trace_source part holds (true when absent).
-func resolveOpenObserveTraceSource(binary query.BinaryWhereClause) (query.BinaryWhereClause, bool, error) {
-	ops, ok := binary["trace_source"]
-	if !ok {
-		return binary, true, nil
-	}
-	rest := make(query.BinaryWhereClause, len(binary))
-	for field, v := range binary {
-		if field != "trace_source" {
-			rest[field] = v
-		}
-	}
-	holds := true
-	is := func(v any) bool {
-		return strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", v)), openObserveTraceSource)
-	}
-	for op, v := range ops {
-		switch op {
-		case query.Eq:
-			holds = holds && is(v)
-		case query.Nq:
-			holds = holds && !is(v)
-		case query.In, query.NotIn:
-			found := false
-			for _, item := range splitOpenObserveList(v) {
-				found = found || is(item)
-			}
-			holds = holds && (found == (op == query.In))
-		default:
-			return nil, false, fmt.Errorf("openobserve: trace_source supports =, !=, in and not in, not %s", op)
-		}
-	}
-	return rest, holds, nil
-}
-
 func buildOpenObserveTraceWhereClause(where query.QueryWhereClause) (string, error) {
+	// trace_source never reaches here: OpenObserve declares TraceSource "otel" in
+	// allProviderCaps, so the dispatch layer evaluates it.
 	return buildOpenObserveWhere(where, func(b query.BinaryWhereClause) (string, error) {
-		b, holds, err := resolveOpenObserveTraceSource(b)
-		if err != nil {
-			return "", err
-		}
-		if !holds {
-			return "FALSE", nil
-		}
 		if len(b) == 0 {
 			return "TRUE", nil
 		}

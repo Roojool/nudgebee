@@ -477,30 +477,6 @@ func TestOpenObserveLogs_WorkloadFallbackUsesTheStreamSchema(t *testing.T) {
 	}
 }
 
-// The service map filters every query on trace_source = otel; OpenObserve has no such column,
-// so each query failed and the map was empty. The predicate is evaluated against the one
-// source OpenObserve spans come from.
-func TestOpenObserveTraceWhere_TraceSourceIsEvaluated(t *testing.T) {
-	cases := []struct {
-		where query.QueryWhereClause
-		want  string
-	}{
-		{query.QueryWhereClause{Binary: query.BinaryWhereClause{"trace_source": {query.Eq: "otel"}, "workload_name": {query.Eq: "cart"}}}, "service_name = 'cart'"},
-		{openObserveBinary("trace_source", query.Eq, "OTEL"), "TRUE"},
-		{openObserveBinary("trace_source", query.Eq, "ebpf"), "FALSE"},
-		{openObserveBinary("trace_source", query.In, []any{"ebpf", "otel"}), "TRUE"},
-		{openObserveBinary("trace_source", query.NotIn, []any{"otel"}), "FALSE"},
-		{openObserveBinary("trace_source", query.Nq, "ebpf"), "TRUE"},
-	}
-	for _, tc := range cases {
-		sql, err := buildOpenObserveTraceWhereClause(tc.where)
-		require.NoError(t, err)
-		assert.Equal(t, tc.want, sql)
-	}
-	_, err := buildOpenObserveTraceWhereClause(openObserveBinary("trace_source", query.Like, "o%"))
-	assert.Error(t, err)
-}
-
 // A trace query with no limit is an internal caller (the service map) that wants the whole
 // window; it used to get 100 spans and draw a map with most edges missing.
 func TestOpenObserveTraces_NoLimitMeansTheCap(t *testing.T) {
