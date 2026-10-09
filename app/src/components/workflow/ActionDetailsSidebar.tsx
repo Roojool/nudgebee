@@ -1499,7 +1499,6 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
             taskName='Trigger'
             fieldName={`event.${field.path}`}
             fieldType={field.type}
-            value={field.example}
             template={`{{ Inputs.event.${field.path} }}`}
           />
         ))}
@@ -1591,7 +1590,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                 {triggerInputs.triggerType === 'optimization' ? 'Trigger recommendation' : 'Trigger event'}
               </Typography>
               <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[400], mb: ds.space[2] }}>
-                Example values. Each run gets the real {triggerInputs.triggerType === 'optimization' ? 'recommendation' : 'event'}.
+                Filled in from the trigger that starts each run.
               </Typography>
               {renderTriggerInputFields()}
             </Box>
