@@ -261,6 +261,22 @@ func resumeFollowupLocked(ctx *security.RequestContext, req NBAgentRequest) (NBA
 	req.QueryConfig = mergeLatestMessageConfig(dao, req.MessageId, req.AccountId, req.ConversationId, req.QueryConfig, logger, "resume_v2: merged existing message_config into request QueryConfig")
 	req = withOriginalQuestion(ctx, req)
 
+	// A resumed turn ends here rather than in the save-back that drains the
+	// queue after a normal turn, so start whatever was queued while it ran.
+	// Off the caller's goroutine: the conversation lock is still held here.
+	defer func() {
+		go func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Error("resume_v2: panic dispatching queued message", "panic", recovered, "conversation_id", req.ConversationId)
+				}
+			}()
+			if conversation, err := dao.GetConversation(req.ConversationId); err == nil {
+				dispatchNextQueuedMessage(ctx, nil, conversation)
+			}
+		}()
+	}()
+
 	// 3. Resume the agent with its saved state.
 	resumeResp, resumeErr := runAgentResumeV2(ctx, req, agent)
 	if resumeErr != nil {

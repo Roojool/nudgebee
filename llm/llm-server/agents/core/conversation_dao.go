@@ -1879,7 +1879,7 @@ func (chat *ConversationDao) SaveConversationMessage(id, conversationId, account
 		if err = tx.Get(&currentStatus, `SELECT status FROM llm_conversations WHERE id = $1 AND account_id = $2 FOR UPDATE`, conversationId, accountID); err != nil {
 			return uuid.Nil, fmt.Errorf("history: lock queue conversation: %w", err)
 		}
-		if currentStatus != ConversationStatusInProgress {
+		if !QueueAcceptsStatus(currentStatus) {
 			return uuid.Nil, ErrQueueInactive
 		}
 		var count int

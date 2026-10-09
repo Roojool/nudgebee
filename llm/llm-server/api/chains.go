@@ -333,6 +333,16 @@ func queueConversationMessage(
 	return queuedMessageId, nil
 }
 
+// queueAdmits reports whether a chat request should wait in the queue. A
+// request naming a message on a WAITING conversation is that turn's own retry
+// or resume, not a new message, so it is left to run.
+func queueAdmits(conversation core.Conversation, request *ConversationApiRequest) bool {
+	if conversation.Status == core.ConversationStatusInProgress {
+		return true
+	}
+	return request.MessageId == "" && core.QueueAcceptsStatus(conversation.Status)
+}
+
 // Called after authorized queue admission: a queue-only request must never
 // become an independent asynchronous foreground request when status changes.
 func rejectUnfulfilledQueueRequest(c *gin.Context, request *ConversationApiRequest) bool {
@@ -805,7 +815,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 					c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
 					return
 				}
-				if config.Config.QueuedMessagesEnabled && conversation.Status == core.ConversationStatusInProgress {
+				if config.Config.QueuedMessagesEnabled && queueAdmits(conversation, &request) {
 					if tryQueueConversationMessage(c, conversation, &request, "") {
 						return
 					}
@@ -1250,7 +1260,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 					c.JSON(http.StatusForbidden, buildApiResponse(nil, []error{errors.New(errorUserAccessMessage)}))
 					return
 				}
-				if config.Config.QueuedMessagesEnabled && conversation.Status == core.ConversationStatusInProgress {
+				if config.Config.QueuedMessagesEnabled && queueAdmits(conversation, &request) {
 					if tryQueueConversationMessage(c, conversation, &request, "") {
 						return
 					}
