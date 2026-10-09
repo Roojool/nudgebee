@@ -198,56 +198,15 @@ func tempoCondition(attr string, op query.BinaryWhereClauseType, raw any) (strin
 	return "", fmt.Errorf("grafana tempo: unsupported operator %q for field %q", op, attr)
 }
 
-// tempoTraceSource is the pipeline every Tempo span comes from. The service map and the
-// Traces tab's Trace Source dropdown send trace_source (otel vs ebpf); Tempo has no such
-// attribute.
-const tempoTraceSource = "otel"
-
-// tempoTraceSourceHolds evaluates a trace_source predicate against the constant source,
-// as the OpenObserve source does: true when absent or always true, false when it can
-// never match (the group then renders `false`, so the query returns no spans).
-func tempoTraceSourceHolds(binary query.BinaryWhereClause) (bool, error) {
-	ops, ok := binary["trace_source"]
-	if !ok {
-		return true, nil
-	}
-	is := func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), tempoTraceSource) }
-	holds := true
-	for op, raw := range ops {
-		values := cubeAPMFilterValues(raw)
-		found := false
-		for _, v := range values {
-			found = found || is(v)
-		}
-		switch op {
-		case query.Eq, query.In:
-			holds = holds && found
-		case query.Nq, query.NotIn:
-			holds = holds && !found
-		default:
-			return false, fmt.Errorf("grafana tempo: trace_source supports _eq, _neq, _in and _nin, not %s", op)
-		}
-	}
-	return holds, nil
-}
-
 // tempoWhereExpr renders a where clause as the body of one TraceQL span selector.
 // Binary predicates are rendered in sorted label/operator order so the query is stable.
 func tempoWhereExpr(w query.QueryWhereClause) (string, error) {
 	var parts []string
 
-	holds, err := tempoTraceSourceHolds(w.Binary)
-	if err != nil {
-		return "", err
-	}
-	if !holds {
-		return "false", nil
-	}
+	// trace_source never reaches here: Tempo declares TraceSource "otel" in
+	// allProviderCaps, so the dispatch layer evaluates it.
 	labels := make([]string, 0, len(w.Binary))
 	for label := range w.Binary {
-		if label == "trace_source" {
-			continue
-		}
 		labels = append(labels, label)
 	}
 	sort.Strings(labels)

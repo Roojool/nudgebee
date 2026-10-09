@@ -2268,10 +2268,6 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsTraceGrouping: false,
 		TraceSource:           "otel",
 	},
-	// GCP Cloud Trace: no other capability is declared for it.
-	"gcp": {
-		TraceSourcePassthrough: true,
-	},
 	// Traces only. Grouping is computed by Tempo itself (TraceQL metrics, ≤24h); the
 	// waterfall is trace-by-id. ServiceMap stays false for v1: edges would need a TraceQL
 	// structural query, deferred (spec §1).
@@ -2280,6 +2276,11 @@ var allProviderCaps = map[string]providerStaticCaps{
 		SupportsTraceGrouping: true,
 		SupportsHeatmap:       true,
 		SupportsRawQuery:      true,
+		TraceSource:           "otel",
+	},
+	// GCP Cloud Trace: no other capability is declared for it.
+	"gcp": {
+		TraceSourcePassthrough: true,
 	},
 }
 

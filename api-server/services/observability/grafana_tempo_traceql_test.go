@@ -192,43 +192,6 @@ func TestTempoCondition_EmptyNumericIsNil(t *testing.T) {
 	assert.Equal(t, `{ span.http.status_code = nil }`, sel)
 }
 
-func TestTempoWhere_TraceSource(t *testing.T) {
-	ns := query.BinaryWhereClause{"workload_namespace": {query.Eq: "demo"}}
-	with := func(ops map[query.BinaryWhereClauseType]any) query.QueryWhereClause {
-		b := query.BinaryWhereClause{"trace_source": ops}
-		for k, v := range ns {
-			b[k] = v
-		}
-		return tempoWhereOf(b)
-	}
-	holds := []map[query.BinaryWhereClauseType]any{
-		{query.Eq: "OTel"},
-		{query.Nq: "ebpf"},
-		{query.In: []any{"ebpf", "otel"}},
-		{query.NotIn: []any{"ebpf"}},
-	}
-	for _, ops := range holds {
-		sel, err := tempoSelector(with(ops))
-		require.NoError(t, err)
-		assert.Equal(t, `{ resource.k8s.namespace.name = "demo" }`, sel, "%v is always true for a Tempo span", ops)
-	}
-	never := []map[query.BinaryWhereClauseType]any{
-		{query.Eq: "ebpf"},
-		{query.Nq: "otel"},
-		{query.In: []any{"ebpf"}},
-		{query.NotIn: []any{"otel"}},
-	}
-	for _, ops := range never {
-		sel, err := tempoSelector(with(ops))
-		require.NoError(t, err)
-		assert.Equal(t, `{ false }`, sel, "%v can never match a Tempo span", ops)
-	}
-
-	_, err := tempoSelector(with(map[query.BinaryWhereClauseType]any{query.Contains: "otel"}))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "trace_source")
-}
-
 func TestTempoWhere_StripsHeaders(t *testing.T) {
 	sel, err := tempoSelector(tempoWhereOf(query.BinaryWhereClause{
 		"headers":            {query.Like: "%x-request-id%"},
