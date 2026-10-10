@@ -294,7 +294,7 @@ type appConfig struct {
 	//
 	// When FeatureEventAsyncEnrichmentEnabled is true, InvestigateEvent commits the event
 	// row and returns immediately, and the playbook (evidence collection) runs on this
-	// queue instead of inside the caller's HTTP request. Measured on Rackspace: a single
+	// queue instead of inside the caller's HTTP request. Measured on an anonymized production tenant: a single
 	// trigger_investigation call carrying 408 events held cloud-collector's only MQ worker
 	// for 4h24m, which is how a 10-minute cron builds a 3,000-job backlog overnight.
 	//
