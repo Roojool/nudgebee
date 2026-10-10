@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,7 @@ func TestCubeAPMTraceAliasesSurviveUpstreamMapping(t *testing.T) {
 		{"http_status_code", []string{`http.response.status_code:="payments"`, `http.status_code:="payments"`}},
 		{"destination_workload_name", []string{`peer.service:="payments"`, `server.address:="payments"`}},
 		{"resource", []string{`http.route:="payments"`, `url.path:="payments"`}},
+		{"http_method", []string{`http.request.method:="payments"`, `http.method:="payments"`}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.label, func(t *testing.T) {
@@ -303,6 +305,94 @@ func TestCubeAPMTraceAliasesSurviveUpstreamMapping(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// nubi's trace agent is taught the canonical fields http_method and
+// deployment_environment. Unmapped, CubeAPM read them as literal LogsQL field names
+// that no span carries, so "how many POST requests" counted 0 (live: 0 against 1640).
+func TestCubeAPMTraceCanonicalHTTPMethodAndEnvironment(t *testing.T) {
+	method := mustTraceBase(t, eq("http_method", "POST"), "")
+	for _, want := range []string{`http.request.method:="POST"`, `http.method:="POST"`} {
+		if !strings.Contains(method, want) {
+			t.Errorf("http_method query %q is missing %q", method, want)
+		}
+	}
+	if strings.Contains(method, "http_method") {
+		t.Errorf("query %q filters on the canonical name, which no span carries", method)
+	}
+	if env := mustTraceBase(t, eq("deployment_environment", "prod"), ""); !strings.Contains(env, `env:="prod"`) {
+		t.Errorf("deployment_environment query %q does not filter on env", env)
+	}
+}
+
+// _like / _ilike are SQL LIKE (see sqllike.go). The Traces tab's resource search and
+// nubi both send `_like: "%…%"`; CubeAPM rejected _like outright and read the `%` of
+// _ilike literally, so both matched nothing. LogsQL's `:~` matches anywhere in the
+// value, so the translated pattern is anchored to keep LIKE's whole-value meaning.
+func TestCubeAPMTraceLikeIsSQLLike(t *testing.T) {
+	tests := []struct {
+		name string
+		op   query.BinaryWhereClauseType
+		val  string
+		want string
+	}{
+		{"like with wildcards", query.Like, "%/api/checkout%", `http.route:~"(?is)^(?:.*/api/checkout.*)$"`},
+		{"ilike with wildcards", query.ILike, "%/api/checkout%", `http.route:~"(?is)^(?:.*/api/checkout.*)$"`},
+		{"no wildcard is a whole-value match", query.Like, "/api/cart", `http.route:~"(?is)^(?:/api/cart)$"`},
+		{"underscore is one character", query.Like, "/api/v_", `http.route:~"(?is)^(?:/api/v.)$"`},
+		{"escaped percent is literal", query.Like, `100\%`, `http.route:~"(?is)^(?:100%)$"`},
+		{"regex metacharacters are literal", query.Like, "%a.b%", `http.route:~"(?is)^(?:.*a\\.b.*)$"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mustTraceBase(t, query.QueryWhereClause{
+				Binary: query.BinaryWhereClause{"resource": {tt.op: tt.val}},
+			}, "")
+			if !strings.Contains(got, tt.want) {
+				t.Errorf("query %q is missing %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The pattern is executed by LogsQL's RE2, so check what it actually matches. `%`
+// must span newlines (resource includes multi-line db.statement), LIKE is a
+// whole-value match, and case is ignored.
+func TestCubeAPMLikeRegexMatches(t *testing.T) {
+	tests := []struct {
+		pattern, value string
+		want           bool
+	}{
+		{"%select%", "SELECT 1\nFROM orders", true},
+		{"%/api/checkout%", "/API/Checkout", true},
+		{"/api/check", "/api/checkout", false},
+		{"/api/v_", "/api/v1", true},
+		{`100\%`, "1000", false},
+		{`100\%`, "100%", true},
+		// A backslash escapes only %, _ and \ (sqllike.go); before any other
+		// character it is a literal, so a Windows path keeps its separator.
+		{`%C:\assets%`, `C:\assets\logo.png`, true},
+		{`%C:\assets%`, `C:assets`, false},
+		{`a\\b`, `a\b`, true},
+	}
+	for _, tt := range tests {
+		got := regexp.MustCompile(cubeAPMLikeRegex(tt.pattern)).MatchString(tt.value)
+		if got != tt.want {
+			t.Errorf("LIKE %q against %q = %v, want %v", tt.pattern, tt.value, got, tt.want)
+		}
+	}
+}
+
+// Translating a LIKE pattern must not rewrite the caller's operand slice: the request
+// is shared with other providers in a multi-provider fan-out.
+func TestCubeAPMTraceLikeLeavesCallerValuesAlone(t *testing.T) {
+	values := []string{"%checkout%"}
+	_ = mustTraceBase(t, query.QueryWhereClause{
+		Binary: query.BinaryWhereClause{"span_name": {query.Like: values}},
+	}, "")
+	if values[0] != "%checkout%" {
+		t.Errorf("caller's operand was rewritten to %q", values[0])
 	}
 }
 
