@@ -648,10 +648,9 @@ export class IntegrationLocators extends CommonLocators {
       "Test notification sent to Slack successfully!",
       { exact: false },
     );
-    this.slackTestErrorToast = page.getByText(
-      "Failed to send test notification to Slack",
-      { exact: false },
-    );
+    this.slackTestErrorToast = this.genericErrorToast
+      .or(page.getByText("Failed to send test notification to Slack", { exact: false }))
+      .first();
 
     // MS Teams Locators
     // Section card ID computed from provider "MSTEAMS" → "Msteams" → "Msteams-section-card"

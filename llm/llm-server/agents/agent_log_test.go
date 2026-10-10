@@ -429,6 +429,39 @@ func TestSystemPrompt_BundleSignalInAllModes(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_KubectlDisclosureInAllModes locks in the fix for issue
+// #36237's follow-up gap: kubectl_disclosure is injected into the fetch
+// envelope by withKubectlDisclosure (agent_log_fetch.go) but, unlike
+// bundle_signal/logs_complete/logs_format_hint, was never named in any
+// workflow step — so the planner had no instruction to read or surface it.
+// It lives in sharedHeaderAndWorkflow (step 2c) so it must appear in every
+// mode's prompt, not just one.
+func TestSystemPrompt_KubectlDisclosureInAllModes(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+
+	cases := []struct {
+		name     string
+		query    string
+		original string
+	}{
+		{"investigation mode", "get logs", "why is cron-scheduler broken"},
+		{"enumeration mode", "list errors in service-y", ""},
+		{"routine mode", "tail last 100 lines", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{
+				Query:         tc.query,
+				OriginalQuery: tc.original,
+			})
+			body := strings.Join(prompt.Instructions, "\n")
+			assert.Contains(t, body, "kubectl_disclosure",
+				"prompt should tell the LLM to surface kubectl_disclosure from the fetch envelope when present")
+		})
+	}
+}
+
 // TestLogAgent_BundleToolNotInToolset locks the change: after moving the
 // bundle to deterministic auto-fire inside fetch_logs, the LLM's tool list
 // must not include standard_diagnostic_grep — the LLM already has the
