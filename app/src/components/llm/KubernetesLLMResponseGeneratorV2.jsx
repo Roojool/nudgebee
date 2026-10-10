@@ -28,6 +28,7 @@ import AutoSuggestTextarea from '@components/k8s/common/TextAreaV2';
 import { SummaryBlock } from '@components/k8s/KubernetesClusterSummary';
 import { isFailedCachedConversation } from '@api1/ask-nudgebee';
 import { isCompleteWorkflowDefinition } from './utils/isCompleteWorkflowDefinition';
+import { isConversationActivelyExecuting } from './utils/conversationStatus';
 import { readNubiConversationPointer, writeNubiConversationPointer, clearNubiConversationPointer } from './utils/nubiConversationPointer';
 import ConversationShimmer from './common/ConversationShimmer';
 import { ConversationTokenUsage } from './common/TokenUsageDisplay';
