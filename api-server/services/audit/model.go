@@ -35,13 +35,6 @@ const (
 	EventCategoryTriage      EventCategory = "TRIAGE"
 	EventCategoryOwnership   EventCategory = "OWNERSHIP"
 	EventCategoryDashboard   EventCategory = "DASHBOARDS"
-	// Operator edits to what the Knowledge Graph is built from: the coverage
-	// filter (cloud accounts / flow sources) and manual dependency
-	// declarations. Both deactivate nodes or edges on write, so who changed
-	// them is worth keeping. Mirror any addition here in the Audits page's
-	// CategoryListing (app/src/components/audits/common.ts) or the rows are
-	// written but cannot be filtered.
-	EventCategoryKnowledgeGraph EventCategory = "KNOWLEDGE_GRAPH"
 	// Runtime branding overrides (tenant_branding_override). Writes are
 	// super-admin-only, and audit.LogChange skips super-admin actors, so these
 	// rows appear only for a non-super-admin actor; recovery does not depend on
