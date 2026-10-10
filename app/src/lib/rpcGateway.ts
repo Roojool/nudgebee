@@ -810,7 +810,7 @@ function forwardErrorMessage(err: ForwardError): string {
       console.error('%s', `[graphql-gateway] upstream_unreachable method=${err.method} url=${err.url} detail=${err.detail}`);
       return `Upstream unreachable for ${err.method}`;
     case 'client_disconnected':
-      console.log(`[graphql-gateway] client_disconnected method=${err.method} url=${err.url}`);
+      console.log('%s', `[graphql-gateway] client_disconnected method=${err.method} url=${err.url}`);
       return `Client disconnected before ${err.method} answered`;
     case 'upstream_parse_failed':
       console.error('%s', `[graphql-gateway] upstream_parse_failed method=${err.method} url=${err.url} detail=${err.detail}`);

@@ -188,7 +188,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             return;
           case 'client_disconnected':
             // The socket is gone; there is nobody to answer.
-            console.log(`[rpc-proxy] client_disconnected method=${result.error.method} url=${result.error.url}`);
+            console.log('%s', `[rpc-proxy] client_disconnected method=${result.error.method} url=${result.error.url}`);
             res.end();
             return;
           case 'upstream_parse_failed':
