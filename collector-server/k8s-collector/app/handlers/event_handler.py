@@ -806,30 +806,6 @@ def get_event_data(cloud_account_name, data, evidence, finding, resource_key, re
     return event
 
 
-def _as_naive_utc(value):
-    """Normalise a finding timestamp for comparison against events.starts_at.
-
-    events.starts_at is `timestamp` (no zone). Handing psycopg2 a timezone-aware
-    datetime makes Postgres convert it through the session TimeZone on the way to
-    the naive column, which silently shifts the bound by the session offset -- the
-    same trap discovery_handler documents on this column. Returns None when there
-    is nothing usable, so the caller can leave the bound off entirely rather than
-    compare against a wrong one.
-    """
-    if not value:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if not isinstance(value, datetime):
-        return None
-    if value.tzinfo is not None:
-        value = value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
-
-
 # Reverse of the api-server's ConfigMap→consumers lookup: the ConfigMaps this
 # workload's pod template references. Built by the knowledge graph's k8s source
 # from the real pod spec (volumes, envFrom, valueFrom.configMapKeyRef), so it
