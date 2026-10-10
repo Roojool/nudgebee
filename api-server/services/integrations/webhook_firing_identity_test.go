@@ -41,6 +41,8 @@ type firingIdentity struct {
 var webhookFiringIdentity = map[string]firingIdentity{
 	IntegrationPrometheusAlertManagerWebhook: {firingKeyMode, "startsAt"},
 	IntegrationGrafanaWebhook:                {firingKeyMode, "startsAt"},
+	// Alertmanager-compatible body: same stable fingerprint, same per-firing startsAt.
+	IntegrationCubeAPMWebhook: {firingKeyMode, "startsAt"},
 
 	IntegrationZendutyWebhook:       {perFiringEventId, "incident unique_id"},
 	IntegrationPagerdutyWebhook:     {perFiringEventId, "incident id"},
@@ -114,6 +116,11 @@ var firingKeyParsers = map[string]firingKeySequence{
 	IntegrationPrometheusAlertManagerWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
 		sc := security.NewRequestContextForSuperAdmin(nil, nil, nil)
 		return singleEvent(PrometheusAlertManagerWebhook{}.ProcessEventWebook(sc, nil, "acct-1", alertmanagerStyleBody(status, startsAt, fingerprint)))
+	},
+	// CubeAPM sends the Alertmanager body, so the same delivery fixture applies.
+	IntegrationCubeAPMWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
+		sc := security.NewRequestContextForSuperAdmin(nil, nil, nil)
+		return singleEvent(CubeAPMWebhook{}.ProcessEventWebook(sc, nil, "acct-1", alertmanagerStyleBody(status, startsAt, fingerprint)))
 	},
 	IntegrationGrafanaWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
 		event, err := mapGrafanaAlertToEvent("acct-1", map[string]any{

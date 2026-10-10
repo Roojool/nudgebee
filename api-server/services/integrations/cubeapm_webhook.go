@@ -225,6 +225,7 @@ func (m CubeAPMWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 			WebhookId:             uuid.NewString(),
 			EventType:             alertName,
 			EventId:               fingerprint,
+			FiringKey:             core.FiringKeyFromStart(fingerprint, startsAt),
 			EventUrl:              eventURL,
 			EventStatus:           string(mapGrafanaStatus(status)),
 			EventPriority:         string(mapGrafanaSeverity(severity)),
