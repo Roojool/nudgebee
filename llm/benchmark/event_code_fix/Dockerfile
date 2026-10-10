@@ -12,7 +12,7 @@
 # 008) opens/comments/closes real PRs against the external fixture repo.
 #
 # Build with:  docker buildx build -f event_code_fix/Dockerfile llm/benchmark
-FROM public.ecr.aws/docker/library/python:3.13-slim
+FROM python:3.13-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl \
