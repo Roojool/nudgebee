@@ -116,7 +116,7 @@ const BRANDING_DEFAULTS = {
 // reads within it: the browser tab, the header logo, the favicon, the mascots.
 // Falling back to the Nudgebee defaults meant a partner deployment painted the
 // house brand for those frames and then repainted — the "Nudgebee, then
-// Rackspace" flash. Empty degrades to "not there yet" instead: consumers gated
+// Acme" flash. Empty degrades to "not there yet" instead: consumers gated
 // on `loading` render nothing, and SafeIcon returns null for an empty src.
 //
 // This is the loading state ONLY. Once the config resolves, BRANDING_DEFAULTS

@@ -72,7 +72,7 @@ describe('branding before /api/public/app_config resolves', () => {
   };
 
   it('resolves every brand-visible field to empty while the fetch is in flight', () => {
-    const branding = loadBranding({ title: 'Rackspace' });
+    const branding = loadBranding({ title: 'Acme' });
 
     expect(branding.getBrandTitle()).toBe('');
     expect(branding.getAssistantName()).toBe('');
@@ -83,12 +83,12 @@ describe('branding before /api/public/app_config resolves', () => {
   });
 
   it('uses the resolved config once it lands', async () => {
-    const branding = loadBranding({ title: 'Rackspace', assistantName: 'RIA', nubiIconUrl: '/branding/rackspace/ria-icon-64.svg' });
+    const branding = loadBranding({ title: 'Acme', assistantName: 'ACE', nubiIconUrl: '/branding/acme/ace-icon-64.svg' });
     await releaseConfig();
 
-    expect(branding.getBrandTitle()).toBe('Rackspace');
-    expect(branding.getAssistantName()).toBe('RIA');
-    expect(branding.getNubiIconUrl()).toBe('/branding/rackspace/ria-icon-64.svg');
+    expect(branding.getBrandTitle()).toBe('Acme');
+    expect(branding.getAssistantName()).toBe('ACE');
+    expect(branding.getNubiIconUrl()).toBe('/branding/acme/ace-icon-64.svg');
   });
 
   it('falls back to the defaults per-field once resolved, for fields the config omits', async () => {
@@ -105,14 +105,14 @@ describe('branding before /api/public/app_config resolves', () => {
   it('never hands a white-label deployment a Nudgebee asset', async () => {
     const branding = loadBranding({
       isWhiteLabel: true,
-      helpbeeIconUrl: '/branding/rackspace/ria-icon-64.svg',
+      helpbeeIconUrl: '/branding/acme/ace-icon-64.svg',
       // k8sBeeUrl deliberately absent — the partner kit does not ship one.
     });
     await releaseConfig();
 
     // Set slot: the partner URL alone, with no Nudgebee `fallbackSrc` for
     // SafeIcon to swap in when the partner file 404s.
-    expect(branding.getBrandingAsset('helpbeeIcon')).toBe('/branding/rackspace/ria-icon-64.svg');
+    expect(branding.getBrandingAsset('helpbeeIcon')).toBe('/branding/acme/ace-icon-64.svg');
     // Unset slot: nothing, rather than the house mascot.
     expect(branding.getBrandingAsset('k8sBee')).toBe('');
   });
@@ -129,7 +129,7 @@ describe('branding before /api/public/app_config resolves', () => {
   });
 
   it('reports loading with an empty title, then the brand title', async () => {
-    const branding = loadBranding({ title: 'Rackspace' });
+    const branding = loadBranding({ title: 'Acme' });
     const { result, rerender } = renderHook(() => branding.useBrandingConfig());
 
     expect(result.current.loading).toBe(true);
@@ -142,6 +142,6 @@ describe('branding before /api/public/app_config resolves', () => {
     rerender();
 
     expect(result.current.loading).toBe(false);
-    expect(result.current.title).toBe('Rackspace');
+    expect(result.current.title).toBe('Acme');
   });
 });
