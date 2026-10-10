@@ -9,7 +9,7 @@ import (
 // describe instants -- "ECS Task State Change", "GKE Resource Upgrade Started",
 // "Kubernetes Secret Modified" -- and say so by sending ends_at == starts_at.
 // Stored FIRING they assert an ongoing condition the producer never claimed,
-// and no resolve ever follows for a moment that has passed: on the Rackspace
+// and no resolve ever follows for a moment that has passed: on an anonymized production
 // estate 18,357 `ECS Task State Change` events sat FIRING at a median age of 52
 // days, 69% of everything stuck open there.
 func TestIsPointInTime(t *testing.T) {

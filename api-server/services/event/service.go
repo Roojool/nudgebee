@@ -2327,7 +2327,7 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	// Secret Modified" describes an instant, and the webhook says so by sending a
 	// zero-length interval. Storing that FIRING asserts an ongoing condition the
 	// producer never claimed, and nothing will ever close it: these sources send
-	// no resolve for a moment that has already passed. Measured on the Rackspace
+	// no resolve for a moment that has already passed. Measured on an anonymized production
 	// estate, 18,357 `ECS Task State Change` events sat FIRING at a median age of
 	// 52 days, every one of them carrying ends_at == starts_at, and they were 69%
 	// of everything stuck open there.

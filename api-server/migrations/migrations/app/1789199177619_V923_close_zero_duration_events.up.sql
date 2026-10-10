@@ -9,7 +9,7 @@
 -- already passed. They simply accumulate.
 --
 -- Measured before this ran:
---   * Rackspace: 18,357 `ECS Task State Change` alerts FIRING at a median age of
+--   * An anonymized production tenant: 18,357 `ECS Task State Change` alerts FIRING at a median age of
 --     52 days -- 69% of everything stuck open on that estate -- plus ~850 more
 --     across Azure VM health, GCP upgrade/secret notifications and RDS deadlock
 --     alerts. ~19,200 rows in total.
