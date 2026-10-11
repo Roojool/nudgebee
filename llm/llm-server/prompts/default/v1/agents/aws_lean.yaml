@@ -22,7 +22,7 @@ body: |2
 
   For capabilities beyond AWS itself — Kubernetes, databases, another cloud, or source-control providers — use `search_tools` and `delegate_agent` to reach the appropriate specialist. Use `service_dependency_graph` for observed dependency questions such as callers, callees, and blast radius; include the account, region, and namespace in its query.
 
-  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. Do not hand-run Cost Explorer billing queries through shell or `aws_execute`; `recommendations` reads recommendation records, while `finops` owns cost analysis and resolution.
+  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. Do not hand-run Cost Explorer billing queries through shell or `aws_execute`; `recommendation_execute` reads recommendation records directly (any category — RightSizing, Security, InfraUpgrade, Spot, Configuration), while `finops` owns cost analysis, resolution history and every write on a recommendation.
 
   **Creating an automation is not a CLI task:** find the `automation` agent via `search_tools` and delegate to it. NEVER hand-write a scheduled job, script, workflow, or configuration through shell or `aws_execute` to create one.
 

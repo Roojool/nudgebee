@@ -47,6 +47,11 @@ const RULE_TYPE_OPTIONS = [
 
 const STATUS_OPTIONS = ['Enabled', 'Disabled'];
 
+// router.query values are string | string[] | undefined — an array when the param
+// is repeated in the URL (?accountIds=a&accountIds=b). Normalise to a string[].
+const parseAccountIds = (raw: string | string[] | undefined): string[] =>
+  Array.isArray(raw) ? raw.filter(Boolean) : raw ? raw.split(',').filter(Boolean) : [];
+
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
 const TriageRulesManager: React.FC<TriageRulesManagerProps> = ({ accountId }) => {
@@ -59,7 +64,7 @@ const TriageRulesManager: React.FC<TriageRulesManagerProps> = ({ accountId }) =>
     selectedAccountId: accountId,
     isTroubleshootPage: isMultiAccountView,
     enableFilters: isMultiAccountView,
-    disabledFilters: ['workload', 'namespace', 'subjectType', 'aggregationKey', 'source'],
+    disabledFilters: ['workload', 'namespace', 'subjectType', 'aggregationKey', 'source', 'nbStatus'],
     resource_ids: [],
   }) as { accounts: AccountOption[] };
 
@@ -77,10 +82,7 @@ const TriageRulesManager: React.FC<TriageRulesManagerProps> = ({ accountId }) =>
   const [selectedStatus, setSelectedStatus] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [includeSystemRules, setIncludeSystemRules] = useState(true);
-  const [selectedAccountFilter, setSelectedAccountFilter] = useState<string[]>(() => {
-    const raw = router.query.accountIds as string;
-    return raw ? raw.split(',').filter(Boolean) : [];
-  });
+  const [selectedAccountFilter, setSelectedAccountFilter] = useState<string[]>(() => parseAccountIds(router.query.accountIds));
 
   // System-rule visibility, Status, and name search are all filtered client-side. Status uses
   // each rule's *effective* status (a system rule disabled for this account via an override
@@ -104,9 +106,14 @@ const TriageRulesManager: React.FC<TriageRulesManagerProps> = ({ accountId }) =>
   const totalCount = filteredRules.length;
 
   useEffect(() => {
-    const raw = router.query.accountIds as string;
-    setSelectedAccountFilter(raw ? raw.split(',').filter(Boolean) : []);
-  }, [router.query.accountIds]);
+    if (!router.isReady) {
+      return;
+    }
+    const next = parseAccountIds(router.query.accountIds);
+    // Keep the previous reference when the list is unchanged so fetchRules
+    // (which depends on selectedAccountFilter) isn't invalidated into a redundant refetch.
+    setSelectedAccountFilter((prev) => (prev.length === next.length && prev.every((v, i) => v === next[i]) ? prev : next));
+  }, [router.isReady, router.query.accountIds]);
 
   // Modal state
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false);

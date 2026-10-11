@@ -104,7 +104,22 @@ type Workflow struct {
 	//
 	// Setting it requires the definition to carry a non-empty LLMDescription and
 	// a manual trigger (see validateWorkflowStructLevel).
-	AIInvocable   bool          `json:"ai_invocable" yaml:"ai_invocable,omitempty"`
+	AIInvocable bool `json:"ai_invocable" yaml:"ai_invocable,omitempty"`
+	// AIAutoApprove lets the AI assistant run this workflow without pausing for
+	// the in-chat confirmation card. Default false — every AI-originated run
+	// asks first unless a human has said otherwise for this specific automation.
+	//
+	// It narrows nothing and widens nothing about WHICH automations the AI may
+	// run: assertAIInvocationAllowed and the calling user's own RBAC apply
+	// exactly as before. It only removes the "are you sure" step, and only for
+	// the automation tool synthesised from this workflow.
+	//
+	// Meaningless without AIInvocable, and validated as such: there is no
+	// "auto-approve an automation the AI may not invoke". The two service paths
+	// that drop AIInvocable (an AI-originated update, and a definition that
+	// stops supporting AI invocation) drop this with it, so the pair can never
+	// come apart.
+	AIAutoApprove bool          `json:"ai_auto_approve" yaml:"ai_auto_approve,omitempty"`
 	CreatedBy     string        `json:"created_by,omitempty" yaml:"created_by,omitempty"`
 	CreatedByUser *WorkflowUser `json:"created_by_user,omitempty" yaml:"created_by_user,omitempty"`
 	UpdatedBy     string        `json:"updated_by,omitempty" yaml:"updated_by,omitempty"`
@@ -708,6 +723,9 @@ type AIWorkflowCandidate struct {
 	// Inputs is the live version's input declaration, so the model can fill
 	// parameters in without a second round trip to workflow_get.
 	Inputs []Input `json:"inputs,omitempty"`
+	// AutoApprove says the author has allowed the assistant to run this
+	// automation without asking the user to confirm first.
+	AutoApprove bool `json:"auto_approve,omitempty"`
 }
 
 // AIInvocableWorkflow pairs a workflow's identity with the definition that would
@@ -716,6 +734,10 @@ type AIInvocableWorkflow struct {
 	ID          string
 	Name        string
 	Description string
+	// AutoApprove mirrors Workflow.AIAutoApprove. It travels with the candidate
+	// because llm-server decides whether to show a confirmation card at the
+	// moment it synthesises the tool, and has no other route to this column.
+	AutoApprove bool
 	// Definition is the LIVE version's definition.
 	Definition WorkflowDefinition
 }

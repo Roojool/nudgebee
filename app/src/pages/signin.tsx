@@ -307,8 +307,12 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
       <>
         <Head>
           {!brandingLoading && brandFaviconUrl && <link rel='icon' href={brandFaviconUrl} />}
-          <title>{brandTitle || 'Nudgebee'}: Login</title>
-          <meta property='og:title' content={`${brandTitle || 'Nudgebee'} - Signin`} key='title' />
+          {/* Gated like the favicon above. Ungated, the `|| 'Nudgebee'` fallback
+              painted the house brand into the tab for every frame before
+              /api/public/app_config resolved, so a partner deployment read
+              "Nudgebee: Login" and then repainted to its own name. */}
+          {!brandingLoading && <title>{`${brandTitle}: Login`}</title>}
+          {!brandingLoading && <meta property='og:title' content={`${brandTitle} - Signin`} key='title' />}
         </Head>
         <Box
           sx={{
@@ -837,8 +841,12 @@ export default function SignInV2({ providers, samlEnabled, tier }: any) {
     <>
       <Head>
         {!brandingLoading && brandFaviconUrl && <link rel='icon' href={brandFaviconUrl} />}
-        <title>{brandTitle || 'Nudgebee'}: Login</title>
-        <meta property='og:title' content={`${brandTitle || 'Nudgebee'} - Signin`} key='title' />
+        {/* Gated like the favicon above. Ungated, the `|| 'Nudgebee'` fallback
+            painted the house brand into the tab for every frame before
+            /api/public/app_config resolved, so a partner deployment read
+            "Nudgebee: Login" and then repainted to its own name. */}
+        {!brandingLoading && <title>{`${brandTitle}: Login`}</title>}
+        {!brandingLoading && <meta property='og:title' content={`${brandTitle} - Signin`} key='title' />}
       </Head>
 
       <AuthTemplateV2>

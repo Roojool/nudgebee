@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Image from 'next/image';
 import PropTypes from 'prop-types';
+import { getIsWhiteLabel } from '@hooks/useTenantBranding';
 
 const SafeIcon = ({ src, alt = 'icon', ...props }) => {
   // Extract fallbackSrc: either from { src, fallbackSrc } object or from props
@@ -73,12 +74,20 @@ const SafeIcon = ({ src, alt = 'icon', ...props }) => {
       alt={alt}
       unoptimized={isSvgUrl}
       onError={() => {
-        // Use explicit fallback if provided, otherwise derive default for branding URLs
-        const fallbackUrl =
-          fallback ||
-          (typeof iconSource === 'string' && iconSource.startsWith('/branding/') && !iconSource.startsWith('/branding/default/')
+        // Use explicit fallback if provided, otherwise derive default for branding URLs.
+        //
+        // The derived fallback is suppressed on white-label deployments. It
+        // rewrites /branding/<partner>/x.svg to /branding/default/x.svg, so a
+        // single mistyped or not-yet-deployed partner asset silently painted a
+        // Nudgebee mascot in its place — a brand leak triggered by a 404, which
+        // is exactly the failure nobody notices in review. A partner's broken
+        // asset should read as a gap. An explicit `fallbackSrc` still wins,
+        // because that one is a deliberate choice by the caller.
+        const derivedFallback =
+          typeof iconSource === 'string' && iconSource.startsWith('/branding/') && !iconSource.startsWith('/branding/default/') && !getIsWhiteLabel()
             ? iconSource.replace(/\/branding\/[^/]+\//, '/branding/default/')
-            : null);
+            : null;
+        const fallbackUrl = fallback || derivedFallback;
         if (fallbackUrl && iconSource !== fallbackUrl) {
           setImgSrc(fallbackUrl);
         }

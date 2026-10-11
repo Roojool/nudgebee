@@ -23,6 +23,13 @@ const snoozeUntil = (days: number) => new Date(Date.now() + days * DAY_MS);
 
 interface DismissModalProps {
   rec: any;
+  /**
+   * Every row the dismissal covers. Defaults to [rec]; the Security CIS tab
+   * passes the findings behind a rule row, since a rule is what you act on.
+   */
+  recs?: any[];
+  /** What to name in the copy when it is not one resource, e.g. a CIS rule. */
+  subject?: string;
   onClose: () => void;
   // Called with the recommendation id after the backend applied the change,
   // so the caller can drop/refresh the row.
@@ -35,22 +42,43 @@ interface DismissModalProps {
  * automatically when the period lapses. Both forms suppress the recommendation
  * from the default list, nudges, digest, and the finops score.
  */
-const DismissModal = ({ rec, onClose, onSuccess }: DismissModalProps) => {
+const DismissModal = ({ rec, recs, subject, onClose, onSuccess }: DismissModalProps) => {
   const [snoozeDays, setSnoozeDays] = useState(0);
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const rows = recs && recs.length > 0 ? recs : [rec];
+  const many = rows.length > 1;
 
-  const resourceName = getResourceDisplayName(rec, '');
+  const resourceName = subject || getResourceDisplayName(rec, '');
 
   const submit = async () => {
     setSubmitting(true);
     try {
       const snoozedUntil = snoozeDays > 0 ? snoozeUntil(snoozeDays).toISOString() : undefined;
-      const res = await recommendationApi.updateRecommendationDismissal(rec.account_id, rec.id, {
-        dismissed: true,
-        reason: reason.trim(),
-        snoozedUntil,
-      });
+      const options = { dismissed: true, reason: reason.trim(), snoozedUntil };
+      if (many) {
+        let applied = 0;
+        for (let i = 0; i < rows.length; i += 10) {
+          const results = await Promise.allSettled(
+            rows.slice(i, i + 10).map((row) => recommendationApi.updateRecommendationDismissal(row.account_id, row.id, options))
+          );
+          for (const r of results) {
+            if (r.status === 'fulfilled' && !r.value?.errors?.length && r.value?.data && r.value.data.applied !== false) applied++;
+          }
+        }
+        if (applied === 0) {
+          snackbar.error('The findings could not be dismissed');
+          return;
+        }
+        if (applied < rows.length) snackbar.warning(`Dismissed ${applied} of ${rows.length} findings`);
+        else
+          snackbar.success(
+            snoozeDays > 0 ? `Snoozed ${applied} findings for ${snoozeDays} days — they will return automatically.` : `Dismissed ${applied} findings`
+          );
+        onSuccess(rec.id);
+        return;
+      }
+      const res = await recommendationApi.updateRecommendationDismissal(rec.account_id, rec.id, options);
       if (res?.errors?.length) {
         snackbar.error(res.errors[0]?.message || 'Failed to dismiss recommendation');
         return;
@@ -70,10 +98,19 @@ const DismissModal = ({ rec, onClose, onSuccess }: DismissModalProps) => {
   };
 
   return (
-    <Modal open handleClose={onClose} width='sm' title='Dismiss Recommendation' isConfirmRequired={false} isCancelRequired={false}>
+    <Modal
+      open
+      handleClose={onClose}
+      width='sm'
+      title={many ? `Dismiss ${rows.length} Findings` : 'Dismiss Recommendation'}
+      isConfirmRequired={false}
+      isCancelRequired={false}
+    >
       <Typography sx={{ fontSize: ds.text.small, color: ds.gray[600], mb: ds.space[3] }}>
-        {resourceName ? `Dismiss the recommendation for ${resourceName}.` : 'Dismiss this recommendation.'} It leaves the open list, nudges, digest,
-        and the FinOps score; a snoozed one returns automatically when the period ends.
+        {many
+          ? `Dismiss the ${rows.length} findings for ${resourceName || 'this rule'}. They leave`
+          : `${resourceName ? `Dismiss the recommendation for ${resourceName}.` : 'Dismiss this recommendation.'} It leaves`}{' '}
+        the open list, nudges, digest, and the FinOps score; a snoozed one returns automatically when the period ends.
       </Typography>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[3] }}>
         <Box>

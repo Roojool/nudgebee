@@ -176,13 +176,25 @@ func (s *AWSSource) createNATGatewayEdges(reqCtx *security.RequestContext, nodes
 				continue
 			}
 
-			if natGatewayID != "" {
+			// describe-nat-gateways is region-scoped; without the gateway's own
+			// region the call resolves to the collector's default region and returns
+			// NatGatewayNotFound. Skip the enrichment fetch rather than issue a
+			// doomed call (#36573) — but keep going, because the edges below are
+			// built from whatever properties the node already carries.
+			region := nodeRegion(node)
+			if region == "" && natGatewayID != "" {
+				s.logger.Warn("NAT Gateway has no region, skipping AWS enrichment lookup",
+					"node_id", node.ID,
+					"nat_gateway_id", natGatewayID)
+			}
+
+			if natGatewayID != "" && region != "" {
 				s.logger.Info("NAT Gateway properties missing, fetching from AWS",
 					"node_id", node.ID,
 					"nat_gateway_id", natGatewayID)
 
 				// Fetch from AWS CLI
-				natData, err := s.fetchNATGatewayDataFromAWS(reqCtx, req, req.CloudAccountID, natGatewayID)
+				natData, err := s.fetchNATGatewayDataFromAWS(reqCtx, req.CloudAccountID, region, natGatewayID)
 				if err != nil {
 					s.logger.Error("Failed to fetch NAT Gateway data from AWS",
 						"nat_gateway_id", natGatewayID,
@@ -263,14 +275,34 @@ func (s *AWSSource) createNATGatewayEdges(reqCtx *security.RequestContext, nodes
 	return edges
 }
 
+// buildDescribeNATGatewaysCommand returns the CLI command describing one NAT gateway.
+// NAT gateway ids are region-scoped, so --region is always present: without it the AWS
+// CLI resolves against the collector's AWS_DEFAULT_REGION and returns NatGatewayNotFound
+// for every gateway in any other region (#36573).
+func buildDescribeNATGatewaysCommand(natGatewayID, region string) string {
+	return fmt.Sprintf("aws ec2 describe-nat-gateways --nat-gateway-ids %s --region %s --output json", natGatewayID, region)
+}
+
 // fetchNATGatewayDataFromAWS fetches NAT Gateway metadata from AWS using cloud collector CLI
-func (s *AWSSource) fetchNATGatewayDataFromAWS(reqCtx *security.RequestContext, req *core.SourceBuildRequest, accountID string, natGatewayID string) (*NATGatewayData, error) {
-	// Build AWS CLI command to describe specific NAT Gateway
-	cmd := fmt.Sprintf("aws ec2 describe-nat-gateways --nat-gateway-ids %s --output json", natGatewayID)
+func (s *AWSSource) fetchNATGatewayDataFromAWS(reqCtx *security.RequestContext, accountID string, region string, natGatewayID string) (*NATGatewayData, error) {
+	// Validate inputs to prevent command injection: natGatewayID can fall back to
+	// the node's customer-controlled name, and region must be a real region.
+	if err := validateAWSResourceID(natGatewayID); err != nil {
+		return nil, fmt.Errorf("invalid NAT gateway id: %w", err)
+	}
+	if region == "" {
+		return nil, fmt.Errorf("region is required to look up NAT gateway %s", natGatewayID)
+	}
+	if err := validateAWSRegion(region); err != nil {
+		return nil, fmt.Errorf("invalid region: %w", err)
+	}
+
+	cmd := buildDescribeNATGatewaysCommand(natGatewayID, region)
 
 	s.logger.Info("Fetching NAT Gateway data from AWS",
 		"nat_gateway_id", natGatewayID,
 		"account_id", accountID,
+		"region", region,
 		"command", cmd)
 
 	// Execute AWS CLI command via cloud collector

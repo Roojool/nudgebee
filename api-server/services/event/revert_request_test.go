@@ -184,3 +184,97 @@ func TestGetRevertRecommendationRequest_UndoRestoresAnAddedField(t *testing.T) {
 		[]any{map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": "c4cjS"}},
 		undo["revert_paths"])
 }
+
+// changedValuesOf feeds the conflict check, so it must read the same diff evidence the revert
+// itself is built from — a disagreement between the two would let a conflicting change through.
+func TestChangedValuesOf(t *testing.T) {
+	e := revertEvent([]any{
+		map[string]any{"path": "spec.template.spec.containers[0].image", "old": "v1", "new": "v2"},
+		map[string]any{"path": "spec.replicas", "old": float64(3), "new": float64(5)},
+	})
+
+	values := changedValuesOf(e)
+	assert.Equal(t, "v2", values["spec.template.spec.containers[0].image"], "the value the change LEFT is what a later change is compared against")
+	assert.Equal(t, float64(5), values["spec.replicas"])
+
+	assert.Empty(t, changedValuesOf(models.Event{Id: "evt-2"}), "an event with no evidence touches no paths")
+}
+
+// Dev records the same config change twice: undo-test-app carries pairs of events sharing a
+// timestamp, a path and both values. With `starts_at >=` catching same-instant changes, a twin
+// looks exactly like a later change on the same path — and refusing a safe revert is worse than
+// the gap that predicate was widened to close. The values are what tell them apart.
+func TestSameChangedValue(t *testing.T) {
+	assert.True(t, sameChangedValue("busybox:1.36", "busybox:1.36"), "a duplicate record is not a conflict")
+	assert.False(t, sameChangedValue("busybox:1.36", "busybox:1.37"), "a different value IS a conflict")
+
+	cmd := []any{"/bin/sh", "-c", "echo boom; exit 1"}
+	assert.True(t, sameChangedValue(cmd, []any{"/bin/sh", "-c", "echo boom; exit 1"}))
+	assert.False(t, sameChangedValue(cmd, []any{"/bin/sh", "-c", "echo ok"}))
+
+	// nil means the field was absent on that side; absent equals absent, and never equals a value.
+	assert.True(t, sameChangedValue(nil, nil))
+	assert.False(t, sameChangedValue(nil, "x"))
+	assert.False(t, sameChangedValue("x", nil))
+}
+
+func TestSameChangeTarget(t *testing.T) {
+	resource := "ns/Deployment/api"
+	other := "ns/Deployment/worker"
+	key := "ns/Deployment/api"
+
+	assert.True(t, sameChangeTarget(
+		models.Event{CloudResourceId: &resource},
+		models.Event{CloudResourceId: &resource},
+	))
+	assert.False(t, sameChangeTarget(
+		models.Event{CloudResourceId: &resource},
+		models.Event{CloudResourceId: &other},
+	), "a change on another workload must never be revertible from this event")
+
+	// cloud_resource_id is preferred, but an event recorded before its resource synced has only
+	// service_key — the same fallback the resource lookup uses.
+	assert.True(t, sameChangeTarget(
+		models.Event{ServiceKey: &key},
+		models.Event{ServiceKey: &key},
+	))
+	assert.False(t, sameChangeTarget(models.Event{}, models.Event{}),
+		"two events that identify no resource are not therefore the same resource")
+}
+
+func TestSameStringValue(t *testing.T) {
+	a, b := "x", "x"
+	c := "y"
+	assert.True(t, sameStringValue(&a, &b))
+	assert.False(t, sameStringValue(&a, &c))
+	// A nil tenant must not compare equal to anything: it is missing, not a wildcard.
+	assert.False(t, sameStringValue(nil, &a))
+	assert.False(t, sameStringValue(&a, nil))
+	assert.False(t, sameStringValue(nil, nil))
+}
+
+func TestHasManifestPayload(t *testing.T) {
+	// The builder's fixed fields alone are not a manifest.
+	assert.False(t, hasManifestPayload(map[string]any{
+		"name": "services-server", "namespace": "shop", "kind": "Deployment",
+	}))
+	assert.False(t, hasManifestPayload(map[string]any{
+		"name": "services-server", "namespace": "shop", "kind": "Deployment",
+		"revert_paths": []any{map[string]any{"path": "spec.replicas", "old": 3}},
+	}))
+
+	// The per-kind key is whatever the kind lowercases to, so the test is "anything else present".
+	for _, kind := range []string{"deployment", "statefulset", "daemonset", "rollout"} {
+		assert.True(t, hasManifestPayload(map[string]any{
+			"name": "services-server", "namespace": "shop", "kind": "Deployment",
+			kind: map[string]any{"spec": map[string]any{}},
+		}), kind)
+	}
+
+	// A manifest alongside paths is the compatibility shape sent to un-migrated tenants; the
+	// path-based check runs for it, so this only has to not crash.
+	assert.True(t, hasManifestPayload(map[string]any{
+		"name": "services-server", "namespace": "shop", "kind": "Deployment",
+		"revert_paths": []any{}, "deployment": map[string]any{},
+	}))
+}

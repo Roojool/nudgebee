@@ -3,6 +3,7 @@ import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import { DateTimePicker } from '@mui/x-date-pickers/DateTimePicker';
 import { Box } from '@mui/material';
+import { calendarViewWeek } from '@assets';
 import { ds } from '@utils/colors';
 
 const Heights = {
@@ -11,6 +12,16 @@ const Heights = {
   md: ds.space[6],
   lg: ds.space.mul(0, 20),
 };
+
+// Same calendar icon as CustomDateTimeRangePicker, kept in sync so both pickers render identically.
+const CalendarIcon = () => (
+  <Box
+    component='img'
+    sx={{ height: ds.space[5], width: ds.space[4] }}
+    alt=''
+    src={calendarViewWeek?.default?.src ?? calendarViewWeek?.src ?? calendarViewWeek}
+  />
+);
 
 /**
  * @param {{
@@ -91,6 +102,7 @@ const CustomDateTimePicker = ({
           minDateTime={minDateTime}
           maxDateTime={maxDateTime}
           componentsProps={componentsProps}
+          components={{ OpenPickerIcon: CalendarIcon }}
           renderInput={({ inputRef, inputProps, InputProps }) => (
             // Outer wrapper: position-relative shell for the trailing icon,
             // same pattern as ds/Input's inputWithIcons block.
@@ -146,20 +158,7 @@ const CustomDateTimePicker = ({
                   '& .MuiIconButton-root': {
                     height: Heights[size] || ds.space.mul(0, 18),
                     width: Heights[size] || ds.space.mul(0, 18),
-                    color: 'var(--ds-brand-600)',
-                    backgroundColor: 'var(--ds-background-100)',
-                    border: '1px solid var(--ds-brand-200)',
-                    borderRadius: 'var(--ds-radius-md)',
-                    transition: `border-color var(--ds-motion-micro), background-color var(--ds-motion-micro)`,
-                    '&:hover': {
-                      color: 'var(--ds-brand-600)',
-                      backgroundColor: 'var(--ds-brand-100)',
-                      borderColor: 'var(--ds-brand-300)',
-                    },
-                    '&:active': {
-                      backgroundColor: 'var(--ds-brand-200)',
-                      borderColor: 'var(--ds-brand-300)',
-                    },
+                    color: disabled ? ds.gray[400] : ds.gray[500],
                   },
                 }}
               >

@@ -6,6 +6,7 @@ import k8sApi from '@api1/kubernetes';
 import apiUser from '@api1/user';
 import apiWorkflow from '@api1/workflow';
 import { ListingLayout } from '@ui/ListingLayout';
+import { EmptyState } from '@ui/EmptyState';
 import FilterDropdown from '@ui/FilterDropdown';
 import SearchInput from '@ui/SearchInput';
 import { Button as DsButton } from '@ui/Button';
@@ -19,15 +20,18 @@ import { Modal } from '@ui/Modal';
 import { toast as snackbar } from '@ui/Toast';
 import CustomTable from '@shared/tables/CustomTable';
 import { canManage } from '@lib/auth';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 import { action } from 'src/utils/actionStyles';
 import { ds } from 'src/utils/colors';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import AddIcon from '@mui/icons-material/Add';
+import LinkOutlinedIcon from '@mui/icons-material/LinkOutlined';
 import { Box, Stack, Typography } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
 import { Chip } from '@ui/Chip';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { parseHttpResponseBodyMessage, safeJSONParse, snakeToTitleCase, toKebabCase } from 'src/utils/common';
 
 const getDisplayName = (name) => {
@@ -45,6 +49,9 @@ const getDisplayName = (name) => {
   }
   return snakeToTitleCase(name);
 };
+
+// The status each page opens on; relaxed to "all" once if it returns nothing.
+const DEFAULT_STATUS_FILTER = 'enabled';
 
 // Maps integration name to the config key that holds its primary connection info
 const integrationConnectionKey = {
@@ -227,7 +234,14 @@ const ListIntegrations = ({ integrationName }) => {
   const [agentHealthMap, setAgentHealthMap] = useState({});
   const [nameInput, setNameInput] = useState('');
   const [selectedNameFilter, setSelectedNameFilter] = useState('');
-  const [selectedStatusFilter, setSelectedStatusFilter] = useState('enabled');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState(DEFAULT_STATUS_FILTER);
+  // Which integration the rows in state belong to. Tagged rather than a plain "have I
+  // loaded" boolean because this component is reused across integrations without
+  // remounting — the account-form switch returns the same element type — so an
+  // untagged flag stays true through the swap and paints the previous integration's
+  // emptiness under the new integration's name.
+  const [loadedFor, setLoadedFor] = useState(null);
+  const hasLoaded = loadedFor === integrationName;
 
   const handleTestConnection = async (item) => {
     setTestingConnectionId(item.id);
@@ -575,6 +589,7 @@ const ListIntegrations = ({ integrationName }) => {
       })
       .finally(() => {
         setLoading(false);
+        setLoadedFor(integrationName);
       });
   };
 
@@ -680,6 +695,62 @@ const ListIntegrations = ({ integrationName }) => {
     setModalAction(null);
     setSelectedIntegration({});
   };
+
+  // otel_clickhouse is still agent-only: it has no user-configurable form, so there is
+  // nothing for an Add button to open. Loki and Prometheus have both left that list —
+  // each can now be connected directly.
+  const canAddAccount = integrationName != 'otel_clickhouse' && canManage('integrations', 'Write');
+
+  const addAccountButton = canAddAccount ? (
+    <DsButton
+      id={`add-${toKebabCase(integrationName)}-account-btn`}
+      tone='primary'
+      size='md'
+      icon={<AddIcon sx={{ fontSize: 18 }} />}
+      onClick={() => {
+        setSelectedIntegration({});
+        setOpenModal(true);
+      }}
+      aria-label={`Add ${integrationName} Account`}
+    >
+      {`Add ${getDisplayName(integrationName)} Account`}
+    </DsButton>
+  ) : undefined;
+
+  // The providers whose header carries a "how do I get these values" guide.
+  const setupGuideIntegration =
+    integrationName === 'splunk_observability_platform'
+      ? 'Splunk Observability Cloud'
+      : integrationName === 'splunk_enterprise'
+      ? 'Splunk Enterprise'
+      : integrationName === 'solarwinds'
+      ? 'SolarWinds Observability'
+      : '';
+
+  // Swap the filter bar + table for a "connect your first account" prompt only when the
+  // list is empty with the filters untouched. A zero-row result the user filtered their
+  // way into keeps the toolbar, otherwise clearing that filter is unreachable. Known
+  // edge: status defaults to Enabled, so a tenant whose only configs are disabled sees
+  // this prompt too.
+  const showConnectPrompt = hasLoaded && !loading && totalCount === 0 && !selectedNameFilter && !selectedStatusFilter;
+
+  // When the default status filter hides everything, fall back to "all statuses" once
+  // before declaring the screen empty. Without this a tenant whose only configs are
+  // disabled sees the connect prompt — with no filter left on screen to clear, its
+  // disabled configs would be unreachable from the UI.
+  // Tagged for the same reason as `loadedFor`: a plain boolean would stay true
+  // after a swap and skip this fallback for every later integration in the session.
+  const relaxedFor = useRef(null);
+  useEffect(() => {
+    if (!hasLoaded || loading || relaxedFor.current === integrationName) {
+      return;
+    }
+    if (totalCount === 0 && !selectedNameFilter && selectedStatusFilter) {
+      relaxedFor.current = integrationName;
+      setSelectedStatusFilter('');
+      setCurrentPage(0);
+    }
+  }, [hasLoaded, loading, totalCount, selectedNameFilter, selectedStatusFilter, integrationName]);
 
   const handleConfirmationSubmit = () => {
     if (modalAction === 'delete') {
@@ -990,56 +1061,27 @@ const ListIntegrations = ({ integrationName }) => {
           handleClose={closeModal}
           integrationName={integrationName == 'postgres' ? 'postgresql' : integrationName}
           title={selectedIntegration.name ? `Edit ${getDisplayName(integrationName)} Account` : `Add ${getDisplayName(integrationName)} Account`}
+          subtitle={getIntegrationDescription(integrationName)}
           integrationData={integrationData}
           editData={selectedIntegration || {}}
           listIntegrationConfigurationById={listIntegrationConfigurationById}
         />
       )}
       <ListingLayout id={`${integrationName}-integrations`}>
-        <ListingLayout.Toolbar
+        <ListingLayout.Header
+          icon={<CloudProviderIcon cloud_provider={integrationName} width={ds.space[5]} height={ds.space[5]} />}
           title={
             <Stack direction='row' alignItems='center' spacing={1}>
-              <Typography color={ds.gray[700]} fontSize={ds.text.title} fontWeight={600}>
-                {getDisplayName(integrationName)}
-              </Typography>
-              <CloudProviderIcon cloud_provider={integrationName} />
-              {integrationName === 'splunk_observability_platform' && (
-                <Tooltip title='View Splunk Observability Cloud setup guide'>
+              <span>{getDisplayName(integrationName)}</span>
+              {setupGuideIntegration && (
+                <Tooltip title={`View ${setupGuideIntegration} setup guide`}>
                   <span>
                     <DsButton
                       tone='ghost'
                       composition='icon-only'
                       size='xs'
                       icon={<InfoOutlinedIcon sx={{ fontSize: ds.text.title }} />}
-                      aria-label='View Splunk Observability Cloud setup guide'
-                      onClick={() => setOpenSetupGuide(true)}
-                    />
-                  </span>
-                </Tooltip>
-              )}
-              {integrationName === 'splunk_enterprise' && (
-                <Tooltip title='View Splunk Enterprise setup guide'>
-                  <span>
-                    <DsButton
-                      tone='ghost'
-                      composition='icon-only'
-                      size='xs'
-                      icon={<InfoOutlinedIcon sx={{ fontSize: ds.text.title }} />}
-                      aria-label='View Splunk Enterprise setup guide'
-                      onClick={() => setOpenSetupGuide(true)}
-                    />
-                  </span>
-                </Tooltip>
-              )}
-              {integrationName === 'solarwinds' && (
-                <Tooltip title='View SolarWinds Observability setup guide'>
-                  <span>
-                    <DsButton
-                      tone='ghost'
-                      composition='icon-only'
-                      size='xs'
-                      icon={<InfoOutlinedIcon sx={{ fontSize: ds.text.title }} />}
-                      aria-label='View SolarWinds Observability setup guide'
+                      aria-label={`View ${setupGuideIntegration} setup guide`}
                       onClick={() => setOpenSetupGuide(true)}
                     />
                   </span>
@@ -1047,81 +1089,96 @@ const ListIntegrations = ({ integrationName }) => {
               )}
             </Stack>
           }
-          actions={
-            // otel_clickhouse is still agent-only: it has no user-configurable form,
-            // so there is nothing for an Add button to open. Loki and Prometheus have
-            // both left that list — each can now be connected directly.
-            integrationName != 'otel_clickhouse' && canManage('integrations', 'Write') ? (
-              <DsButton
-                id={`add-${toKebabCase(integrationName)}-account-btn`}
-                tone='primary'
-                size='md'
-                onClick={() => {
-                  setSelectedIntegration({});
-                  setOpenModal(true);
+          description={getIntegrationDescription(integrationName)}
+          actions={addAccountButton}
+        />
+        {showConnectPrompt ? (
+          <ListingLayout.Body padding={ds.space[5]}>
+            <EmptyState
+              id={`${integrationName}-no-accounts`}
+              icon={<LinkOutlinedIcon sx={{ fontSize: 20 }} />}
+              title={`No ${getDisplayName(integrationName)} accounts connected`}
+              description={getIntegrationDescription(integrationName)}
+              action={
+                canAddAccount
+                  ? {
+                      label: `Add ${getDisplayName(integrationName)} Account`,
+                      onClick: () => {
+                        setSelectedIntegration({});
+                        setOpenModal(true);
+                      },
+                      icon: <AddIcon sx={{ fontSize: 16 }} />,
+                    }
+                  : undefined
+              }
+            />
+          </ListingLayout.Body>
+        ) : (
+          <>
+            <ListingLayout.Toolbar
+              actions={
+                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>
+                  {totalCount} {totalCount === 1 ? 'account' : 'accounts'}
+                </Typography>
+              }
+            >
+              {(() => {
+                const statusOptions = [
+                  { label: 'Enabled', value: 'enabled' },
+                  { label: 'Disabled', value: 'disabled' },
+                ];
+                const selectedStatusOption = statusOptions.find((o) => o.value === selectedStatusFilter) ?? null;
+                return (
+                  <FilterDropdown
+                    id={`${integrationName}-status-filter`}
+                    label='Status'
+                    options={statusOptions}
+                    value={selectedStatusOption}
+                    onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
+                  />
+                );
+              })()}
+              <SearchInput
+                id={`${integrationName}-name-search`}
+                value={nameInput}
+                onChange={(next) => {
+                  setNameInput((prev) => {
+                    if (prev.trim() !== '' && next.trim() === '') {
+                      setSelectedNameFilter('');
+                      setCurrentPage(0);
+                    }
+                    return next;
+                  });
                 }}
-                aria-label={`Add ${integrationName} Account`}
-              >
-                {`Add ${getDisplayName(integrationName)} Account`}
-              </DsButton>
-            ) : undefined
-          }
-        >
-          {(() => {
-            const statusOptions = [
-              { label: 'Enabled', value: 'enabled' },
-              { label: 'Disabled', value: 'disabled' },
-            ];
-            const selectedStatusOption = statusOptions.find((o) => o.value === selectedStatusFilter) ?? null;
-            return (
-              <FilterDropdown
-                id={`${integrationName}-status-filter`}
-                label='Status'
-                options={statusOptions}
-                value={selectedStatusOption}
-                onSelect={(_e, item) => handleStatusFilterChange({ target: { value: item?.value || '' } })}
-              />
-            );
-          })()}
-          <SearchInput
-            id={`${integrationName}-name-search`}
-            value={nameInput}
-            onChange={(next) => {
-              setNameInput((prev) => {
-                if (prev.trim() !== '' && next.trim() === '') {
+                onEnterPress={() => {
+                  setSelectedNameFilter(nameInput);
+                  setCurrentPage(0);
+                }}
+                onClear={() => {
+                  setNameInput('');
                   setSelectedNameFilter('');
                   setCurrentPage(0);
-                }
-                return next;
-              });
-            }}
-            onEnterPress={() => {
-              setSelectedNameFilter(nameInput);
-              setCurrentPage(0);
-            }}
-            onClear={() => {
-              setNameInput('');
-              setSelectedNameFilter('');
-              setCurrentPage(0);
-            }}
-            label='Enter Name'
-          />
-        </ListingLayout.Toolbar>
-        <ListingLayout.Body>
-          <CustomTable
-            id={`${integrationName}`}
-            loading={loading}
-            tableData={tableData}
-            headers={headers}
-            totalRows={totalCount}
-            rowsPerPage={recordsPerPage}
-            pageNumber={currentPage + 1}
-            onPageChange={(page, limit) => {
-              setCurrentPage(page - 1);
-              setRecordsPerPage(limit);
-            }}
-          />
-        </ListingLayout.Body>
+                }}
+                label='Enter Name'
+              />
+            </ListingLayout.Toolbar>
+            <ListingLayout.Body>
+              <CustomTable
+                id={`${integrationName}`}
+                loading={loading}
+                tableData={tableData}
+                headers={headers}
+                totalRows={totalCount}
+                rowsPerPage={recordsPerPage}
+                pageNumber={currentPage + 1}
+                onPageChange={(page, limit) => {
+                  setCurrentPage(page - 1);
+                  setRecordsPerPage(limit);
+                }}
+              />
+            </ListingLayout.Body>
+          </>
+        )}
       </ListingLayout>
     </>
   );

@@ -40,6 +40,8 @@ func NewCodeAgentWithTracker(cfg *config.Config, llmClient *llm.Client, gitClien
 	// Restrict PR/MR creation — only the orchestrator creates PRs with proper formatting
 	cliTool := tools.NewCLITool(workspaceDir)
 	cliTool.SetRestrictPROperations(true)
+	bgTool := tools.NewBackgroundExecTool(workspaceDir)
+	bgTool.SetRestrictPROperations(true)
 	ghTool := tools.NewGHTool(workspaceDir)
 	ghTool.SetRestrictPROperations(true)
 	glabTool := tools.NewGLabTool(workspaceDir)
@@ -47,6 +49,7 @@ func NewCodeAgentWithTracker(cfg *config.Config, llmClient *llm.Client, gitClien
 
 	var rawTools []core.NBTool
 	rawTools = append(rawTools, cliTool)
+	rawTools = append(rawTools, bgTool)
 	rawTools = append(rawTools, tools.NewFileFindTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewFileViewTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewRipgrepTool(workspaceDir))
@@ -86,7 +89,7 @@ func NewCodeAgentWithTracker(cfg *config.Config, llmClient *llm.Client, gitClien
 		tools:         trackedTools,
 		promptLoader:  common.NewPromptLoader(),
 		repoCloneTool: repoCloneTool,
-		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool},
+		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool, bg: bgTool},
 	}
 }
 
@@ -191,24 +194,19 @@ func (a *CodeAgent) buildEnhancedQuery(ctx context.Context, sessionCtx *session.
 }
 
 func (a *CodeAgent) buildCodeAgentPrompt(sessionCtx *session.SessionContext) (string, error) {
-	contextInfo := ""
-	if sessionCtx.RepoContext != nil {
-		contextInfo = sessionCtx.RepoContext.GetRepositoryGuidance()
-	}
+	contextInfo, repoSkills := repoScopedPromptContext(sessionCtx, a.logger)
 
 	// Prepare template data (tools are now passed via native function calling, not prompt text)
-	mode := sessionCtx.Mode
-	if mode == "" {
-		mode = "explore"
-	}
+	mode := effectiveMode(sessionCtx)
 	templateData := map[string]any{
 		"ContextInfo":   contextInfo,
 		"OriginalQuery": sessionCtx.OriginalQuery,
 		"Mode":          mode,
-		"IsExploreMode": mode == "explore",
-		"IsFixMode":     mode == "fix",
+		"IsExploreMode": mode == ModeExplore,
+		"IsFixMode":     mode == ModeFix,
 		"BaseDiff":      sessionCtx.BaseDiff,
 		"Skills":        sessionCtx.SkillsContext,
+		"RepoSkills":    repoSkills,
 	}
 
 	// Load and execute template

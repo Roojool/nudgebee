@@ -20,6 +20,7 @@ import (
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -1577,6 +1578,11 @@ const maxInvestigationEvidenceBytes = 12000
 // middle-truncated so both the first and last errors of the window survive.
 const maxErrorLogLinesBytes = 4096
 
+// Reserve space for observations even when enrichment produces verbose insights.
+const maxEvidenceInsightBytes = 2000
+const maxEvidencePatternBytes = 1500
+const maxInlineRawLogBytes = 1000
+
 // maxLogPatternCount bounds how many enricher log-pattern templates are
 // rendered into the prompt digest.
 const maxLogPatternCount = 10
@@ -1618,11 +1624,11 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// push them past the cap.
 	if insights := collectEvidenceInsights(ev); len(insights) > 0 {
 		b.WriteString("### Collected Insights\n")
+		var insightText strings.Builder
 		for _, msg := range insights {
-			b.WriteString("- ")
-			b.WriteString(msg)
-			b.WriteString("\n")
+			insightText.WriteString("- " + msg + "\n")
 		}
+		b.WriteString(core.TruncateMiddle(insightText.String(), maxEvidenceInsightBytes/2, maxEvidenceInsightBytes/2))
 		b.WriteString("\n")
 	}
 
@@ -1630,7 +1636,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// the severity breakdown.
 	if digest := renderLogPatternDigest(ev.LogSummary); digest != "" {
 		b.WriteString("### Log Patterns\n")
-		b.WriteString(digest)
+		b.WriteString(core.TruncateMiddle(digest, maxEvidencePatternBytes/2, maxEvidencePatternBytes/2))
 		b.WriteString("\n")
 	}
 
@@ -1648,7 +1654,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 	// not, the caller saves it to the conversation workspace instead and the
 	// prompt points the agent at that file.
 	if logText := strings.TrimSpace(ev.LogData); logText != "" {
-		remaining := maxInvestigationEvidenceBytes - b.Len()
+		remaining := min(maxInlineRawLogBytes, maxInvestigationEvidenceBytes-b.Len()-128)
 		if remaining > 512 {
 			b.WriteString("### Collected Logs\n```\n")
 			if len(logText) > remaining {
@@ -1679,7 +1685,7 @@ func buildInvestigationEvidenceContext(ev events.InvestigateData) string {
 // conversation row exists by this point: Step 1 (summary) created it.
 func saveEvidenceLogsToWorkspace(ctx *security.RequestContext, accountId, sessionId, eventId string, event events.Event) string {
 	logText := strings.TrimSpace(event.Evidences.LogData)
-	if len(logText) <= maxInvestigationEvidenceBytes {
+	if len(logText) <= maxInlineRawLogBytes {
 		return ""
 	}
 	conv, convErr := core.GetConversationDao().GetConversationBySession(accountId, sessionId)
@@ -1925,7 +1931,7 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 			fmt.Fprintf(&b, " at commit `%s`", caps.Source.Commit)
 		}
 		b.WriteString(". `code_analyzer` is available.\n")
-		b.WriteString("- When your causality chain lands on a code defect, OR your Next Steps call for a code change (error handling, retry/backoff, a hardening change) even if the root cause is external/config, call `code_analyzer` in **explore mode** with the distinctive strings from the logs — the exact error message text and any `filename:lineno` — so it clones the repo and greps for where that code lives. Use what it returns to name the exact file(s).\n")
+		b.WriteString("- When incident-window evidence supports a code defect, call `code_analyzer` in **explore mode** with the resource, time window, observed failure, causal mechanism, and distinctive log strings (including any filename:lineno). Ask it to verify the mechanism against the deployed revision and identify the exact repo-relative file(s). A log-string match alone does not establish a defect. Keep optional hardening suggestions in prose; they do not justify an automated change plan.\n")
 	}
 	if caps.Deployment != nil {
 		fmt.Fprintf(&b, "The deployment values for `%s` are in `%s`: `%s`.\n", workload, caps.Deployment.Repo, caps.Deployment.ValuesPath)
@@ -1935,7 +1941,7 @@ func buildCodeCapabilityBlock(caps *services_server.EventCodeCapabilities, names
 	b.WriteString("<change_plan>\n")
 	b.WriteString("kind: source | deployment\n")
 	b.WriteString("files: <repo-relative path(s) code_analyzer identified, comma-separated; or the values file>\n")
-	b.WriteString("change: <what to change and why, as direct instructions to a code-fixing agent>\n")
+	b.WriteString("change: <what to change, the incident evidence establishing why it is needed, and a focused regression check with its expected result; distinguish observed facts from hypotheses>\n")
 	b.WriteString("target_value: <for a deployment change only: the exact value, e.g. 512Mi>\n")
 	b.WriteString("</change_plan>\n")
 	return b.String()
@@ -2506,10 +2512,17 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			// as JSON in this row's analysis column for Step 3 and log-only reruns.
 			changePlan = parseChangePlanBlock(investigationResponse)
 			if changePlan != nil {
+				// #38488: carry the code the investigation actually read into the
+				// plan. The fix agent's only input is its query, so without this it
+				// re-explores from scratch and can contradict the investigation
+				// (event ed0fd316: it found the retry the investigation asked for
+				// and stopped, never doing the other half of the plan).
+				changePlan.Evidence = collectInvestigationCodeCitations(ctx, dbManager, parentConversationId, request.AccountId, rootcauseAgentName, changePlan.Files)
 				ctx.GetLogger().Info("analyzer: debug agent emitted a change plan",
 					"event_id", request.EventId, "kind", changePlan.Kind,
 					"files", strings.Join(changePlan.Files, ","),
-					"target_value", changePlan.TargetValue, "change_bytes", len(changePlan.Change))
+					"target_value", changePlan.TargetValue, "change_bytes", len(changePlan.Change),
+					"evidence_bytes", len(changePlan.Evidence))
 			} else {
 				ctx.GetLogger().Info("analyzer: no <change_plan> block in investigation",
 					"event_id", request.EventId, "investigation_bytes", len(investigationResponse))
@@ -2535,11 +2548,16 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 		if existingLog.RelatedEventId != "" {
 			response.RelatedEventId = existingLog.RelatedEventId
 		}
+		codeFixText = existingLog.Analysis
 		if cached := (EventAnalysisResponse{}); json.Unmarshal([]byte(existingLog.Analysis), &cached) == nil {
 			response.SourceUpdates = cached.SourceUpdates
+			// #38488: synthesis used to receive the whole marshaled response
+			// envelope on this path and the plain analysis text on the fresh one,
+			// so the same event produced different reports depending on which run
+			// synthesised it. Normalise both through codeFixSummary.
+			codeFixText = codeFixSummary(cached)
 		}
 		ctx.GetLogger().Info("analyzer: using existing log analysis", "event_id", request.EventId)
-		codeFixText = existingLog.Analysis
 
 		// If DetailedResponse is also already done, return immediately.
 		existingDetailed, _ := eventAnalysisRepo.GetEventAnalysis(ctx, request.EventId, eventFingerprint, eventAggregationKey, request.AccountId, events.AnalysisTypeDetailedResponse)
@@ -2595,7 +2613,7 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 				if upErr := eventAnalysisRepo.UpsertEventAnalysis(ctx, response.EventId, response.Analysis, response.Summary, string(events.AnalysisStatusCompleted), eventFingerprint, request.AccountId, eventAggregationKey, events.AnalysisTypeLog); upErr != nil {
 					ctx.GetLogger().Warn("analyzer: failed to store code analysis result", "error", upErr, "event_id", request.EventId)
 				}
-				codeFixText = codeFixResponse.Analysis
+				codeFixText = codeFixSummary(codeFixResponse)
 			}
 		}
 	}
@@ -2831,6 +2849,11 @@ type codeChangePlan struct {
 	Files       []string `json:"files"`        // repo-relative path(s) code_analyzer identified, or the values file
 	Change      string   `json:"change"`       // instructions to a code-fixing agent
 	TargetValue string   `json:"target_value"` // for a deployment/limit change: the exact value, e.g. "512Mi"
+	// Evidence is the code the investigation actually read, rendered from
+	// code_analyzer's citations (#38488). It travels with the plan so the fix
+	// agent starts from the same code the investigation saw, on the fresh path
+	// and on every later rerun that reloads the stored plan.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 var (
@@ -2872,13 +2895,41 @@ func parseChangePlanBlock(investigationText string) *codeChangePlan {
 			plan.Files = append(plan.Files, p)
 		}
 	}
+	// A target value the agent left as a placeholder ("<valid-image-tag>") is not
+	// a value: carrying it forward guarantees the produced diff fails the
+	// "does not set the value the investigation asked for" check (#38488). Drop
+	// it and let the plan run without a target, as it does when none was given.
+	if strings.HasPrefix(plan.TargetValue, "<") {
+		plan.TargetValue = ""
+	}
 	if plan.Change == "" && len(plan.Files) == 0 {
 		return nil
 	}
-	if plan.Kind != "source" && plan.Kind != "deployment" {
-		plan.Kind = "source"
-	}
 	return plan
+}
+
+// Check both fresh and recovered plans before paying for a fix invocation.
+// Structural validity is necessary, but does not prove the diagnosis correct.
+func validateCodeChangePlan(plan *codeChangePlan) string {
+	if plan == nil {
+		return "skipped - investigation concluded no actionable code change"
+	}
+	if plan.Kind != "source" && plan.Kind != "deployment" {
+		return "skipped - change plan has an unsupported kind"
+	}
+	if strings.TrimSpace(plan.Change) == "" || len(plan.Files) == 0 {
+		return "skipped - change plan needs explicit instructions and located files"
+	}
+	if strings.HasPrefix(strings.TrimSpace(plan.Change), "<") {
+		return "skipped - change plan instructions are an unfilled placeholder"
+	}
+	for _, file := range plan.Files {
+		clean := path.Clean(strings.TrimSpace(file))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) || strings.ContainsAny(file, "<>*?\\\n\r") {
+			return "skipped - change plan files must be concrete repository-relative paths"
+		}
+	}
+	return ""
 }
 
 // stripChangePlanBlock removes the <change_plan> block (and trailing blank
@@ -2924,6 +2975,11 @@ var errCodeFixSkipped = errors.New("analyzer: code fix stage skipped - no action
 // minCodeFixDiffBytes rejects a diff too small to be a real change — the
 // "Analysis Response Parse Error" rows in #37005 were 56 bytes.
 const minCodeFixDiffBytes = 120
+
+// maxStoredCitationBytes bounds the code citations rendered into a stored
+// no-diff result. Generous enough for the handful of snippets that justify a
+// verdict, small enough that the log_analysis row stays a row and not a dump.
+const maxStoredCitationBytes = 8000
 
 // validateFixAgainstCapabilities is the deterministic, no-LLM check on a
 // produced diff (#37005 §5). The diff must be a real change; for a deployment
@@ -2991,6 +3047,229 @@ func diffChangedFiles(diff string) []string {
 	return files
 }
 
+// Outcomes of a code-agent fix run, as stored in source_updates.outcome and
+// rendered by the investigate page. They mirror code-analysis's execution_status
+// (#38488): the service is the authority on how its run ended, and llm-server
+// must not re-derive that from which JSON keys happen to be populated.
+const (
+	codeOutcomeSuccess = "success" // a diff (and possibly a PR) was produced
+	codeOutcomeNoOp    = "no_op"   // the requested change is already present
+	codeOutcomeFailed  = "failed"  // the run could not finish or errored out
+)
+
+// codeAgentOutcome classifies a fix-mode response that carried no diff, and
+// returns the text to show alongside it. The explanation is the agent's own
+// wording plus whatever code it cited, so the page and the synthesised report
+// can say WHY no change was made instead of silently omitting the stage.
+func codeAgentOutcome(actualResponse map[string]any, response EventAnalysisResponse) (string, string) {
+	outcome := ""
+	switch response.ExecutionStatus {
+	case codeOutcomeNoOp:
+		outcome = codeOutcomeNoOp
+	case codeOutcomeFailed:
+		outcome = codeOutcomeFailed
+	case "":
+		// An older code-analysis build (or a followup shape) that never stamped a
+		// status. Treat it as inconclusive rather than inventing "already present".
+		outcome = codeOutcomeFailed
+	default:
+		outcome = codeOutcomeFailed
+	}
+
+	var b strings.Builder
+	for _, key := range []string{"answer", "description", "pr_creation_reason", "execution_summary", "root_cause_analysis"} {
+		if v, ok := actualResponse[key].(string); ok && strings.TrimSpace(v) != "" {
+			b.WriteString(strings.TrimSpace(v))
+			break
+		}
+	}
+	if b.Len() == 0 && strings.TrimSpace(response.ErrorMessage) != "" {
+		b.WriteString(strings.TrimSpace(response.ErrorMessage))
+	}
+	if cites := renderCodeCitations(actualResponse["citations"], maxStoredCitationBytes); cites != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(cites)
+	}
+	return outcome, b.String()
+}
+
+// collectInvestigationCodeCitations returns the code_analyzer citations gathered
+// during the investigation, rendered as markdown for the fix-mode query (#38488).
+//
+// Scoped to the LATEST investigation generation in this conversation — messages
+// whose agent_name is the debug agent — so it can never pick up a previous
+// fix-mode run's own verdict (which is itself stored as a code_analyzer row on a
+// separate message, and would otherwise feed the next fix run its own output).
+// Citations are filtered to the files the plan named; a citation for an
+// unrelated file is what would make the fix agent confidently answer about the
+// wrong code. Best-effort: on any error the query degrades to plan-only.
+func collectInvestigationCodeCitations(ctx *security.RequestContext, dbManager *common.DatabaseManager, sessionId, accountId, debugAgentName string, planFiles []string) string {
+	if dbManager == nil || sessionId == "" || accountId == "" || debugAgentName == "" {
+		return ""
+	}
+	// The pipeline addresses its conversation by session id ("event-<fingerprint>"),
+	// not by conversation UUID, so resolve it through llm_conversations. Filtering
+	// llm_conversation_messages.conversation_id on the session string matched
+	// nothing and silently dropped every citation (#38488 follow-up).
+	var responses []string
+	if err := dbManager.Db.Select(&responses, `
+		WITH investigation AS (
+		    SELECT m.id
+		    FROM llm_conversation_messages m
+		    JOIN llm_conversations c ON c.id = m.conversation_id
+		    WHERE c.session_id = $1 AND c.account_id = $2 AND m.agent_name = $3
+		    ORDER BY m.created_at DESC
+		    LIMIT 1)
+		SELECT COALESCE(a.response, '')
+		FROM llm_conversation_agent a
+		JOIN investigation i ON i.id = a.message_id
+		WHERE a.agent_name = 'code_analyzer'
+		  AND a.status = 'success'
+		ORDER BY a.created_at`, sessionId, accountId, debugAgentName); err != nil {
+		ctx.GetLogger().Warn("analyzer: unable to collect investigation code citations", "error", err, "session_id", sessionId)
+		return ""
+	}
+
+	var b strings.Builder
+	for _, raw := range responses {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			continue
+		}
+		rendered := renderCodeCitations(filterCitationsToFiles(parsed["citations"], planFiles), maxStoredCitationBytes-b.Len())
+		if rendered == "" {
+			continue
+		}
+		b.WriteString(rendered)
+		if b.Len() >= maxStoredCitationBytes {
+			break
+		}
+	}
+	return b.String()
+}
+
+// filterCitationsToFiles keeps only the citations naming a file the plan targets,
+// matched on the full path or a directory-qualified suffix for workspace-absolute
+// and service-relative citations. Basenames alone cannot identify monorepo files.
+// An empty file list keeps
+// everything — the plan named no file to check against.
+func filterCitationsToFiles(raw any, planFiles []string) any {
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 || len(planFiles) == 0 {
+		return raw
+	}
+	wanted := make(map[string]bool, len(planFiles))
+	for _, f := range planFiles {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		wanted[path.Clean(f)] = true
+	}
+	kept := make([]any, 0, len(list))
+	for _, item := range list {
+		c, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		file, _ := c["file_path"].(string)
+		if strings.TrimSpace(file) == "" {
+			continue
+		}
+		file = path.Clean(strings.TrimSpace(file))
+		for target := range wanted {
+			if file == target || (strings.Contains(target, "/") && strings.HasSuffix(file, "/"+target)) {
+				kept = append(kept, item)
+				break
+			}
+		}
+	}
+	return kept
+}
+
+// codeFixSummary renders what the code stage concluded, for the synthesis step.
+// A run that produced a diff contributes its analysis text as before; a run that
+// produced none contributes its outcome and the agent's reasoning, so the report
+// is written knowing the code was checked and what the check found (#38488).
+func codeFixSummary(resp EventAnalysisResponse) string {
+	outcome, _ := resp.SourceUpdates["outcome"].(string)
+	explanation, _ := resp.SourceUpdates["explanation"].(string)
+	if outcome == "" || outcome == codeOutcomeSuccess {
+		return resp.Analysis
+	}
+	header := "Code check result: the requested change is already present in the code, so no change was made."
+	if outcome != codeOutcomeNoOp {
+		header = "Code check result: the check could not be completed, so the code was not verified."
+	}
+	if strings.TrimSpace(explanation) == "" {
+		return header
+	}
+	return header + "\n\n" + explanation
+}
+
+// renderCodeCitations formats code-analysis citations (file, line range, note,
+// snippet) as markdown, bounded by budget bytes. Returns "" when there are none.
+func renderCodeCitations(raw any, budget int) string {
+	list, ok := raw.([]any)
+	if !ok || len(list) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("**Code examined**\n")
+	for _, item := range list {
+		c, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		path, _ := c["file_path"].(string)
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		entry := "\n- `" + path + "`"
+		if start, ok := toInt(c["line_start"]); ok {
+			entry += fmt.Sprintf(":%d", start)
+			if end, ok := toInt(c["line_end"]); ok && end != start {
+				entry += fmt.Sprintf("-%d", end)
+			}
+		}
+		if note, _ := c["note"].(string); strings.TrimSpace(note) != "" {
+			entry += " — " + strings.TrimSpace(note)
+		}
+		if snippet, _ := c["snippet"].(string); strings.TrimSpace(snippet) != "" {
+			entry += "\n\n```\n" + strings.TrimSpace(snippet) + "\n```\n"
+		}
+		if b.Len()+len(entry) > budget {
+			break
+		}
+		b.WriteString(entry)
+	}
+	if strings.TrimSpace(strings.TrimPrefix(b.String(), "**Code examined**")) == "" {
+		return ""
+	}
+	return b.String()
+}
+
+// toInt accepts the numeric shapes encoding/json produces for a citation's line
+// numbers (float64 for a plain unmarshal, json.Number when decoding is buffered).
+func toInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	}
+	return 0, false
+}
+
 // buildFixModeQuery turns the debug agent's <change_plan> into a short
 // code_analyzer fix-mode query. The investigation already localised the change
 // with code_analyzer, so this is a one-line implementation instruction plus the
@@ -3006,6 +3285,14 @@ func buildFixModeQuery(plan *codeChangePlan, caps *services_server.EventCodeCapa
 		if plan.TargetValue != "" {
 			fmt.Fprintf(&b, " to %s", plan.TargetValue)
 		}
+	}
+	// #38488: hand over the code the investigation read, and say what to do when
+	// it already satisfies the request — without this the agent re-explores, and
+	// on a plan offering two alternatives it answers about the first one only.
+	if strings.TrimSpace(plan.Evidence) != "" {
+		b.WriteString("\n\nThe investigation already read this code:\n")
+		b.WriteString(plan.Evidence)
+		b.WriteString("\n\nIf part of the requested change is already present in the code above, do not repeat it: implement the part that is missing. If the whole request is already satisfied, make no change and report that, citing the code that satisfies it.")
 	}
 	return b.String()
 }
@@ -3047,8 +3334,8 @@ func runCodeFixStage(ctx *security.RequestContext, request EventAnalysisRequest,
 		"code_capabilities_present", caps.HasAny(),
 		"auto_raise_pr_enabled", raisePR)
 
-	if plan == nil {
-		return skipCodeFix("skipped - investigation concluded no actionable code change")
+	if reason := validateCodeChangePlan(plan); reason != "" {
+		return skipCodeFix(reason)
 	}
 	if !isGitIntegrationConfigured(request.AccountId) {
 		return skipCodeFix("skipped - no git integration configured")
@@ -3401,9 +3688,28 @@ func runCodeFixStage(ctx *security.RequestContext, request EventAnalysisRequest,
 
 	// #37005 §5: deterministic, no-LLM check on the produced diff before it is
 	// stored. A rejected diff completes the row empty with the reason.
+	//
+	// #38488: a run that produced no diff is not automatically a dead end. The
+	// code agent distinguishes "the change is already present" (no_op) from "the
+	// run could not finish" (failed), and both are results the user must see —
+	// blanking them is what left the event page showing a root cause the code
+	// check had disproved. Only a response that says nothing at all still skips.
 	if strings.TrimSpace(response.GitDiff) == "" && response.AutomatedFixPR.URL == "" {
-		return skipCodeFix("skipped - code analysis found no change to make")
+		outcome, explanation := codeAgentOutcome(actualResponse, response)
+		if outcome == "" || strings.TrimSpace(explanation) == "" {
+			return skipCodeFix("skipped - code analysis returned no result")
+		}
+		response.SourceUpdates["outcome"] = outcome
+		response.SourceUpdates["explanation"] = explanation
+		if outcome == codeOutcomeNoOp {
+			response.StatusReason = "no code change needed"
+		} else {
+			response.StatusReason = "code check could not finish"
+		}
+		ctx.GetLogger().Info("analyzer: code analysis produced no diff", "event_id", request.EventId, "outcome", outcome)
+		return response, nil
 	}
+	response.SourceUpdates["outcome"] = codeOutcomeSuccess
 	if reject := validateFixAgainstCapabilities(response.GitDiff, plan, caps); reject != "" {
 		// EVENT_AUTO_RAISE_PR_ENABLED opens the PR inside the code_analyzer call
 		// above, before this check runs. If the PR is already on GitHub, dropping

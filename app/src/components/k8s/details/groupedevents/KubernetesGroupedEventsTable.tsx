@@ -161,6 +161,9 @@ const transformTableData = (
     // (#37273) — shown so the grouping is visible rather than silently hiding replicas.
     const subjectLabel = cloudProvider && cloudProvider !== 'K8s' ? 'resources' : 'pods';
     const collapsedSubjectCount = Number(item.count_subject_name) || 0;
+    // event_count is the events inside the selected range. fingerprint_event_count is the
+    // position in the fingerprint's occurrence run, which can begin before the range (#38458).
+    const runCount = Number(item.fingerprint_event_count) || 0;
 
     // Common Drilldown Props
     const commonDrilldown = {
@@ -259,7 +262,15 @@ const transformTableData = (
           drilldownQuery: commonDrilldown,
         },
         { component: <Text showAutoEllipsis value={titleCaseForAggregationKey(item.aggregation_key)} /> },
-        { component: <Text showAutoEllipsis value={item.fingerprint_event_count ?? item.event_count} /> },
+        {
+          component: (
+            <Box>
+              <Text showAutoEllipsis value={item.event_count ?? item.fingerprint_event_count} data-testid='inbox-event-count' />
+              {/* A run of 1 is just this firing, so it adds nothing to the Count; shown from 2 up. */}
+              {runCount >= 2 && <Text secondaryText showAutoEllipsis value={`run of ${runCount}`} data-testid='inbox-run-count' />}
+            </Box>
+          ),
+        },
         {
           component: (
             <Box display='flex' alignItems='center' gap={ds.space[1]}>
@@ -763,7 +774,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
           name: 'Count',
           width: '8%',
           sortable: true,
-          info: 'Number of times this event has fired in the selected time range.',
+          info: 'Number of events in the selected time range. The "run of N" line is how many times this issue has fired in its current run, which continues while it re-fires within 24 hours of the previous firing and so can begin before the selected range.',
         },
         {
           name: 'Triage Score',
@@ -955,7 +966,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
     }
 
     const SORT_COLUMN_MAP: Record<string, string> = {
-      Count: 'fingerprint_event_count',
+      Count: 'event_count',
       'Event Count': 'event_count',
       Priority: 'latest_computed_score',
       'Last Occurred': 'max_created_at',

@@ -9,6 +9,8 @@ import { Button } from '@ui/Button';
 import { toast as snackbar } from '@ui/Toast';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
+import { addPendingAgentInstall } from '@components/integrations/pendingAgentInstall';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const SETUP_INSTRUCTIONS = `### Self-Hosted VM Fleet
   A self-hosted account groups virtual machines we reach through an agent rather
@@ -73,6 +75,13 @@ const AddSelfHostedAccountModal = ({ open, onClose }) => {
           snackbar.error(`Failed to add self-hosted account - ${res?.data?.message}`);
           return;
         }
+        // The account on its own collects nothing — a VM Agent integration has to
+        // be added before any forager exists, and that step is easy to leave for
+        // later and forget. Record it so the reminder banner carries the message
+        // until a proxy agent actually connects. Unlike the cluster flow there is
+        // nothing to wait for here: the install command lives in that separate
+        // integration, not in this modal.
+        addPendingAgentInstall(res?.data?.data?.accounts_create?.id || '', accountNameValue, 'vm');
         snackbar.success('Self-hosted account added successfully');
         handleCloseModal(true);
       })
@@ -93,6 +102,7 @@ const AddSelfHostedAccountModal = ({ open, onClose }) => {
       open={open}
       handleClose={isSubmitting ? () => {} : () => handleCloseModal(false)}
       title='Add Self-Hosted Account'
+      subtitle={getIntegrationDescription('SELFHOSTED')}
       loader={isSubmitting}
     >
       <MarkDowns data={SETUP_INSTRUCTIONS} sx={{ width: 'auto' }} />

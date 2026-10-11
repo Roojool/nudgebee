@@ -14,6 +14,7 @@ import Tooltip from '@ui/Tooltip';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const HELPER_TEXT_SX = {
   color: 'var(--ds-gray-500)',
@@ -270,6 +271,7 @@ const GithubAccountModal = ({ openModal, handleClose, editConfig = null }) => {
       open={openModal}
       handleClose={() => handleCloseGithubModal()}
       title={isEdit ? 'Edit Github Account' : 'Add Github Account'}
+      subtitle={getIntegrationDescription('GITHUB')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: ds.space[5], pb: ds.space[2] }}>

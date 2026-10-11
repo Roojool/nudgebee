@@ -22,6 +22,9 @@ import { Button } from '@ui/Button';
 import { safeJSONParse } from '@utils/common';
 import SecurityFindingPanel from './SecurityFindingPanel';
 import { fromImageScanRow } from './securityFinding';
+import { AskNubiIconButton, findingPromptContext, useAskNubiAboutSecurityFinding } from './askNubi';
+import { dismissMenuEntry, useRecommendationDismissal } from './dismissal';
+import { useTenantBranding } from '@hooks/useTenantBranding';
 
 const SEVERITY_TO_DS_LEVEL = {
   critical: 'critical',
@@ -78,6 +81,18 @@ const KubernetesSecurityDetails = (props) => {
   // The finding whose detail panel is open. Rows used to expand into an
   // accordion; a single finding now opens the side panel instead.
   const [panelFinding, setPanelFinding] = useState(null);
+  const { assistantName } = useTenantBranding();
+  const dismissal = useRecommendationDismissal(() => {
+    setPanelFinding(null);
+    getSecurityDetails();
+  });
+  const askNubi = useAskNubiAboutSecurityFinding();
+  const askAboutFinding = (item) =>
+    askNubi({
+      accountId: item?.account_id,
+      sessionKey: item?.id,
+      context: findingPromptContext(fromImageScanRow(item), props?.accountsById?.[item?.account_id]),
+    });
 
   // Filter integrations based on the repo URL in annotations
   const filteredGitIntegrations = useMemo(() => {
@@ -161,6 +176,8 @@ const KubernetesSecurityDetails = (props) => {
       setIsTicketCreateFormOpen(true);
     } else if (menuItem.id === 'create-pull-request') {
       openPRModal(data);
+    } else if (menuItem.id === 'dismiss' || menuItem.id === 'reactivate') {
+      dismissal.toggle(data);
     }
   };
 
@@ -317,6 +334,7 @@ const KubernetesSecurityDetails = (props) => {
 
   const getMenuItems = (data) => {
     const hasFixAvailable = data?.recommendation?.FixedVersion;
+    const dismissEntry = dismissMenuEntry(data?.status, hasWriteAccess(data?.account_id));
     return [
       {
         icon: TicketsIcon,
@@ -332,6 +350,7 @@ const KubernetesSecurityDetails = (props) => {
         // flight, or a terminal one that needs no further action — blocks a new PR.
         disabled: !hasFixAvailable || !hasWriteAccess() || Boolean(data?.resolution && data.resolution.status !== 'Failed'),
       },
+      ...(dismissEntry ? [{ label: dismissEntry.label, id: dismissEntry.id }] : []),
     ];
   };
 
@@ -418,7 +437,8 @@ const KubernetesSecurityDetails = (props) => {
       data.push({ component: <Datetime value={item.created_at} /> });
       data.push({
         component: (
-          <Box display={'flex'} flexDirection={'row'} alignItems={'space-between'} justifyContent={'flex-end'}>
+          <Box display={'flex'} flexDirection={'row'} alignItems={'center'} justifyContent={'flex-end'} gap={'var(--ds-space-1)'}>
+            <AskNubiIconButton id={`security-ask-nubi-${item.id}`} assistantName={assistantName} onClick={() => askAboutFinding(item)} />
             <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} />
           </Box>
         ),
@@ -661,8 +681,11 @@ const KubernetesSecurityDetails = (props) => {
           setIsTicketCreateFormOpen(true);
         }}
         onCreatePR={() => openPRModal(panelFinding)}
+        onAskNubi={() => askAboutFinding(panelFinding)}
+        onDismiss={panelFinding && hasWriteAccess(panelFinding.account_id) ? () => dismissal.toggle(panelFinding) : undefined}
         createPRDisabledReason={!hasWriteAccess() ? 'You need write access to raise a pull request' : prBlockedReason(panelFinding)}
       />
+      {dismissal.modal}
       <CustomTable
         id={props.tableId}
         headers={BEST_PRACTICES_HEADER}

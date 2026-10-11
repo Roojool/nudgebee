@@ -14,5 +14,9 @@ for _key, _val in {
     "RELAY_SERVER_ENDPOINT": "http://localhost:8080",
     "RELAY_SERVER_SECRET_KEY": "test-secret",
     "ML_MODEL_STORE_BUCKET": "test-bucket",
+    # The api-server metrics transport reads these at import; a test that wants the
+    # relay path pins ML_METRICS_TRANSPORT itself.
+    "SERVICE_API_SERVER_URL": "http://services-server:8000",
+    "ACTION_API_SERVER_TOKEN": "test-action-token",
 }.items():
     os.environ.setdefault(_key, _val)

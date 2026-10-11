@@ -52,15 +52,24 @@ function PrometheusCPUUsageCardComponent(props) {
       return;
     }
 
+    let cancelled = false;
+
     const fetchData = async () => {
       const result = await getDataFromProemtheus(props.event);
 
+      if (cancelled) {
+        return;
+      }
       if (result) {
         setCpuUsageData(result);
       }
     };
 
     fetchData();
+
+    return () => {
+      cancelled = true;
+    };
   }, [props.event.cloud_account_id, props.event.subject_namespace, props.event.subject_name, props.event.starts_at]);
 
   return (

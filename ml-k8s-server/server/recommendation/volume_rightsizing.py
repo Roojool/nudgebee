@@ -385,11 +385,11 @@ class VolumeRightsizingService:
         try:
             total_minutes = int(duration.total_seconds() / 60)
             response_data = prometheus_range_query(
-                endpoint=self.prometheus_url,
                 promql_query=query,
                 account_id=self.account_id,
                 duration_minutes=total_minutes,
                 step="1m",
+                tenant_id=self.tenant_id,
             )
             return response_data if response_data and isinstance(response_data, list) else []
         except Exception as e:

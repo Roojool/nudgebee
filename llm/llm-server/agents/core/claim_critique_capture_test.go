@@ -65,9 +65,9 @@ func installClaimCaptureDAO(t *testing.T, d *claimCaptureDAO) {
 }
 
 func TestClaimCapturePersistsWithTracingDisabled(t *testing.T) {
-	previous, tracing := config.Config.ClaimCritiqueShadowEnabled, config.Config.LlmTraceEnabled
-	config.Config.ClaimCritiqueShadowEnabled, config.Config.LlmTraceEnabled = true, false
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled, config.Config.LlmTraceEnabled = previous, tracing })
+	previous, tracing := config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled
+	config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled = true, false
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled, config.Config.LlmTraceEnabled = previous, tracing })
 	for _, output := range []string{validClaimAudit, `{"claims":[`} {
 		t.Run(output, func(t *testing.T) {
 			dao := &claimCaptureDAO{usage: make(chan *TokenUsageRecord, 4)}
@@ -111,9 +111,9 @@ func TestClaimCapturePersistsWithTracingDisabled(t *testing.T) {
 }
 
 func TestClaimCaptureStorageFailureSkipsInference(t *testing.T) {
-	previous := config.Config.ClaimCritiqueShadowEnabled
-	config.Config.ClaimCritiqueShadowEnabled = true
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled = previous })
+	previous := config.Config.ClaimCritiqueFeedbackEnabled
+	config.Config.ClaimCritiqueFeedbackEnabled = true
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
 	dao := &claimCaptureDAO{failWrite: 1}
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
@@ -124,9 +124,9 @@ func TestClaimCaptureStorageFailureSkipsInference(t *testing.T) {
 }
 
 func TestClaimCaptureOversizeAndCancellationRemainVisible(t *testing.T) {
-	previous := config.Config.ClaimCritiqueShadowEnabled
-	config.Config.ClaimCritiqueShadowEnabled = true
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled = previous })
+	previous := config.Config.ClaimCritiqueFeedbackEnabled
+	config.Config.ClaimCritiqueFeedbackEnabled = true
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
 	dao := &claimCaptureDAO{}
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{}
@@ -185,9 +185,9 @@ func TestClaimCaptureFailureUsageID(t *testing.T) {
 }
 
 func TestClaimCaptureCompletionFailureLeavesStarted(t *testing.T) {
-	previous := config.Config.ClaimCritiqueShadowEnabled
-	config.Config.ClaimCritiqueShadowEnabled = true
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled = previous })
+	previous := config.Config.ClaimCritiqueFeedbackEnabled
+	config.Config.ClaimCritiqueFeedbackEnabled = true
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
 	dao := &claimCaptureDAO{failWrite: 2, usage: make(chan *TokenUsageRecord, 1)}
 	installClaimCaptureDAO(t, dao)
 	fake := &fakeLLMModel{turns: []fakeTurn{{content: validClaimAudit}}}

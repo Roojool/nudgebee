@@ -53,6 +53,14 @@ func (s agentWarehouseStmt) executeChronosphereRequestWithRetry(requestData map[
 	httpClient := &http.Client{Transport: common.HttpClient().Transport, Timeout: 30 * time.Second}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Bail out if the request context is already done. A pooled connection can
+		// carry a stale, cancelled context (see QueryContext / newConnection); without
+		// this check the retry loop would fire the relay POST with a dead context and
+		// burn its one retry on an instant "context canceled".
+		if err := s.ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		if attempt > 0 {
 			delay := baseDelay * time.Duration(1<<(attempt-1)) // Exponential backoff: 1s, 2s, 4s
 			slog.Warn("Retrying Chronosphere request",
@@ -244,9 +252,13 @@ func (c *agentWarehouseConnection) Close() error {
 	return nil
 }
 
-func newConnection(ctx context.Context, _ string) (*agentWarehouseConnection, error) {
+func newConnection(_ context.Context, _ string) (*agentWarehouseConnection, error) {
+	// Deliberately do NOT retain the Connect context. database/sql passes the
+	// first caller's request-scoped context here, and this connection outlives
+	// that request in the pool. QueryContext supplies the live per-call context;
+	// Background keeps the non-context Query() path from ever sending a stale one.
 	return &agentWarehouseConnection{
-		ctx: ctx,
+		ctx: context.Background(),
 	}, nil
 }
 
@@ -271,6 +283,18 @@ func (s agentWarehouseStmt) QueryContext(ctx context.Context, args []driver.Name
 	if len(args) == 0 {
 		return nil, errors.New("invalid number of arguments")
 	}
+
+	// Use this call's context for the relay request rather than the one baked into
+	// the pooled connection at Prepare time. database/sql hands each pooled
+	// connection the context of whichever query first opened it; once that query's
+	// WithTimeout/WithCancel fires its deferred cancel, the connection goes back in
+	// the pool with a permanently cancelled context. s is a value receiver, so this
+	// assignment propagates to every downstream helper (batching / chunk paths
+	// included) without threading ctx through their signatures.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.ctx = ctx
 
 	requestData := map[string]any{
 		"no_sinks": true,

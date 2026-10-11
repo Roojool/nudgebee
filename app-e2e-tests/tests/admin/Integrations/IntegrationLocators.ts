@@ -648,10 +648,9 @@ export class IntegrationLocators extends CommonLocators {
       "Test notification sent to Slack successfully!",
       { exact: false },
     );
-    this.slackTestErrorToast = page.getByText(
-      "Failed to send test notification to Slack",
-      { exact: false },
-    );
+    this.slackTestErrorToast = this.genericErrorToast
+      .or(page.getByText("Failed to send test notification to Slack", { exact: false }))
+      .first();
 
     // MS Teams Locators
     // Section card ID computed from provider "MSTEAMS" → "Msteams" → "Msteams-section-card"
@@ -660,13 +659,11 @@ export class IntegrationLocators extends CommonLocators {
     this.addToMsTeamsBtn = page.locator("#add-to-ms-teams-btn");
     this.testMsTeamsNotificationBtn = page.locator("#test-ms-teams-btn");
     this.msTeamsTestSuccessToast = page.getByText(
-      "Test notification sent to Ms Teams successfully!",
-      { exact: false },
+      /Test notification sent to (Microsoft|Ms) Teams successfully!/,
     );
-    this.msTeamsTestErrorToast = page.getByText(
-      "Failed to send test notification to Ms Teams",
-      { exact: false },
-    );
+    this.msTeamsTestErrorToast = this.genericErrorToast
+      .or(page.getByText(/Failed to send test notification to (Microsoft|Ms) Teams/))
+      .first();
 
     // Google Chat Locators
     // Section card ID computed from provider "GOOGLE_CHAT" → "Google-Chat" → "Google-Chat-section-card"

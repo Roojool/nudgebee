@@ -19,6 +19,7 @@ import apiIntegrations from '@api1/integrations';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { computeTierDefaults } from '@utils/tierDefaults';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const renderAccountGroupIcon = (provider) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -1640,7 +1641,13 @@ const AddLLMConfigModal = ({ open, onClose, editData, onSaved, accountId }) => {
   };
 
   return (
-    <Modal open={open} onClose={onClose} title={isEdit ? 'Edit LLM Provider' : 'Add LLM Provider'} width='md'>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={isEdit ? 'Edit LLM Provider' : 'Add LLM Provider'}
+      subtitle={getIntegrationDescription('LLM')}
+      width='md'
+    >
       <Box>
         {/* ---------- Global section ---------- */}
         <Stack spacing='var(--ds-space-4)'>

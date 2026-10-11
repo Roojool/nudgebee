@@ -14,6 +14,8 @@ import { useLatestRequest } from '@components/vm/common';
 import { normalizeSeverity } from './securityFinding';
 import { type CloudPostureRule, cloudRuleTitle, foldCloudPostureRules } from './cloudPosture';
 import CloudRuleResources from './CloudRuleResources';
+import { useAskNubiAboutSecurityFinding } from './askNubi';
+import { useRecommendationDismissal } from './dismissal';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import { toast as snackbar } from '@ui/Toast';
 
@@ -43,6 +45,11 @@ const HEADERS = [
   { name: 'Provider', width: '16%' },
 ];
 
+const STATUS_OPTIONS = [
+  { label: 'Open', value: 'Open' },
+  { label: 'Dismissed / snoozed', value: 'Dismissed' },
+];
+
 const SEVERITY_OPTIONS = ['Critical', 'High', 'Medium', 'Low', 'Info'].map((s) => ({ label: s, value: s }));
 
 interface CloudPostureViewProps {
@@ -67,11 +74,16 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
   const [rules, setRules] = useState<CloudPostureRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [severity, setSeverity] = useState<string | null>(null);
+  // Dismissed covers snoozed rows too: a snooze is Dismissed plus an expiry.
+  const [statusFilter, setStatusFilter] = useState<string>('Open');
+  const [refreshKey, setRefreshKey] = useState(0);
   const [isTicketFormOpen, setIsTicketFormOpen] = useState(false);
   const [ticketTarget, setTicketTarget] = useState<{ rule: CloudPostureRule; resource: any } | null>(null);
   const beginRequest = useLatestRequest();
 
   const closeTicketForm = useCallback(() => setIsTicketFormOpen(false), []);
+  const askNubi = useAskNubiAboutSecurityFinding();
+  const dismissal = useRecommendationDismissal(() => setRefreshKey((k) => k + 1));
 
   // Memoised: CloudRuleResources lists this in a dependency array, so an inline
   // object would rebuild every resource table on each render of the rollup.
@@ -81,8 +93,28 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
         setTicketTarget({ rule, resource });
         setIsTicketFormOpen(true);
       },
+      onDismiss: (_rule: CloudPostureRule, resource: any) => dismissal.toggle(resource),
+      onAskNubi: (rule: CloudPostureRule, resource: any) => {
+        const payload = typeof resource?.recommendation === 'string' ? safeJSONParse(resource.recommendation) || {} : resource?.recommendation || {};
+        const catalog: any = recommendationApi.getRecommendationDetails('Security', rule.ruleName) || {};
+        askNubi({
+          accountId: resource?.account_id,
+          sessionKey: resource?.id,
+          context: {
+            kind: 'Cloud posture check',
+            id: rule.ruleName,
+            title: cloudRuleTitle(rule.ruleName, catalog),
+            severity: normalizeSeverity(resource?.severity),
+            resource: resource?.resource_name || payload.repository_name || resource?.resource_id,
+            provider: rule.provider,
+            accountName: accountsById?.[resource?.account_id],
+            description: catalog?.description,
+            reason: payload?.reason,
+          },
+        });
+      },
     }),
-    []
+    [askNubi, accountsById, dismissal]
   );
 
   const providerOf = useCallback((id: string) => providerById?.[id], [providerById]);
@@ -96,7 +128,10 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
     setLoading(true);
     const isLatest = beginRequest();
     try {
-      const rows = await recommendationApi.listCloudPostureRules({ accountId: scope });
+      const rows = await recommendationApi.listCloudPostureRules({
+        accountId: scope,
+        ...(statusFilter === 'Dismissed' ? { status: ['Dismissed'] } : {}),
+      });
       if (!isLatest()) return;
       setRules(foldCloudPostureRules(rows, providerOf));
     } catch (error) {
@@ -105,7 +140,7 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
     } finally {
       if (isLatest()) setLoading(false);
     }
-  }, [accountId, providerOf, beginRequest]);
+  }, [accountId, providerOf, beginRequest, statusFilter, refreshKey]);
 
   useEffect(() => {
     load();
@@ -163,6 +198,7 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
         ticketUrl={{}}
         reference={{ id: ticketTarget?.resource?.id, type: 'cloud' }}
       />
+      {dismissal.modal}
       <ListingLayout id='cloud-posture'>
         <ListingLayout.Toolbar actions={<DownloadButton id={`${TABLE_ID}-download`} onClick={() => ({ tableId: TABLE_ID })} />}>
           {leadingFilters}
@@ -172,6 +208,14 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
             value={severity}
             options={SEVERITY_OPTIONS}
             onSelect={(event: any) => setSeverity(event?.target?.value || null)}
+          />
+          <FilterDropdown
+            id='cloud-posture-status'
+            label='Status'
+            value={statusFilter}
+            options={STATUS_OPTIONS}
+            clearable={false}
+            onSelect={(event: any) => setStatusFilter(event?.target?.value || 'Open')}
           />
         </ListingLayout.Toolbar>
         <ListingLayout.Body>
@@ -209,6 +253,8 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
                       <CloudRuleResources
                         rule={drilldownQuery.rule}
                         scopeAccountId={accountId}
+                        status={statusFilter === 'Dismissed' ? ['Dismissed'] : undefined}
+                        refreshKey={refreshKey}
                         accountsById={accountsById}
                         rowActions={resourceRowActions}
                       />

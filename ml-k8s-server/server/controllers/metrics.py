@@ -29,8 +29,13 @@ def fetch_metrics():
         current_span.set_attribute("Namespace", str(data.get("namespace")))
         current_span.set_attribute("Account", str(data.get("account")))
         try:
+            # No tenant on this request (api-server's MetricsRequest carries only
+            # account/namespace/deployment), so Prometheus resolves it from the account.
             prometheus_instance = Prometheus(
-                namespace_name=data["namespace"], deployment_name=data["deployment"], account_id=data["account"]
+                namespace_name=data["namespace"],
+                deployment_name=data["deployment"],
+                account_id=data["account"],
+                tenant_id=str(data.get("tenant") or ""),
             )
             metrics_df = prometheus_instance.get_metrics()
             metrics_df.fillna(0, inplace=True)

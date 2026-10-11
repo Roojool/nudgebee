@@ -320,7 +320,49 @@ func decodeInnerData(result []map[string]any) ([]string, map[string]any, error) 
 	return strs, raw, nil
 }
 
+// labelValuesOutput wraps decoded label values for the metrics_list_label_values
+// response. Attributes is deliberately empty: it used to carry the whole decoded
+// provider reply, which made the response O(N^2) because every one of the N items
+// embedded a copy of the full N-value payload (a 2362-value 'pod' lookup marshalled
+// to 193MiB instead of 144KiB, OOM-killing both the API and llm-server pods).
+// No caller reads it, and every other provider already returns an empty map.
+func labelValuesOutput(values []string) []OutputMetricsLabelValues {
+	output := make([]OutputMetricsLabelValues, len(values))
+	for i, v := range values {
+		output[i] = OutputMetricsLabelValues{Value: v, Attributes: map[string]any{}}
+	}
+	return output
+}
+
+// requestedMetricName reads the optional metric the caller wants label values
+// scoped to. Both the query builder and the agent tools already send it; it was
+// previously dropped, so every lookup ran cluster-wide.
+func requestedMetricName(req FetchMetricsLabelValueRequest) string {
+	m, _ := req.Request["metric_name"].(string)
+	return strings.TrimSpace(m)
+}
+
 func (s *PrometheusMetricSource) FetchMetricLabelValues(ctx *security.RequestContext, req FetchMetricsLabelValueRequest) ([]OutputMetricsLabelValues, error) {
+	// Scope the lookup to the requested metric when there is one. The
+	// prometheus_labels action takes only a label name, so it returns the
+	// label's values across the whole cluster; the proxy path accepts a
+	// match[] selector, the same mechanism FetchMetricList already uses.
+	if metric := requestedMetricName(req); metric != "" {
+		match := metricNameSelector(metric)
+		path := fmt.Sprintf("prometheus-v2/api/v1/label/%s/values?match[]=%s",
+			url.PathEscape(req.Label), url.QueryEscape(match))
+
+		resp, err := relayProxyRequest(ctx, req.AccountId, nil, path)
+		if err != nil {
+			return nil, err
+		}
+		values, err := stringListFromProxyData(resp)
+		if err != nil {
+			return nil, err
+		}
+		return labelValuesOutput(values), nil
+	}
+
 	resp, err := relayRequest(ctx, req.AccountId, "prometheus_labels", map[string]any{"label_name": req.Label})
 	if err != nil {
 		return nil, err
@@ -331,16 +373,47 @@ func (s *PrometheusMetricSource) FetchMetricLabelValues(ctx *security.RequestCon
 		return nil, err
 	}
 
-	values, raw, err := decodeInnerData(result)
+	values, _, err := decodeInnerData(result)
 	if err != nil {
 		return nil, err
 	}
 
-	output := make([]OutputMetricsLabelValues, len(values))
-	for i, v := range values {
-		output[i] = OutputMetricsLabelValues{Value: v, Attributes: raw}
+	return labelValuesOutput(values), nil
+}
+
+// metricNameSelector builds the match[] selector that scopes a label lookup to
+// one metric. %q quotes and escapes on its own — escaping the metric first as
+// well would double-escape an embedded quote.
+func metricNameSelector(metric string) string {
+	return fmt.Sprintf("{__name__=%q}", metric)
+}
+
+// stringListFromProxyData pulls the string array out of a Prometheus proxy
+// reply ({"status":"success","data":[...]}). An error envelope arrives with
+// HTTP 200 on some engines, so the status is inspected rather than trusted --
+// the same reason PrometheusSaasMetricSource checks it.
+func stringListFromProxyData(resp map[string]any) ([]string, error) {
+	if status, _ := resp["status"].(string); status == "error" {
+		if msg, _ := resp["error"].(string); msg != "" {
+			return nil, fmt.Errorf("prometheus error: %s", msg)
+		}
+		return nil, fmt.Errorf("prometheus returned an error envelope")
 	}
-	return output, nil
+	data, ok := resp["data"]
+	if !ok {
+		return nil, fmt.Errorf("missing data field in response")
+	}
+	list, ok := data.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("data field is not a list")
+	}
+	out := make([]string, 0, len(list))
+	for _, v := range list {
+		if str, ok := v.(string); ok {
+			out = append(out, str)
+		}
+	}
+	return out, nil
 }
 
 func (s *PrometheusMetricSource) FetchMetricList(ctx *security.RequestContext, req FetchMetricsListRequest) ([]OutputMetrics, error) {

@@ -1041,6 +1041,7 @@ const Header1 = ({ showBorder = false }) => {
                     size='md'
                     tooltip='Product Updates'
                     tooltipPlacement='bottom'
+                    tooltipDisableFlip
                     aria-label='Product Updates'
                     icon={<CampaignOutlinedIcon fontSize='small' />}
                     onClick={openProductUpdates}
@@ -1075,6 +1076,7 @@ const Header1 = ({ showBorder = false }) => {
                   size='md'
                   tooltip='Coming Soon'
                   tooltipPlacement='bottom'
+                  tooltipDisableFlip
                   aria-label='Notifications'
                   icon={<SafeIcon alt='Notification Icon' src={NotificationOutlineIconDark} />}
                 />
@@ -1088,6 +1090,7 @@ const Header1 = ({ showBorder = false }) => {
                         size='md'
                         tooltip='Help'
                         tooltipPlacement='bottom'
+                        tooltipDisableFlip
                         aria-label='Help'
                         icon={<SafeIcon alt='Help Icon' src={HelpOutlineDarkIcon} />}
                       />

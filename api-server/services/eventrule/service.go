@@ -51,18 +51,34 @@ var agentToServerActionMap = map[string][]string{
 	"event_resource_events_enricher":      {"event_resource_events_enricher"},
 }
 
-// actionImplKey identifies one *configured* action implementation for the
+// ActionImplKey identifies one *configured* action implementation for the
 // auto-discovery dedup: the Go type, plus the variant key for types registered
 // under several names with different configuration.
-type actionImplKey struct {
-	typ     reflect.Type
-	variant string
+type ActionImplKey struct {
+	Typ     reflect.Type
+	Variant string
 }
 
-func implKeyOf(action playbooks.PlaybookAction) actionImplKey {
-	key := actionImplKey{typ: reflect.TypeOf(action)}
+// actionRunsWithoutAgent reports whether a k8s_*-prefixed action has declared
+// that it no longer depends on the cluster agent, so the auto-discovery
+// pre-flight must not hide it from an account whose metrics come from a
+// directly-connected backend.
+func actionRunsWithoutAgent(actionName string) bool {
+	action, found := playbooks.GetAction(actionName)
+	if !found {
+		return false
+	}
+	optional, ok := action.(playbooks.PlaybookActionAgentOptional)
+	return ok && optional.AgentOptional()
+}
+
+// ImplKeyOf is exported for the dedup guard in the observability package: that
+// is where actions registered from observability's own init()s are visible, and
+// a test in this package would see only the ones playbooks registers itself.
+func ImplKeyOf(action playbooks.PlaybookAction) ActionImplKey {
+	key := ActionImplKey{Typ: reflect.TypeOf(action)}
 	if v, ok := action.(playbooks.PlaybookActionVariant); ok {
-		key.variant = v.VariantKey()
+		key.Variant = v.VariantKey()
 	}
 	return key
 }
@@ -898,25 +914,20 @@ func ListAlertAgentPlaybook(context *security.RequestContext, request ListAgentP
 	return converted, nil
 }
 
-// isK8sAgentConnected reports whether the account has a non-proxy agent row whose
-// connection_status is populated. Returns false on any DB error or no matching row —
-// callers use this strictly as a hint to skip k8s-agent-dependent actions, so
-// failing closed avoids surfacing transient DB errors as spurious relay calls.
+// isK8sAgentConnected reports whether the account's in-cluster k8s agent is
+// currently registered with the relay. Callers use it as a hint to skip
+// k8s-agent-dependent actions.
+//
+// It used to run its own `connection_status IS NOT NULL` query here — a column
+// that is never cleared once an agent has connected even once, so clusters last
+// seen a year ago still read as connected. relay.AgentConnected tests
+// agent.status, the same column the relay routes on, and is the single
+// definition shared with the transport that enforces it.
 func isK8sAgentConnected(accountId string) bool {
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return false
-	}
-	var exists int
-	if qErr := dbms.Db.Get(&exists,
-		`SELECT 1 FROM agent WHERE cloud_account_id = $1 AND type != 'proxy' AND connection_status IS NOT NULL LIMIT 1`,
-		accountId); qErr != nil {
-		return false
-	}
-	return true
+	return relay.AgentConnected(accountId)
 }
 
-// IsK8sAgentConnected reports whether the account has a connected (non-proxy) k8s agent.
+// IsK8sAgentConnected reports whether the account has a connected in-cluster k8s agent.
 // Exported wrapper around isK8sAgentConnected so other packages (e.g. triage's threshold
 // apply capability check) can gate agent-dependent writes without duplicating the query.
 func IsK8sAgentConnected(accountId string) bool {
@@ -924,6 +935,14 @@ func IsK8sAgentConnected(accountId string) bool {
 }
 
 // Action defines the interface that all playbook actions must implement.
+// playbookBudgetExpired reports whether the caller's deadline for this playbook
+// run has passed. A zero deadline means unbounded, which is what the inline
+// request path uses — only the asynchronous enrichment consumer sets one, so that
+// a single event cannot outlive the broker's consumer_timeout.
+func playbookBudgetExpired(event playbooks.PlaybookEvent) bool {
+	return !event.Deadline.IsZero() && time.Now().After(event.Deadline)
+}
+
 func ExecutePlaybook(context *security.RequestContext, accountId string, event playbooks.PlaybookEvent) ([]PlaybookActionExecutionResponse, error) {
 	context.GetLogger().Info("eventrule: executing playbook", "event_id", event.EventId, "account_id", accountId, "event_name", event.Name)
 
@@ -969,6 +988,20 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 
 	for i, actionMap := range playbooksData {
 		for actionName, rawParams := range actionMap {
+			// Stop before starting another action once the caller's budget is spent.
+			// Returning what we have beats abandoning the run: the caller writes the
+			// partial evidence and moves on, instead of a goroutine continuing to
+			// hammer cloud-collector and landing results after the event has already
+			// been handed to triage.
+			if playbookBudgetExpired(event) {
+				context.GetLogger().Warn("eventrule: playbook budget exhausted, returning partial results",
+					"event_id", event.EventId, "actions_executed", len(executedAction),
+					"actions_total", len(playbooksData), "next_action", actionName,
+					"deadline", event.Deadline.Format(time.RFC3339))
+				common.MetricsPlaybookBudgetExhausted(context.GetContext())
+				return executionResults, nil
+			}
+
 			action, found := playbooks.GetAction(actionName)
 			if !found {
 				context.GetLogger().Warn("eventrule: action not found in registry", "actionName", actionName)
@@ -1494,10 +1527,10 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 	// AutoExecute never sees the action name, so one run per implementation is
 	// equivalent — except where the same type is registered under several names
 	// with different configuration, which PlaybookActionVariant reports.
-	executedImpls := make(map[actionImplKey]bool)
+	executedImpls := make(map[ActionImplKey]bool)
 	for _, actionName := range executedAction {
 		if action, found := playbooks.GetAction(actionName); found {
-			executedImpls[implKeyOf(action)] = true
+			executedImpls[ImplKeyOf(action)] = true
 		}
 	}
 
@@ -1506,8 +1539,10 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 		if slices.Contains(executedAction, actionName) {
 			continue
 		}
-		// Skip k8s-agent-dependent actions when the account has no connected agent.
-		if !k8sAgentAvailable && strings.HasPrefix(actionName, "k8s_") {
+		// Skip k8s-agent-dependent actions when the account has no connected agent,
+		// unless the action has opted out because it no longer needs one (see
+		// playbooks.PlaybookActionAgentOptional).
+		if !k8sAgentAvailable && strings.HasPrefix(actionName, "k8s_") && !actionRunsWithoutAgent(actionName) {
 			continue
 		}
 		// Skip any log action if another log action already ran — avoids duplicate log collection
@@ -1527,7 +1562,7 @@ func ExecutePlaybook(context *security.RequestContext, accountId string, event p
 		if !ok {
 			continue
 		}
-		implKey := implKeyOf(action)
+		implKey := ImplKeyOf(action)
 		if executedImpls[implKey] {
 			context.GetLogger().Info("eventrule: skipping auto action (same implementation already ran under another name)", "actionName", actionName)
 			continue

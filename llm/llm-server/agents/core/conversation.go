@@ -44,6 +44,17 @@ const finalizeOnPanicDBBudget = 5 * time.Second
 
 var conversationAsyncTaskWorkerPool *common.WorkerPool
 
+// QueuedMessageDispatcherFunc defines the function signature for dispatching queued messages
+// to an asynchronous execution pool.
+type QueuedMessageDispatcherFunc func(ctx *security.RequestContext, agent NBAgent, conversation Conversation, msg ConversationMessage)
+
+var queuedMessageDispatcher QueuedMessageDispatcherFunc
+
+// SetQueuedMessageDispatcher configures the dispatcher used to execute queued conversation messages.
+func SetQueuedMessageDispatcher(d QueuedMessageDispatcherFunc) {
+	queuedMessageDispatcher = d
+}
+
 func init() {
 	conversationAsyncTaskWorkerPool = common.NewWorkerPool("conversation_async_tasks", config.Config.ConversationTaskWorkerCount, 100)
 }
@@ -333,6 +344,7 @@ type additionalConversationSessionRequestConfig struct {
 	previousState         string
 	isNewConversation     bool
 	isResume              bool
+	isQueuedDispatch      bool
 	images                []ImageAttachment
 	channelContext        string
 	channelContextRefs    map[string]any
@@ -565,6 +577,19 @@ func ConversationSessionRequestWithIsResume(isResume bool) ConversationSessionRe
 	}
 }
 
+type sessionRequestWithQueuedDispatch struct{}
+
+func (sessionRequestWithQueuedDispatch) apply(c *additionalConversationSessionRequestConfig) {
+	c.isResume = true
+	c.isQueuedDispatch = true
+}
+
+// ConversationSessionRequestWithQueuedDispatch is only for an atomically claimed
+// queue row. It bypasses the competing-turn guard without recovery cleanup.
+func ConversationSessionRequestWithQueuedDispatch() ConversationSessionRequestConfig {
+	return sessionRequestWithQueuedDispatch{}
+}
+
 type sessionRequestWithImages struct {
 	images []ImageAttachment
 }
@@ -691,6 +716,7 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 		Capabilities:          defaultConfig.capabilities,
 		PreviousState:         defaultConfig.previousState,
 		IsResume:              defaultConfig.isResume,
+		IsQueuedDispatch:      defaultConfig.isQueuedDispatch,
 		Images:                defaultConfig.images,
 		ChannelContext:        defaultConfig.channelContext,
 		ChannelContextRefs:    defaultConfig.channelContextRefs,
@@ -704,6 +730,16 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 	}
 
 	return response, err
+}
+
+func shouldSkipQueuedDispatch(conversationStatus, messageStatus ConversationStatus) bool {
+	return conversationStatus != ConversationStatusInProgress || messageStatus != ConversationStatusInProgress
+}
+
+func shouldCleanupExistingMessage(queuedDispatch bool, status ConversationStatus, messageType MessageType) bool {
+	// A claimed queue row is fresh. Recovery cleanup would reset its status and
+	// could resurrect it if cancellation committed after the worker read it.
+	return !queuedDispatch && status != ConversationStatusWaiting && status != ConversationStatusWaitingForClientTool && messageType != MessageTypeFollowup
 }
 
 // shouldSkipResumeForTerminalConversation returns true when a recovery / resume
@@ -1011,6 +1047,17 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 				return NBAgentResponse{}, errors.New("conversation: sessionId doesnt match with existing conversation")
 			}
 
+			if request.IsQueuedDispatch {
+				// Reject a superseded claim before writing sticky model settings.
+				claimed, loadErr := GetConversationDao().GetConversationMessage(request.MessageId, request.AccountId, request.ConversationId)
+				if loadErr != nil {
+					return NBAgentResponse{}, loadErr
+				}
+				if shouldSkipQueuedDispatch(conversation.Status, claimed.Status) {
+					return NBAgentResponse{Status: claimed.Status, ConversationId: request.ConversationId, MessageId: request.MessageId}, nil
+				}
+			}
+
 			// Followup resume v2: when the feature flag is on and the request is a
 			// followup response (has agent_id + query), delegate to the clean single-
 			// entry-point handler. It serializes via conv-level lock, resolves the
@@ -1230,7 +1277,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			}
 			if len(previousConversations) > 0 {
 				for _, v := range slices.Backward(previousConversations) {
-					if v.MessageType != string(MessageTypeGeneration) {
+					if v.Status == ConversationStatusQueued || v.MessageType != string(MessageTypeGeneration) {
 						continue
 					}
 					if v.MessageConfig != nil && *v.MessageConfig != "" {
@@ -1315,6 +1362,11 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		messageStatus = message.Status
 		messageType = MessageType(message.MessageType)
 
+		if request.IsQueuedDispatch && shouldSkipQueuedDispatch(conversation.Status, message.Status) {
+			// Stop/force may have superseded this claim while the worker waited.
+			return NBAgentResponse{Status: message.Status, ConversationId: request.ConversationId, MessageId: request.MessageId}, nil
+		}
+
 		// Defense-in-depth: don't cleanup or re-process messages for conversations
 		// that already reached a terminal state. This prevents dead worker recovery
 		// from destroying completed execution data.
@@ -1337,7 +1389,7 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 		markConversationActive(ctx, conversation.ID.String(), conversation.Status, "resumed/followup turn", false)
 
 		// Only cleanup if it's not a waiting message or a followup response
-		if message.Status != ConversationStatusWaiting && message.Status != ConversationStatusWaitingForClientTool && messageType != MessageTypeFollowup {
+		if shouldCleanupExistingMessage(request.IsQueuedDispatch, message.Status, messageType) {
 			err = GetConversationDao().CleanupConversationMessage(request.MessageId, request.AccountId)
 			if err != nil {
 				if errors.Is(err, ErrCleanupRefusedActiveFollowup) {
@@ -1516,7 +1568,15 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 
 	if !skipSaveBack {
 		// Saving AI Response to DB
-		err = GetConversationDao().UpdateConversationMessage(request.MessageId, agentResponseContent, status)
+		if config.Config.QueuedMessagesEnabled {
+			var applied bool
+			applied, err = GetConversationDao().FinalizeConversationMessage(request.ConversationId, request.MessageId, agentResponseContent, status)
+			if err == nil && !applied {
+				return NBAgentResponse{ConversationId: request.ConversationId, MessageId: request.MessageId, Status: ConversationStatusTerminated}, nil
+			}
+		} else {
+			err = GetConversationDao().UpdateConversationMessage(request.MessageId, agentResponseContent, status)
+		}
 		if err != nil {
 			ctx.GetLogger().Error("conversation: unable to save AI response to DB at router", "error", err)
 			return NBAgentResponse{}, err
@@ -1560,7 +1620,9 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			}
 		}
 
-		err = GetConversationDao().UpdateConversationStatus(request.ConversationId, status)
+		if !config.Config.QueuedMessagesEnabled {
+			err = GetConversationDao().UpdateConversationStatus(request.ConversationId, status)
+		}
 		if err != nil {
 			ctx.GetLogger().Error("conversation: unable to save conversation to DB", "error", err)
 			return NBAgentResponse{}, err
@@ -1586,6 +1648,15 @@ func handleConversationRequest(ctx *security.RequestContext, request NBAgentRequ
 			// status does not depend on the outcome. Self-gates on the feature
 			// flag and on the turn being an investigation.
 			ScoreAnswerConfidenceAsync(ctx, request, agentResponseContent)
+		}
+
+		if status == ConversationStatusCompleted && queuedMessageDispatcher != nil {
+			if nextMsg, claimErr := GetConversationDao().ClaimNextQueuedMessage(ctx.GetContext(), request.ConversationId); claimErr == nil && nextMsg != nil {
+				ctx.GetLogger().Info("conversation: auto-dispatching next queued message", "conversation_id", request.ConversationId, "message_id", nextMsg.ID.String())
+				queuedMessageDispatcher(ctx, agent, conversation, *nextMsg)
+			} else if claimErr != nil {
+				ctx.GetLogger().Warn("conversation: error checking for queued messages", "error", claimErr, "conversation_id", request.ConversationId)
+			}
 		}
 	} else {
 		ctx.GetLogger().Info("conversation: skipping save-back", "reason", skipReason, "message_id", request.MessageId)

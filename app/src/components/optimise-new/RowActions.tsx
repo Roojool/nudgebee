@@ -1,3 +1,4 @@
+import { hasCliCommand } from './cliCommands';
 /**
  * The per-row quick actions every recommendation listing shares — Optimize and
  * Ask Nubi as icon buttons, ticket / dismiss / CLI behind the overflow menu.
@@ -49,7 +50,7 @@ interface RowActionsProps {
 
 const RowActions = memo(({ rowId, rec, ticketId, assistantName, onAskNubi, onResolve, onCreateTicket, onCopyCli, onDismiss }: RowActionsProps) => {
   const showResolve = rec.rule_name === 'pod_right_sizing' && hasWriteAccess(rec.account_id);
-  const showCopyCli = rec.rule_name === 'pod_right_sizing';
+  const showCopyCli = hasCliCommand(rec);
   // Only offer what the backend legality matrix accepts: dismiss from Open,
   // reactivate from Dismissed. Other statuses (InProgress, Closed, Archive) get
   // no menu entry rather than a guaranteed error toast.

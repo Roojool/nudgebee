@@ -71,19 +71,46 @@ func mockedInfraReqCtx() *security.RequestContext {
 // createCloudFormationEdges calls `aws cloudformation list-stack-resources` via
 // the collector; the fake returns a stack containing an S3 bucket, and the
 // converter links the InfraStack → Storage node with MANAGES.
+//
+// The fixture holds two stacks in different regions and the fake answers each
+// only when the command carries that stack's own region — which is how this
+// reproduces #36573 offline. Before the fix the graph build never set
+// SourceBuildRequest.Region, so both commands went out with no --region at all,
+// AWS resolved them against the collector's AWS_DEFAULT_REGION, and every stack
+// outside that one region came back "does not exist". Here that shows up as the
+// eu-west-1 MANAGES edge going missing.
 func TestE2E_MockedInfra_AWSManages(t *testing.T) {
+	// stackResources returns the CLI output for a stack holding one S3 bucket.
+	stackResources := func(logicalID, bucket string) string {
+		out, _ := json.Marshal(map[string]any{
+			"StackResourceSummaries": []map[string]any{{
+				"LogicalResourceId":  logicalID,
+				"PhysicalResourceId": bucket,
+				"ResourceType":       "AWS::S3::Bucket",
+				"ResourceStatus":     "CREATE_COMPLETE",
+			}},
+		})
+		return string(out)
+	}
+
 	srv := fakeCollector(t, func(command string) (string, bool) {
-		if strings.Contains(command, "cloudformation list-stack-resources") {
-			out, _ := json.Marshal(map[string]any{
-				"StackResourceSummaries": []map[string]any{{
-					"LogicalResourceId":  "AppBucket",
-					"PhysicalResourceId": "app-bucket",
-					"ResourceType":       "AWS::S3::Bucket",
-					"ResourceStatus":     "CREATE_COMPLETE",
-				}},
-			})
-			return string(out), true
+		if !strings.Contains(command, "cloudformation list-stack-resources") {
+			return "", false
 		}
+		// A region-scoped command with no --region is the production bug; fail
+		// loudly rather than letting it degrade into an empty result.
+		if !strings.Contains(command, "--region ") {
+			t.Errorf("list-stack-resources issued without --region: %q", command)
+			return "", false
+		}
+		switch {
+		case strings.Contains(command, "--stack-name my-stack --region us-east-1"):
+			return stackResources("AppBucket", "app-bucket"), true
+		case strings.Contains(command, "--stack-name eu-stack --region eu-west-1"):
+			return stackResources("EuBucket", "eu-bucket"), true
+		}
+		// Right stack, wrong region — exactly what AWS answers with
+		// "Stack with id ... does not exist".
 		return "", false
 	})
 	defer srv.Close()
@@ -105,14 +132,16 @@ func TestE2E_MockedInfra_AWSManages(t *testing.T) {
 
 	assertGoldenGraph(t, e2eGoldenPath("aws_manages"), nodes, edges)
 
-	var manages bool
+	// One MANAGES edge per region. The eu-west-1 edge is the regression guard:
+	// it can only exist if the stack's own region reached the CLI command.
+	manages := 0
 	for _, e := range edges {
 		if e.RelationshipType == core.RelationshipManages {
-			manages = true
+			manages++
 		}
 	}
-	if !manages {
-		t.Error("aws_manages: expected CloudFormation InfraStack→Storage MANAGES edge not produced")
+	if manages != 2 {
+		t.Errorf("aws_manages: expected 2 CloudFormation InfraStack→Storage MANAGES edges (one per region), got %d", manages)
 	}
 }
 

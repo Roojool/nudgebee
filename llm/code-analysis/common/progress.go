@@ -32,12 +32,22 @@ func InitAnalysis(analysisID string) {
 
 // SetCancelFunc associates the context cancellation function with an analysis.
 // It is installed by the async handler before the analysis starts.
+//
+// A cancellation that lands between InitAnalysis and this call finds Cancel still
+// nil, so it can only record the status; honouring it is this call's job. No
+// caller can currently reach that window — the id embeds a random UUID and is not
+// returned until after this call — but that is an implicit invariant, and the
+// failure it would cause is silent: an analysis reported as cancelled that runs on
+// to its deadline, unstoppable because the status flip already happened.
 func SetCancelFunc(analysisID string, cancel context.CancelFunc) {
 	if v, ok := progressStore.Load(analysisID); ok {
 		state := v.(*AnalysisState)
 		state.mu.Lock()
+		defer state.mu.Unlock()
 		state.Cancel = cancel
-		state.mu.Unlock()
+		if state.Status == "cancelled" {
+			cancel()
+		}
 	}
 }
 
@@ -63,15 +73,18 @@ func CancelAnalysis(analysisID string) bool {
 	}
 	state := v.(*AnalysisState)
 	state.mu.Lock()
+	defer state.mu.Unlock()
 	if state.Status != "running" {
-		state.mu.Unlock()
 		return false
 	}
 	state.Status = "cancelled"
-	cancel := state.Cancel
-	state.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	// Cancelled under the lock, not after releasing it: Snapshot takes the same
+	// mutex, so this keeps the status flip and the cancellation indivisible and a
+	// caller that reads "cancelled" can never still see a live context.
+	// context.CancelFunc runs no code from this package, so it cannot re-enter
+	// the lock.
+	if state.Cancel != nil {
+		state.Cancel()
 	}
 	return true
 }

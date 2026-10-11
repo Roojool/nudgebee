@@ -229,12 +229,6 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	instructions = append(instructions,
 		fmt.Sprintf("**MODE = %s** (set deterministically from the user's verbatim question; workflow below is narrowed to this mode only).", logModeName(mode)),
 	)
-	if orig := strings.TrimSpace(query.OriginalQuery); orig != "" && orig != strings.TrimSpace(query.Query) {
-		instructions = append(instructions,
-			fmt.Sprintf("**Original user question:** %q", orig),
-		)
-	}
-
 	instructions = append(instructions, sharedHeaderAndWorkflow()...)
 
 	switch mode {
@@ -247,6 +241,15 @@ func (l *LogAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NBAg
 	}
 
 	instructions = append(instructions, outputFormatInstructions(mode)...)
+	// The original question is per-request text (for an event investigation it
+	// carries the whole event payload). It goes last so everything above it is
+	// identical across requests in the same mode and stays in the provider's
+	// prompt cache across runs (#39633).
+	if orig := strings.TrimSpace(query.OriginalQuery); orig != "" && orig != strings.TrimSpace(query.Query) {
+		instructions = append(instructions,
+			fmt.Sprintf("**Original user question:** %q", orig),
+		)
+	}
 
 	return core.NBAgentPrompt{
 		Role:         "an SRE expert that investigates logs across multiple backends",
@@ -270,7 +273,7 @@ func sharedHeaderAndWorkflow() []string {
 		"     Call it with the workload name and namespace directly: `{\"resource_name\": \"<name>\", \"namespace\": \"<ns>\", \"search_type\": \"suggestions\"}`. `suggestions` is the right mode for this workflow — it resolves a workload to its live pods (and their owner references) in one lookup — and it is also what the tool falls back to when `search_type` is absent, so a call that omits it still behaves correctly. Pass it explicitly anyway. Omit `namespace` only when the user genuinely didn't give one.",
 		"  2. **Fetch the logs** by calling `fetch_logs` with a natural-language question that includes the resolved resource and time window. `fetch_logs` translates the question into the right backend query (Loki, Datadog, Elasticsearch, or kubectl) and runs it. The response is a JSON envelope with the rendered query and the raw logs.",
 		"  2b. **Read the response metadata before you shell out.** The inline logs end in one of two bracketed markers, and the `logs_complete` field says the same thing machine-readably. `[... complete — all matching lines are shown above ...]` (`logs_complete: true`) means `file_ref` holds nothing you have not been given: answer from the inline logs, and do NOT call shell_execute. `[... N more bytes truncated ...]` (`logs_complete: false`) means `file_ref` has more — and the inline portion is the FIRST lines of that same file in EXACTLY the same format. Follow `logs_format_hint`: for `timestamp_tab_message`, read line-by-line and split once on TAB; never JSON-decode the whole file. You never need a separate `head` call to discover the layout.",
-		"  2c. **Surface `kubectl_disclosure` when present.** It means the kubectl result was narrowed to one pod and/or a server-side filter. State that limitation explicitly rather than treating the slice as complete workload coverage.",
+		"  2c. **Surface `kubectl_disclosure` when present.** On the kubectl backend, the fetch response may carry a `kubectl_disclosure` field — it means what you're seeing was narrowed: a multi-pod workload was read from only one pod, and/or a filter/line-cap was applied server-side. When it's non-empty, state that caveat explicitly in your final answer (which pod(s) went unread, any filter applied) rather than reporting on the narrowed slice as if it were the whole picture. Empty or absent means nothing was narrowed.",
 		"  2a. **Recovery from name resolution failure.** If `fetch_logs` returns an error containing \"pod not found\", \"(NotFound)\", \"no resources found\", or similar — the resource name didn't resolve. You MUST:",
 		"     - Call `resource_search_execute` with the original name and namespace: `{\"resource_name\": \"<name>\", \"namespace\": \"<ns>\", \"search_type\": \"suggestions\"}`.",
 		"     - Take the resolved pod name (with hash suffix) from the search result.",

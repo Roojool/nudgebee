@@ -34,7 +34,7 @@ export function indexForAccount(indexRules, accountId, topLevelIndex) {
   return (match?.log_index || '').trim() || (topLevelIndex || '').trim();
 }
 
-export default function useLogFieldOptions({ enabled, provider, providerSource, buildProbeConfigValues, accountIndexPairs }) {
+export default function useLogFieldOptions({ enabled, provider, providerSource, integrationId, buildProbeConfigValues, accountIndexPairs }) {
   const [options, setOptions] = useState({});
 
   // Held in a ref because the modal rebuilds this closure every render; as a hook
@@ -52,6 +52,9 @@ export default function useLogFieldOptions({ enabled, provider, providerSource, 
           log_provider: provider,
           log_provider_source: providerSource || 'user',
           integration_config_values: probeValuesRef.current ? probeValuesRef.current() : [],
+          // On edit, secrets left masked are sent as a "keep" flag; the backend reads
+          // the saved value from this integration.
+          ...(integrationId ? { integration_id: integrationId } : {}),
           ...(index ? { request: { index } } : {}),
         });
         const fields = (res?.data?.data?.logs_list_labels || []).map((l) => (typeof l === 'string' ? l : l?.label ?? l?.name)).filter(Boolean);
@@ -61,7 +64,7 @@ export default function useLogFieldOptions({ enabled, provider, providerSource, 
         setOptions((prev) => ({ ...prev, [key]: { loading: false, options: [], message: 'Failed to load fields.' } }));
       }
     },
-    [provider, providerSource]
+    [provider, providerSource, integrationId]
   );
 
   // Only probe once the connection is verified. Before that the form may hold a

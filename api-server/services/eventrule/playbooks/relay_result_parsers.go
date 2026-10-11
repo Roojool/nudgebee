@@ -6,10 +6,10 @@ import (
 
 // Relay wire-format parsers for prometheus_queries_enricher results.
 //
-// These live here, not beside the noisy-neighbours action that used to hold them:
-// action_k8s_pod_metrics and action_impacted_services parse the same shapes, and the
-// action itself moved to the observability package (which owns the metrics-provider
-// lookup and cannot be imported from here). Three of them are exported for that caller.
+// These live here, not beside the noisy-neighbours action that used to hold them.
+// The actions that parsed these shapes have since moved to the observability
+// package and read typed results from the metrics layer instead, so nothing
+// outside this package calls them any more.
 
 // LatestValueEntries reduces a relay prometheus_queries_enricher result to
 // {metric, latest-value} pairs. noisy_neighbours runs RANGE queries (see the

@@ -17,6 +17,7 @@ import { snackbar } from '@shared/snackbarService';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import ValidationResultBanner from '@components/accounts/ValidationResultBanner';
 import { ACCOUNT_ENV_PROD, ACCOUNT_ENV_NON_PROD, DEFAULT_ACCOUNT_ENV, accountEnvTooltip } from '@shared/forms/AccountEnvToggle';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const CF_INSTRUCTIONS = `### Step 1. Give Account Name
   ### Step 2. Click on Connect via AWS Console
@@ -511,6 +512,7 @@ const AddAwsAccountModal = ({ open, onClose }) => {
       open={open}
       handleClose={isPolling || isSubmitting ? () => {} : () => handleCloseModal(false)}
       title={'Add AWS Account'}
+      subtitle={getIntegrationDescription('AWS')}
       loader={isSubmitting}
     >
       <Box sx={{ mb: 1, '& .MuiTab-root': { flex: 1, maxWidth: 'none' } }}>

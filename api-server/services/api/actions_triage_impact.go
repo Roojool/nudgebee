@@ -627,6 +627,7 @@ type tierItem struct {
 	EventID         string        `json:"event_id"`
 	Title           string        `json:"title,omitempty"`
 	Subject         string        `json:"subject,omitempty"`
+	SubjectType     string        `json:"subject_type,omitempty"` // lets the UI say "ConfigMap changed" rather than "was deployed"
 	AggregationKey  string        `json:"aggregation_key,omitempty"`
 	Priority        string        `json:"priority,omitempty"`
 	Sources         []string      `json:"sources,omitempty"`          // unioned across cross-source copies
@@ -717,6 +718,18 @@ func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID
 			continue
 		}
 		k := ckey{tier, triage.SubjectKey(r.id), r.id.AggregationKey}
+		if r.id.IsConfigChange {
+			// Config changes deliberately share a SubjectKey: the owning
+			// workload is what attaches a ConfigMap or Ingress edit to the
+			// seed at all (AssembleTiers requires ek == sk). They also share
+			// one aggregation key. Folding on those alone therefore merges an
+			// edit to a ConfigMap with the workload's own rollout into a
+			// single "was deployed / changed · happened 3 times" row, and the
+			// reader cannot see that a different object changed. Keep the
+			// changed object in the fold so distinct objects stay distinct
+			// while repeat edits to one object still collapse with a count.
+			k.subj += "|" + strings.ToLower(strings.TrimSpace(r.id.SubjectName))
+		}
 		i, ok2 := seen[k]
 		if !ok2 {
 			i = len(items)
@@ -950,9 +963,17 @@ func toTierItem(r windowRow, rates map[string]triage.Rate) tierItem {
 		EventID:        r.id.ID,
 		Title:          r.title,
 		Subject:        triage.SubjectKey(r.id),
+		SubjectType:    r.id.SubjectType,
 		AggregationKey: r.id.AggregationKey,
 		Priority:       r.priority,
 		DtSeconds:      r.id.TsOffsetS,
+	}
+	// The row is named from Subject, which for a config change is the OWNING
+	// workload — correct for attaching it to the incident, wrong as a label:
+	// it renders a ConfigMap edit as the workload being redeployed. Name the
+	// object that actually changed.
+	if r.id.IsConfigChange && strings.TrimSpace(r.id.SubjectName) != "" {
+		item.Subject = strings.ToLower(strings.TrimSpace(r.id.SubjectNamespace)) + "|" + r.id.SubjectName
 	}
 	if !r.startsAt.IsZero() {
 		item.StartsAt = r.startsAt.UTC().Format(time.RFC3339)

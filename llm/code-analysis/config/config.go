@@ -141,6 +141,12 @@ type AgentConfig struct {
 	// never silenced. Override via AGENT_AUTOMATION_COMMENT_MARKERS. Markers
 	// containing a comma cannot be expressed.
 	AutomationCommentMarkers string `mapstructure:"automation_comment_markers"`
+	// InstructionFileMaxBytes caps how much of a detected repo instruction file
+	// (AGENTS.md/CLAUDE.md/...) is read into agent prompts. 0 disables content
+	// injection and falls back to the pointer-only behavior. The file is
+	// documentation about the analyzed repo, never a privileged instruction
+	// channel — see GetRepositoryGuidance's framing.
+	InstructionFileMaxBytes int `mapstructure:"instruction_file_max_bytes"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -217,6 +223,7 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("agent.model_fixer", "")
 	viper.SetDefault("agent.model_review", "")
 	viper.SetDefault("agent.automation_comment_markers", DefaultAutomationCommentMarkers)
+	viper.SetDefault("agent.instruction_file_max_bytes", 8000)
 
 	// Load secrets file if it exists (e.g., secrets.yaml or secrets.json)
 	// This file should contain sensitive information and should not be committed to VCS.

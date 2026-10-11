@@ -233,11 +233,7 @@ func (s *PrometheusSaasMetricSource) fetchMetricsQueryWithConfig(ctx *security.R
 			}
 		} else {
 			prometheusSaasTimeParams(params, req.StartTime, req.EndTime)
-			step := req.StepInterval
-			if step <= 0 {
-				step = 60
-			}
-			params.Set("step", strconv.Itoa(step))
+			params.Set("step", strconv.Itoa(prometheusSaasStepSeconds(req.StepInterval, req.StartTime, req.EndTime)))
 		}
 
 		// One failing query must not discard the results of the others: the
@@ -256,6 +252,43 @@ func (s *PrometheusSaasMetricSource) fetchMetricsQueryWithConfig(ctx *security.R
 	}
 
 	return results, nil
+}
+
+// prometheusSaasStepSeconds picks a range query's resolution. An explicit step
+// from the caller wins; otherwise the window decides, following the same ladder
+// the agent path applies inside the relay (relay-server
+// pkg/utils.GetResolutionFromDuration + CalculateStep), so the same window drawn
+// through either source comes back with the same number of points.
+//
+// A flat 60s default is only safe for short windows: a 30d window asks for 43201
+// points per series, and VictoriaMetrics rejects the whole query with HTTP 422
+// once it passes -search.maxPointsPerTimeseries (30000).
+func prometheusSaasStepSeconds(requested int, startMs, endMs int64) int {
+	if requested > 0 {
+		return requested
+	}
+	rangeSec := (endMs - startMs) / 1000
+	if rangeSec <= 0 {
+		return 60
+	}
+
+	var resolution int64
+	switch {
+	case rangeSec <= 3600:
+		resolution = 250
+	case rangeSec <= 24*3600:
+		resolution = (rangeSec + 59) / 60 // 1m resolution, at most 1440 points
+	case rangeSec <= 7*24*3600:
+		resolution = (rangeSec + 299) / 300 // 5m resolution, at most 2016 points
+	default:
+		resolution = 3000
+	}
+
+	step := int(math.Round(float64(rangeSec) / float64(resolution)))
+	if step < 1 {
+		step = 1
+	}
+	return step
 }
 
 func prometheusSaasQueryError(queryKey, query string, err error) QueryResult {

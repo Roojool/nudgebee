@@ -137,3 +137,24 @@ func TestLogLabelProbeContext_RequiresProvider(t *testing.T) {
 	assert.Equal(t, 400, status)
 	assert.Contains(t, err.Error(), "log_provider is required")
 }
+
+// TestLogLabelProbeContext_KeptSecretNeedsTheIntegration: a secret the user left masked
+// arrives flagged is_encrypted and is looked up on the saved integration, never
+// decrypted from the request (#39639). Without an integration id there is nothing to
+// look it up on, so the probe is refused rather than handed the client's ciphertext.
+func TestLogLabelProbeContext_KeptSecretNeedsTheIntegration(t *testing.T) {
+	base := tenantAdminCtx(t)
+	req := &observability.FetchLogLabelRequest{
+		AccountId:   "acc-1",
+		LogProvider: "ES",
+		IntegrationConfigValues: append(probeValues(),
+			core.IntegrationConfigValue{Name: "password", Value: "client-ciphertext", IsEncrypted: true}),
+	}
+
+	got, status, err := logLabelProbeContext(base, req)
+
+	require.Error(t, err)
+	assert.Equal(t, 400, status)
+	assert.Nil(t, got)
+	assert.Contains(t, err.Error(), "editing a saved integration")
+}

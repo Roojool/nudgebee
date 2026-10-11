@@ -29,9 +29,41 @@ func NodeIDFor(uniqueKey, tenantID, cloudAccountID string) string {
 	return GenerateNodeID(uniqueKey + tenantID + cloudAccountID)
 }
 
-// GenerateEdgeID generates a unique ID for an edge based on source, destination, and relationship
+// GenerateEdgeID generates a unique ID for an edge based on source, destination, and relationship.
+//
+// Deprecated for anything that reaches the database: it hashes only three of the
+// five columns knowledge_graph_edge is keyed on, so two rows that the unique
+// constraint considers distinct can collide on the primary key. Use EdgeIDFor.
+// Still correct for synthetic, never-persisted edges (see pod_synthesizer.go).
 func GenerateEdgeID(sourceNodeID, destinationNodeID string, relationshipType RelationshipType) string {
 	key := fmt.Sprintf("%s->%s:%s", sourceNodeID, destinationNodeID, relationshipType)
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key)).String()
+}
+
+// EdgeIDFor derives an edge's primary key from the FULL natural key that
+// knowledge_graph_edge's unique constraint is built on (migration V578):
+// (source_node_id, destination_node_id, relationship_type, cloud_account_id,
+// tenant_id). Because the PK is a function of exactly the ON CONFLICT tuple
+// SaveEdges arbitrates on, a primary-key collision now implies a natural-key
+// collision, which the upsert's DO UPDATE arm always absorbs.
+//
+// The rule this exists to enforce: anything that rewrites one of those five
+// columns on an edge — Go or SQL — MUST rewrite id along with it. Migration
+// V864 repointed source_node_id/destination_node_id without touching id, which
+// left primary keys squatting the value a later, correctly-built edge derives.
+// Those rows miss the conflict arm, fall through to a plain INSERT, and abort
+// the single transaction covering every edge — freezing a tenant's graph for
+// good. See issue #38046 (and #36139 for the node-side version).
+//
+// The "@" and "/" separators keep this hash space disjoint from
+// GenerateEdgeID's, so the two schemes can coexist on one table.
+func EdgeIDFor(sourceNodeID, destinationNodeID string, relationshipType RelationshipType, cloudAccountID, tenantID string) string {
+	// Concatenated rather than fmt.Sprintf'd: this runs once per edge per build,
+	// and Sprintf costs ~35% of the whole call (302ns/11 allocs vs 195ns/6).
+	// The separators are part of the hash — changing any of them re-keys every
+	// edge written from here on, so TestEdgeIDFor_KeyFormatIsStable pins the
+	// output.
+	key := sourceNodeID + "->" + destinationNodeID + ":" + string(relationshipType) + "@" + cloudAccountID + "/" + tenantID
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(key)).String()
 }
 
@@ -122,7 +154,7 @@ func NewEdge(sourceNodeID, destinationNodeID string, relationshipType Relationsh
 	properties map[string]interface{}, tenantID, cloudAccountID, source string) *DbEdge {
 	now := time.Now()
 	return &DbEdge{
-		ID:                GenerateEdgeID(sourceNodeID, destinationNodeID, relationshipType),
+		ID:                EdgeIDFor(sourceNodeID, destinationNodeID, relationshipType, cloudAccountID, tenantID),
 		SourceNodeID:      sourceNodeID,
 		DestinationNodeID: destinationNodeID,
 		RelationshipType:  relationshipType,

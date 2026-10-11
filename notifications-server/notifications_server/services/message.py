@@ -45,7 +45,9 @@ from notifications_server.services.messaging_installations import (
     MESSAGING_PLATFORMS,
     ORIGIN_INTEGRATION,
     ORIGIN_LEGACY,
+    WEBHOOK_PLATFORM_TYPES,
     load_integration_installations_async,
+    load_ms_teams_webhook_installations_async,
     persist_messaging_token_async,
 )
 
@@ -861,6 +863,10 @@ class MessageService:
         integration_installs = []
         for platform in target_platforms:
             integration_installs += await load_integration_installations_async(session, tenant_id, platform)
+        # Webhook targets: many per tenant, no legacy counterpart, routed per-target
+        # in get_channels_from_request_or_defaults (never a tenant default).
+        if requested is None or requested in WEBHOOK_PLATFORM_TYPES:
+            integration_installs += await load_ms_teams_webhook_installations_async(session, tenant_id)
         if not integration_installs:
             return installs
         overridden = {ip.platform for ip in integration_installs}
@@ -872,6 +878,28 @@ class MessageService:
 
         for ip in installed_platforms:
             platform = ip.platform
+
+            # Webhooks route only to the target a rule names by id in its channels
+            # JSON; no rule -> to_channel stays None -> skipped (no tenant default).
+            # A directed send (explicit `channels`) silences them like any other
+            # platform it doesn't name.
+            if platform in WEBHOOK_PLATFORM_TYPES:
+                if all_channels:
+                    ip.to_channel = None
+                    continue
+                ip.to_channel = next(
+                    (
+                        rule["channels"]
+                        for rule in matched_rules
+                        if rule.get("platform") == platform
+                        and isinstance(rule.get("channels"), dict)
+                        and rule["channels"].get("webhook_target_id") is not None
+                        and str(rule["channels"]["webhook_target_id"]) == str(ip.id)
+                    ),
+                    None,
+                )
+                continue
+
             to_channel = all_channels.get(platform) if all_channels else None
 
             if all_channels and to_channel is None:
@@ -947,6 +975,7 @@ class MessageService:
         return {
             PlatformTypes.SLACK.value: self._send_finding_to_slack,
             PlatformTypes.MS_TEAMS.value: self._send_finding_to_teams,
+            PlatformTypes.MS_TEAMS_WEBHOOK.value: self._send_finding_to_teams_webhook,
             PlatformTypes.GOOGLE_CHAT.value: self._send_finding_to_gchat,
             PlatformTypes.DISCORD.value: self._send_finding_to_discord,
         }.get(platform)
@@ -1099,6 +1128,23 @@ class MessageService:
         )
 
         return response_data, None
+
+    async def _send_finding_to_teams_webhook(self, session, tenant_id, ip, finding, _):
+        """POST a finding card to ip.webhook_url. Returns (response, None) — webhooks
+        don't thread, so no sent_notification row."""
+        if not getattr(ip, "webhook_url", None):
+            return None, None
+
+        response = await asyncio.to_thread(
+            MsTeamsClient.post_to_ms_teams_webhook,
+            ip.webhook_url,
+            get_ms_teams_finding_message_template(finding),
+            tenant_id,
+        )
+        if not (response is not None and 200 <= response.status_code < 300):
+            return None, None
+
+        return success_response("ms_teams_webhook", channel_id=str(ip.id)), None
 
     @staticmethod
     async def _resolve_default_gchat_space(session, tenant_id):
@@ -1254,7 +1300,11 @@ class MessageService:
                 if not ip.to_channel:
                     continue
 
-                template_func = template_mapping[notification_type].get(ip.platform)
+                # Webhooks reuse the ms_teams templates (only the transport differs).
+                template_key = (
+                    PlatformTypes.MS_TEAMS.value if ip.platform == PlatformTypes.MS_TEAMS_WEBHOOK.value else ip.platform
+                )
+                template_func = template_mapping[notification_type].get(template_key)
                 if not template_func:
                     LOG.warning(
                         "No template found for platform %s with installation id %s for type %s",
@@ -1282,6 +1332,8 @@ class MessageService:
                 return await self.send_slack_template_notification(ip, template_func, param_value, tenant, session)
             case PlatformTypes.MS_TEAMS.value:
                 return await self.send_teams_template_notification(ip, template_func, param_value, session, tenant)
+            case PlatformTypes.MS_TEAMS_WEBHOOK.value:
+                return await self.send_teams_webhook_template_notification(ip, template_func, param_value, tenant)
             case PlatformTypes.GOOGLE_CHAT.value:
                 return await self.send_google_chat_template_notification(
                     ip, template_func, param_value, session, tenant
@@ -1397,6 +1449,21 @@ class MessageService:
 
         reason = response.reason if response else "Unable to send teams notification"
         return failed_response("ms_teams", reason=reason)
+
+    async def send_teams_webhook_template_notification(self, ip, template_func, param_value, tenant):
+        """Template send via webhook: same ms_teams card, POSTed to ip.webhook_url."""
+        if not getattr(ip, "webhook_url", None):
+            return failed_response("ms_teams_webhook", reason="Webhook target has no URL")
+
+        response = await asyncio.to_thread(
+            MsTeamsClient.post_to_ms_teams_webhook, ip.webhook_url, template_func(param_value), tenant
+        )
+
+        if response is not None and 200 <= response.status_code < 300:
+            return success_response("ms_teams_webhook", channel_id=str(ip.id))
+
+        reason = response.text[:512] if response is not None else "Unable to send teams webhook notification"
+        return failed_response("ms_teams_webhook", reason=reason)
 
     async def send_google_chat_template_notification(self, ip, template_func, param_value, session, tenant_id):
         if not GoogleChatAppClient.is_enabled():

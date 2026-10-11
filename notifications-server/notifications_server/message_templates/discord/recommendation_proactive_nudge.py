@@ -44,7 +44,7 @@ def get_discord_recommendation_proactive_nudge_template(params: ProactiveNudgePa
         for rec in acc_data.recommendations[:5]:
             lines.append(f"{counter}. **{rec.resource_name}** — {format_rule_name(rec.rule_name)}")
             lines.append(
-                f"{format_savings_clause(rec.estimated_savings)} · "
+                f"{format_savings_clause(rec.estimated_savings, rec.recommendation)} · "
                 f"Severity: {rec.severity} · Category: {rec.category}"
             )
             counter += 1

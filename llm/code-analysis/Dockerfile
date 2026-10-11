@@ -124,7 +124,10 @@ RUN ARCH=$(uname -m) && \
 # /usr/bin/python3 and the service-account auth crypto path works with the bundle
 # removed.
 ENV CLOUDSDK_PYTHON=/usr/bin/python3
-ENV PATH=/home/appuser/.local/bin:/home/appuser/bin:/app/google-cloud-sdk/bin:$PATH
+# Keep writable HOME directories out of PATH. Workspace commands may persist
+# files under HOME, but must not be able to shadow image-owned tools or relay
+# shims such as kubectl, ssh, git, and gh.
+ENV PATH=/app/google-cloud-sdk/bin:$PATH
 # Keep dependency/build caches in explicit, workspace-owned locations so the
 # runtime can share them across worktrees and remove them safely when idle.
 ENV GOCACHE=/tmp/code-analysis/shared-cache/go-build \

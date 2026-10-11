@@ -34,6 +34,14 @@ const PROVIDER_META = {
 const providerLabel = (t) => PROVIDER_META[t]?.label || t;
 const providerLogo = (t) => PROVIDER_META[t]?.logo;
 
+// integrations.name is the connection name an admin types when configuring an
+// integration ("PagerDuty-test"), so it's worth showing. These two are installed via
+// OAuth instead, where nothing prompts for a name and the installer stores the
+// workspace identifier it needs to resolve the install by — a Slack team id
+// (T05JW…) or an MS Teams account GUID. Meaningless to a reader, so don't show it.
+const OPAQUE_INSTANCE_NAME_TYPES = new Set(['slack', 'ms_teams']);
+const hasReadableInstanceName = (a) => Boolean(a.integration_name) && !OPAQUE_INSTANCE_NAME_TYPES.has(a.integration_type);
+
 // Small caption above each picker control so every step names itself — keeps the
 // three-step map flow (type → account → profile) self-explanatory.
 const FIELD_LABEL_SX = { display: 'block', font: "500 11px/1.2 'Roboto'", color: ds.gray[600], mb: 'var(--ds-space-1)' };
@@ -376,7 +384,7 @@ export default function IntegrationProfiles({ userId, onNotify, readOnly = false
                               <Datetime value={a.last_synced_at} sx={{ fontSize: ds.text.caption }} sxSuffix={{ fontSize: ds.text.caption }} />
                             )}
                           {detailRow('External ID', a.external_user_id)}
-                          {a.integration_name && detailRow('Integration', a.integration_name)}
+                          {hasReadableInstanceName(a) && detailRow('Integration', a.integration_name)}
                           {a.email && detailRow('Email', a.email)}
                         </Box>
                       )}

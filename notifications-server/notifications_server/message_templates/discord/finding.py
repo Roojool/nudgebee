@@ -71,7 +71,7 @@ def _add_evidence_fields(embed: Dict[str, Any], finding: Dict[str, Any], is_clou
 
 def get_discord_finding_message(finding: Dict[str, Any]) -> Dict[str, Any]:
     """Format a finding into a Discord message payload containing 'content' and 'embeds'."""
-    title = finding.get("title") or "NudgeBee Finding"
+    title = finding.get("title") or f"{settings.urls.branding_name} Finding"
     finding_id = finding.get("id", "")
     service_key = finding.get("service_key") or ""
     is_cloud = service_key.startswith("arn") or "aws" in service_key
@@ -119,7 +119,7 @@ def get_discord_finding_message(finding: Dict[str, Any]) -> Dict[str, Any]:
     embed: Dict[str, Any] = {
         "title": title,
         "url": investigate_url,
-        "description": f"[🔍 View Details in NudgeBee]({investigate_url})",
+        "description": f"[🔍 View Details in {settings.urls.branding_name}]({investigate_url})",
         "color": color,
         "fields": fields,
     }

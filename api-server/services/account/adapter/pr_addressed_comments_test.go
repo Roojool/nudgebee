@@ -203,6 +203,9 @@ func addressedTestManager(t *testing.T) *database.DatabaseManager {
 		pr_followup_pending boolean NOT NULL DEFAULT false,
 		status_message text,
 		addressed_comments jsonb NOT NULL DEFAULT '[]'::jsonb,
+		run_token uuid,
+		run_conversation_id text,
+		run_heartbeat_at timestamptz,
 		created_at timestamptz NOT NULL DEFAULT now(),
 		updated_at timestamptz NOT NULL DEFAULT now(),
 		CONSTRAINT pr_followup_url_unique UNIQUE (pr_url)

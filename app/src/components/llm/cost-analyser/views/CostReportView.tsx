@@ -13,7 +13,8 @@
  */
 import * as React from 'react';
 import dayjs from 'dayjs';
-import { Box, IconButton, Tooltip } from '@mui/material';
+import { Box, IconButton } from '@mui/material';
+import Tooltip from '@ui/Tooltip';
 import { ds } from '@utils/colors';
 import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
 import CustomTable2 from '@shared/tables/CustomTable';

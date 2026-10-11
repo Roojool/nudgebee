@@ -20,6 +20,7 @@ const (
 	ConversationStatusWaiting              ConversationStatus = "WAITING"
 	ConversationStatusWaitingForClientTool ConversationStatus = "WAITING_FOR_CLIENT_TOOL"
 	ConversationStatusTerminated           ConversationStatus = "TERMINATED"
+	ConversationStatusQueued               ConversationStatus = "QUEUED"
 )
 
 // IsTerminalConversationStatus returns true if the conversation has reached a
@@ -128,9 +129,15 @@ type NBAgentRequest struct {
 	// #29973). New-turn requests must keep IsResume=false so legitimate races
 	// (user submits while another turn is running) still surface as errors.
 	IsResume bool `json:"is_resume,omitempty"`
+	// IsQueuedDispatch is internal: the queue claim owns this fresh message.
+	IsQueuedDispatch bool `json:"-" mapstructure:"-"`
 	// KBPrestepContent holds relevant knowledge retrieved before planning. The
 	// planner renders it into the human message, not the cacheable system prefix.
 	KBPrestepContent string `json:"kb_prestep_content,omitempty"`
+	// RAGExamples holds the agent's RAG examples retrieved for this query. They
+	// vary per query, so the planner renders them into the human message, not
+	// the cacheable system prefix.
+	RAGExamples string `json:"rag_examples,omitempty"`
 	// KBReferences holds references to knowledge base sources retrieved by the pre-step.
 	KBReferences []AgentReference `json:"kb_references,omitempty"`
 	// KBPrestepExecuted indicates whether pre-step RAG retrieval has already been performed

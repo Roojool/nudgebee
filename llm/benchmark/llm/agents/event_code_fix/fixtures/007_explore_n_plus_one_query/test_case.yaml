@@ -1,0 +1,12 @@
+user_prompt: Why might /api/orders/by-email be slow? Look at how orders are fetched.
+expected_output:
+- "The response must identify an N+1 query pattern \u2014 fetching orders, then issuing one extra customer\
+  \ lookup per order \u2014 instead of a single joined query."
+tags:
+- event_code_fix
+- explore
+- explore
+- latency
+- sql
+type: question-answer
+event_code_fix_scenario: explore_n_plus_one_query

@@ -15,7 +15,7 @@ if [ "$SERVICE" = "web" ]; then
   # Single worker for Qdrant persistent mode (avoids file locking issues)
   WORKERS="${UVICORN_WORKERS:-1}"
   PORT="${RAGSERVER_PORT:-9999}"
-  TIMEOUT="${UVICORN_TIMEOUT:-180}"
+  TIMEOUT="${UVICORN_TIMEOUT:-15}"
   LOG_CONFIG="${LOGGING_CONFIG_FILE:-/app/config/logging.json}"
 
   echo "Using logging config: $LOG_CONFIG"

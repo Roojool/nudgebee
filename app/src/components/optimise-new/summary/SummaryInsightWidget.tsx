@@ -384,6 +384,8 @@ interface SummaryInsightWidgetProps {
   totalFindingsCount: number;
   savingsSymbol: string;
   savingsCurrency: string;
+  /** Some account bills in another currency: the savings tile says its figure is USD. */
+  billedOutsideUsd?: boolean;
   /** Total $ across the "Do this first" top-3 queue — moved down from the old headline metrics row. */
   rankedDollars: number;
   /** True tenant-wide (or account-scoped, when filtered) category split — not derived from `items`. */
@@ -428,6 +430,7 @@ const SummaryInsightWidget = ({
   totalFindingsCount,
   savingsSymbol,
   savingsCurrency,
+  billedOutsideUsd,
   rankedDollars,
   categoryBreakdown,
   worstAccount,
@@ -503,7 +506,8 @@ const SummaryInsightWidget = ({
             <Tile
               label='Potential savings'
               value={formatWholeCurrency(totalSavings, savingsCurrency)}
-              secondary='/mo'
+              secondary={billedOutsideUsd ? '/mo · USD' : '/mo'}
+              tooltip={billedOutsideUsd ? "Savings are estimated in US dollars; spend is shown in each account's billing currency." : undefined}
               tone={totalSavings > 0 ? 'positive' : 'default'}
               onClick={onFocusAllFindings}
             />

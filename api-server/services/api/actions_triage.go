@@ -1431,7 +1431,7 @@ func handleEventGetThresholdSuggestion(h *ActionRequest, c *gin.Context, ctx *se
 	}
 
 	// Fallback: compute live
-	response := triage.GetThresholdSuggestion(ctx.GetContext(), dbms.Db, ev, tenantID)
+	response := triage.GetThresholdSuggestion(ctx.GetContext(), dbms.Db, ev, tenantID, promQLRangeSeries)
 
 	// Async: store in cache for next time
 	if response.Available && response.Suggestion != nil && response.Suggestion.EstimatedReduction > 0 {

@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 
 from server.recommendation.vertical_rightsizing.models.result import PodsTimeData
 from server.recommendation.vertical_rightsizing.models.objects import K8sObjectData
+from server.recommendation.vertical_rightsizing.models.replicas import ReplicaStats
 from server.recommendation.vertical_rightsizing.metrics.base import PrometheusMetric
 from server.recommendation.vertical_rightsizing.models.config import Config
 
@@ -42,6 +43,10 @@ class MetricsService(abc.ABC):
         step: datetime.timedelta = datetime.timedelta(minutes=30),
     ) -> PodsTimeData:
         pass
+
+    async def load_replica_stats(self, object: K8sObjectData, period: datetime.timedelta) -> Optional[ReplicaStats]:
+        """Replica count over the window for the savings multiplier; None means fall back to the live count."""
+        return None
 
     def get_prometheus_cluster_label(self) -> str:
         return " __CLUSTER__ "

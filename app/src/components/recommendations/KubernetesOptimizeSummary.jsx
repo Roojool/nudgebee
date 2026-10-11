@@ -22,6 +22,7 @@ import AutoOptimizePVRightSizingSingleConfiguration from '@components/autopilot/
 import AutoOptimizeContinuousVerticalRightSizingSingleConfiguration from '@components/autopilot/form/AutoOptimizeContinuousVerticalRightSizingSingleConfiguration';
 import { snackbar } from '@shared/snackbarService';
 import { Text } from '@shared';
+import Currency from '@shared/format/Currency';
 import CustomTable from '@shared/tables/CustomTable2';
 import SafeIcon from '@shared/icons/SafeIcon';
 import Card from '@ui/Card';
@@ -1176,7 +1177,7 @@ const KubernetesOptimizeSummary = ({ kubernetes }) => {
                           component: <Text value={eksUpgrade.end_of_support.end_of_standard_support} />,
                         },
                         {
-                          component: <Text value={`${eksUpgrade.estimated_savings}$`} />,
+                          component: <Currency value={eksUpgrade.estimated_savings} precison={1} suffix='/mo' />,
                         },
                       ],
                     ]}

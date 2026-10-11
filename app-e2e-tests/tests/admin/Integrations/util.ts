@@ -531,7 +531,19 @@ async function changeRowStatus(
  */
 async function showAllStatuses(page: Page, statusFilterId: string): Promise<void> {
   const trigger = page.locator(`#auto-complete-${statusFilterId}`);
-  await trigger.waitFor({ state: "visible", timeout: 10000 });
+  // The filter bar is not rendered at all when the tenant has no configs for this
+  // integration — the list page swaps it for a "connect your first account" prompt.
+  // That IS the answer this helper's callers want ("nothing to find here"), so race
+  // the two outcomes and return as soon as the prompt wins. Waiting on the filter
+  // alone would burn the full timeout on every not-yet-connected integration.
+  // ListIntegrations ids both controls off the integration name, so the prompt's id
+  // is the filter's with the suffix swapped — no glob, and no coupling to the other
+  // listing pages this helper never visits.
+  const emptyPrompt = page.locator(`#${statusFilterId.replace(/-status-filter$/, "")}-no-accounts`);
+  await expect(trigger.or(emptyPrompt)).toBeVisible({ timeout: 10000 });
+  if (!(await trigger.isVisible())) {
+    return;
+  }
   const clearIcon = trigger.locator("svg").last();
 
   for (let attempt = 0; attempt < 4; attempt++) {

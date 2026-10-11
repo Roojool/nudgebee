@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS workflows (
     tags JSONB NOT NULL,
     status VARCHAR(50) NOT NULL, -- Administrative status (e.g., Active, Inactive)
     ai_invocable boolean NOT NULL DEFAULT false, -- Opt-in: may the AI assistant invoke this workflow
+    ai_auto_approve boolean NOT NULL DEFAULT false, -- Opt-in: may the AI assistant run it without asking the user to confirm
     last_execution_status VARCHAR(50), -- Status of the last execution (e.g., RUNNING, COMPLETED)
     last_execution_status_message text,
     last_execution_time TIMESTAMP WITHOUT TIME ZONE,

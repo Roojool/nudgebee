@@ -4,11 +4,12 @@ import logging
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, Iterable
+from typing import Dict, Any, Iterable, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from server.recommendation.vertical_rightsizing.models.config import Config
 from server.recommendation.vertical_rightsizing.models.objects import K8sObjectData, PodData
+from server.recommendation.vertical_rightsizing.models.replicas import ReplicaStats, replica_stats_from_running_series
 from server.recommendation.vertical_rightsizing.strategy.strategies import BaseStrategy
 
 from server.recommendation.vertical_rightsizing.models.result import PodsTimeData
@@ -45,21 +46,30 @@ def _tuning_env(name: str, legacy_name: str, default: str) -> str:
 # repeat the deprecation warning for every workload of every scan.
 # Global semaphore to limit concurrent relay server requests
 # This prevents overwhelming the relay/agent when multiple ML server replicas are running
-MAX_CONCURRENT_RELAY_REQUESTS = int(
+MAX_CONCURRENT_METRICS_REQUESTS = int(
     _tuning_env("RIGHTSIZING_MAX_CONCURRENT_RELAY_REQUESTS", "KRR_MAX_CONCURRENT_RELAY_REQUESTS", "10")
 )
+# Concurrency cap for metric queries. Named for the relay for backward compatibility:
+# the queries now go through api-server, but an operator's existing override should keep
+# working rather than silently reverting to the default.
 # How many pod owners are packed into a single Prometheus query by load_pods
 OWNER_BATCH_SIZE = int(_tuning_env("RIGHTSIZING_OWNER_BATCH_SIZE", "KRR_OWNER_BATCH_SIZE", "100"))
-_relay_semaphore: asyncio.Semaphore | None = None
+# Keyed by limit: one process can serve accounts on different transports, and a single
+# cached semaphore would pin every later account to whichever limit was created first.
+_metrics_semaphores: dict[int, asyncio.Semaphore] = {}
 
 
-def _get_relay_semaphore() -> asyncio.Semaphore:
-    """Get or create the global relay semaphore for the current event loop."""
-    global _relay_semaphore
-    if _relay_semaphore is None:
-        _relay_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RELAY_REQUESTS)
-        logger.info(f"Initialized relay semaphore with max {MAX_CONCURRENT_RELAY_REQUESTS} concurrent requests")
-    return _relay_semaphore
+def _get_relay_semaphore(limit: int | None = None) -> asyncio.Semaphore:
+    """Get or create the metrics semaphore for this concurrency limit."""
+    # Clamped: Semaphore(0) blocks forever and a negative value raises, so a mistyped
+    # override would hang every scan rather than fail at startup.
+    resolved = max(1, MAX_CONCURRENT_METRICS_REQUESTS if limit is None else limit)
+    semaphore = _metrics_semaphores.get(resolved)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(resolved)
+        _metrics_semaphores[resolved] = semaphore
+        logger.info(f"Initialized metrics semaphore with max {resolved} concurrent requests")
+    return semaphore
 
 
 class PrometheusMetricsService(MetricsService):
@@ -67,9 +77,9 @@ class PrometheusMetricsService(MetricsService):
     A class for fetching metrics from Prometheus.
     """
 
-    def __init__(self, config: Config, account_id: str, executor: ThreadPoolExecutor) -> None:
+    def __init__(self, config: Config, account_id: str, executor: ThreadPoolExecutor, tenant_id: str = "") -> None:
         super().__init__(config, account_id, executor)
-        self.prometheus = Prometheus(deployment_name="", namespace_name="", account_id=account_id)
+        self.prometheus = Prometheus(deployment_name="", namespace_name="", account_id=account_id, tenant_id=tenant_id)
         # self.prometheus = PrometheusConnect(url="http://127.0.0.1:8429", disable_ssl=True)
 
     def check_connection(self):
@@ -394,3 +404,39 @@ class PrometheusMetricsService(MetricsService):
                 current_pods_set |= batch_pods
 
         return list({PodData(name=pod, deleted=pod not in current_pods_set) for pod in related_pods})
+
+    async def load_replica_stats(self, object: K8sObjectData, period: timedelta) -> Optional[ReplicaStats]:
+        """Time-weighted replica count over the window, from the pods load_pods discovered.
+
+        Hourly samples of the Running phase per pod; a timestamp with no running
+        pod carries no sample, so a workload younger than the window averages
+        over its own lifetime. Returns None on an empty result so the caller
+        falls back to the instant count.
+        """
+        pods = [pod.name for pod in object.pods]
+        if not pods:
+            return None
+        cluster_label = self.get_prometheus_cluster_label()
+        now = datetime.now()
+
+        async def range_batch(pod_group: Iterable[str]) -> Any:
+            # query_range is annotated dict but yields the list of series the
+            # liveness check above iterates the same way.
+            return await self.query_range(
+                f"""
+                    kube_pod_status_phase{{
+                        phase="Running",
+                        pod=~"{'|'.join(pod_group)}",
+                        namespace="{object.namespace}",
+                        {cluster_label}
+                    }} == 1
+                """,
+                start=now - period,
+                end=now,
+                step=timedelta(hours=1),
+            )
+
+        series: list = []
+        for batch in await asyncio.gather(*(range_batch(g) for g in batched(pods, 100))):
+            series.extend(batch)
+        return replica_stats_from_running_series(series, period)

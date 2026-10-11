@@ -49,7 +49,7 @@ func TestResolveGCPManagedServiceCalls_FirestoreSameAccount(t *testing.T) {
 	}
 	// The PK (edge.ID) must be regenerated for the new destination, else it still
 	// hashes the old stub dest and collides with the stub's PK row on save.
-	if want := GenerateEdgeID(caller.ID, "fs-A", RelationshipCalls); edge.ID != want {
+	if want := EdgeIDFor(caller.ID, "fs-A", RelationshipCalls, acct, edge.TenantID); edge.ID != want {
 		t.Errorf("edge ID must be regenerated to %s after rewrite, got %s", want, edge.ID)
 	}
 	if got := edge.Properties[resolveGCPManagedServicePropResolvedBy]; got != resolveGCPManagedServiceResolver {

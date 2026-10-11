@@ -18,6 +18,7 @@ const EMPTY_CATEGORY_BREAKDOWN: Record<MainCategory, { dollars: number; count: n
 };
 
 const DEFAULT_SYMBOL = '$';
+const SAVINGS_CURRENCY = 'USD';
 
 // Resolve an ISO currency code (USD/INR/EUR/GBP/…) to its narrow symbol via Intl,
 // so any billing currency a cloud provider reports renders correctly rather than
@@ -76,13 +77,10 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
   const [safeToApply, setSafeToApply] = useState<{ count: number; dollars: number } | null>(null);
   const [costByCurrency, setCostByCurrency] = useState<CurrencyCostSummary[]>([]);
   const [accountCosts, setAccountCosts] = useState<Record<string, AccountCost>>({});
-  const [currencySymbols, setCurrencySymbols] = useState<Record<string, string>>({});
-  // Currency the headline / briefing savings total is rendered in. estimated_savings
-  // is denominated in each account's billing currency, so a single-currency tenant
-  // (the common case) gets its real currency; a mixed-currency tenant falls back to
-  // USD since one summed figure across currencies is meaningless either way.
-  const [savingsCurrency, setSavingsCurrency] = useState<string>('USD');
-  const [savingsSymbol, setSavingsSymbol] = useState<string>(DEFAULT_SYMBOL);
+  // Savings are estimated in USD by every producer, whatever currency the account
+  // is billed in; only spend is in the billing currency. An account billed outside
+  // USD gets its savings labelled as USD, never relabelled with the spend symbol.
+  const [billedOutsideUsd, setBilledOutsideUsd] = useState(false);
   const [costLoading, setCostLoading] = useState(true);
 
   // Fetch accounts
@@ -330,8 +328,8 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
 
   const insights = useMemo(() => {
     if (rawApiRows.length === 0) return [];
-    return rawApiRows.map((r: any) => transformApiToInsight(r, accounts, currencySymbols));
-  }, [rawApiRows, accounts, currencySymbols]);
+    return rawApiRows.map((r: any) => transformApiToInsight(r, accounts));
+  }, [rawApiRows, accounts]);
 
   // Fetch cost data for all accounts in one batched query. The previous version
   // fanned out 2 calls per account (a 13-aggregate summary + a 7-day trend used
@@ -381,17 +379,15 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
         const dominantCurrency = (amounts: Record<string, number>): string =>
           Object.entries(amounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
 
-        const accountCurrency: Record<string, string> = {};
         const byCurrency: Record<string, { mtd: number; prevMonth: number; ytd: number; accountNames: string[] }> = {};
         const perAccount: Record<string, AccountCost> = {};
-        const realCurrencies = new Set<string>();
+        let nonUsdBilling = false;
 
         accountIds.forEach((id) => {
           const data = folded[id];
           const currencyIso = dominantCurrency(data?.currencyAmounts || {});
-          if (currencyIso) realCurrencies.add(currencyIso);
+          if (currencyIso && currencyIso !== SAVINGS_CURRENCY) nonUsdBilling = true;
           const symbol = currencyIso ? getCurrencySymbol(currencyIso) : DEFAULT_SYMBOL;
-          accountCurrency[id] = symbol;
           const acctName = accounts[id]?.account_name || id;
 
           const mtd = data?.mtd || 0;
@@ -427,12 +423,9 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
             };
           });
 
-        const tenantCurrency = realCurrencies.size === 1 ? [...realCurrencies][0] : 'USD';
         setCostByCurrency(costSummaries);
         setAccountCosts(perAccount);
-        setCurrencySymbols(accountCurrency);
-        setSavingsCurrency(tenantCurrency);
-        setSavingsSymbol(getCurrencySymbol(tenantCurrency));
+        setBilledOutsideUsd(nonUsdBilling);
       } catch (err) {
         console.error('Failed to fetch cost data:', err);
       } finally {
@@ -464,7 +457,8 @@ export function useSummaryData(accountId?: string | null, envFilter?: string | n
     costByCurrency,
     accountCosts,
     costLoading,
-    savingsCurrency,
-    savingsSymbol,
+    savingsCurrency: SAVINGS_CURRENCY,
+    savingsSymbol: DEFAULT_SYMBOL,
+    billedOutsideUsd,
   };
 }

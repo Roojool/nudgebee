@@ -115,14 +115,14 @@ func TestClaimCritiquePacketPreservesEvidenceWithoutThoughts(t *testing.T) {
 }
 
 func TestClaimShadowDisabledAndSubagentDoNotCallLLM(t *testing.T) {
-	previous := config.Config.ClaimCritiqueShadowEnabled
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled = previous })
+	previous := config.Config.ClaimCritiqueFeedbackEnabled
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
 	fake := &fakeLLMModel{response: validClaimAudit}
 	withFakeLLMModel(t, fake)
 	ctx := llmOverrideContext()
-	config.Config.ClaimCritiqueShadowEnabled = false
+	config.Config.ClaimCritiqueFeedbackEnabled = false
 	runClaimCritiqueShadow(ctx, NBAgentRequest{}, "react4", "test_agent", "accept", "legacy", "why", "answer", "", nil)
-	config.Config.ClaimCritiqueShadowEnabled = true
+	config.Config.ClaimCritiqueFeedbackEnabled = true
 	runClaimCritiqueShadow(ctx, NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}, "react3", "test_agent", "accept", "legacy", "why", "answer", "", nil)
 	require.Zero(t, fake.callCount())
 }
@@ -166,10 +166,10 @@ func (d *claimTestDAO) SaveClaimCritiqueAudit(_ context.Context, _ *ClaimCritiqu
 
 func (d *claimTestDAO) SaveCritique(_ *ConversationCritique) error { return nil }
 
-func TestClaimShadowBothPlannersPreserveLegacyResult(t *testing.T) {
-	previous := config.Config.ClaimCritiqueShadowEnabled
-	t.Cleanup(func() { config.Config.ClaimCritiqueShadowEnabled = previous })
-	config.Config.ClaimCritiqueShadowEnabled = true
+func TestClaimFeedbackBothPlannersValidateAudit(t *testing.T) {
+	previous := config.Config.ClaimCritiqueFeedbackEnabled
+	t.Cleanup(func() { config.Config.ClaimCritiqueFeedbackEnabled = previous })
+	config.Config.ClaimCritiqueFeedbackEnabled = true
 	previousDAO := GetConversationDao()
 	conversationDaoMutex.Lock()
 	SetConversationDao(&claimTestDAO{IConversationDao: previousDAO})
@@ -198,8 +198,13 @@ func TestClaimShadowBothPlannersPreserveLegacyResult(t *testing.T) {
 					p := &NBReActPlanner3{ctx: ctx, request: request, nbAgent: notebookOptOutAgent{}}
 					decision, feedback = p.runCritique(request.Query, "metrics", "answer", steps, ctx.GetLogger())
 				}
-				require.Equal(t, "accept", decision)
-				require.Equal(t, "legacy feedback", feedback)
+				if output == validClaimAudit {
+					require.Equal(t, "refine", decision)
+					require.Contains(t, feedback, "material evidence gaps")
+				} else {
+					require.Equal(t, "accept", decision)
+					require.Equal(t, "legacy feedback", feedback)
+				}
 				require.Equal(t, 2, fake.callCount())
 			})
 		}

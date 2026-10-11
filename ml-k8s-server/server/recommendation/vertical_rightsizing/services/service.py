@@ -46,10 +46,12 @@ class RecommendationService:
         datadog_app_key: Optional[str] = None,
         datadog_site: Optional[str] = None,
         elasticsearch: Optional[dict] = None,
+        tenant_id: str = "",
     ) -> None:
         self._config = config
         self._executor = ThreadPoolExecutor(self._config.max_workers)
         self.account_id = account_id
+        self.tenant_id = tenant_id
         if metrics_provider == "ES":
             # An ES account has no Prometheus to fall back to, so a missing connection
             # has to fail loudly. Falling through to PrometheusMetricsService is what
@@ -81,7 +83,9 @@ class RecommendationService:
                 site=datadog_site,
             )
         else:
-            self._metrics_service_loaders = PrometheusMetricsService(config, account_id, self._executor)
+            self._metrics_service_loaders = PrometheusMetricsService(
+                config, account_id, self._executor, tenant_id=tenant_id
+            )
         self._k8s_loader = ClusterService(account_id, self._executor, config)
         self._strategy = NudgebeeStrategy(NudgebeeStrategySettings())
         self.errors: list[dict] = []
@@ -167,6 +171,15 @@ class RecommendationService:
                 object.add_warning("NoPrometheusPods")
             else:
                 logger.warning(f"No pods found for {object} in both Prometheus and database")
+
+        if object.pods:
+            try:
+                object.replica_stats = await self._metrics_service_loaders.load_replica_stats(
+                    object, self._strategy.settings.history_timedelta
+                )
+            except Exception as e:  # the multiplier falls back to the live count
+                logger.warning(f"Replica window lookup failed for {object}: {e}")
+                object.replica_stats = None
 
         metrics = await self._metrics_service_loaders.gather_data(
             object,

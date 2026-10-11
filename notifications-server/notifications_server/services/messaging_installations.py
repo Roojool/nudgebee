@@ -33,11 +33,20 @@ LOG = logging.getLogger(__name__)
 # Messaging integration `type` equals the platform string.
 MESSAGING_PLATFORMS = ("slack", "ms_teams", "discord")
 
+# Teams channel webhooks: own `integrations` type, many per tenant, no OAuth.
+# Loaded separately from MESSAGING_PLATFORMS (not one-per-tenant, no legacy row).
+MS_TEAMS_WEBHOOK_TYPE = "ms_teams_webhook"
+MS_TEAMS_WEBHOOK_URL_FIELD = "webhook_url"
+
+# Every "is this a webhook?" guard in the send path checks membership here, so a
+# second webhook platform joins routing just by being added.
+WEBHOOK_PLATFORM_TYPES = frozenset({MS_TEAMS_WEBHOOK_TYPE})
+
 # Config-value field names. The encrypted set must mirror the IsEncrypted fields
 # declared in api-server slack.go / ms_teams.go.
 TOKEN_FIELD = {"slack": "bot_token", "ms_teams": "access_token", "discord": "bot_token"}
 REFRESH_TOKEN_FIELD = "refresh_token"
-_SECRET_FIELDS = {"bot_token", "access_token", "refresh_token"}
+_SECRET_FIELDS = {"bot_token", "access_token", "refresh_token", "webhook_url"}
 
 ORIGIN_LEGACY = "legacy"
 ORIGIN_INTEGRATION = "integration"
@@ -201,6 +210,66 @@ async def load_integration_installations_async(session, tenant_id, platform: str
             # One un-decryptable install (e.g. key rotation, corrupted blob) must not
             # abort loading every platform for the tenant — skip it and keep going.
             LOG.exception("messaging installation: failed to load %s integration %s; skipping", platform, integ.id)
+    return result
+
+
+def build_webhook_installation(
+    integration: Integration,
+    cfg: Dict[str, str],
+    platform: str = MS_TEAMS_WEBHOOK_TYPE,
+    url_field: str = MS_TEAMS_WEBHOOK_URL_FIELD,
+) -> MessagingPlatform:
+    """MessagingPlatform-shaped view of one outbound-webhook integration row. The
+    decrypted URL is the whole destination, on `.webhook_url` (carried across the
+    installations cache by models.to_dict/from_dict). `.id` is the integration id —
+    how a rule mapping selects this target. platform/url_field are parametrized so a
+    future webhook platform reuses this builder."""
+    inst = MessagingPlatform()
+    inst.id = integration.id
+    inst.tenant_id = integration.tenant_id
+    inst.platform = platform
+    inst.team_name = integration.name  # label shown in rule pickers
+    inst.username = cfg.get("installed_by")
+    inst.channels = None
+    inst.webhook_url = cfg.get(url_field)
+    inst._origin = ORIGIN_INTEGRATION
+    inst._integration_id = integration.id
+    return inst
+
+
+async def load_ms_teams_webhook_installations_async(session, tenant_id) -> List[MessagingPlatform]:
+    """Async: every ms_teams_webhook target for the tenant, URL decrypted."""
+    if not tenant_id:
+        return []
+    integ_result = await session.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.type == MS_TEAMS_WEBHOOK_TYPE,
+            Integration.status != "disabled",
+        )
+    )
+    integ_rows = integ_result.scalars().all()
+    if not integ_rows:
+        return []
+
+    cfg_result = await session.execute(
+        select(IntegrationConfigValue).where(
+            IntegrationConfigValue.integration_id.in_([integ.id for integ in integ_rows])
+        )
+    )
+    cfg_by_integration: Dict[Any, List[IntegrationConfigValue]] = {}
+    for cfg in cfg_result.scalars().all():
+        cfg_by_integration.setdefault(cfg.integration_id, []).append(cfg)
+
+    result: List[MessagingPlatform] = []
+    for integ in integ_rows:
+        try:
+            inst = build_webhook_installation(integ, _decrypt_config(cfg_by_integration.get(integ.id, [])))
+        except Exception:
+            LOG.exception("messaging installation: failed to load ms_teams_webhook %s; skipping", integ.id)
+            continue
+        if inst.webhook_url:
+            result.append(inst)
     return result
 
 

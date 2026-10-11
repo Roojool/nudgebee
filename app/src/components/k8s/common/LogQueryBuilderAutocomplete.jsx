@@ -613,19 +613,24 @@ const LogQueryBuilderAutocomplete = ({
       const fetchMetrics = async () => {
         setIsMetricsLoading(true);
         try {
-          const cachedPrometheusLabels = cache.getWithSuffix(`${accountId}.${logProvider}.labels`, null, {});
+          // .v2: entries written before the provider was pinned below hold the
+          // ACCOUNT DEFAULT provider's metrics under the selected provider's key.
+          const cachedPrometheusLabels = cache.getWithSuffix(`${accountId}.${logProvider}.labels.v2`, null, {});
           if (cachedPrometheusLabels) {
             setMetricsList(cachedPrometheusLabels);
           } else {
             setMetricsList([]);
-            const res = await observability.metricsList(accountId);
+            // Without metric_provider the backend answers from the account default,
+            // so picking Datadog on a Prometheus-default account listed Prometheus
+            // metrics. Only sent when the caller pinned a provider.
+            const res = await observability.metricsList(accountId, providerOverride ? { metricProvider: providerOverride } : undefined);
             if (res?.errors) {
               snackbar.error(`failed to fetch labels- ${parseHttpResponseBodyMessage(res?.data)}`);
               return;
             }
             const metricsList = res?.data?.data?.metrics_list_names?.map((m) => m.metric) || [];
             if (metricsList.length) {
-              cache.setWithSuffix(`${accountId}.${logProvider}.labels`, metricsList, {}, 60 * 60 * 6);
+              cache.setWithSuffix(`${accountId}.${logProvider}.labels.v2`, metricsList, {}, 60 * 60 * 6);
               setMetricsList(metricsList);
             }
           }
@@ -640,19 +645,23 @@ const LogQueryBuilderAutocomplete = ({
       const fetchIndexes = async () => {
         setIsMetricsLoading(true);
         try {
-          const cachedESIndexes = cache.getWithSuffix(`${accountId}.es.metrics.indexes`, null, {});
+          // .v2: pre-fix entries hold the account default's metric names, not indexes.
+          const cachedESIndexes = cache.getWithSuffix(`${accountId}.es.metrics.indexes.v2`, null, {});
           if (cachedESIndexes) {
             setMetricsList(cachedESIndexes);
           } else {
             setMetricsList([]);
-            const res = await observability.metricsList(accountId);
+            // ES answers metrics_list_names with its data-stream names, which is what
+            // this picker wants — but only when asked as ES. Unpinned, a Prometheus
+            // -default account returned Prometheus metric names into the index list.
+            const res = await observability.metricsList(accountId, providerOverride ? { metricProvider: providerOverride } : undefined);
             if (res?.errors) {
               snackbar.error(`failed to fetch indices- ${parseHttpResponseBodyMessage(res?.data)}`);
               return;
             }
             const indexList = res?.data?.data?.metrics_list_names?.map((m) => m.metric) || [];
             if (indexList.length) {
-              cache.setWithSuffix(`${accountId}.es.metrics.indexes`, indexList, {}, 60 * 60 * 6);
+              cache.setWithSuffix(`${accountId}.es.metrics.indexes.v2`, indexList, {}, 60 * 60 * 6);
               setMetricsList(indexList);
             }
           }
@@ -711,7 +720,11 @@ const LogQueryBuilderAutocomplete = ({
       ) {
         try {
           setLoadingLabels(true);
-          const response = await observability.metricsLabelList(accountId, activeSelectedMetric);
+          const response = await observability.metricsLabelList(
+            accountId,
+            activeSelectedMetric,
+            providerOverride ? { metricProvider: providerOverride } : undefined
+          );
           if (response?.data?.errors) {
             snackbar.error(`Failed to fetch labels - ${response?.data?.error_msg || parseHttpResponseBodyMessage(response?.data)}`);
             return;
@@ -730,7 +743,11 @@ const LogQueryBuilderAutocomplete = ({
       } else if (logProvider == 'ES' && providerType == 'metrics') {
         try {
           setLoadingLabels(true);
-          const response = await observability.metricsLabelList(accountId, activeSelectedMetric);
+          const response = await observability.metricsLabelList(
+            accountId,
+            activeSelectedMetric,
+            providerOverride ? { metricProvider: providerOverride } : undefined
+          );
           if (response?.data?.errors) {
             snackbar.error(`Failed to fetch labels - ${response?.data?.error_msg || parseHttpResponseBodyMessage(response?.data)}`);
             return;
@@ -936,14 +953,20 @@ const LogQueryBuilderAutocomplete = ({
           providerType == 'metrics'
         ) {
           const activeBlock = getActiveBlock();
-          response = await observability.metricsLabelValueList(accountId, findLabel.label, {
-            metric_name: activeBlock.selectedMetric,
-          });
+          response = await observability.metricsLabelValueList(
+            accountId,
+            findLabel.label,
+            { metric_name: activeBlock.selectedMetric },
+            providerOverride ? { metricProvider: providerOverride } : undefined
+          );
         } else if (logProvider === 'ES' && providerType === 'metrics') {
           const activeBlock = getActiveBlock();
-          response = await observability.metricsLabelValueList(accountId, findLabel.label, {
-            metric_name: activeBlock.selectedMetric,
-          });
+          response = await observability.metricsLabelValueList(
+            accountId,
+            findLabel.label,
+            { metric_name: activeBlock.selectedMetric },
+            providerOverride ? { metricProvider: providerOverride } : undefined
+          );
         } else if (logProvider === 'ES') {
           const activeBlock = getActiveBlock();
           response = await observability.fetchLogLabelValues({

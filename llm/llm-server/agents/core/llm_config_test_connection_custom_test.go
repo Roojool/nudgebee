@@ -136,6 +136,41 @@ func TestProbeOne_CustomPlainShapeUnchanged(t *testing.T) {
 	assert.Empty(t, gotRawQuery, "no api-version on the plain shape")
 }
 
+// Regression #39109: a thinking model (Gemini 3.x via the AI Gateway) spends a small
+// budget on reasoning and returns `"choices": null`, which failed the probe as "empty response".
+func TestProbeOne_ThinkingModelNeedsReasoningBudget(t *testing.T) {
+	var gotMaxTokens int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var payload struct {
+			MaxTokens           int `json:"max_tokens"`
+			MaxCompletionTokens int `json:"max_completion_tokens"`
+		}
+		require.NoError(t, json.Unmarshal(b, &payload))
+		gotMaxTokens = max(payload.MaxTokens, payload.MaxCompletionTokens)
+		// Live test env: gemini-3.6-flash used 57-196 reasoning tokens for "ping".
+		if gotMaxTokens < 256 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": nil, "usage": map[string]int{"completion_tokens": gotMaxTokens}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": "pong"}, "finish_reason": "stop"}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 150},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := map[string]string{
+		cfgKeyProvider:    ProviderCustom,
+		cfgKeyAPIEndpoint: srv.URL + "/v1",
+		cfgKeyAPIKey:      "static-key",
+	}
+	res := probeOne(context.Background(), probeTarget{provider: ProviderCustom, model: "gemini-3.6-flash", source: "global", cfg: cfg})
+
+	require.True(t, res.OK, "probe must pass: %s", res.Error)
+	assert.Equal(t, probeMaxTokens, gotMaxTokens, "probe budget on the wire")
+}
+
 // resolveLLMDeploymentName: pinned wins, then tier, then global.
 func TestResolveLLMDeploymentName_Layering(t *testing.T) {
 	assert.Equal(t, "pinned-dep", resolveLLMDeploymentName("", &LLMConfigResolution{

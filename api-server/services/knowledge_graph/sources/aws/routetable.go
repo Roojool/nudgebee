@@ -126,6 +126,9 @@ func (s *AWSSource) fetchRouteTablesFromAWS(_ *security.RequestContext, _ *core.
 			s.logger.Warn("Failed to parse route table meta, skipping", "resource_id", row.ResourceID, "error", err)
 			continue
 		}
+		// Carry the row's region across: route-table rows never reach the classify
+		// path, so this is the only place a RouteTable node can get one (#36573).
+		rt.Region = row.Region
 		routeTables = append(routeTables, rt)
 	}
 	s.logger.Info("Fetched route tables from DB cache", "count", len(routeTables))
@@ -198,7 +201,7 @@ func (s *AWSSource) ensureRouteTableNodes(reqCtx *security.RequestContext, nodes
 			"vpc_id":         rt.VpcId,
 			"is_main":        isMain,
 			"account_number": rt.OwnerId, // AWS account number from route table data
-			"region":         req.Region,
+			"region":         rt.Region,
 			// Stored under "meta" so getMetadataMap can find it; createRouteTableEdges
 			// then emits BELONGS_TO/ASSOCIATED_WITH/ROUTES_THROUGH edges off this.
 			"meta":   metaMap,

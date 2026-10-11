@@ -75,6 +75,36 @@ describe('useLLMInvestigationControl', () => {
     mockGetModelConfig.mockResolvedValue({ data: null });
   });
 
+  it.each([409, 500])('permits the idle refresh retry only for a definite 409 rejection (%s)', async (status) => {
+    mockGenerateInvestigate.mockResolvedValue({
+      data: {
+        errors: [{ message: 'Conversation is not ready to queue a message. Please retry your message.', extensions: { upstream: { status } } }],
+      },
+    });
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    await act(async () => {
+      await expect(result.current.queueInvestigationMessage({ text: 'draft' })).rejects.toMatchObject({ queueNotReady: status === 409 });
+    });
+  });
+
+  it('replaces only the submitting placeholder when a foreground request is queued by the server', async () => {
+    mockGenerateInvestigate.mockResolvedValue({
+      data: { data: { ai_execute_investigation: { data: { query: 'same', status: 'QUEUED', message_id: 'saved-queue' } } } },
+    });
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    act(() =>
+      result.current.setMessages([
+        { id: 'this-request', text: 'same', type: 'question', isOptimistic: true },
+        { id: 'other-request', text: 'same', type: 'question', isOptimistic: true },
+      ])
+    );
+    await act(async () => {
+      await result.current.startInvestigation({ text: 'same', optimisticMessageId: 'this-request' });
+    });
+    expect(result.current.messages.map((m) => m.id)).toEqual(['other-request']);
+    expect(result.current.queuedMessages).toEqual([expect.objectContaining({ id: 'saved-queue', text: 'same' })]);
+  });
+
   it('initialises with empty state', () => {
     const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
     expect(result.current.messages).toEqual([]);
@@ -108,6 +138,49 @@ describe('useLLMInvestigationControl', () => {
     await waitFor(() => expect(result.current.availableCredentials).toHaveLength(1));
     expect(result.current.availableCredentials[0].models).toEqual([{ model: 'claude-3' }]);
     expect(result.current.defaultModel).toBe('claude-3');
+  });
+
+  it('recovers queue capabilities after a transient server failure', async () => {
+    jest.useFakeTimers();
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockListModels
+      .mockResolvedValueOnce({ data: {}, errors: [{ message: 'server restarting' }] })
+      .mockResolvedValue({ data: { models: [], credentials: [], queue_support: { enabled: true, max_messages: 5 } }, errors: [] });
+    const { result, unmount } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    try {
+      await act(async () => {});
+      expect(result.current.queueSupport.enabled).toBe(false);
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+      expect(result.current.queueSupport.enabled).toBe(true);
+      await act(async () => {
+        jest.advanceTimersByTime(10000);
+      });
+      expect(mockListModels).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+      log.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not retry capability loads after unmount', async () => {
+    jest.useFakeTimers();
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+    mockListModels.mockResolvedValue({ data: {}, errors: ['unavailable'] });
+    const { unmount } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    try {
+      await act(async () => {});
+      unmount();
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+      expect(mockListModels).toHaveBeenCalledTimes(1);
+    } finally {
+      log.mockRestore();
+      jest.useRealTimers();
+    }
   });
 
   it('resetInvestigationState clears all state', async () => {
@@ -181,13 +254,61 @@ describe('useLLMInvestigationControl', () => {
       data: { data: { ai_cancel_investigation: { data: { status: 'terminated' } } } },
     });
     const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
-    act(() => result.current.setAllowStop(true));
+    act(() => {
+      result.current.setAllowStop(true);
+      result.current.setConversationStatus('IN_PROGRESS');
+      result.current.setCurrentlyProcessingQuestion('working');
+    });
 
     await act(async () => {
       await result.current.stopInvestigation('conv-1', 'IN_PROGRESS', jest.fn());
     });
     expect(mockStopInvestigate).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'acc-1', conversationId: 'conv-1' }));
     expect(snackbar.success).toHaveBeenCalledWith('Investigation terminated successfully');
+    expect(result.current.conversationStatus).toBe('TERMINATED');
+    expect(result.current.currentlyProcessingQuestion).toBeNull();
+    expect(result.current.allowStop).toBe(false);
+  });
+
+  it('does not let a poll started before cancellation restore the running state', async () => {
+    let finishPoll;
+    mockGetConversation.mockReturnValue(
+      new Promise((resolve) => {
+        finishPoll = resolve;
+      })
+    );
+    mockStopInvestigate.mockResolvedValue({ data: { data: { ai_cancel_investigation: { data: { status: 'terminated' } } } } });
+    const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+    let poll;
+    act(() => {
+      result.current.setAllowStop(true);
+      result.current.setConversationStatus('IN_PROGRESS');
+      result.current.setCurrentlyProcessingQuestion('working');
+      poll = result.current.fetchConversation('sess-1', 'conv-1', 'poll', false);
+    });
+    await act(async () => {
+      await result.current.stopInvestigation('conv-1', 'IN_PROGRESS');
+    });
+    await act(async () => {
+      finishPoll({ data: { data: { llm_conversations: [{ id: 'conv-1', status: 'IN_PROGRESS', llm_conversation_messages: [] }] } } });
+      await poll;
+    });
+    expect(result.current.conversationStatus).toBe('TERMINATED');
+    expect(result.current.currentlyProcessingQuestion).toBeNull();
+    expect(result.current.allowStop).toBe(false);
+    expect(result.current.needsConversationRefresh).toBe(true);
+    mockGetConversation.mockResolvedValueOnce({ data: { errors: [{ message: 'temporarily unavailable' }] } });
+    await act(async () => {
+      await result.current.fetchConversation('sess-1', 'conv-1', 'poll', false);
+    });
+    expect(result.current.needsConversationRefresh).toBe(true);
+    mockGetConversation.mockResolvedValueOnce({
+      data: { data: { llm_conversations: [{ id: 'conv-1', status: 'TERMINATED', llm_conversation_messages: [] }] } },
+    });
+    await act(async () => {
+      await result.current.fetchConversation('sess-1', 'conv-1', 'poll', false);
+    });
+    expect(result.current.needsConversationRefresh).toBe(false);
   });
 
   it('fetchConversation sets conversationStatus from response', async () => {
@@ -605,6 +726,95 @@ describe('useLLMInvestigationControl', () => {
         llm_provider: 'googleai',
         llm_model_name: 'gemini-2.5-pro',
       });
+    });
+  });
+
+  describe('queued messages', () => {
+    it('parses queued messages and populates queuedMessages in state', async () => {
+      mockGetConversation.mockResolvedValue({
+        data: {
+          data: {
+            llm_conversations: [
+              {
+                id: 'conv-1',
+                session_id: 'sess-1',
+                status: 'IN_PROGRESS',
+                llm_conversation_messages: [
+                  {
+                    id: 'msg-1',
+                    message: 'first question running',
+                    status: 'IN_PROGRESS',
+                    message_type: 'generation',
+                    created_at: '2026-09-07T10:00:00Z',
+                  },
+                  {
+                    id: 'msg-queued-1',
+                    message: 'follow up queued question',
+                    status: 'QUEUED',
+                    message_type: 'generation',
+                    user: { display_name: 'Alice' },
+                    user_id: 'user-alice-id',
+                    created_at: '2026-09-07T10:01:00Z',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+      await act(async () => {
+        await result.current.fetchConversation('sess-1', 'conv-1', 'direct', false);
+      });
+
+      expect(result.current.queuedMessages).toHaveLength(1);
+      expect(result.current.queuedMessages[0]).toEqual(
+        expect.objectContaining({
+          id: 'msg-queued-1',
+          text: 'follow up queued question',
+          user: 'Alice',
+          userId: 'user-alice-id',
+          isServer: true,
+        })
+      );
+      // Queued message is not rendered in regular conversation messages
+      const questionTexts = result.current.messages.map((m) => m.text);
+      expect(questionTexts).toContain('first question running');
+      expect(questionTexts).not.toContain('follow up queued question');
+    });
+
+    it('queueInvestigationMessage sends request to server with conversationId', async () => {
+      mockGenerateInvestigate.mockResolvedValue({
+        data: {
+          data: {
+            ai_execute_investigation: {
+              data: { query: 'queued query', status: 'QUEUED', message_id: 'queued-1' },
+            },
+          },
+        },
+      });
+
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+      await act(async () => {
+        await result.current.queueInvestigationMessage({ text: 'my queued message' });
+      });
+
+      expect(mockGenerateInvestigate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          account_id: 'acc-1',
+          query: 'my queued message',
+          queue_only: true,
+        })
+      );
+    });
+    it.each([{ status: 'IN_PROGRESS' }, { status: 'QUEUED' }])('rejects an acknowledgement without a saved queued message: %j', async (data) => {
+      mockGenerateInvestigate.mockResolvedValue({ data: { data: { ai_execute_investigation: { data } } } });
+      const { result } = renderHook(() => useLLMInvestigationControl('acc-1'));
+      await act(async () => {
+        await expect(result.current.queueInvestigationMessage({ text: 'keep this draft' })).rejects.toThrow('Unable to queue message');
+      });
+      expect(result.current.queuedMessages).toEqual([]);
     });
   });
 });

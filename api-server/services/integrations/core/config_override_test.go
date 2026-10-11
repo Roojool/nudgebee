@@ -179,3 +179,19 @@ func TestWithConfigOverride_NilContext(t *testing.T) {
 	_, ok := configOverrideFor(nil, "acc-1", "ES")
 	assert.False(t, ok)
 }
+
+// TestWithConfigOverride_ClearsEncryptedFlag: override values come from a request, and
+// provider config getters decrypt whatever is flagged is_encrypted. A flag carried into
+// the override would let a probe handler decrypt client-supplied ciphertext (#39639).
+func TestWithConfigOverride_ClearsEncryptedFlag(t *testing.T) {
+	o := sampleOverride()
+	o.Values = []IntegrationConfigValue{{Name: "password", Value: "client-ciphertext", IsEncrypted: true}}
+	ctx := WithConfigOverride(overrideCtx(t), o)
+	failDB(t)
+
+	dtos, err := ListIntegrationConfigs(ctx, "acc-1", "ES")
+
+	require.NoError(t, err)
+	assert.Equal(t, []IntegrationConfigValue{{Name: "password", Value: "client-ciphertext"}}, dtos[0].Configs)
+	assert.True(t, o.Values[0].IsEncrypted, "the caller's slice must not be modified")
+}

@@ -46,6 +46,20 @@ export interface ServerBrandingData {
 
 type ServerBrandingProvider = (host?: string | null) => ServerBrandingData | null;
 
+/**
+ * Optional async preparation step. The provider itself must stay synchronous
+ * (SSR calls it during render), but a provider backed by anything other than
+ * the local filesystem needs a way to say "I am not ready yet".
+ *
+ * Only callers that CAN await should use it — in practice `/api/public/app_config`,
+ * which is an API route and is also the client's single source of branding. If
+ * it answers before the provider is ready, the browser caches un-branded values
+ * for the whole page load and the partner sees the house brand until the next
+ * reload. SSR paths keep calling the provider directly and may be one beat
+ * behind; the client repaints from app_config regardless.
+ */
+type ServerBrandingPreload = () => Promise<void>;
+
 // The provider lives on globalThis so it survives Next.js's dual module graph
 // between the Node-runtime (`instrumentation.ts` → `@ee/init-server` →
 // `branding/serverInit.ts`) and page/API-route contexts. With a module-scoped
@@ -56,11 +70,11 @@ type ServerBrandingProvider = (host?: string | null) => ServerBrandingData | nul
 // in every built image. Same pattern (and same root cause) as
 // `globalThis.__nbAuthHooks` in `authHooks.ts` and
 // `globalThis.__nbBypassGraphQLAsServer` in `instrumentation.ts`.
-type ServerBrandingRegistry = { provider: ServerBrandingProvider | null };
+type ServerBrandingRegistry = { provider: ServerBrandingProvider | null; preload: ServerBrandingPreload | null };
 
 const _g = globalThis as unknown as { __nbServerBranding?: ServerBrandingRegistry };
 if (!_g.__nbServerBranding) {
-  _g.__nbServerBranding = { provider: null };
+  _g.__nbServerBranding = { provider: null, preload: null };
 }
 const _registry = _g.__nbServerBranding!;
 
@@ -70,6 +84,33 @@ const _registry = _g.__nbServerBranding!;
  */
 export function registerServerBranding(provider: ServerBrandingProvider): void {
   _registry.provider = provider;
+}
+
+/**
+ * Register the optional async readiness step. Called once at server boot
+ * alongside registerServerBranding. OSS registers nothing, so
+ * `awaitServerBrandingReady()` resolves immediately there.
+ */
+export function registerServerBrandingPreload(preload: ServerBrandingPreload): void {
+  _registry.preload = preload;
+}
+
+/**
+ * Resolve once the branding provider can answer completely. A no-op when no
+ * preload is registered.
+ *
+ * Never rejects and never blocks indefinitely: the registered implementation
+ * owns its own timeout, and a failure here must degrade to "answer with what we
+ * have", exactly like a failed refresh does.
+ */
+export async function awaitServerBrandingReady(): Promise<void> {
+  const preload = _registry.preload;
+  if (!preload) return;
+  try {
+    await preload();
+  } catch (err) {
+    console.warn('[branding] readiness step failed; answering with current values:', err);
+  }
 }
 
 /**
@@ -127,8 +168,12 @@ export function resolveServerBranding(host?: string | null): ServerBrandingData 
   if (!provider) return null;
   try {
     return provider(host);
-  } catch {
-    // A misbehaving provider must never break SSR / the config endpoint.
+  } catch (err) {
+    // A misbehaving provider must never break SSR / the config endpoint, but it
+    // must not fail silently either: returning null here is indistinguishable
+    // from "no branding configured", so a partner deployment would quietly
+    // render as Nudgebee with nothing anywhere saying why.
+    console.error('[branding] server branding provider threw; falling back to neutral defaults:', err);
     return null;
   }
 }

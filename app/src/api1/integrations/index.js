@@ -373,7 +373,7 @@ const apiIntegrations = {
       return { options: [], message: 'Failed to load suggestions.' };
     }
   },
-  testIntegrationConnectionByConfig: async function (integrationName, accountIds, configValues, source, integrationId) {
+  testIntegrationConnectionByConfig: async function (integrationName, accountIds, configValues, source, integrationId, integrationConfigName) {
     const TEST_INTEGRATION_CONNECTION_CONFIG = `
     mutation TestIntegrationConnectionConfig($data: IntegrationTestConnectionConfigRequest!) {
       integrations_check_connection_config(request: $data) {
@@ -393,6 +393,7 @@ const apiIntegrations = {
         account_ids: accountIds,
         integration_config_values: configValues,
         source: source || 'user',
+        ...(integrationConfigName ? { integration_config_name: integrationConfigName } : {}),
       };
       if (integrationId) {
         data.integration_id = integrationId;

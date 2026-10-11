@@ -224,6 +224,7 @@ const SummaryView = () => {
     costLoading,
     savingsCurrency,
     savingsSymbol,
+    billedOutsideUsd,
   } = useSummaryData(accountFilter, envFilter);
 
   // ── Action modal state ──
@@ -556,6 +557,7 @@ const SummaryView = () => {
             totalFindingsCount={totalFindingsCount}
             savingsSymbol={savingsSymbol}
             savingsCurrency={savingsCurrency}
+            billedOutsideUsd={billedOutsideUsd}
             rankedDollars={rankedDollars}
             categoryBreakdown={categoryBreakdown}
             worstAccount={worstAccount}
@@ -842,7 +844,6 @@ const SummaryView = () => {
           costByCurrency={costByCurrency}
           accountCosts={accountCosts}
           costLoading={costLoading}
-          defaultCurrencySymbol={savingsSymbol}
           selectedAccountId={accountFilter}
           onSelectAccount={setAccountFilter}
         />
@@ -879,11 +880,7 @@ const SummaryView = () => {
         ticketData={{
           subject: ticketRec?.summary || '',
           description: `${ticketRec?.accountName || ''}\n\nSeverity: ${ticketRec?.severity || ''}\n${
-            ticketRec?.dollarImpact > 0
-              ? `Potential savings: ${
-                  (ticketRec?._raw?.account_id ? accountCosts[ticketRec._raw.account_id]?.currencySymbol : undefined) || savingsSymbol
-                }${ticketRec.dollarImpact}/mo`
-              : ''
+            ticketRec?.dollarImpact > 0 ? `Potential savings: ${savingsSymbol}${ticketRec.dollarImpact}/mo` : ''
           }`,
           accountId: ticketRec?._raw?.account_id,
         }}

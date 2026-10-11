@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 const abandonedResourceNetworkThresholdDefault = 5000
@@ -106,7 +107,7 @@ func upsertRecommendationData(ctx *security.RequestContext, dbms *database.Datab
 	}
 	// Compute finops score for the INSERT case only. On conflict finops_* are
 	// deliberately not overwritten: this path scores recency from now(), which
-	// inflated re-upserted old rows until the next cron pass. The 6h recompute
+	// inflated re-upserted old rows until the next cron pass. The daily recompute
 	// cron owns score refresh for existing rows.
 	for _, d := range data {
 		ComputeAndSetFinOpsScoreFields(d)
@@ -483,6 +484,14 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 	if tenantId == "" || accountId == "" {
 		return fmt.Errorf("image_scanner: tenantId and accountId are required for scoping")
 	}
+	// Per-account configuration (Kubernetes account → Settings): the whole scan
+	// can be turned off, and individual namespaces excluded. Defaults to scanning
+	// everything, so an account that never touched the setting is unaffected.
+	settings := getImageScanSettings(ctx, dbms, accountId)
+	if !settings.IsEnabled() {
+		ctx.GetLogger().Info("image_scanner: image scanning disabled for account, skipping", "account_id", accountId)
+		return nil
+	}
 	// Overlap guard: image scan rides both the daily "K8s Recommendation refresh"
 	// and the 2-hourly "Security recommendation refresh" crons — both fire-and-forget
 	// goroutines. Without this, two passes for the same account can run concurrently
@@ -519,7 +528,7 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 				AND cr.cloud_account_id = $1
 				AND cr.tenant_id = $2
 				AND cr.status = 'Running'
-				AND cr.meta->>'namespace' NOT IN ('kube-system', 'nudgebee-agent')
+				AND NOT (cr.meta->>'namespace' = ANY($7))
 				AND cr.workload_type != 'Job'
 		),
 		scan_state AS (
@@ -543,7 +552,8 @@ func runImageScannerServerOrchestrated(ctx *security.RequestContext, accountId, 
 			                                  ELSE make_interval(days => $5) END)
 		ORDER BY (s.last_scanned IS NULL) DESC, s.last_scanned ASC
 		LIMIT $6
-	`, accountId, tenantId, imageScanUnscannableRetryDays, imageScanFailedRetryDays, imageScanFreshDays, imageScanBatchLimit)
+	`, accountId, tenantId, imageScanUnscannableRetryDays, imageScanFailedRetryDays, imageScanFreshDays, imageScanBatchLimit,
+		pq.Array(settings.namespaceExclusions()))
 	if err != nil {
 		return fmt.Errorf("image_scanner: query pending images: %w", err)
 	}

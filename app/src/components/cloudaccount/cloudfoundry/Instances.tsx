@@ -1,5 +1,6 @@
-import { Box, LinearProgress, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import Tooltip from '@ui/Tooltip';
+import { ProgressBar } from '@ui/ProgressBar';
 import React, { useCallback, useEffect, useState } from 'react';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import apiCloudAccount from '@api1/cloud-account';
@@ -163,20 +164,10 @@ const AppStatusCell = ({ state }: { state: string }) => {
 /** Compact usage bar for table columns */
 const CompactUsageBar = ({ used, quota }: { used: number; quota: number }) => {
   const pct = quota > 0 ? Math.min((used / quota) * 100, 100) : 0;
-  const barColor = pct > 80 ? ds.amber[500] : ds.blue[500];
   return (
     <Tooltip title={`${formatBytes(used)} / ${formatBytes(quota)} (${pct.toFixed(1)}%)`} arrow>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: ds.space.mul(0, 40) }}>
-        <LinearProgress
-          variant='determinate'
-          value={pct}
-          sx={{
-            height: ds.space.mul(0, 3),
-            borderRadius: ds.radius.lg,
-            backgroundColor: ds.gray[200],
-            '& .MuiLinearProgress-bar': { backgroundColor: barColor, borderRadius: ds.radius.lg },
-          }}
-        />
+        <ProgressBar value={pct} thresholds={{ success: 80, warning: 100 }} showValue={false} size='sm' />
         <Typography sx={{ fontSize: ds.text.caption, color: ds.gray[500], whiteSpace: 'nowrap' }}>
           {formatBytes(used)} / {formatBytes(quota)}
         </Typography>
@@ -186,21 +177,11 @@ const CompactUsageBar = ({ used, quota }: { used: number; quota: number }) => {
 };
 
 /** Full-size usage bar for instance stats panel */
-const UsageBar = ({ used, quota, color }: { used: number; quota: number; color: string }) => {
+const UsageBar = ({ used, quota }: { used: number; quota: number }) => {
   const pct = quota > 0 ? Math.min((used / quota) * 100, 100) : 0;
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], minWidth: ds.space.mul(0, 90) }}>
-      <LinearProgress
-        variant='determinate'
-        value={pct}
-        sx={{
-          flex: 1,
-          height: ds.space[2],
-          borderRadius: ds.radius.xl,
-          backgroundColor: ds.gray[200],
-          '& .MuiLinearProgress-bar': { backgroundColor: color, borderRadius: ds.radius.xl },
-        }}
-      />
+      <ProgressBar value={pct} thresholds={{ success: 80, warning: 100 }} showValue={false} size='md' />
       <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700], whiteSpace: 'nowrap' }}>
         {formatBytes(used)} / {formatBytes(quota)}
       </Typography>
@@ -477,8 +458,6 @@ const CFInstanceStats = ({ drilldownQuery }: { drilldownQuery: any }) => {
         </Box>
         {/* Rows */}
         {instanceStats.map((inst: any, idx: number) => {
-          const memColor = inst.mem_quota > 0 && inst.mem / inst.mem_quota > 0.8 ? ds.amber[500] : ds.blue[500];
-          const diskColor = inst.disk_quota > 0 && inst.disk / inst.disk_quota > 0.8 ? ds.amber[500] : ds.blue[500];
           return (
             <Box
               key={inst.index ?? idx}
@@ -494,8 +473,8 @@ const CFInstanceStats = ({ drilldownQuery }: { drilldownQuery: any }) => {
             >
               <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700], fontWeight: ds.weight.medium }}>{inst.index ?? idx}</Typography>
               <Label variant={getInstanceStateColor(inst.state)} text={inst.state || '-'} />
-              <UsageBar used={inst.mem || 0} quota={inst.mem_quota || 0} color={memColor} />
-              <UsageBar used={inst.disk || 0} quota={inst.disk_quota || 0} color={diskColor} />
+              <UsageBar used={inst.mem || 0} quota={inst.mem_quota || 0} />
+              <UsageBar used={inst.disk || 0} quota={inst.disk_quota || 0} />
               <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700] }}>
                 {typeof inst.cpu === 'number' ? `${inst.cpu.toFixed(2)}%` : '-'}
               </Typography>

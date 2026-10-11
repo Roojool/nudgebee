@@ -22,6 +22,14 @@ const OVER_PROVISIONED = {
   app: [entry('cpu', 1.0, 0.25), entry('memory', 2147483648, 536870912)],
 };
 
+// The per-entry figures the producers stamp: the app saves, the sidecar pays,
+// and the row net is a few cents.
+const priced = (e: ReturnType<typeof entry>, dollars: number) => ({ ...e, add_info: { estimated_savings: dollars } });
+const MIXED_NET_ZERO = {
+  app: [priced(entry('cpu', 1.0, 0.4), 28.2), priced(entry('memory', 2147483648, 1073741824), 12.1)],
+  sidecar: [priced(entry('cpu', 0.1, 0.25), -10), priced(entry('memory', 268435456, 805306368), -29.93)],
+};
+
 const build = (recData: unknown, savings: number) =>
   buildInterpretation({
     category: 'RightSizing',
@@ -74,5 +82,24 @@ describe('buildInterpretation cost impact', () => {
     });
     expect(impact).toContain('Costs ~$42/mo more to apply');
     expect(impactIsCost).toBe(false);
+  });
+
+  it('names both sides of a mixed workload instead of "no direct cost change"', () => {
+    const { impact, impactIsCost } = build(MIXED_NET_ZERO, 0.37);
+    expect(impact).toBe('Saves ~$40/mo on app · costs ~$40/mo more on sidecar · net ~$0/mo.');
+    expect(impactIsCost).toBe(false);
+  });
+
+  it('states the net direction when a mixed workload still saves overall', () => {
+    const payload = { ...MIXED_NET_ZERO, sidecar: [priced(entry('cpu', 0.1, 0.25), -10)] };
+    const { impact, impactIsCost } = build(payload, 30.3);
+    expect(impact).toBe('Saves ~$40/mo on app · costs ~$10/mo more on sidecar · net saves ~$30/mo.');
+    expect(impactIsCost).toBe(true);
+  });
+
+  it('names the one container that both saves and pays when cpu goes down and memory goes up', () => {
+    const payload = { app: [priced(entry('cpu', 1.0, 0.4), 40), priced(entry('memory', 1073741824, 2147483648), -40)] };
+    const { impact } = build(payload, 0);
+    expect(impact).toBe('Saves ~$40/mo and costs ~$40/mo more on app · net ~$0/mo.');
   });
 });

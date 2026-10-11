@@ -24,7 +24,6 @@ import ConfirmActionDialog from '@components/cloudaccount/ConfirmActionDialog';
 import RunSsmCommandDialog from '@components/cloudaccount/RunSsmCommandDialog';
 import SsmCommandResultDialog, { type SsmCommandResult } from '@components/cloudaccount/SsmCommandResultDialog';
 import ResourceActionHistory from '@components/cloudaccount/ResourceActionHistory';
-import VulnerabilityTable from '@components/vulnerabilities/VulnerabilityTable';
 import { ListingLayout } from '@ui/ListingLayout';
 import FilterDropdown from '@ui/FilterDropdown';
 import SearchInput from '@ui/SearchInput';
@@ -958,19 +957,6 @@ const InstancesView = (props: {
                 key: 'ec2-events',
                 componentFn: function (opt: any, drilldownQuery: any, _row: any) {
                   return <CloudAccountEvents accountId={props?.accountId} serviceName={props.serviceName} subjectName={drilldownQuery.resourse_id} />;
-                },
-              },
-              {
-                text: 'Vulnerabilities',
-                value: 3,
-                // A React list key, not a credential: gitleaks' generic-api-key rule fires on any
-                // `key:` whose value clears its entropy threshold, which a long kebab-case slug does.
-                key: 'ec2-vulnerabilities', // gitleaks:allow
-                componentFn: function (_opt: any, drilldownQuery: any, _row: any) {
-                  // drilldownQuery.id, not resourse_id: findings are keyed to the
-                  // cloud_resourses row (a UUID), while resourse_id is the
-                  // provider-side instance id (i-0abc…).
-                  return <VulnerabilityTable accountId={props?.accountId ?? ''} resourceId={drilldownQuery?.id} embedded />;
                 },
               },
               {

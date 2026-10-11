@@ -86,6 +86,17 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 				ctx.GetLogger().Info("cron: finops score recompute done", "duration", time.Since(t0))
 			}()
 			c.JSON(200, gin.H{"status": "ok"})
+		case "finops-score-recompute-recent":
+			go func() {
+				t0 := time.Now()
+				ctx.GetLogger().Info("cron: recomputing finops scores for recent recommendations")
+				err := recommendation.RecomputeRecentFinOpsScores(ctx)
+				if err != nil {
+					ctx.GetLogger().Error("cron: error recomputing recent finops scores", "error", err)
+				}
+				ctx.GetLogger().Info("cron: recent finops score recompute done", "duration", time.Since(t0))
+			}()
+			c.JSON(200, gin.H{"status": "ok"})
 		case "recommendation-nudge-digest":
 			go func() {
 				t0 := time.Now()
@@ -641,7 +652,7 @@ func handleCrons(r *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logge
 					}
 				}()
 				ctx.GetLogger().Info("cron: analyzing noisy alerts for threshold suggestions")
-				if err := triage.AnalyzeNoisyAlerts(ctx); err != nil {
+				if err := triage.AnalyzeNoisyAlerts(ctx, promQLRangeSeries); err != nil {
 					ctx.GetLogger().Error("cron: failed to analyze noisy alerts", "error", err)
 				}
 			}()

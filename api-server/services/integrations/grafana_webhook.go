@@ -242,6 +242,7 @@ func mapGrafanaAlertToEvent(accountId string, alert map[string]any) (*core.Event
 		WebhookId:             uuid.NewString(),
 		EventType:             labels["alertname"],
 		EventId:               fingerprint,
+		FiringKey:             core.FiringKeyFromStart(fingerprint, startsAt),
 		EventUrl:              eventURL,
 		EventStatus:           string(mapGrafanaStatus(status)),
 		EventPriority:         string(mapGrafanaSeverity(labels["severity"])),

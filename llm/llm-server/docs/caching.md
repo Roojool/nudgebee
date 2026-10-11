@@ -38,9 +38,26 @@ If a cache reference fails at generation time (e.g. 403/404 `CachedContent not f
 ### 6. Observability & Metrics
 Prometheus metrics provide visibility into cache efficiency:
 - `nb_llm_cache`: Incremented on every cache operation with labels `provider`, `model`, `status` (`hit`/`miss`/`error`), `account_id`, `agent`, `scope`.
-- `nb_llm_cache_skip`: Tracks cache skips with labels `reason` (`no_cacheable_messages`, `model_no_cache_support`, `insufficient_tokens`, `exceeds_context_window`, `disabled`), `provider`, `model`, `account_id`, `agent`, `scope`.
+- `nb_llm_cache_skip`: Tracks cache skips with labels `reason` (`no_cacheable_messages`, `model_no_cache_support`, `insufficient_tokens`, `exceeds_context_window`, `disabled`, `conversation_scope_implicit`, `hybrid_low_coverage`), `provider`, `model`, `account_id`, `agent`, `scope`.
 - `nb_llm_cached_tokens`: Total token savings from cached queries.
 - `nb_llm_cache_invalidations`: Churn tracking for caches invalidated before planned TTL.
+
+## Google AI Provider: Conversation Scope Uses Implicit Caching (#39633)
+
+Gemini 2.5+ caches repeated prompt prefixes automatically ("implicit" caching). A request that references one of our `CachedContent` entries gets **no** implicit caching on the rest of the prompt. On Gemini, **Conversation-scope calls never create or reference `CachedContent`**: those entries were created after a conversation's first call, read 1.4–3.9 times before expiring, and for react_3/react_4 held only the system prompt — so they capped every tool step at the system prompt. The calls are left to implicit caching, which covers the whole growing tool history. Global and Account scope are unchanged.
+
+Implicit caching needs a byte-stable prefix: anything that changes near the top of the prompt between steps (a per-second timestamp, a notebook rewritten in the opening message, compression rewriting older steps, tool definitions in a different order) cuts the reusable prefix at that point. In react_4 the notebook and timestamp in the opening message are fixed for the turn, so the prompt only grows at the end; one known exception is a clarification continuation, which rewrites the question framing in that message once. Measured on dev: implicit entries are best-effort (a hit ~6 in 10 times after a single call, never after 5 minutes), and inside a tool loop ~83% of follow-up calls hit. Explicit and implicit hits look the same in `llm_conversation_token_usage` (`is_cache_hit` is true whenever cached tokens > 0); the `cacheMode` field on the `LLM cache tokens used` log line tells them apart. Dashboards built on `is_cache_hit` or cached-token share therefore count implicit hits too since this change, so rates before and after 2026-09-30 are not like-for-like.
+
+## Google AI Provider: Hybrid Use of Global/Account Caches (#39633)
+
+Global/Account-scope `CachedContent` is the only cache that survives a long idle gap (12h), so a cold first call relies on it. But every later step of a tool loop that references it gets no implicit caching on the tool history. `LLM_SERVER_GEMINI_CACHE_STRATEGY` chooses:
+
+| Value | Behavior |
+|---|---|
+| `explicit` | Reference the live cache on every call (rollback value) |
+| `hybrid` (default) | In a tool loop, reference it only while it covers at least `LLM_SERVER_GEMINI_CACHE_HYBRID_MIN_COVERAGE` (default 0.65) of the prompt's tokens; otherwise send the full prompt so implicit caching covers the longer prefix. A request with no tool calls or results (a one-shot helper) always keeps the cache: it never repeats, so implicit caching cannot help it |
+
+Coverage = cached tokens / (cached tokens + rest of the prompt). The cached side is the entry's exact size, as reported by Gemini when it was created (tools included); the rest is estimated from its characters at ~3 characters per token. Because the prompt only grows within a run, a run normally switches from explicit to implicit once (on dev, 1 of 93 runs switched back, e.g. after compression shrank the prompt). Skipped calls log `hybrid_low_coverage` with the coverage value.
 
 ## Google AI Provider: System Message Handling
 
@@ -118,6 +135,7 @@ Fires when the agent is top-level (not a sub-agent) and the query is an investig
 | Account-wide GlobalContext | System message (`AccountContext`) | Stable per account = cacheable |
 | Entry-point/request additional instructions | Human message (`AccountPrompt`) | May differ between event analysis and ordinary chat |
 | User query, conversation history, scratchpad | Human message | Changes every request = must not pollute cache |
+| RAG examples retrieved for the query (`NBAgentPrompt.Rag`) | Human message (`rag_examples`, ReAct planners) | Retrieved per query; other planner types still get them in the system prompt |
 | Date/time (`today`) | System message is OK | Rotates daily; acceptable for 12h TTL |
 | Previous tool observations, iteration state | Human message (`scratchpad`) | Changes every ReAct3 iteration |
 

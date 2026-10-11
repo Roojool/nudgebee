@@ -1433,3 +1433,14 @@ func TestK8sResourceSearchTool_EmptySearchTypeIsTreatedAsAbsent(t *testing.T) {
 			"processSearchRequest normalizes this to suggestions; pinned here so the two paths cannot diverge")
 	})
 }
+
+// TestGetCurrentOtelHosts_NilContextReturnsEmpty guards the caller side of the
+// same regression: GetCurrentOtelHosts only enriches the promql_query system
+// prompt with OTel host names, so losing those hosts must degrade the prompt,
+// never fail the request that asked for it. Without a security context there is
+// nobody to query services-server as, so the answer is "no hosts".
+func TestGetCurrentOtelHosts_NilContextReturnsEmpty(t *testing.T) {
+	assert.NotPanics(t, func() {
+		assert.Empty(t, GetCurrentOtelHosts(nil, "acct-1"))
+	})
+}

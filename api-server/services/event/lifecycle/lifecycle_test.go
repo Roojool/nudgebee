@@ -113,3 +113,19 @@ func TestEmitHookErrorDoesNotStopOthers(t *testing.T) {
 	Emit(testCtx(), PhaseInvestigationEnqueued, map[string]any{}, nil)
 	assert.Equal(t, []string{"boom", "after"}, ran, "a hook error must not stop later hooks")
 }
+
+func TestSilencedByTriage(t *testing.T) {
+	// A drop rule hides an event completely, a stronger action than suppress,
+	// so every gate that skips SUPPRESSED events must skip DROPPED ones too.
+	for status, want := range map[string]bool{
+		"SUPPRESSED": true,
+		"suppressed": true,
+		"DROPPED":    true,
+		"dropped":    true,
+		"OPEN":       false,
+		"DUPLICATE":  false,
+		"":           false,
+	} {
+		assert.Equal(t, want, SilencedByTriage(status), "nb_status %q", status)
+	}
+}

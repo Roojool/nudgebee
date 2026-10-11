@@ -5,6 +5,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/testenv"
 	"nudgebee/services/security"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -189,6 +190,78 @@ func TestQueryGenerationOnBuilder(t *testing.T) {
 		queryResponse, err := executeSqlQuery(database.Metastore, query, []any{}, queryRequest.Limit)
 		assert.Nil(t, err)
 		assert.NotEmpty(t, queryResponse)
+	})
+
+	// cloud_resources_list_v2 used to SUM the account's entire all-time spend
+	// history and join it to the resource rows under a rows=1 misestimate,
+	// which degraded to a 60s+ nested loop on busy accounts. The spend
+	// roll-up must instead be scoped to the request's filtered resource set.
+	t.Run("TestCloudResourcesListSpendRollupIsScoped", func(t *testing.T) {
+		queryRequest := QueryRequest{
+			Table: "cloud_resources_list_v2",
+			Columns: fromStringColsToQueryCols([]string{
+				"id", "name", "type", "status", "account", "spend_amount", "total_count",
+			}),
+			Where: QueryWhereClause{
+				Binary: map[string]map[BinaryWhereClauseType]any{
+					"account": {"_eq": testenv.FakeAccountID},
+					"type":    {"_eq": "log-group"},
+					"status":  {"_eq": "Active"},
+				},
+			},
+			OrderBy: []QueryOrderBy{{Column: "created_at", Order: "desc"}},
+			Limit:   10,
+		}
+		query, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), uuid.NewString(), queryRequest, table_metadata["cloud_resources_list_v2"])
+		assert.Nil(t, err)
+		assert.NotEmpty(t, query)
+		// spend is aggregated over only the filtered resources, not all of spends
+		assert.Contains(t, query, "WITH cr_base AS")
+		assert.Contains(t, query, "FROM spends")
+		assert.Contains(t, query, "JOIN cr_base ON cr_base.id = spends.cloud_resource_id AND cr_base.account = spends.cloud_account")
+		// the resource filter is applied once, inside the CTE
+		assert.Contains(t, query, "(type = 'log-group')")
+	})
+
+	// spend_summary_windows_v2 replaces the 8 near-identical spend_groupings_v2
+	// calls the cost-summary cards used to fan out per page. One query: a
+	// recent (this + last month) scan CROSS JOINed to the year scan, every
+	// figure a sum(amount) FILTER (...). account_id and the optional
+	// resource_service_name are pushed into both inner scans and stripped from
+	// the outer where.
+	t.Run("TestSpendSummaryWindowsCollapsesTheFanOut", func(t *testing.T) {
+		run := func(svc string) string {
+			w := QueryWhereClause{Binary: map[string]map[BinaryWhereClauseType]any{
+				"account_id": {"_eq": testenv.FakeAccountID},
+			}}
+			if svc != "" {
+				w.Binary["resource_service_name"] = map[BinaryWhereClauseType]any{"_eq": svc}
+			}
+			qr := QueryRequest{
+				Table: "spend_summary_windows_v2",
+				Columns: fromStringColsToQueryCols([]string{
+					"currency_type", "cm_net", "cm_gross", "cm_credits",
+					"lm_net", "lm_gross", "lm_credits", "yr_net", "yr_gross",
+				}),
+				Where: w,
+			}
+			query, err := GenerateSqlQuery(security.NewRequestContextForSuperAdmin(nil, nil, nil), uuid.NewString(), qr, table_metadata["spend_summary_windows_v2"])
+			assert.Nil(t, err)
+			assert.NotEmpty(t, query)
+			return query
+		}
+
+		q := run("")
+		// two scans of spends (recent + year), not one per figure
+		assert.Equal(t, 2, strings.Count(q, "FROM spends"))
+		assert.Contains(t, q, "sum(amount) FILTER (WHERE")
+		assert.Contains(t, q, "date_trunc('year', now())")
+		// account scope is pushed into the inner scans, not left on the outer
+		assert.Equal(t, 2, strings.Count(q, "cloud_account = '"+testenv.FakeAccountID+"'"))
+
+		// EC2 variant pushes resource_service_name into both inner scans too
+		qEC2 := run("AmazonEC2")
+		assert.Equal(t, 2, strings.Count(qEC2, "(tags -> 'nb_service_name' ->> 0) = 'AmazonEC2'"))
 	})
 }
 

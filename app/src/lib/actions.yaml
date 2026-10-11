@@ -436,6 +436,57 @@ actions:
       - role: k8s_namespace_admin
       - role: account_admin_readonly
       - role: account_admin
+  - name: ai_delete_conversation_queued_message
+    comment: Delete a queued message in an investigation
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_delete'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+  - name: ai_update_conversation_queued_message
+    comment: Update a queued message text in an investigation
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_update'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
+  - name: ai_execute_queued_message
+    comment: Force execute a queued message immediately
+    definition:
+      kind: synchronous
+      handler: '{{LLM_SERVER_URL}}/v1/completions/queued_message_force'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: LLM_SERVER_TOKEN
+    permissions:
+      - role: tenant_usage
+      - role: tenant_admin_readonly
+      - role: tenant_admin
+      - role: k8s_namespace_admin_readonly
+      - role: k8s_namespace_admin
+      - role: account_admin_readonly
+      - role: account_admin
   - name: ai_generate_log_query
     comment: Generate and validate a log query for the account's configured log backend, from a natural-language request
     definition:
@@ -4671,6 +4722,20 @@ actions:
       - role: account_admin
       - role: tenant_admin_readonly
       - role: tenant_admin
+  - name: spend_summary_windows_v2
+    comment: This-month / last-month / year-to-date spend (net, gross, credits) for one account in a single query
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/query'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: account_admin_readonly
+      - role: account_admin
+      - role: tenant_admin_readonly
+      - role: tenant_admin
   - name: tenant_attribute_delete
     definition:
       kind: synchronous
@@ -7014,6 +7079,73 @@ actions:
       - role: tenant_admin
       - role: account_admin_readonly
       - role: account_admin
+  # Runtime branding overrides (tenant_branding_override). Super-admin only:
+  # rows are keyed by hostname and carry no tenant column, because branding
+  # resolves before authentication, so there is no tenant scope to constrain a
+  # tenant_admin — one partner's admin could otherwise repaint another
+  # partner's hostname. services-server re-checks IsSuperAdmin on every one of
+  # these; the gate here is the fast-fail, not the authority.
+  #
+  # The read path the frontend uses on every render is NOT an action: it is
+  # GET /v1/branding/overrides, called server-side from the Next.js process
+  # because branding must resolve without a session.
+  - name: branding_list_overrides
+    comment: List every stored per-host branding override, including disabled rows
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: super_admin
+      - role: super_admin_readonly
+  - name: branding_get_override
+    comment: Get the stored branding override for one host
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: super_admin
+      - role: super_admin_readonly
+  - name: branding_upsert_override
+    comment: Create or replace the branding override for one host
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: super_admin
+  - name: branding_apply_previous_override
+    comment: Roll a host's branding override back to the value before its last write
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: super_admin
+  - name: branding_delete_override
+    comment: Remove a host's branding override so it falls back to its mounted kit
+    definition:
+      kind: "synchronous"
+      handler: '{{SERVICE_API_SERVER_URL}}/rpc/branding'
+      forward_client_headers: true
+      headers:
+        - name: X-ACTION-TOKEN
+          value_from_env: ACTION_API_SERVER_TOKEN
+    permissions:
+      - role: super_admin
 custom_types:
   enums:
     - name: QuerySortOrderRequest

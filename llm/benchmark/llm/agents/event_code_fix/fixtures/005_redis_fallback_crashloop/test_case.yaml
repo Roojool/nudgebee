@@ -1,0 +1,16 @@
+user_prompt: llm-gateway-worker CrashLoopBackOff
+expected_output:
+- The response must identify that the service treats a Redis connection failure at startup as fatal (crashes/exits)
+  instead of falling back to an in-memory rate limiter.
+- "The response must NOT recommend fixing or scaling Redis itself, or attribute this to resource limits\
+  \ \u2014 the log shows a connection refusal, not a Redis outage, and the fix is making the service resilient\
+  \ to it, not the dependency more available."
+tags:
+- event_code_fix
+- event
+- code_fix
+- crashloop
+- dependency_resilience
+- real_incident
+type: rca
+event_code_fix_scenario: redis_fallback_crashloop

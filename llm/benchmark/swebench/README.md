@@ -17,7 +17,9 @@ retrieval problem as correlating an incident with a customer's code — and beca
 labels are free and human-verified.
 
 What it still does **not** measure: log→code correlation. SWE-bench inputs are prose
-issues, not telemetry. That gap is what `docs/code-analysis-eval-spec.md` exists for.
+issues, not telemetry. That gap is what
+[`../event_code_fix/docs/code-analysis-eval-spec.md`](../event_code_fix/docs/code-analysis-eval-spec.md)
+exists for.
 
 ## What it measures
 

@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"nudgebee/llm/agents/aws"
@@ -140,6 +141,54 @@ func isTracesSoftCompletion(response string) bool {
 	return false
 }
 
+// executedTraceQueryProvider recovers the query services-server actually ran and the provider that
+// answered it from the trace tool observations collected during a run — the
+// {"traces":[…],"metadata":{"query","provider"}} envelope tracePayloadForResponse produces.
+// Observations are walked newest-first so the last trace query wins, and matched by shape rather
+// than by tool name so every trace tool (canonical v2, default, jaeger, chronosphere) is covered
+// while non-trace observations simply fail to yield either field. Mirrors executedLogQuery /
+// providerFromLogs on the log path.
+func executedTraceQueryProvider(steps []core.ToolInvocation) (string, string) {
+	for i := len(steps) - 1; i >= 0; i-- {
+		var doc struct {
+			Metadata struct {
+				Query    string `json:"query"`
+				Provider string `json:"provider"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal([]byte(steps[i].Response.Content), &doc); err != nil {
+			continue
+		}
+		if doc.Metadata.Query != "" || doc.Metadata.Provider != "" {
+			return doc.Metadata.Query, doc.Metadata.Provider
+		}
+	}
+	return "", ""
+}
+
+// appendExecutedTraceContext names the provider and executed query alongside a "no traces found"
+// message, so an empty answer is attributable instead of leaving the user to guess what ran
+// (#37406). Returns msg untouched when neither could be recovered — an older services-server, or
+// the Datadog / cloud-CLI trace paths, which serialize their own payloads.
+func appendExecutedTraceContext(msg string, steps []core.ToolInvocation) string {
+	query, provider := executedTraceQueryProvider(steps)
+	var parts []string
+	if provider != "" {
+		parts = append(parts, "provider: "+provider)
+	}
+	if query != "" {
+		// Verbatim: a clipped query is not one the reader can paste into the provider to run
+		// for themselves, which is the point of naming it. Length needs no guard here —
+		// TracesAgentTool saves an oversized response to the workspace and still returns the
+		// full text after the size notice, so nothing is lost.
+		parts = append(parts, "executed query: "+query)
+	}
+	if len(parts) == 0 {
+		return msg
+	}
+	return fmt.Sprintf("%s (%s)", msg, strings.Join(parts, "; "))
+}
+
 func (f *fallbackTracesAgent) GetName() string {
 	return TracesAgentName
 }
@@ -253,10 +302,15 @@ func (f *fallbackTracesAgent) Execute(ctx *security.RequestContext, query core.N
 	// If any agent legitimately returned a "no traces" style completion, propagate the
 	// last such response as Completed so the user sees a clean message. Only responses
 	// from agents that returned ConversationStatusCompleted qualify here — error strings
-	// from Failed agents must not be promoted to Completed.
+	// from Failed agents must not be promoted to Completed. The message is annotated with the
+	// query and provider recovered from the tool observations, so "no traces found" says what
+	// ran and where instead of leaving it unattributable (#37406). This runs after the
+	// soft-completion classification above, and reads only observations — it cannot change what
+	// counts as empty versus failed.
 	if len(completedNoDataResponses) > 0 {
 		return core.NBAgentResponse{
-			Response:          []string{completedNoDataResponses[len(completedNoDataResponses)-1]},
+			Response: []string{appendExecutedTraceContext(
+				completedNoDataResponses[len(completedNoDataResponses)-1], allAgentStepResponses)},
 			Status:            core.ConversationStatusCompleted,
 			AgentStepResponse: allAgentStepResponses,
 			References:        allReferences,

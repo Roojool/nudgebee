@@ -154,7 +154,7 @@ const AskNudgebeeLayout = ({
   // tenant-wide agent catalog, and SettingsModal / b-Cortex render their
   // own tenant-wide views in that case.
   const { accountId } = router.query;
-  const { baseTitle } = useTenantBranding();
+  const { baseTitle, loading: brandingLoading } = useTenantBranding();
 
   const [open, setOpen] = useState(false);
   const [avatarSubMenu, setAvatarSubMenu] = useState(['UserInfo', 'Switch Tenant', 'Logout']);
@@ -278,7 +278,13 @@ const AskNudgebeeLayout = ({
   return (
     <>
       <Head>
-        <title>{baseTitle}</title>
+        {/* Gated like the main layout's title (components/common/layout/index.jsx).
+            Ungated, this painted the Nudgebee default for the frames before
+            /api/public/app_config resolved, so a partner deployment flashed the
+            wrong name in the browser tab. No title until it resolves is the
+            intended trade — the tab shows the URL for an instant instead of the
+            wrong brand. */}
+        {!brandingLoading && <title>{baseTitle}</title>}
       </Head>
       {renderSlot('LayoutHeadExtras')}
       <LayoutHeaderActionSlot open={openSwitchAccount} title={'Switch Tenant'} onClose={handleSwitchAccountClose} />
@@ -324,6 +330,16 @@ const AskNudgebeeLayout = ({
                 />
 
                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <DsButton
+                    tone='ghost'
+                    size='sm'
+                    composition='icon-only'
+                    icon={<SafeIcon alt='Profile Icon' src={ProfileOutlineIcon} width={24} height={24} />}
+                    aria-label='Account Settings'
+                    tooltip='Account Settings'
+                    tooltipPlacement='right'
+                    onClick={handleOpenUserMenu}
+                  />
                   {getUserSession()?.tenant?.name && (
                     <Tooltip title={getUserSession()?.tenant?.name} placement='right'>
                       <Typography
@@ -341,16 +357,6 @@ const AskNudgebeeLayout = ({
                       </Typography>
                     </Tooltip>
                   )}
-                  <DsButton
-                    tone='ghost'
-                    size='sm'
-                    composition='icon-only'
-                    icon={<SafeIcon alt='Profile Icon' src={ProfileOutlineIcon} width={24} height={24} />}
-                    aria-label='Account Settings'
-                    tooltip='Account Settings'
-                    tooltipPlacement='right'
-                    onClick={handleOpenUserMenu}
-                  />
                   <Menu
                     id='menu-appbar'
                     sx={{

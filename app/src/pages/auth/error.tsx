@@ -81,9 +81,13 @@ export default function AuthError() {
   return (
     <>
       <Head>
-        {!branding.loading && <link rel='icon' href={branding.faviconUrl} />}
-        <title>{`${branding.title}: ${title}`}</title>
-        <meta property='og:title' content={`${branding.title} - ${title}`} key='title' />
+        {!branding.loading && branding.faviconUrl && <link rel='icon' href={branding.faviconUrl} />}
+        {/* Gated on the branding config, like the favicon: until
+            /api/public/app_config answers there is no brand name to print, and
+            printing the house-brand default meant a partner deployment showed
+            "Nudgebee" in the tab and then repainted to its own name. */}
+        {!branding.loading && <title>{`${branding.title}: ${title}`}</title>}
+        {!branding.loading && <meta property='og:title' content={`${branding.title} - ${title}`} key='title' />}
       </Head>
       <AuthTemplate>
         <Box display='flex' flexDirection='column' justifyContent='space-between' alignItems='flex-start'>

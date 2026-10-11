@@ -109,6 +109,38 @@ const BRANDING_DEFAULTS = {
   signingPublicKey: DEFAULT_SIGNING_PUBLIC_KEY,
 };
 
+// The value branding resolves to BEFORE /api/public/app_config answers.
+//
+// Deliberately empty rather than BRANDING_DEFAULTS. That window is a real,
+// visible server round trip, and every field here reaches something a user
+// reads within it: the browser tab, the header logo, the favicon, the mascots.
+// Falling back to the Nudgebee defaults meant a partner deployment painted the
+// house brand for those frames and then repainted — the "Nudgebee, then
+// Acme" flash. Empty degrades to "not there yet" instead: consumers gated
+// on `loading` render nothing, and SafeIcon returns null for an empty src.
+//
+// This is the loading state ONLY. Once the config resolves, BRANDING_DEFAULTS
+// comes back as the per-field fallback for anything the response omits.
+const BRANDING_UNRESOLVED = {
+  isWhiteLabel: false,
+  logoUrl: '',
+  faviconUrl: '',
+  title: '',
+  assistantName: '',
+  nubiIconUrl: '',
+  nubiIconLightUrl: '',
+  loaderUrl: '',
+  signinImageUrl: '',
+  signinLeftImageUrl: '',
+  carouselSlides: null,
+  theme: null,
+  colorTokens: null,
+  fontRemap: null,
+  relayUrl: DEFAULT_RELAY_URL,
+  k8sCollectorUrl: DEFAULT_K8S_COLLECTOR_URL,
+  signingPublicKey: DEFAULT_SIGNING_PUBLIC_KEY,
+};
+
 /**
  * Lightweight hook for pages that only need the four branding defaults
  * (logo, favicon, title, assistantName) without the full tenant/partner logic.
@@ -117,11 +149,17 @@ const BRANDING_DEFAULTS = {
 export const useBrandingConfig = () => {
   const config = useSyncExternalStore(subscribeToBrandingConfig, getBrandingSnapshot, getBrandingServerSnapshot);
 
-  // Merge defaults UNDER the fetched config so any field the config omits falls
-  // back to its Nudgebee default per-field. The branding apparatus is EE-only:
-  // in OSS (and EE without a custom branding file) /api/public/app_config returns
-  // only the non-branding runtime fields, so the branding fields must default here.
-  return useMemo(() => ({ ...BRANDING_DEFAULTS, ...(config || {}), loading: config === null }), [config]);
+  // Two states, and the split between them is the point:
+  //
+  //   not resolved yet (config === null) -> BRANDING_UNRESOLVED, i.e. empty.
+  //     See that constant for why this must not be the Nudgebee defaults.
+  //
+  //   resolved -> merge defaults UNDER the response so any field it omits falls
+  //     back to its Nudgebee default per-field. The branding apparatus is
+  //     EE-only: in OSS (and EE without a custom branding file)
+  //     /api/public/app_config returns only the non-branding runtime fields, so
+  //     the branding fields must default here.
+  return useMemo(() => (config === null ? { ...BRANDING_UNRESOLVED, loading: true } : { ...BRANDING_DEFAULTS, ...config, loading: false }), [config]);
 };
 
 /**
@@ -144,14 +182,20 @@ export const useWatchFeatureEnabled = () => {
  * Reads from the eagerly-fetched config cache, falling back to defaults.
  * Safe to call from plain functions (e.g. getIcon) after initial page load.
  */
-export const getNubiIconUrl = () => _configCache?.nubiIconUrl || DEFAULT_NUBI_ICON;
-export const getNubiIconLightUrl = () => _configCache?.nubiIconLightUrl || DEFAULT_NUBI_ICON_LIGHT;
+// Same rule as useBrandingConfig above: before the config resolves these answer
+// EMPTY, not with a Nudgebee default. `_configCache` is the resolved/unresolved
+// signal — the `?.` chains these used to have could not tell "no config yet"
+// from "config resolved without this field", so both took the house-brand
+// branch and a partner saw Nudgebee assets until the fetch landed.
+export const getNubiIconUrl = () => (_configCache ? _configCache.nubiIconUrl || DEFAULT_NUBI_ICON : '');
+export const getNubiIconLightUrl = () => (_configCache ? _configCache.nubiIconLightUrl || DEFAULT_NUBI_ICON_LIGHT : '');
 // White-label tenants without an explicit circle variant fall back to their
 // regular nubi icon rather than the Nudgebee default.
-export const getNubiIconCircleUrl = () => _configCache?.nubiIconCircleUrl || _configCache?.nubiIconUrl || DEFAULT_NUBI_ICON_CIRCLE;
-export const getLoaderUrl = () => _configCache?.loaderUrl || DEFAULT_LOADER_URL;
-export const getAssistantName = () => _configCache?.assistantName || DEFAULT_ASSISTANT_NAME;
-export const getBrandTitle = () => _configCache?.title || DEFAULT_TITLE;
+export const getNubiIconCircleUrl = () =>
+  _configCache ? _configCache.nubiIconCircleUrl || _configCache.nubiIconUrl || DEFAULT_NUBI_ICON_CIRCLE : '';
+export const getLoaderUrl = () => (_configCache ? _configCache.loaderUrl || DEFAULT_LOADER_URL : '');
+export const getAssistantName = () => (_configCache ? _configCache.assistantName || DEFAULT_ASSISTANT_NAME : '');
+export const getBrandTitle = () => (_configCache ? _configCache.title || DEFAULT_TITLE : '');
 
 // Sentence-cased assistant name, for copy that opens a sentence or names a UI
 // surface ("Ask Nubi > Memory"). The configured name is lowercase by default,
@@ -206,9 +250,23 @@ const BRANDING_ASSETS = {
 };
 
 export const getBrandingAsset = (key) => {
+  // Unresolved config: no asset. Returning the Nudgebee default here would put
+  // a house-brand mascot on a partner's page for the frames before the config
+  // lands. Callers already treat a plain string as "no custom asset" and
+  // SafeIcon renders nothing for an empty one, so this is a safe third value.
+  if (!_configCache) return '';
   const asset = BRANDING_ASSETS[key];
+  const customSrc = asset && _configCache[asset.configKey];
+
+  // On a white-label deployment the Nudgebee assets are never the right answer:
+  // not as the value for a slot the kit left unset, and not as the onError
+  // fallback for a slot it did set. Both paths used to repaint a partner's page
+  // with house-brand mascots — the second one silently, on nothing more than a
+  // typo'd path. Same rule the sidebar logo already follows: a broken URL should
+  // surface as a gap, not swap to another brand.
+  if (_configCache.isWhiteLabel) return customSrc || '';
+
   const defaultSrc = `/branding/default/${asset?.defaultFile || key}`;
-  const customSrc = asset && _configCache?.[asset.configKey];
   if (customSrc) return { src: customSrc, fallbackSrc: defaultSrc };
   return defaultSrc;
 };

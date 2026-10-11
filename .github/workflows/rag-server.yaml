@@ -44,15 +44,13 @@ jobs:
       - name: Install dependencies with uv
         working-directory: ./llm/rag-server
         run: |
-          # Verify and install from lock file first
-          uv pip install --system -r uv.lock
-          
-          # Install in editable mode with all extras for testing and linting
-          uv pip install --system -e ".[dev,test]"
+          # Sync the project env to uv.lock exactly (no re-resolve), with
+          # dev/test extras for linting and testing.
+          uv sync --frozen --all-extras
 
       - name: Run linters
         working-directory: ./llm/rag-server
         run: |
-          black --check .
-          flake8 .
-          mypy ./**/*.py --namespace-packages
+          uv run black --check .
+          uv run flake8 .
+          uv run mypy ./**/*.py --namespace-packages

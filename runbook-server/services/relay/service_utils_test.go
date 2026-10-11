@@ -256,6 +256,40 @@ func TestGetRelayCommandResponseData_SurfacesErrors(t *testing.T) {
 			},
 			wantErr: "",
 		},
+		{
+			// The relay forwards the agent's reply verbatim, so a refused action
+			// arrives as HTTP 200 with the agent's status at the top level.
+			name: "agent refusal at the top level",
+			response: map[string]any{
+				"status_code": float64(403),
+				"data":        map[string]any{"error": "kubectl write commands are disabled on this agent"},
+			},
+			wantErr: "cluster agent returned status 403: kubectl write commands are disabled on this agent",
+		},
+		{
+			name: "request expired in the relay queue",
+			response: map[string]any{
+				"status_code": float64(504),
+				"data":        "request expired in queue before an agent picked it up",
+			},
+			wantErr: "cluster agent returned status 504: request expired in queue",
+		},
+		{
+			name: "top-level failure with no message uses the status text",
+			response: map[string]any{
+				"status_code": float64(500),
+				"data":        map[string]any{},
+			},
+			wantErr: "cluster agent returned status 500: Internal Server Error",
+		},
+		{
+			name: "top-level 200 with a command payload is not an error",
+			response: map[string]any{
+				"status_code": float64(200),
+				"data":        map[string]any{"response": "pod/web-1 deleted", "exit_code": float64(0)},
+			},
+			wantErr: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -267,6 +301,26 @@ func TestGetRelayCommandResponseData_SurfacesErrors(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, result)
+			}
+		})
+	}
+}
+
+// TestParseProxyResponseRunbook_AgentRefusal: a proxy-agent reply the relay
+// marks as failed must surface the agent's reason, not a JSON parse error.
+func TestParseProxyResponseRunbook_AgentRefusal(t *testing.T) {
+	refused := map[string]any{
+		"status_code": float64(502),
+		"data":        "agent connection lost",
+	}
+	for name, parse := range map[string]func(map[string]any) (string, error){
+		"db_query":    parseProxyDBResponseRunbook,
+		"ssh_command": parseProxySSHResponseRunbook,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parse(refused)
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), "cluster agent returned status 502: agent connection lost")
 			}
 		})
 	}

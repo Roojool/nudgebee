@@ -58,43 +58,59 @@ func (s *AWSSource) extractCloudFormationMetadata(properties map[string]interfac
 	}
 }
 
+// buildCFNListStackResourcesCommand returns the CLI command listing a stack's resources.
+// Stack names are region-scoped, so --region is always present: without it the AWS CLI
+// resolves against the collector's AWS_DEFAULT_REGION and reports every stack in any
+// other region as "does not exist" (#36573). Arguments must be validated by the caller.
+func buildCFNListStackResourcesCommand(stackName, region string) string {
+	return fmt.Sprintf("aws cloudformation list-stack-resources --stack-name %s --region %s --output json", stackName, region)
+}
+
+// cfnStackResourcesCacheKey keys the cfn_stack_resources cache. The region is part of
+// the key because stack names are only unique within a region — without it two
+// same-named stacks in different regions share one entry and serve each other's
+// resource lists. It must stay in step with buildCFNListStackResourcesCommand.
+func cfnStackResourcesCacheKey(accountID, region, stackName string) string {
+	return fmt.Sprintf("%s:%s:%s", accountID, region, stackName)
+}
+
 // fetchCloudFormationStackResources fetches all resources managed by a CloudFormation stack.
 // Results are cached for 2 hours to avoid redundant AWS API calls across graph builds.
-func (s *AWSSource) fetchCloudFormationStackResources(reqCtx *security.RequestContext, req *core.SourceBuildRequest, accountID string, stackName string) ([]CloudFormationStackResource, error) {
+func (s *AWSSource) fetchCloudFormationStackResources(reqCtx *security.RequestContext, accountID string, region string, stackName string) ([]CloudFormationStackResource, error) {
 	// Validate inputs to prevent command injection
 	if err := validateStackName(stackName); err != nil {
 		return nil, fmt.Errorf("invalid stack name: %w", err)
 	}
-	if err := validateAWSRegion(req.Region); err != nil {
+	// validateAWSRegion is shared and permits "" (meaning "use the default"); this
+	// lookup does not, so require a region explicitly before validating its shape.
+	if region == "" {
+		return nil, fmt.Errorf("region is required to look up stack %s", stackName)
+	}
+	if err := validateAWSRegion(region); err != nil {
 		return nil, fmt.Errorf("invalid region: %w", err)
 	}
 
 	// Check cache first
-	cacheKey := fmt.Sprintf("%s:%s:%s", accountID, req.Region, stackName)
+	cacheKey := cfnStackResourcesCacheKey(accountID, region, stackName)
 	if cached, found := common.CacheGet("cfn_stack_resources", cacheKey); found {
 		var resources []CloudFormationStackResource
 		if unmarshalErr := json.Unmarshal(cached, &resources); unmarshalErr == nil {
 			s.logger.Debug("CloudFormation stack resources cache hit",
 				"stack_name", stackName,
 				"account_id", accountID,
+				"region", region,
 				"resource_count", len(resources))
 			return resources, nil
 		}
 	}
 
-	// Build AWS CLI command to list stack resources
 	// Arguments are safe after validation above
-	cmd := fmt.Sprintf("aws cloudformation list-stack-resources --stack-name %s --output json", stackName)
-
-	// Add region filter if specified
-	if req.Region != "" {
-		cmd = fmt.Sprintf("aws cloudformation list-stack-resources --stack-name %s --region %s --output json", stackName, req.Region)
-	}
+	cmd := buildCFNListStackResourcesCommand(stackName, region)
 
 	s.logger.Debug("Fetching CloudFormation stack resources",
 		"stack_name", stackName,
 		"account_id", accountID,
-		"region", req.Region)
+		"region", region)
 
 	// Execute AWS CLI command via cloud collector
 	resp, err := cloud.ExecuteCli(reqCtx, cloud.CloudExecuteCliCommandRequest{
@@ -203,18 +219,35 @@ func (s *AWSSource) createCloudFormationEdges(reqCtx *security.RequestContext, n
 			continue
 		}
 
+		// A stack name only identifies a stack within its own region, so the lookup
+		// needs the region the node was discovered in. Skipping beats falling back to
+		// a region-less command, which silently resolves to the collector's default
+		// region and reports the stack as non-existent (#36573).
+		region := nodeRegion(node)
+		if region == "" {
+			s.logger.Warn("CloudFormation stack has no region, skipping resource lookup",
+				"stack_name", stackName,
+				"node_id", node.ID)
+			continue
+		}
+
 		// Fetch stack resources from AWS
-		stackResources, err := s.fetchCloudFormationStackResources(reqCtx, req, req.CloudAccountID, stackName)
+		stackResources, err := s.fetchCloudFormationStackResources(reqCtx, req.CloudAccountID, region, stackName)
 		if err != nil {
 			if strings.Contains(err.Error(), "Stack with id") && strings.Contains(err.Error(), "does not exist") {
-				s.logger.Debug("CloudFormation stack not found, skipping resource processing",
+				// Logged at Warn, not Debug: now that the command carries the stack's
+				// own region this genuinely means the stack is gone, and the count is
+				// the signal that cloud resources need retiring from the graph.
+				s.logger.Warn("CloudFormation stack not found, skipping resource processing",
 					"stack_name", stackName,
+					"region", region,
 					"error", err)
 				continue
 			}
 
 			s.logger.Warn("failed to fetch CloudFormation stack resources",
 				"stack_name", stackName,
+				"region", region,
 				"error", err)
 			continue
 		}

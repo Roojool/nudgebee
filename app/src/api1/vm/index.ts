@@ -325,12 +325,49 @@ const GROUPING_DIMENSIONS: Record<VmVulnerabilityGrouping, { groupBy: string[]; 
   vm: { groupBy: ['resource_id', 'resource_name'], key: 'resource_id', label: 'resource_name', canListVms: false },
 };
 
-const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}) => ({
+const vmVulnerabilityWhere = (accountId: string | string[], extra: Record<string, any> = {}, status: string[] = OPEN_STATUSES) => ({
   account_id: Array.isArray(accountId) ? { _in: accountId } : { _eq: accountId },
   rule_name: { _eq: VM_VULNERABILITY_RULE },
-  status: { _in: OPEN_STATUSES },
+  status: { _in: status },
   ...extra,
 });
+
+/**
+ * The page unmounts a tab's component on every switch, so without this each
+ * Summary → Vulnerabilities → Instances hop re-ran the same 7s aggregate queries
+ * (#38494). Responses are kept per (operation, query, variables) for a few
+ * minutes and shared with in-flight callers; a failed or errored response is
+ * never kept. Anything that writes (a scan) drops the lot.
+ */
+const READ_CACHE_TTL_MS = 2 * 60 * 1000;
+const readCache = new Map<string, { expires: number; pending: Promise<any> }>();
+
+function cachedCall<T>(key: string, fetcher: () => Promise<T>, isFailure: (result: T) => boolean = () => false): Promise<T> {
+  const hit = readCache.get(key);
+  if (hit && hit.expires > Date.now()) return hit.pending;
+  const now = Date.now();
+  // Entries are otherwise only replaced when the same key is asked for again, so
+  // paging and searching would grow the map for the life of the tab.
+  readCache.forEach((entry, entryKey) => {
+    if (entry.expires <= now) readCache.delete(entryKey);
+  });
+  // .then, so a fetcher that throws synchronously becomes a rejection, not a throw.
+  const pending = Promise.resolve().then(fetcher);
+  readCache.set(key, { expires: now + READ_CACHE_TTL_MS, pending });
+  const drop = () => {
+    if (readCache.get(key)?.pending === pending) readCache.delete(key);
+  };
+  pending.then((result) => isFailure(result) && drop()).catch(drop);
+  return pending;
+}
+
+function queryGraphQLCached(query: string, operationName: string, variables: Record<string, any>): Promise<any> {
+  return cachedCall(
+    `${operationName}|${query}|${JSON.stringify(variables)}`,
+    () => queryGraphQL(query, operationName, variables),
+    (response) => !!response?.data?.errors?.length
+  );
+}
 
 const apiVm = {
   /** Self-hosted accounts, i.e. everything the /vm page can be scoped to. */
@@ -344,7 +381,7 @@ const apiVm = {
     if (search) {
       where._and = [{ _or: [{ name: { _ilike: `%${search}%` } }, { resourse_id: { _ilike: `%${search}%` } }] }];
     }
-    const response = await queryGraphQL(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit, offset });
+    const response = await queryGraphQLCached(LIST_VMS.replaceAll('__WHERE__', gqlStringify(where)), 'ListVms', { limit, offset });
     const rows = response?.data?.data?.vms?.rows || [];
     return {
       rows: rows.map((row: any) => ({ ...row, meta: safeParse(row.meta) || {}, tags: safeParse(row.tags) || {} })) as VmResource[],
@@ -376,7 +413,7 @@ const apiVm = {
     const query = LIST_VM_PACKAGES.replaceAll('__WHERE__', gqlStringify(where))
       .replaceAll('__GROUP_BY__', JSON.stringify(PACKAGE_GROUP_KEY))
       .replaceAll('__COLUMNS__', JSON.stringify([...PACKAGE_GROUP_KEY, 'resource_ids', 'max_last_seen_at']));
-    const response = await queryGraphQL(query, 'ListVmPackages', { limit, offset });
+    const response = await queryGraphQLCached(query, 'ListVmPackages', { limit, offset });
     const rows = response?.data?.data?.packages?.rows || [];
     return {
       rows: rows.map((row: any) => ({
@@ -393,7 +430,7 @@ const apiVm = {
   /** resource id → { count, lastSeenAt } for the inventory table's Packages column. */
   async getPackageCountsByVm(accountId: string) {
     const where = { account_id: { _eq: accountId }, is_active: { _eq: true } };
-    const response = await queryGraphQL(PACKAGE_COUNTS_BY_VM.replaceAll('__WHERE__', gqlStringify(where)), 'VmPackageCounts', {});
+    const response = await queryGraphQLCached(PACKAGE_COUNTS_BY_VM.replaceAll('__WHERE__', gqlStringify(where)), 'VmPackageCounts', {});
     const rows = response?.data?.data?.packages_aggregate?.rows || [];
     const byResource: Record<string, { count: number; lastSeenAt: string }> = {};
     for (const row of rows) {
@@ -409,7 +446,7 @@ const apiVm = {
    */
   async getOsByVm(accountId: string) {
     const where = { account_id: { _eq: accountId }, is_active: { _eq: true } };
-    const response = await queryGraphQL(VM_OS_BY_VM.replaceAll('__WHERE__', gqlStringify(where)), 'VmOsFamilies', {});
+    const response = await queryGraphQLCached(VM_OS_BY_VM.replaceAll('__WHERE__', gqlStringify(where)), 'VmOsFamilies', {});
     const rows = response?.data?.data?.packages_aggregate?.rows || [];
     const byResource: Record<string, string> = {};
     for (const row of rows) {
@@ -425,6 +462,7 @@ const apiVm = {
     vulnId,
     packageName,
     severity,
+    status,
     limit = 10,
     offset = 0,
   }: {
@@ -433,6 +471,8 @@ const apiVm = {
     vulnId?: string;
     packageName?: string;
     severity?: string;
+    /** Row statuses to list; defaults to the open ones. */
+    status?: string[];
     limit?: number;
     offset?: number;
   }) {
@@ -441,8 +481,8 @@ const apiVm = {
     if (vulnId) extra.vuln_id = { _eq: vulnId };
     if (packageName) extra.package_name = { _eq: packageName };
     if (severity) extra.severity = { _eq: severity };
-    const where = vmVulnerabilityWhere(accountId, extra);
-    const response = await queryGraphQL(LIST_VM_VULNERABILITIES.replaceAll('__WHERE__', gqlStringify(where)), 'ListVmVulnerabilities', {
+    const where = vmVulnerabilityWhere(accountId, extra, status);
+    const response = await queryGraphQLCached(LIST_VM_VULNERABILITIES.replaceAll('__WHERE__', gqlStringify(where)), 'ListVmVulnerabilities', {
       limit,
       offset,
     });
@@ -466,6 +506,7 @@ const apiVm = {
     vulnId,
     packageName,
     severity,
+    status,
     limit = 10,
     offset = 0,
     includeTotal = true,
@@ -478,6 +519,8 @@ const apiVm = {
     vulnId?: string;
     packageName?: string;
     severity?: string;
+    /** Row statuses to group; defaults to the open ones. */
+    status?: string[];
     limit?: number;
     offset?: number;
     /** Drop the group-count round trip when the caller only wants a top-N. */
@@ -498,7 +541,7 @@ const apiVm = {
     if (vulnId) extra.vuln_id = { _eq: vulnId };
     if (packageName) extra.package_name = { _eq: packageName };
     if (severity) extra.severity = { _eq: severity };
-    const where = vmVulnerabilityWhere(accountId, extra);
+    const where = vmVulnerabilityWhere(accountId, extra, status);
     const listVms = includeVms && dimension.canListVms;
     const groupColumns = [...dimension.groupBy, 'count', 'max_severity_weight', ...(listVms ? ['resource_names'] : [])];
     const query = VULNERABILITY_GROUPS.replaceAll('__TOTAL__', includeTotal ? VULNERABILITY_GROUPS_TOTAL : '')
@@ -509,7 +552,7 @@ const apiVm = {
       .replaceAll('__COLUMNS__', dimension.groupBy.join('\n      '))
       .replaceAll('__VM_FIELD__', listVms ? 'resource_names' : '')
       .replaceAll('__DISTINCT_ARGS__', JSON.stringify([dimension.key]));
-    const response = await queryGraphQL(query, 'VmVulnerabilityGroups', { limit, offset });
+    const response = await queryGraphQLCached(query, 'VmVulnerabilityGroups', { limit, offset });
     const rows = response?.data?.data?.groups?.rows || [];
     return {
       rows: rows.map((row: any) => ({
@@ -530,7 +573,7 @@ const apiVm = {
     const extra = cloudResourceId ? { resource_id: { _eq: cloudResourceId } } : {};
     const where = vmVulnerabilityWhere(accountId, extra);
     const query = VULNERABILITY_GROUPINGS.replaceAll('__WHERE__', gqlStringify(where)).replaceAll('__GROUP_BY__', '["severity"]');
-    const response = await queryGraphQL(query, 'VmVulnerabilityGroupings', {});
+    const response = await queryGraphQLCached(query, 'VmVulnerabilityGroupings', {});
     const rows = response?.data?.data?.groupings?.rows || [];
     const bySeverity: Record<string, number> = {};
     for (const row of rows) {
@@ -544,7 +587,7 @@ const apiVm = {
   async getVulnerabilityCountsByVm(accountId: string) {
     const where = vmVulnerabilityWhere(accountId);
     const query = VULNERABILITY_GROUPINGS.replaceAll('__WHERE__', gqlStringify(where)).replaceAll('__GROUP_BY__', '["resource_id", "severity"]');
-    const response = await queryGraphQL(query, 'VmVulnerabilityGroupings', {});
+    const response = await queryGraphQLCached(query, 'VmVulnerabilityGroupings', {});
     const rows = response?.data?.data?.groupings?.rows || [];
     const byResource: Record<string, Record<string, number>> = {};
     for (const row of rows) {
@@ -563,6 +606,15 @@ const apiVm = {
    * same approximation the integrations listing makes.
    */
   async listAgents(accountId: string): Promise<VmAgent[]> {
+    return cachedCall(`listAgents|${accountId}`, () => apiVm.fetchAgents(accountId));
+  },
+
+  async listDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
+    return cachedCall(`listDiscoveryTargets|${accountId}`, () => apiVm.fetchDiscoveryTargets(accountId));
+  },
+
+  /** Uncached; use listAgents. */
+  async fetchAgents(accountId: string): Promise<VmAgent[]> {
     const [listRes, healthRes]: any[] = await Promise.all([
       apiIntegrations.listIntegrations({ type: 'vm_agent', cloudAccountId: accountId, limit: 100 }),
       // Health is decoration on top of the agent list — if it fails, still show
@@ -593,7 +645,8 @@ const apiVm = {
    * The relay auto-registers a forager discovery datasource as type `discovery`,
    * so it must not be looked up as an SSH integration.
    */
-  async listDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
+  /** Uncached; use listDiscoveryTargets. */
+  async fetchDiscoveryTargets(accountId: string): Promise<VmScanTarget[]> {
     const response: any = await apiIntegrations.listIntegrations({ type: 'discovery', cloudAccountId: accountId, limit: 100 });
     return (response?.data?.data?.integrations_list?.rows || []).map((row: any) => ({
       id: row.id,
@@ -612,6 +665,7 @@ const apiVm = {
    * "finished" — the caller has to re-poll for results.
    */
   async scanVm({ accountId, datasourceId, cloudResourceId }: { accountId: string; datasourceId: string; cloudResourceId: string }) {
+    readCache.clear();
     const response = await queryGraphQL(SCAN_VM, 'ScanVm', { accountId, datasourceId, cloudResourceId });
     const errors = response?.data?.errors;
     if (errors?.length) {
@@ -626,6 +680,7 @@ const apiVm = {
    * fails with a clear error when no discovery agent is configured.
    */
   async scanVmAccount({ accountId }: { accountId: string }) {
+    readCache.clear();
     const response = await queryGraphQL(SCAN_VM_ACCOUNT, 'ScanVmAccount', { accountId });
     const errors = response?.data?.errors;
     if (errors?.length) {

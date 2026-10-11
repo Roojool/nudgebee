@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // LogsAgentName is the production `logs` log investigator (the superseded
@@ -172,7 +174,11 @@ func (l *LogAgentV3) GetSystemPrompt(ctx *security.RequestContext, query core.NB
 		instructions = append(instructions, routineParallelFollowupReads())
 	}
 
+	instructions = append(instructions, logAnalysisExecutionInstructionsV3()...)
 	instructions = append(instructions, outputFormatInstructionsV3(mode)...)
+	if query.ParentAgentId != "" && query.ParentAgentId != query.AgentId && query.ParentAgentId != uuid.Nil.String() {
+		instructions = append(instructions, "**Sub-agent response:** Return compact findings for the calling agent to compose the user-facing answer: conclusion, relevant counts and time bounds, exact evidence/examples, artifact references, and limitations or unresolved questions. Preserve requested detail and causal reasoning, but omit conversational introductions, repeated summaries, and duplicated raw records. The calling agent will combine these findings with other evidence; do not claim the overall investigation is complete.")
+	}
 
 	return core.NBAgentPrompt{
 		Role:         "an SRE expert that investigates logs across multiple backends",

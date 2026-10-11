@@ -81,12 +81,18 @@ LLM_BUSY_MESSAGES: List[str] = [
 ]
 
 LLM_OFFLINE_MESSAGES: List[str] = [
-    "Nubi's offline right now. Couldn't get a response. Try again in a sec!",
-    "Hmm, I couldn't reach Nubi. Mind trying again in a moment?",
-    "Looks like Nubi's taking a quick break. Give it another shot in a sec!",
-    "Nubi seems to be unavailable right now. Try again shortly!",
-    "Couldn't connect to Nubi at the moment. Please try again!",
+    "{assistant}'s offline right now. Couldn't get a response. Try again in a sec!",
+    "Hmm, I couldn't reach {assistant}. Mind trying again in a moment?",
+    "Looks like {assistant}'s taking a quick break. Give it another shot in a sec!",
+    "{assistant} seems to be unavailable right now. Try again shortly!",
+    "Couldn't connect to {assistant} at the moment. Please try again!",
 ]
+
+# Distinct from LLM_BUSY_MESSAGES: stalled on the user, not "still thinking".
+# Fixed (not a random-pick list like the others) -- the scenario is unambiguous.
+LLM_PENDING_FOLLOWUP_MESSAGE = (
+    "I'm still waiting on your answer to an earlier question in this thread — mind replying to that one first?"
+)
 
 GENERIC_ERROR_MESSAGES: List[str] = [
     "Oops! Something went sideways. Mind trying that again?",
@@ -110,12 +116,12 @@ ACCOUNT_NOT_ACCESSIBLE: List[str] = [
 SIGNUP_URL = f"{settings.base_url}/signup"
 
 USER_NOT_FOUND: List[str] = [
-    "It looks like you don't have a Nudgebee account yet! "
-    f"Sign up at {SIGNUP_URL} to get started, and I'll be ready to help once you're all set.",
-    "I couldn't find a Nudgebee account linked to your email. "
-    f"Head over to {SIGNUP_URL} to create one — it only takes a minute!",
+    "It looks like you don't have a {brand} account yet! "
+    "Sign up at {signup_url} to get started, and I'll be ready to help once you're all set.",
+    "I couldn't find a {brand} account linked to your email. "
+    "Head over to {signup_url} to create one — it only takes a minute!",
     "Hmm, I don't see you in our system yet. "
-    f"You can sign up for a free Nudgebee account at {SIGNUP_URL} and then come back and chat with me!",
+    "You can sign up for a free {brand} account at {signup_url} and then come back and chat with me!",
 ]
 
 
@@ -266,7 +272,13 @@ def get_llm_busy_message() -> str:
 
 def get_llm_offline_message() -> str:
     """Get a random message for when LLM is offline/unavailable."""
-    return get_random_message(LLM_OFFLINE_MESSAGES)
+    return get_random_message(LLM_OFFLINE_MESSAGES, assistant=settings.urls.assistant_name)
+
+
+def get_llm_pending_followup_message() -> str:
+    """Message for when a new message is rejected because an earlier
+    follow-up question in the same conversation is still unanswered."""
+    return LLM_PENDING_FOLLOWUP_MESSAGE
 
 
 def get_generic_error_message() -> str:
@@ -286,7 +298,7 @@ def get_account_not_accessible_message() -> str:
 
 def get_user_not_found_message() -> str:
     """Get a random 'user not found' message with sign-up instructions."""
-    return get_random_message(USER_NOT_FOUND)
+    return get_random_message(USER_NOT_FOUND, brand=settings.urls.branding_name, signup_url=SIGNUP_URL)
 
 
 def get_empty_message_response() -> str:
@@ -339,6 +351,16 @@ def is_conversation_in_progress_error(error_response: Optional[dict]) -> bool:
 
     error_msg = str(error_response).lower()
     return "conversation" in error_msg and ("in progress" in error_msg or "already" in error_msg)
+
+
+def is_conversation_pending_followup_error(error_response: Optional[dict]) -> bool:
+    """True if llm-server rejected the turn with ErrConversationPendingFollowup
+    (an earlier follow-up is unanswered) -- distinct from "in progress"."""
+    if not error_response:
+        return False
+
+    error_msg = str(error_response).lower()
+    return "waiting on a followup" in error_msg or "waiting on a follow-up" in error_msg
 
 
 def is_budget_exceeded_error(error_response: Optional[dict]) -> bool:

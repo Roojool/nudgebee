@@ -39,30 +39,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// When enabled, start the in-process Prometheus shim that OpenCost is pointed
-	// at (see opencostengine.engine.go). It translates OpenCost's Prometheus
-	// queries into services-server observability metrics_query calls.
-	var shimSrv *http.Server
-	if opencostengine.UseObservabilityMetrics() {
-		shim, err := opencostengine.NewPrometheusShim()
-		if err != nil {
-			logger.Error("cost-server: prometheus shim init failed", "error", err)
+	// Start the in-process Prometheus shim that OpenCost is pointed at (see
+	// opencostengine.engine.go). By default it proxies to relay-server's
+	// /prometheus-v2 passthrough; with observability-backed metrics enabled it
+	// answers instant and range queries from services-server instead.
+	shim, err := opencostengine.NewPrometheusShim()
+	if err != nil {
+		logger.Error("cost-server: prometheus shim init failed", "error", err)
+		os.Exit(1)
+	}
+	shimAddr := opencostengine.GetPrometheusShimAddr()
+	shimSrv := &http.Server{
+		Addr:              shimAddr,
+		Handler:           shim.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		logger.Info("cost-server prometheus shim listening", "addr", shimAddr)
+		if err := shimSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("cost-server: prometheus shim listen failed", "error", err)
 			os.Exit(1)
 		}
-		shimAddr := opencostengine.GetPrometheusShimAddr()
-		shimSrv = &http.Server{
-			Addr:              shimAddr,
-			Handler:           shim.Handler(),
-			ReadHeaderTimeout: 10 * time.Second,
-		}
-		go func() {
-			logger.Info("cost-server prometheus shim listening", "addr", shimAddr)
-			if err := shimSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("cost-server: prometheus shim listen failed", "error", err)
-				os.Exit(1)
-			}
-		}()
-	}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /allocation/compute", opencostengine.AllocationHandler)
@@ -95,9 +93,7 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("cost-server: graceful shutdown failed", "error", err)
 	}
-	if shimSrv != nil {
-		if err := shimSrv.Shutdown(ctx); err != nil {
-			logger.Error("cost-server: prometheus shim shutdown failed", "error", err)
-		}
+	if err := shimSrv.Shutdown(ctx); err != nil {
+		logger.Error("cost-server: prometheus shim shutdown failed", "error", err)
 	}
 }

@@ -60,6 +60,9 @@ const probeConcurrency = 5
 // Per-probe wall-clock budget. Same 15s used by the original single-probe.
 const probeTimeout = 15 * time.Second
 
+// probeMaxTokens is the ping reply budget; see probeOne.
+const probeMaxTokens = 1024
+
 // ProbeResult describes the outcome of probing one (provider, model) pair.
 // Surfaced via the test-connection HTTP response so the api-server can
 // humanize per-model errors and build a user-actionable aggregate.
@@ -169,10 +172,11 @@ func probeOne(ctx context.Context, t probeTarget) ProbeResult {
 	}
 	pingCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	// Cheap ping to verify auth + reachability; >1 token so thinking models still return a content block.
+	// Cheap ping to verify auth + reachability. Budget must cover thinking models' reasoning
+	// (Gemini 3.x spends ~60-200 tokens) or they return no content and the probe fails.
 	if _, err := llm.GenerateContent(pingCtx, []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeHuman, "ping"),
-	}, llms.WithMaxTokens(16)); err != nil {
+	}, llms.WithMaxTokens(probeMaxTokens)); err != nil {
 		return ProbeResult{
 			Provider: t.provider, Model: t.model, Source: t.source,
 			OK: false, Error: err.Error(),

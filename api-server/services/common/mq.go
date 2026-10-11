@@ -175,7 +175,31 @@ func MqHealthCheck(ctx context.Context) MqHealthInfo {
 	return info
 }
 
-func MqConsume(exchangeName string, routingKey string, queue string, concurrency int, processor func(ctx context.Context, data []byte) error) error {
+type mqConsumeOptions struct {
+	QueueDurable bool
+}
+
+type MqConsumeOption func(o *mqConsumeOptions)
+
+// MqConsumeWithDurableQueue declares the queue durable so its contents survive a
+// broker restart. Pair it with MqPublishWithPersistentDelivery — a durable queue
+// holding transient messages still loses everything on restart.
+//
+// Opt-in rather than the default because every queue this helper has created so
+// far is non-durable, and RabbitMQ rejects a re-declare that changes durability
+// with PRECONDITION_FAILED. Only new queue names can take this.
+func MqConsumeWithDurableQueue() MqConsumeOption {
+	return func(o *mqConsumeOptions) {
+		o.QueueDurable = true
+	}
+}
+
+func MqConsume(exchangeName string, routingKey string, queue string, concurrency int, processor func(ctx context.Context, data []byte) error, opts ...MqConsumeOption) error {
+	consumeOpts := &mqConsumeOptions{}
+	for _, opt := range opts {
+		opt(consumeOpts)
+	}
+
 	conn := getConnection()
 	if conn == nil {
 		slog.Error("rbmq: initial connection to rabbitmq failed for consumer setup", "queue", queue, "exchange", exchangeName)
@@ -214,9 +238,7 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 			}
 
 			var err error
-			currentConsumer, err = rabbitmq.NewConsumer(
-				conn,
-				queue,
+			consumerOptions := []func(*rabbitmq.ConsumerOptions){
 				rabbitmq.WithConsumerOptionsRoutingKey(routingKey),
 				rabbitmq.WithConsumerOptionsExchangeName(exchangeName),
 				rabbitmq.WithConsumerOptionsQOSPrefetch(concurrency),
@@ -224,8 +246,13 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 				rabbitmq.WithConsumerOptionsConcurrency(concurrency),
 				rabbitmq.WithConsumerOptionsExchangeDurable,
 				rabbitmq.WithConsumerOptionsLogging,
-				rabbitmq.WithConsumerOptionsConsumerName(config.Config.OtelServiceName+"/"+routingKey+"/"+config.Config.ServerName),
-			)
+				rabbitmq.WithConsumerOptionsConsumerName(config.Config.OtelServiceName + "/" + routingKey + "/" + config.Config.ServerName),
+			}
+			if consumeOpts.QueueDurable {
+				consumerOptions = append(consumerOptions, rabbitmq.WithConsumerOptionsQueueDurable)
+			}
+
+			currentConsumer, err = rabbitmq.NewConsumer(conn, queue, consumerOptions...)
 			if err != nil {
 				slog.Error("rbmq: error creating consumer", "error", err, "queue", queue, "attempt", attempt+1)
 				continue
@@ -274,10 +301,11 @@ func MqConsume(exchangeName string, routingKey string, queue string, concurrency
 }
 
 type mqPublishOptions struct {
-	Expiration      time.Duration
-	ExchangeType    string
-	BackgroundRetry bool
-	Ctx             context.Context
+	Expiration         time.Duration
+	ExchangeType       string
+	BackgroundRetry    bool
+	PersistentDelivery bool
+	Ctx                context.Context
 }
 
 type MqPublishOption func(o *mqPublishOptions)
@@ -315,9 +343,32 @@ func MqPublishWithBackgroundRetry() MqPublishOption {
 	}
 }
 
+// MqPublishWithPersistentDelivery marks the message persistent so the broker writes
+// it to disk. Required for anything published to a durable queue — durability of the
+// queue alone does not preserve transient messages across a broker restart.
+func MqPublishWithPersistentDelivery() MqPublishOption {
+	return func(o *mqPublishOptions) {
+		o.PersistentDelivery = true
+	}
+}
+
 // processMessageAndDetermineAction handles the core message processing and decides the RabbitMQ action.
 // This function is called by the handler in consumer.Run.
-func processMessageAndDetermineAction(d rabbitmq.Delivery, processorFunc func(ctx context.Context, data []byte) error, queueName string, exchangeName string) rabbitmq.Action {
+func processMessageAndDetermineAction(d rabbitmq.Delivery, processorFunc func(ctx context.Context, data []byte) error, queueName string, exchangeName string) (action rabbitmq.Action) {
+	// go-rabbitmq runs handlers on its own per-concurrency goroutines (consume.go
+	// spawns options.Concurrency of them), so the recover() around consumer.Run in
+	// MqConsume never sees a panic raised here — it would take down the whole
+	// process. Ack rather than requeue: a panic is a bug in the processor, and
+	// redelivering the same bytes would just panic again in a hot loop.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("mq: PANIC in message processor, dropping message",
+				"panic", r, "queue", queueName, "exchange", exchangeName,
+				"delivery_tag", d.DeliveryTag, "stack", string(debug.Stack()))
+			action = rabbitmq.Ack
+		}
+	}()
+
 	slog.Debug("rbmq: processing message", "queue", queueName, "exchange", exchangeName, "delivery_tag", d.DeliveryTag)
 	// Continue the distributed trace: extract the W3C context the publisher
 	// injected into the AMQP headers and run the processor inside a consumer
@@ -473,6 +524,10 @@ func MqPublish(exchangeName string, routingKey string, message any, opts ...MqPu
 	}
 	if options.Expiration > 0 {
 		publishOptsList = append(publishOptsList, rabbitmq.WithPublishOptionsExpiration(fmt.Sprintf("%d", options.Expiration.Milliseconds())))
+	}
+
+	if options.PersistentDelivery {
+		publishOptsList = append(publishOptsList, rabbitmq.WithPublishOptionsPersistentDelivery)
 	}
 
 	publisherKey := fmt.Sprintf("%s:%s", exchangeName, routingKey)

@@ -231,7 +231,7 @@ func (s *AWSSource) createLoadBalancerV2TargetEdges(reqCtx *security.RequestCont
 	edges := make([]*core.DbEdge, 0)
 
 	arn, _ := lbNode.Properties["arn"].(string)
-	region, _ := lbNode.Properties["region"].(string)
+	region := nodeRegion(lbNode)
 	if arn == "" || region == "" {
 		return edges
 	}

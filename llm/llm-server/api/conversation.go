@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/common"
+	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 
 	"github.com/gin-gonic/gin"
@@ -474,6 +475,10 @@ func handleConversationApis(r *gin.Engine, tracer trace.Tracer, meter metric.Met
 			"default": map[string]string{
 				"provider": defaultProvider,
 				"model":    defaultModel,
+			},
+			"queue_support": map[string]any{
+				"enabled":      config.Config.QueuedMessagesEnabled,
+				"max_messages": config.Config.MaxQueuedMessagesPerConversation,
 			},
 			"image_support": map[string]any{
 				"enabled":            true,

@@ -1,7 +1,7 @@
 import { Box, Typography } from '@mui/material';
 import React, { useEffect, useState } from 'react';
 import recommendationApi, { RECOMMENDATION_STATUS } from '@api1/recommendation';
-import Currency from '@shared/format/Currency';
+import Currency, { formatCurrency } from '@shared/format/Currency';
 import apiHome from '@api1/home';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import Datetime from '@shared/format/Datetime';
@@ -286,7 +286,7 @@ const KubernetesSpotRecommendation = ({ enabledSummary = true, enabledFilters = 
     description += '**App Name**: ' + data?.recommendation?.controller_name + '\n';
     description += '**App Type**: ' + (data?.recommendation?.controller_type || 'Job') + '\n';
     description += '**Namespace**: ' + data?.recommendation?.namespace + '\n';
-    description += '**Estimated Savings**: ' + data?.estimated_savings + '\n';
+    description += '**Estimated Savings**: ' + (data?.estimated_savings != null ? formatCurrency(data.estimated_savings) + '/mo' : '-') + '\n';
     return description;
   };
 

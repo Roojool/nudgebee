@@ -161,8 +161,8 @@ export const sortInsights = (items: InsightItem[], sortBy: SortKey = 'savings'):
 
 export const subtotal = (items: InsightItem[]): number => items.reduce((s, i) => s + i.dollarImpact, 0);
 
-// `symbol` lets callers render the tenant/account billing currency (estimated_savings
-// is denominated in the account currency, not always USD). Defaults to '$'.
+// Savings are estimated in USD by every producer; `symbol` exists for spend-side
+// callers and defaults to '$'.
 export const formatDollars = (n: number, symbol = '$'): string => {
   if (n >= 1000) return symbol + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
   // Cap at cents: bare toLocaleString defaults to 3 fraction digits, which

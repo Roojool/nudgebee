@@ -8,9 +8,9 @@ import re
 import threading
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 
 import requests
 from cachetools import TTLCache
@@ -589,6 +589,96 @@ def _call_trigger_investigation(tenant: str, events: list) -> dict:
         raise
 
 
+def _agent_raw_alert(evidence) -> Dict[str, Any]:
+    """Return the Alertmanager alert the Go agent carries as a `json` evidence block, or {}."""
+    for envelope in evidence or []:
+        blocks = envelope
+        if isinstance(envelope, dict) and isinstance(envelope.get("data"), str):
+            try:
+                blocks = json.loads(envelope["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("type") != "json" or not isinstance(block.get("data"), str):
+                continue
+            try:
+                raw_alert = json.loads(block["data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(raw_alert, dict):
+                return raw_alert
+    return {}
+
+
+def _agent_alert_resolution(finding: dict, evidence) -> Tuple[bool, Optional[str]]:
+    """Whether a Go-agent prometheus finding reports its alert resolved, and when it ended.
+
+    The Go agent forwards every alert of an Alertmanager notification as a finding,
+    firing or resolved, with the same title and no RESOLVED marker. The alert's own
+    `status`, carried verbatim in the evidence, is the only place a resolve is
+    recorded. The end time comes back as an ISO-8601 UTC string, or None when the
+    alert has none (Alertmanager's zero time) or it cannot be parsed.
+    """
+    if finding.get("source") != "prometheus":
+        return False, None
+    raw_alert = _agent_raw_alert(evidence)
+    if str(raw_alert.get("status", "")).lower() != "resolved":
+        return False, None
+    ends_at = _as_naive_utc(raw_alert.get("endsAt"))
+    if ends_at is None or ends_at.year <= 1:
+        return True, None
+    return True, ends_at.isoformat() + "Z"
+
+
+def _forward_agent_resolve(
+    finding: dict, evidence, alert_labels: dict, cloud_account_name: str, cloud_account_id: str, tenant: str
+) -> bool:
+    """Send a resolved Go-agent alert to trigger_investigation as a RESOLVED.
+
+    Returns False when the finding is not a resolve, so the caller goes on to store
+    it as a firing. Storing a resolve that way would open a new event that nothing
+    ever closes.
+
+    A RESOLVED whose finding_id names no stored event closes every open event of the
+    same fingerprint, source and account, and stores nothing — so the payload carries
+    only what identifies the alert, not the enrichment a firing needs.
+    """
+    resolved, ends_at = _agent_alert_resolution(finding, evidence)
+    if not resolved:
+        return False
+    if not finding.get("fingerprint"):
+        logging.warning("Resolved alert %s carries no fingerprint, nothing to close it by", finding["id"])
+        return True
+    event = {
+        "finding_id": finding["id"],
+        "aggregation_key": finding["aggregation_key"],
+        "title": finding["title"],
+        "source": finding["source"],
+        "finding_type": finding["finding_type"],
+        "priority": finding["priority"],
+        "subject_type": finding["subject_type"],
+        "subject_name": finding["subject_name"],
+        "subject_namespace": finding["subject_namespace"],
+        "cluster": cloud_account_name,
+        "status": "RESOLVED",
+        "starts_at": finding["starts_at"],
+        "fingerprint": finding["fingerprint"],
+        "account_id": cloud_account_id,
+        "tenant": tenant,
+        "labels": alert_labels,
+    }
+    if ends_at:
+        event["ends_at"] = ends_at
+    try:
+        _call_trigger_investigation(tenant, [event])
+    except Exception:
+        logging.exception("Failed to call trigger_investigation API for resolved alert %s", finding["id"])
+        raise
+    return True
+
+
 def run_event_handler_async(content: str | dict) -> None:
     if isinstance(content, dict):
         data = content
@@ -643,6 +733,9 @@ def run_event_handler_async(content: str | dict) -> None:
         _resolve_prometheus_subject(finding, alert_labels, tenant, cloud_account_id)
 
     _enrich_and_normalize_fingerprint(finding, tenant, cloud_account_id)
+
+    if _forward_agent_resolve(finding, data["evidence"], alert_labels, cloud_account_name, cloud_account_id, tenant):
+        return
 
     resource_key, resources_data = get_resource_info(cloud_account_id, finding, tenant)
     if "RESOLVED" in finding["title"]:
@@ -806,21 +899,170 @@ def get_event_data(cloud_account_name, data, evidence, finding, resource_key, re
     return event
 
 
+# Reverse of the api-server's ConfigMap→consumers lookup: the ConfigMaps this
+# workload's pod template references. Built by the knowledge graph's k8s source
+# from the real pod spec (volumes, envFrom, valueFrom.configMapKeyRef), so it
+# covers the case the whole feature exists for — an `envFrom` value, which
+# appears nowhere in the pod template and therefore in no rollout revision.
+_WORKLOAD_CONFIGMAPS_SQL = """
+    select distinct cm.properties->>'name'
+    from knowledge_graph_node w
+    join knowledge_graph_edge e
+      on e.source_node_id = w.id
+     and e.relationship_type = 'USES_CONFIG'
+     and e.is_active = true
+    join knowledge_graph_node cm
+      on cm.id = e.destination_node_id
+     and cm.is_active = true
+    where w.tenant_id = %s and w.cloud_account_id = %s and w.is_active = true
+      and w.properties->>'namespace' = %s
+      and w.properties->>'name' = %s
+"""
+
+# How many changes the evidence carries. One is not enough for the commonest
+# shape of a config incident: a value is edited, the workload restarts so the
+# new value is actually read, and the restart is the newer change. Returning
+# only the newest hands the reader "a deployment happened" and drops the edit
+# that caused it. Several lets them discriminate; the deployment_history
+# playbook remains the place to see the complete list.
+CONFIG_CHANGE_CORRELATION_LIMIT = 5
+
+
+# The routing side of the same question: which Ingresses send traffic to this
+# workload. Two hops — Ingress -ROUTES_TO_SERVICE-> K8sService <-EXPOSES- Workload.
+# The second hop runs backwards: EXPOSES is declared "K8sService -> Workload" in
+# knowledge_graph/core/types.go but written Workload -> K8sService, and a query
+# built from the comment returns nothing rather than failing.
+_WORKLOAD_INGRESSES_SQL = """
+    select distinct ing.properties->>'name'
+    from knowledge_graph_node w
+    join knowledge_graph_edge exposes
+      on exposes.source_node_id = w.id
+     and exposes.relationship_type = 'EXPOSES'
+     and exposes.is_active = true
+    join knowledge_graph_node svc
+      on svc.id = exposes.destination_node_id
+     and svc.is_active = true
+    join knowledge_graph_edge routes
+      on routes.destination_node_id = svc.id
+     and routes.relationship_type = 'ROUTES_TO_SERVICE'
+     and routes.is_active = true
+    join knowledge_graph_node ing
+      on ing.id = routes.source_node_id
+     and ing.is_active = true
+    where w.tenant_id = %s and w.cloud_account_id = %s and w.is_active = true
+      and w.properties->>'namespace' = %s
+      and w.properties->>'name' = %s
+"""
+
+
+def get_consumed_configmap_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """ConfigMaps the workload reads, per the knowledge graph."""
+    return _related_object_names(
+        _WORKLOAD_CONFIGMAPS_SQL, "ConfigMaps", tenant, cloud_account_id, namespace, workload_name
+    )
+
+
+def get_routed_ingress_names(tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """Ingresses that route traffic to the workload, per the knowledge graph."""
+    return _related_object_names(
+        _WORKLOAD_INGRESSES_SQL, "Ingresses", tenant, cloud_account_id, namespace, workload_name
+    )
+
+
+def _related_object_names(query, what, tenant, cloud_account_id, namespace, workload_name) -> List[str]:
+    """Objects the graph connects to this workload.
+
+    Best-effort: the graph rebuilds hourly, so a relationship created in the
+    last hour has no edge yet and simply isn't correlated. That is the right
+    failure mode — the alternative, matching objects to workloads by name,
+    asserts causal links that do not exist.
+    """
+    if not workload_name or not namespace:
+        return []
+    try:
+        rows = database.run_query(query, [tenant, cloud_account_id, namespace, workload_name])
+    except Exception:
+        logger.exception("Failed to look up %s related to %s/%s", what, namespace, workload_name)
+        return []
+    return [row[0] for row in rows if row and row[0]]
+
+
 def get_last_config_change(config_change_event, data, finding):
-    if finding["finding_type"] != "configuration_change" and finding["service_key"]:
-        select_config_change_event = sql.SQL(
-            "select id, service_key, evidences,starts_at from {} where "
-            "cloud_account_id = %s  and finding_type = %s and subject_namespace = %s and service_key = %s "
-            "order by created_at desc limit 1"
-        ).format(sql.Identifier("events"))
-        values = [
-            data["cloud_account_id"],
-            "configuration_change",
-            finding["subject_namespace"],
-            finding["service_key"],
-        ]
-        config_change_event = database.run_query(select_config_change_event, values)
-    return config_change_event
+    """Find the configuration changes this alert should be shown against.
+
+    Two sources, one query: changes to the workload itself (image, replicas,
+    resources, a restart), and changes to the ConfigMaps it consumes. The
+    second is the one an engineer cannot find by hand — editing a ConfigMap
+    leaves the consuming Deployment's spec byte-identical, so `kubectl rollout
+    history` has no revision to diff and Kubernetes emits no event at all. The
+    workload → ConfigMap link comes from the knowledge graph's USES_CONFIG
+    edges, never from matching names.
+
+    Two bounds that were missing, and each produced a wrong answer:
+
+    - The query had no relation to the alert's own start time, so a change made
+      AFTER the alert fired could be attached as its cause. Ordering by
+      created_at (ingest time) rather than starts_at (when the change happened)
+      compounded it, because a late-arriving old change sorted first.
+    - It was scoped by cloud_account_id alone, not by tenant.
+
+    Changes older than the alert are deliberately NOT excluded here. An alert on
+    a workload that last deployed six weeks ago should still say so — the UI
+    shows how long before the alert it happened, which is the useful disclosure.
+    Silently dropping it would just return the card to being empty, which reads
+    as "nothing changed" rather than "the last change was a while ago".
+    """
+    if finding["finding_type"] == "configuration_change" or not finding["service_key"]:
+        return config_change_event
+
+    namespace = finding["subject_namespace"]
+    conditions = [
+        "cloud_account_id = %s",
+        "finding_type = %s",
+        "subject_namespace = %s",
+        "tenant = %s",
+    ]
+    values = [
+        data["cloud_account_id"],
+        "configuration_change",
+        namespace,
+        data["tenant"],
+    ]
+    # A finding without a start time cannot bound anything; keep the old
+    # behaviour for it rather than dropping every candidate change.
+    alert_starts_at = _as_naive_utc(finding.get("starts_at"))
+    if alert_starts_at is not None:
+        conditions.append("starts_at <= %s")
+        values.append(alert_starts_at)
+
+    # service_key is "<namespace>/<workload>" and is already owner-resolved for
+    # pod-subject findings, which is what makes it the right key here.
+    workload_name = finding["service_key"].split("/", 1)[-1]
+    subject_clauses = ["service_key = %s"]
+    values.append(finding["service_key"])
+    # Names are expanded into placeholders rather than bound as an ANY(%s)
+    # array so an empty list can never produce an untyped empty array; each
+    # clause is simply omitted when there is nothing to add.
+    for subject_type, names in (
+        ("configmap", get_consumed_configmap_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)),
+        ("ingress", get_routed_ingress_names(data["tenant"], data["cloud_account_id"], namespace, workload_name)),
+    ):
+        if not names:
+            continue
+        subject_clauses.append(
+            "(subject_type = '{}' and subject_name in ({}))".format(subject_type, ",".join(["%s"] * len(names)))
+        )
+        values.extend(names)
+    conditions.append("({})".format(" or ".join(subject_clauses)))
+    values.append(CONFIG_CHANGE_CORRELATION_LIMIT)
+
+    select_config_change_event = sql.SQL(
+        "select id, service_key, evidences, starts_at from {} where "
+        + " and ".join(conditions)
+        + " order by starts_at desc nulls last limit %s"
+    ).format(sql.Identifier("events"))
+    return database.run_query(select_config_change_event, values)
 
 
 def get_resource_info(cloud_account_id, finding, tenant):
@@ -1038,7 +1280,12 @@ def handle_krr_report(content: dict, tenant: str, cloud_account_id: str, account
                 logging.warning(f"Failed to parse container data for workload {resource[0]}: {e}")
                 continue
 
-        recommendations = generate_krr_recommendation(cloud_account_id, report, resource_map, tenant)
+        try:
+            replica_stats = get_workload_replica_stats(cloud_account_id, tenant)
+        except Exception:
+            logging.exception(f"Replica window lookup failed for account {cloud_account_id}, using live counts")
+            replica_stats = {}
+        recommendations = generate_krr_recommendation(cloud_account_id, report, resource_map, tenant, replica_stats)
         try:
             handle_notification(
                 account_name,
@@ -1378,7 +1625,76 @@ def is_value_no_change_workload(merged_content):
     return saw_entry
 
 
-def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
+POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS = 24 * 14
+
+
+def replica_stats_from_pod_rows(rows, now, window_hours=POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS):
+    """Time-weighted replica count per workload from pod lifetimes in the metastore.
+
+    Twin of replica_stats_from_running_series in ml-k8s-server
+    (vertical_rightsizing/models/replicas.py), which folds Prometheus samples;
+    this side only has k8s_pods rows, so each pod counts as running from its
+    creation_time until last_seen (or now while it is active). The span is
+    sampled hourly like the Prometheus path, and a sample where the workload
+    had no pod at all is not part of the average — the denominator is the
+    workload's observed lifetime inside the window, so a one-day-old
+    Deployment averages its real replica count.
+
+    rows: iterables of (workload_type, workload_name, namespace, creation_time,
+    last_seen, is_active). Returns {"kind/namespace/name": {avg, min, max,
+    window_hours}} for workloads that had at least one running pod in the window.
+    """
+    window_start = now - timedelta(hours=window_hours)
+    intervals = {}
+    for workload_type, workload_name, namespace, creation_time, last_seen, is_active in rows:
+        if creation_time is None:
+            continue
+        end = now if is_active else last_seen
+        if end is None:
+            continue
+        start = max(creation_time, window_start)
+        if end <= start:
+            continue
+        intervals.setdefault(f"{workload_type}/{namespace}/{workload_name}", []).append((start, min(end, now)))
+    stats = {}
+    for key, spans in intervals.items():
+        first = min(start for start, _ in spans)
+        counts = []
+        sample = first
+        while sample <= now:
+            alive = sum(1 for start, end in spans if start <= sample < end)
+            if alive > 0:
+                counts.append(alive)
+            sample += timedelta(hours=1)
+        if not counts:
+            continue
+        stats[key] = {
+            "avg": round(sum(counts) / len(counts), 2),
+            "min": min(counts),
+            "max": max(counts),
+            "window_hours": window_hours,
+        }
+    return stats
+
+
+def get_workload_replica_stats(cloud_account_id, tenant, window_hours=POD_RIGHT_SIZING_REPLICA_WINDOW_HOURS):
+    now = datetime.utcnow()
+    rows = database.run_query(
+        """
+        select workload_type, workload_name, namespace, creation_time, last_seen, is_active
+        from k8s_pods
+        where cloud_account_id = %s
+          and tenant_id = %s
+          and last_seen >= %s
+          and status not in ('Succeeded', 'Failed')
+        """,
+        [cloud_account_id, tenant, now - timedelta(hours=window_hours)],
+    )
+    return replica_stats_from_pod_rows(rows, now, window_hours)
+
+
+def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant, replica_stats=None):
+    replica_stats = replica_stats or {}
     recommendations = {}
     settings = get_recommendation_settings(cloud_account_id, "pod_right_sizing")
     for r in report["data"]:
@@ -1387,7 +1703,12 @@ def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
             continue
         resource_id = resource_map[f"{r['kind']}/{r['namespace']}/{r['name']}/{r['container']}"]
         ignore_recommendation, r_content, recommendation, saving = generate_container_recommendation(
-            cloud_account_id, r, resource_id, settings, tenant
+            cloud_account_id,
+            r,
+            resource_id,
+            settings,
+            tenant,
+            replica_stats.get(f"{r['kind']}/{r['namespace']}/{r['name']}"),
         )
         if ignore_recommendation:
             logging.info(f"Ignoring recommendation for {r['kind']}/{r['namespace']}/{r['name']}/{r['container']}")
@@ -1419,7 +1740,7 @@ def generate_krr_recommendation(cloud_account_id, report, resource_map, tenant):
     return recommendations
 
 
-def generate_container_recommendation(cloud_account_id, r, resource_id, settings, tenant):
+def generate_container_recommendation(cloud_account_id, r, resource_id, settings, tenant, replicas=None):
     r_content = r["content"]
     cpu_cost_per_hour = DEFAULT_COST.get("CPU")
     memory_cost_per_hour = DEFAULT_COST.get("RAM")
@@ -1438,9 +1759,20 @@ def generate_container_recommendation(cloud_account_id, r, resource_id, settings
         cpu_cost_per_hour = resource_id[6]
         memory_cost_per_hour = resource_id[7]
 
+    # Windowed average when the metastore had pod history for the workload,
+    # otherwise the live count from the workload lookup.
+    pods_count = replicas["avg"] if replicas else (resource_id[18] if len(resource_id) > 18 else 1)
     saving, ignore_recommendation = process_resource_recommendation(
-        cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id[0]
+        cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id[0], pods_count
     )
+    if replicas:
+        for rec in r_content:
+            if isinstance(rec, dict) and "info" not in rec:
+                add_info = rec.get("add_info")
+                if not isinstance(add_info, dict):
+                    add_info = {}
+                    rec["add_info"] = add_info
+                add_info["replicas"] = replicas
     content = {r["container"]: r_content}
     rightsize = json.dumps(content)
     recommendation = {
@@ -1459,20 +1791,39 @@ def generate_container_recommendation(cloud_account_id, r, resource_id, settings
     return ignore_recommendation, r_content, recommendation, saving
 
 
-def process_resource_recommendation(cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id):
+def process_resource_recommendation(
+    cpu_cost_per_hour, memory_cost_per_hour, r_content, settings, resource_id, pods_count=1
+):
+    """Monthly saving for one container plus whether the container should be dropped.
+
+    Keep in sync with calculate_container_savings in ml-k8s-server
+    vertical_rightsizing/__init__.py: requests are per pod, so the per-pod
+    delta is scaled by the live replica count, and a resource entry without
+    usable numbers contributes nothing rather than discarding the container
+    (a sidecar with no memory series must not erase the app container's
+    cpu saving). A container with no usable entry at all is still dropped:
+    there is nothing to show for it. Each priced entry keeps its own signed
+    monthly figure in add_info.estimated_savings, so a reader can show the
+    saving and the added cost side by side where the row net cancels them.
+    """
     saving = 0
     new_cpu = 0
     original_cpu = 0
     new_memory = 0
     original_memory = 0
     ignore_recommendation = False
+    usable_entries = 0
+    try:
+        replicas = max(float(pods_count or 0), 1.0)
+    except (TypeError, ValueError):
+        replicas = 1.0
     for rec in r_content:
         new_hourly_cost = 0
         original_hourly_cost = 0
         if "info" in rec and (rec["info"] == "Not enough data" or rec["info"] == "No data"):
-            logging.info(f"Not enough data Ignoring recommendation {resource_id}")
-            ignore_recommendation = True
+            logging.info(f"Not enough data for {rec.get('resource')} on {resource_id}, skipping the entry")
             continue
+        usable_entries += 1
         if rec["recommended"]["request"] == "?":
             rec["recommended"]["request"] = rec["allocated"]["request"]
         if rec["resource"] == "cpu" and rec["allocated"]["request"]:
@@ -1484,7 +1835,16 @@ def process_resource_recommendation(cpu_cost_per_hour, memory_cost_per_hour, r_c
                 memory_cost_per_hour, rec, settings
             )
         if new_hourly_cost != 0 and original_hourly_cost != 0:
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30
+            entry_saving = (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas
+            add_info = rec.get("add_info")
+            if not isinstance(add_info, dict):
+                add_info = {}
+                rec["add_info"] = add_info
+            add_info["estimated_savings"] = entry_saving
+            saving += entry_saving
+    if r_content and usable_entries == 0:
+        logging.info(f"No usable data for any resource on {resource_id}, ignoring the container")
+        ignore_recommendation = True
     if (
         new_cpu
         and original_cpu
@@ -1727,7 +2087,19 @@ def get_existing_resource(cloud_account_id, report, tenant):
                AND kp.namespace = kw.namespace
                AND kp.is_active = true
              LIMIT 1
-            ) AS memory_gb
+            ) AS memory_gb,
+            -- Live replica count, the collector-side twin of ml-k8s-server's
+            -- current_pods_count. Requests are per pod, so the per-pod saving is
+            -- scaled by this; appended last so the positional reads above hold.
+            (SELECT count(*)
+             FROM k8s_pods kp
+             WHERE kp.cloud_account_id = kw.cloud_account_id
+               AND kp.tenant_id = kw.tenant_id
+               AND kp.workload_name = kw.name
+               AND kp.workload_type = kw.kind
+               AND kp.namespace = kw.namespace
+               AND kp.is_active = true
+            ) AS active_pods
         from k8s_workloads as kw
         where kw.cloud_account_id = %s
           and kw.tenant_id = %s
@@ -1801,12 +2173,14 @@ def format_evidence(evidence, config_change_event: List, aggregation_key: str):
             if action_name == "service_map_enricher":
                 check_neighboring_workload_health(item, {})
             item["insight"] = insights
-    if len(config_change_event) > 0:
+    # One block per correlated change, newest first. A single block used to be
+    # appended here; with a ConfigMap edit followed by the restart that made it
+    # take effect, that block was always the restart.
+    for change in config_change_event:
         try:
-            config_data = get_config_change_data(config_change_event, aggregation_key)
-            formatted_evidence.append(config_data)
+            formatted_evidence.append(get_config_change_data(change, aggregation_key))
         except Exception:
-            logging.exception("Failed to handle config change event %s", config_change_event)
+            logger.exception("Failed to handle config change event %s", change)
     return formatted_evidence
 
 
@@ -1851,7 +2225,9 @@ def _parse_json_dict(data):
 
 
 def get_config_change_data(config_change_event, aggregation_key):
-    # config_change_event[0] = (id, service_key, evidences, starts_at).
+    # config_change_event = (id, service_key, evidences, starts_at) — one row.
+    # (It took the whole result set and used [0] until this had to render more
+    # than one correlated change.)
     # evidences is a JSONB array of evidence blocks. One historic shape was a
     # single-element [{type:"diff", data:object}]; another shape prepends a
     # raw kubewatch {type:"json", data:"<json-string>"} so the diff lives at
@@ -1859,7 +2235,7 @@ def get_config_change_data(config_change_event, aggregation_key):
     # hard-coding [0] — the indexed path raised KeyError on the kubewatch
     # JSON string and the exception was swallowed by the caller, dropping
     # the diff from the rendered evidence.
-    evidences = config_change_event[0][2] or []
+    evidences = config_change_event[2] or []
     diff_entry = None
     for ev in evidences:
         if isinstance(ev, dict) and ev.get("type") == "diff" and ev.get("data") is not None:
@@ -1900,8 +2276,58 @@ def get_config_change_data(config_change_event, aggregation_key):
                 "data": data,
                 "insight": get_change_insights(data, aggregation_key),
             }
-    config_data["start_at"] = config_change_event[0][3].isoformat()
+    # starts_at is nullable, and the correlation query orders `nulls last` — so
+    # with several changes returned instead of one, a null-timestamped row can
+    # now reach here in the tail rather than only when every row was null.
+    starts_at = config_change_event[3]
+    config_data["start_at"] = starts_at.isoformat() if starts_at is not None else None
+    # Name the object this diff is about. LastDeploymentCard falls back to the
+    # literal string "Last Deployment Change" when no title is supplied, which
+    # was accurate while exactly one change was ever attached and it was always
+    # the workload's own deploy. Now that a ConfigMap edit and an Ingress
+    # annotation can be attached alongside it, that fallback renders several
+    # identically-titled rows and the reader cannot tell which is which — or
+    # that any of them concern a different object at all.
+    title = _change_block_title(config_data.get("data"), starts_at)
+    if title:
+        config_data["additional_info"] = {"title": title}
     return config_data
+
+
+def _change_block_title(diff_data, starts_at) -> str:
+    """ "ConfigMap sessions-config changed · 14:05 UTC", from the diff block.
+
+    resource_name is "<kind>/<namespace>/<name>.yaml" with the kind lowercased
+    (see BuildKubernetesDiffBlock in the agent). The time disambiguates repeat
+    edits to one object, which otherwise produce two rows with the same title.
+    """
+    if not isinstance(diff_data, dict):
+        return ""
+    resource_name = diff_data.get("resource_name") or ""
+    parts = [p for p in str(resource_name).split("/") if p]
+    if len(parts) < 2:
+        return ""
+    kind, name = parts[0], parts[-1]
+    if name.endswith(".yaml"):
+        name = name[: -len(".yaml")]
+    title = "{} {} changed".format(_DIFF_KIND_LABELS.get(kind.lower(), kind.title()), name)
+    if starts_at is not None:
+        try:
+            title += " · {} UTC".format(starts_at.strftime("%H:%M"))
+        except Exception:
+            pass
+    return title
+
+
+# Kubernetes spellings for the lowercased kind carried in resource_name.
+_DIFF_KIND_LABELS = {
+    "configmap": "ConfigMap",
+    "deployment": "Deployment",
+    "daemonset": "DaemonSet",
+    "statefulset": "StatefulSet",
+    "ingress": "Ingress",
+    "rollout": "Rollout",
+}
 
 
 def get_change_insights(config_data, aggregation_key) -> List[Dict[str, Any]]:
@@ -1919,19 +2345,68 @@ def get_change_insights(config_data, aggregation_key) -> List[Dict[str, Any]]:
                 add_unique_insight(insights, unique_insights, insight)
                 break
         else:
-            get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path)
+            get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path, config_data)
 
     return insights
 
 
-def get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path):
+def _memory_limit_direction(config_data, updated_path) -> str:
+    """'raised', 'lowered', or '' when the old/new values can't be compared.
+
+    Quantities arrive as Kubernetes strings ("192Mi", "1Gi") and either side may
+    be absent when the limit was added or removed. An unparseable pair yields ''
+    so the caller gives neutral advice rather than advice built on a guess.
+    """
+    for entry in (config_data or {}).get("updated_values") or []:
+        if not isinstance(entry, dict) or entry.get("path") != updated_path:
+            continue
+        # A limit added or removed leaves one side null; there is no direction
+        # to read from that, and str(None) would just reach parse_size_to_gb as
+        # the literal "None".
+        old_value, new_value = entry.get("old"), entry.get("new")
+        if old_value is None or new_value is None:
+            return ""
+        try:
+            old = parse_size_to_gb(str(old_value))
+            new = parse_size_to_gb(str(new_value))
+        except Exception:
+            # Broad on purpose: the only job here is to pick between three
+            # canned sentences, and no parse failure is worth failing an
+            # event over.
+            return ""
+        if old == new:
+            return ""
+        return "raised" if new > old else "lowered"
+    return ""
+
+
+def get_resource_update_insight(aggregation_key, insights, unique_insights, updated_path, config_data=None):
     if "resources.limits['memory']" in updated_path:
         insight = {
             "message": "Resource memory limit were updated",
             "severity": "Critical",
         }
         if aggregation_key == "pod_oom_killer_enricher":
-            insight["recommendation"] = "Increase memory limit in pod specifications"
+            # This used to recommend "Increase memory limit in pod
+            # specifications" unconditionally — including when the limit had
+            # just been raised and the workload OOMed anyway, which is the
+            # case where raising it again is exactly the wrong move. The
+            # direction of the change decides which advice is honest.
+            direction = _memory_limit_direction(config_data, updated_path)
+            if direction == "raised":
+                insight["recommendation"] = (
+                    "The memory limit was already raised and the workload still hit it. "
+                    "Find what is consuming the memory before raising it again — if the working "
+                    "set grows without settling, no limit is large enough."
+                )
+            elif direction == "lowered":
+                insight["recommendation"] = (
+                    "The memory limit was lowered shortly before this OOMKill. "
+                    "Compare it against the workload's actual usage; reverting the reduction is "
+                    "the first thing to check."
+                )
+            else:
+                insight["recommendation"] = "Check the workload's memory usage against this limit before changing it."
         add_unique_insight(insights, unique_insights, insight)
     elif "resources.requests['memory']" in updated_path:
         insight = {

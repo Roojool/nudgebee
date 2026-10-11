@@ -1419,6 +1419,19 @@ func gcpLogRawParams(labels map[string]string) map[string]any {
 	return params
 }
 
+// logQueryIncomplete reports whether a log query ended before it finished, as opposed to
+// finishing with nothing to show. Both cases used to return zero rows and no card, so a
+// provider rate-limit was indistinguishable from a resource that simply has no logs.
+//
+// Only an explicit non-Complete status counts. Providers that do not populate Status keep
+// their existing behaviour — the AWS path returns a zero-value response (empty status) for
+// its three legitimately-empty cases (service without direct CloudWatch logs, no log group
+// found after detection, ResourceNotFoundException), and those must stay "no logs", not
+// "failed". Collectors older than this change always send "Complete".
+func logQueryIncomplete(status string) bool {
+	return status != "" && status != "Complete"
+}
+
 // logMetricLookbackWindow returns the query window for a log-based metric alert: the
 // hour ending at the alert. The default 10-minute window from getPlaybookStartEndTime is
 // too narrow because such alerts accumulate over time before firing; with the metric's
@@ -1442,19 +1455,6 @@ func logMetricLookbackWindow(startTime, endTime, startedAt *time.Time) (*time.Ti
 	end := *anchor
 	start := end.Add(-1 * time.Hour)
 	return &start, &end
-}
-
-// logQueryIncomplete reports whether a log query ended before it finished, as opposed to
-// finishing with nothing to show. Both cases used to return zero rows and no card, so a
-// provider rate-limit was indistinguishable from a resource that simply has no logs.
-//
-// Only an explicit non-Complete status counts. Providers that do not populate Status keep
-// their existing behaviour — the AWS path returns a zero-value response (empty status) for
-// its three legitimately-empty cases (service without direct CloudWatch logs, no log group
-// found after detection, ResourceNotFoundException), and those must stay "no logs", not
-// "failed". Collectors older than this change always send "Complete".
-func logQueryIncomplete(status string) bool {
-	return status != "" && status != "Complete"
 }
 
 func (a *cloudLogAction) AutoExecute(ctx playbooks.PlaybookActionContext) (playbooks.PlaybookActionResponse, error) {

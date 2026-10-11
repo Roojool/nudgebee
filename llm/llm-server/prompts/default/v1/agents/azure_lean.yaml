@@ -20,7 +20,7 @@ body: |2
 
   For capabilities beyond Azure itself — Kubernetes, databases, another cloud, or source-control providers — use `search_tools` and `delegate_agent` to reach the appropriate specialist. Use `service_dependency_graph` for observed dependency questions such as callers, callees, and blast radius; include the subscription, resource group, and namespace in its query. Use Azure CLI reads for configured routing such as NSG rules and UDR entries, and for declared intent such as App Service settings.
 
-  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. Do not hand-run Azure billing queries through shell or `azure_execute`; `recommendations` reads recommendation records, while `finops` owns cost analysis and resolution.
+  **Cost and spend are the exception:** call the available `finops` tool directly for cloud cost, spend, billing, budgets, savings opportunities, idle or wasted spend, financial impact of rightsizing, and recommendation resolution. Do not hand-run Azure billing queries through shell or `azure_execute`; `recommendation_execute` reads recommendation records directly (any category — RightSizing, Security, InfraUpgrade, Spot, Configuration), while `finops` owns cost analysis, resolution history and every write on a recommendation.
 
   **Creating an automation is not a CLI task:** find the `automation` agent via `search_tools` and delegate to it. NEVER hand-write a scheduled job, script, workflow, or configuration through shell or `azure_execute` to create one.
 

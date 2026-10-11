@@ -115,6 +115,8 @@ export const AI_TOOLS_SUB_TABS = [
     icon: EgressFilterIcon,
     Body: EgressFilterAdminTab,
     module: 'egressfilter',
+    // EE-only body (app/src/ee/), stripped on OSS — callers drop the tab there. enterprise#37063.
+    eeOnly: true,
   },
   {
     id: 'budgets-limits',

@@ -1121,7 +1121,7 @@ const KubernetesLLMRequestResponse = (props) => {
             />
           </Box>
           <Box display={'flex'} alignItems={'center'} justifyContent={'space-between'} mt={ds.space[3]}>
-            {props.toolCall.type == 'response' && (
+            {props.toolCall.type == 'response' && !props.isResponseInProgress && (
               <>
                 <Box display={'flex'} alignItems={'center'} gap={ds.space.mul(0, 5)}>
                   <Button
@@ -1390,6 +1390,7 @@ const KubernetesLLMRequestResponse = (props) => {
 
 KubernetesLLMRequestResponse.propTypes = {
   toolCall: PropTypes.object,
+  isResponseInProgress: PropTypes.bool,
   generateQuestionText: PropTypes.string,
   accountId: PropTypes.string,
   handleShare: PropTypes.func,

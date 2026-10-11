@@ -15,13 +15,17 @@ cache = Cache()
 
 FEATURE_FLAG_ID = "CHANNEL_AWARENESS"
 
+
 # Posted in-channel on every enable. Consent requirement: if this post fails,
-# the enable is rolled back rather than silently watching.
-DISCLOSURE_TEXT = (
-    ":wave: Nubi is now following this channel so it has context when someone asks it for help. "
-    "It only takes action when explicitly @mentioned — everything else is reference only. "
-    "This can be turned off anytime in NudgeBee under Settings → Integrations."
-)
+# the enable is rolled back rather than silently watching. Built at call time
+# (never at import) so it reflects the current tenant branding, per
+# configs/branding_overrides.py.
+def _disclosure_text() -> str:
+    return (
+        f":wave: {settings.urls.assistant_name} is now following this channel so it has context when someone "
+        "asks it for help. It only takes action when explicitly @mentioned — everything else is reference only. "
+        f"This can be turned off anytime in {settings.urls.branding_name} under Settings → Integrations."
+    )
 
 
 class ChannelWatchService:
@@ -152,10 +156,11 @@ class ChannelWatchService:
             channel_name = channel_name or channel_info.get("name")
             if not channel_info.get("is_member", False):
                 if channel_info.get("is_private", False):
+                    assistant_name = settings.urls.assistant_name
                     return {
                         "error": {
-                            "message": "Nubi is not a member of this private channel. "
-                            "Invite @Nubi in Slack first, then try again."
+                            "message": f"{assistant_name} is not a member of this private channel. "
+                            f"Invite @{assistant_name} in Slack first, then try again."
                         }
                     }
                 self.slack_app.client.conversations_join(token=installation.token, channel_id=channel_id)
@@ -163,17 +168,18 @@ class ChannelWatchService:
             # the failure mode is a stray notice (visible, fails safe) rather than
             # watching-without-disclosure — the state this feature must never reach.
             disclosure = self.slack_app.client.chat_post(
-                token=installation.token, channel_id=channel_id, text=DISCLOSURE_TEXT
+                token=installation.token, channel_id=channel_id, text=_disclosure_text()
             )
         except SlackApiError as e:
             slack_error = e.response.get("error", "unknown_error")
             if slack_error == "channel_not_found":
                 # Private channels the bot isn't in are invisible to it, so this is
                 # almost always "invite the bot first" rather than a bad channel id.
+                assistant_name = settings.urls.assistant_name
                 return {
                     "error": {
-                        "message": "Nubi can't see this channel. If it's private, "
-                        "invite @Nubi in Slack first, then try again."
+                        "message": f"{assistant_name} can't see this channel. If it's private, "
+                        f"invite @{assistant_name} in Slack first, then try again."
                     }
                 }
             LOG.warning("Slack error enabling watch on %s/%s: %s", team_id, channel_id, slack_error)

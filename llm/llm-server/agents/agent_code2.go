@@ -13,6 +13,7 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	"nudgebee/llm/services_server"
+	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
 	"nudgebee/llm/utils"
 	"nudgebee/llm/workspace"
@@ -301,18 +302,39 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		}
 	}
 
-	// Resolve operator-authored skills mapped to the code agent and forward them to
-	// the stateless code-analysis service, which has no skills DB of its own. Unlike
-	// the in-process ReAct planners — which lazily load_skills mid-loop and so
-	// only pull a skill body when the task needs it — code-analysis receives skill
-	// bodies up front over HTTP. Forwarding every mapped skill would bloat every
-	// downstream code-analysis prompt and dilute relevance, so we always run
-	// question-aware top-K selection here and forward only the skills relevant to the
-	// user's question (own and inherited alike). LlmServerSkillSelectionTopK overrides
-	// the default K when an operator has tuned it. Failures degrade gracefully —
-	// analysis must never be blocked on skills.
+	// Reuse account-wide discovery and exact loading. Keep large documents out
+	// of every analysis prompt; the workspace resolves the reference manifest.
 	skillsBlock := ""
-	if core.AutomaticKnowledgeAllowed(agentRequest) {
+	var knowledgeFiles []tools.KnowledgeFileReference
+	if core.AutomaticKnowledgeAllowed(agentRequest) && config.Config.LlmServerKnowledgeWorkspaceEnabled {
+		prepCtx, cancel := context.WithTimeout(ctx.GetContext(), 90*time.Second)
+		knowledgeCtx := security.NewRequestContext(prepCtx, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
+		candidates := core.DiscoverKnowledgeCandidates(knowledgeCtx, agentRequest, CodeAgent2{})
+		topK := config.Config.LlmServerSkillSelectionTopK
+		if topK <= 0 || topK > defaultForwardedSkillTopK {
+			topK = defaultForwardedSkillTopK
+		}
+		for _, candidate := range candidates[:min(len(candidates), topK)] {
+			toolCtx := toolcore.NbToolContext{Ctx: knowledgeCtx, AccountId: agentRequest.AccountId, UserId: agentRequest.UserId, ConversationId: agentRequest.ConversationId, MessageId: agentRequest.MessageId, Query: agentRequest.Query}
+			inline, ref, err := tools.PrepareKnowledgeForAnalysis(toolCtx, candidate)
+			if err != nil {
+				logger.Warn("code: knowledge preparation unavailable", "candidate", candidate.ID, "error", err)
+				skillsBlock += "\n[Knowledge unavailable: " + candidate.ID + "; do not claim its complete content was read.]\n"
+				continue
+			}
+			if ref != nil {
+				knowledgeFiles = append(knowledgeFiles, *ref)
+				continue
+			}
+			if len(skillsBlock)+len(inline)+1 <= maxForwardedSkillBytes {
+				skillsBlock += inline + "\n"
+			}
+		}
+		cancel()
+	}
+
+	// Preserve the existing inline path when workspace knowledge is explicitly disabled.
+	if core.AutomaticKnowledgeAllowed(agentRequest) && !config.Config.LlmServerKnowledgeWorkspaceEnabled {
 		// Include the legacy name so knowledge bases mapped to "agent_code_2" in
 		// llm_kb_agent_mappings before the rename are still inherited (the lookup
 		// UNIONs both names and dedupes by kb id).
@@ -406,6 +428,9 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		analyzeRequest["base_diff"] = core.TruncateMiddle(baseDiff, 48*1024, 16*1024)
 	}
 
+	if len(knowledgeFiles) > 0 {
+		analyzeRequest["knowledge_files"] = knowledgeFiles
+	}
 	if skillsBlock != "" {
 		analyzeRequest["skills"] = skillsBlock
 	}

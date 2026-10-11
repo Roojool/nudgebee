@@ -74,7 +74,7 @@ func TestLeanOrchestratorParity_ReducedCoreShape(t *testing.T) {
 	sharedRequired := []string{
 		ServiceDependencyGraph,
 		EventsAgentName,
-		RecommendationsAgentName,
+		tools.ToolRecommendationExecuteSql,
 		DelegateAgentToolName,
 		SearchToolsToolName,
 		WebSearchAgentName,

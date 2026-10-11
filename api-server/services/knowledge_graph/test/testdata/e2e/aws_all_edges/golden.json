@@ -1,78 +1,6 @@
 {
   "nodes": [
     {
-      "unique_key": "aws:test-account-aws-1::RouteTable:main-vpc:rtb-1",
-      "node_type": "RouteTable",
-      "specific_type": "RouteTable",
-      "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "test-tenant-1",
-      "level": "",
-      "source": "aws",
-      "properties": {
-        "account_number": "",
-        "is_main": false,
-        "labels": {},
-        "meta": {
-          "Associations": [
-            {
-              "AssociationState": {
-                "State": ""
-              },
-              "GatewayId": "",
-              "Main": false,
-              "RouteTableAssociationId": "",
-              "RouteTableId": "",
-              "SubnetId": "subnet-1"
-            }
-          ],
-          "OwnerId": "",
-          "RouteTableId": "rtb-1",
-          "Routes": [
-            {
-              "DestinationCidrBlock": "0.0.0.0/0",
-              "DestinationIpv6CidrBlock": "",
-              "GatewayId": "",
-              "InstanceId": "",
-              "NatGatewayId": "nat-1",
-              "NetworkInterfaceId": "",
-              "Origin": "",
-              "State": "",
-              "TransitGatewayId": "",
-              "VpcPeeringConnectionId": ""
-            },
-            {
-              "DestinationCidrBlock": "10.0.0.0/8",
-              "DestinationIpv6CidrBlock": "",
-              "GatewayId": "igw-1",
-              "InstanceId": "",
-              "NatGatewayId": "",
-              "NetworkInterfaceId": "",
-              "Origin": "",
-              "State": "",
-              "TransitGatewayId": "",
-              "VpcPeeringConnectionId": ""
-            }
-          ],
-          "VpcId": "vpc-1"
-        },
-        "name": "rtb-1",
-        "region": "",
-        "resource_id": "rtb-1",
-        "route_table_id": "rtb-1",
-        "source": "aws",
-        "vpc_id": "vpc-1",
-        "vpc_name_hierarchy": "main-vpc"
-      },
-      "labels": {},
-      "query_attributes": {
-        "is_main": false,
-        "name": "rtb-1",
-        "route_table_id": "rtb-1",
-        "vpc_id": "vpc-1"
-      },
-      "ontology_attributes": {}
-    },
-    {
       "unique_key": "aws:test-account-aws-1:global:ServiceIdentity::admin-role",
       "node_type": "ServiceIdentity",
       "specific_type": "IAMRole",
@@ -807,6 +735,78 @@
       }
     },
     {
+      "unique_key": "aws:test-account-aws-1:us-east-1:RouteTable:main-vpc:rtb-1",
+      "node_type": "RouteTable",
+      "specific_type": "RouteTable",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "is_main": false,
+        "labels": {},
+        "meta": {
+          "Associations": [
+            {
+              "AssociationState": {
+                "State": ""
+              },
+              "GatewayId": "",
+              "Main": false,
+              "RouteTableAssociationId": "",
+              "RouteTableId": "",
+              "SubnetId": "subnet-1"
+            }
+          ],
+          "OwnerId": "",
+          "RouteTableId": "rtb-1",
+          "Routes": [
+            {
+              "DestinationCidrBlock": "0.0.0.0/0",
+              "DestinationIpv6CidrBlock": "",
+              "GatewayId": "",
+              "InstanceId": "",
+              "NatGatewayId": "nat-1",
+              "NetworkInterfaceId": "",
+              "Origin": "",
+              "State": "",
+              "TransitGatewayId": "",
+              "VpcPeeringConnectionId": ""
+            },
+            {
+              "DestinationCidrBlock": "10.0.0.0/8",
+              "DestinationIpv6CidrBlock": "",
+              "GatewayId": "igw-1",
+              "InstanceId": "",
+              "NatGatewayId": "",
+              "NetworkInterfaceId": "",
+              "Origin": "",
+              "State": "",
+              "TransitGatewayId": "",
+              "VpcPeeringConnectionId": ""
+            }
+          ],
+          "VpcId": "vpc-1"
+        },
+        "name": "rtb-1",
+        "region": "us-east-1",
+        "resource_id": "rtb-1",
+        "route_table_id": "rtb-1",
+        "source": "aws",
+        "vpc_id": "vpc-1",
+        "vpc_name_hierarchy": "main-vpc"
+      },
+      "labels": {},
+      "query_attributes": {
+        "is_main": false,
+        "name": "rtb-1",
+        "route_table_id": "rtb-1",
+        "vpc_id": "vpc-1"
+      },
+      "ontology_attributes": {}
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:SecurityGroup:main-vpc:app-sg",
       "node_type": "SecurityGroup",
       "specific_type": "EC2SecurityGroup",
@@ -1122,81 +1122,6 @@
     }
   ],
   "edges": [
-    {
-      "src_key": "aws:test-account-aws-1::RouteTable:main-vpc:rtb-1",
-      "dst_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:app-igw",
-      "relationship_type": "ROUTES_THROUGH",
-      "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "test-tenant-1",
-      "level": "",
-      "source": "aws",
-      "properties": {
-        "contributing_sources": [
-          "aws"
-        ],
-        "destination_cidr": "10.0.0.0/8",
-        "route_type": "internet_gateway"
-      },
-      "contributing_sources": [
-        "aws"
-      ]
-    },
-    {
-      "src_key": "aws:test-account-aws-1::RouteTable:main-vpc:rtb-1",
-      "dst_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:app-nat",
-      "relationship_type": "ROUTES_THROUGH",
-      "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "test-tenant-1",
-      "level": "",
-      "source": "aws",
-      "properties": {
-        "contributing_sources": [
-          "aws"
-        ],
-        "destination_cidr": "0.0.0.0/0",
-        "route_type": "nat_gateway"
-      },
-      "contributing_sources": [
-        "aws"
-      ]
-    },
-    {
-      "src_key": "aws:test-account-aws-1::RouteTable:main-vpc:rtb-1",
-      "dst_key": "aws:test-account-aws-1:us-east-1:Subnet:main-vpc:main-subnet",
-      "relationship_type": "ASSOCIATED_WITH",
-      "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "test-tenant-1",
-      "level": "",
-      "source": "aws",
-      "properties": {
-        "connection_type": "subnet_association",
-        "contributing_sources": [
-          "aws"
-        ],
-        "is_main": false
-      },
-      "contributing_sources": [
-        "aws"
-      ]
-    },
-    {
-      "src_key": "aws:test-account-aws-1::RouteTable:main-vpc:rtb-1",
-      "dst_key": "aws:test-account-aws-1:us-east-1:VPC::main-vpc",
-      "relationship_type": "BELONGS_TO",
-      "cloud_account_id": "test-account-aws-1",
-      "tenant_id": "test-tenant-1",
-      "level": "",
-      "source": "aws",
-      "properties": {
-        "connection_type": "vpc",
-        "contributing_sources": [
-          "aws"
-        ]
-      },
-      "contributing_sources": [
-        "aws"
-      ]
-    },
     {
       "src_key": "aws:test-account-aws-1:global:ServiceIdentity::admin-role",
       "dst_key": "aws:test-account-aws-1:global:ServiceIdentity::app-role",
@@ -1566,6 +1491,81 @@
         ],
         "private_ip": "",
         "public_ip": "52.1.2.3"
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:RouteTable:main-vpc:rtb-1",
+      "dst_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:app-igw",
+      "relationship_type": "ROUTES_THROUGH",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "contributing_sources": [
+          "aws"
+        ],
+        "destination_cidr": "10.0.0.0/8",
+        "route_type": "internet_gateway"
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:RouteTable:main-vpc:rtb-1",
+      "dst_key": "aws:test-account-aws-1:us-east-1:NetworkGateway:main-vpc:app-nat",
+      "relationship_type": "ROUTES_THROUGH",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "contributing_sources": [
+          "aws"
+        ],
+        "destination_cidr": "0.0.0.0/0",
+        "route_type": "nat_gateway"
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:RouteTable:main-vpc:rtb-1",
+      "dst_key": "aws:test-account-aws-1:us-east-1:Subnet:main-vpc:main-subnet",
+      "relationship_type": "ASSOCIATED_WITH",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "subnet_association",
+        "contributing_sources": [
+          "aws"
+        ],
+        "is_main": false
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
+    {
+      "src_key": "aws:test-account-aws-1:us-east-1:RouteTable:main-vpc:rtb-1",
+      "dst_key": "aws:test-account-aws-1:us-east-1:VPC::main-vpc",
+      "relationship_type": "BELONGS_TO",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "vpc",
+        "contributing_sources": [
+          "aws"
+        ]
       },
       "contributing_sources": [
         "aws"

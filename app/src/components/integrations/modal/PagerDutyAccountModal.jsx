@@ -11,6 +11,7 @@ import PropTypes from 'prop-types';
 import { Button } from '@ui/Button';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 const PAGERDUTY_DEFAULT_URL = 'api.pagerduty.com';
 
@@ -176,6 +177,7 @@ const PagerDutyAccountModal = ({ openModal, handleClose, editConfig = null }) =>
       open={openModal}
       handleClose={handleClosePagerDutyModal}
       title={isEdit ? 'Edit PagerDuty Account' : 'Add PagerDuty Account'}
+      subtitle={getIntegrationDescription('PAGERDUTY')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: ds.space[5], pb: ds.space[2] }}>

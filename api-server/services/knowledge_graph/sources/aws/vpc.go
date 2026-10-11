@@ -14,15 +14,8 @@ import (
 // whose BOTH VPCs are present in this account's graph are linked; cross-account peers
 // (accepter in another account) resolve via the cross-account rules engine.
 func (s *AWSSource) createVPCPeeringEdges(reqCtx *security.RequestContext, vpcNodes []*core.DbNode, lookup *sources.NodeLookup, req *core.SourceBuildRequest) []*core.DbEdge {
-	regions := make(map[string]struct{})
-	for _, n := range vpcNodes {
-		if r, ok := n.Properties["region"].(string); ok && r != "" {
-			regions[r] = struct{}{}
-		}
-	}
-
 	var peerings [][]string
-	for region := range regions {
+	for _, region := range nodeRegions(vpcNodes) {
 		peerings = append(peerings, s.fetchVPCPeeringConnections(reqCtx, req.CloudAccountID, region)...)
 	}
 	return s.buildVPCPeeringEdges(peerings, lookup, req)
@@ -331,8 +324,18 @@ func (s *AWSSource) propagateVPCNamesToResources(nodes []*core.DbNode, lookup *s
 		// Store VPC name in the resource node properties for hierarchy
 		node.Properties["vpc_name_hierarchy"] = vpcName
 
-		// Regenerate unique key for this node to use VPC name in hierarchy
-		node.UniqueKey = s.GenerateUniqueKey(node)
+		// Regenerate unique key for this node to use VPC name in hierarchy.
+		// The node's primary key is derived from its unique key, and SaveNodes'
+		// ON CONFLICT (id) DO UPDATE does not write unique_key — so rewriting the
+		// key without the id silently discards the rewrite and leaves a row whose
+		// id and unique_key disagree. Edges built on that id then outlive it. That
+		// desync is what seeded #38046.
+		newUniqueKey := s.GenerateUniqueKey(node)
+		if newUniqueKey == node.UniqueKey {
+			continue
+		}
+		node.UniqueKey = newUniqueKey
+		node.ID = core.NodeIDFor(newUniqueKey, node.TenantID, node.CloudAccountID)
 
 		s.logger.Debug("Updated resource hierarchy to use VPC name",
 			"resource_name", node.Properties["name"],

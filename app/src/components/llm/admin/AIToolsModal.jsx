@@ -21,7 +21,7 @@ import { Modal } from '@ui/Modal';
 import Tabs from '@shared/navigation/Tabs';
 import ErrorBoundary from '@shared/ErrorBoundary';
 import { missingPermissionMessage, isUiFeatureEnabled } from '@lib/auth';
-import { useBCortexEnabled } from '@hooks/useBCortexEnabled';
+import { useBCortexEnabled, isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
 import { useFeatureAccess } from '@hooks/useFeatureAccess';
 import { ds } from '@utils/colors';
 import { AI_TOOLS_SUB_TABS } from './aiToolsConfig';
@@ -41,6 +41,9 @@ const AIToolsModal = ({ open, onClose }) => {
   const visibleSubTabs = useMemo(
     () =>
       AI_TOOLS_SUB_TABS.filter((t) => {
+        if (t.eeOnly && isOSSDeploymentMode()) {
+          return false;
+        }
         if (t.legacyOnly && bcortexEnabled !== false) {
           return false;
         }

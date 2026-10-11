@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"nudgebee/services/common"
 	"nudgebee/services/config"
+	"nudgebee/services/event/lifecycle"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
 	"nudgebee/services/security"
@@ -26,11 +26,11 @@ func ProcessEvent(ctx *security.RequestContext, newEvent map[string]any) (err er
 		return nil
 	}
 
-	// Triage classified this event as suppressed — the user explicitly told
-	// us not to surface it, so don't page them. PostProcessEvent runs triage
+	// Triage classified this event as suppressed or dropped — the user explicitly
+	// told us not to surface it, so don't page them. PostProcessEvent runs triage
 	// first and propagates nb_status into newEvent, so this gate is reliable
 	// even for first-firing events suppressed in the same batch.
-	if nbStatus, _ := newEvent["nb_status"].(string); strings.EqualFold(nbStatus, "SUPPRESSED") {
+	if nbStatus, _ := newEvent["nb_status"].(string); lifecycle.SilencedByTriage(nbStatus) {
 		return nil
 	}
 
@@ -90,7 +90,7 @@ func ProcessEventResolved(ctx *security.RequestContext, newEvent map[string]any)
 		ctx.GetLogger().Error("error getting event nb_status", "error", scanErr, "event_id", eventID)
 		return scanErr
 	}
-	if nbStatus.Valid && strings.EqualFold(nbStatus.String, "SUPPRESSED") {
+	if nbStatus.Valid && lifecycle.SilencedByTriage(nbStatus.String) {
 		return nil
 	}
 

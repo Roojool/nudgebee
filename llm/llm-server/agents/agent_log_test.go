@@ -429,6 +429,39 @@ func TestSystemPrompt_BundleSignalInAllModes(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_KubectlDisclosureInAllModes locks in the fix for issue
+// #36237's follow-up gap: kubectl_disclosure is injected into the fetch
+// envelope by withKubectlDisclosure (agent_log_fetch.go) but, unlike
+// bundle_signal/logs_complete/logs_format_hint, was never named in any
+// workflow step — so the planner had no instruction to read or surface it.
+// It lives in sharedHeaderAndWorkflow (step 2c) so it must appear in every
+// mode's prompt, not just one.
+func TestSystemPrompt_KubectlDisclosureInAllModes(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+
+	cases := []struct {
+		name     string
+		query    string
+		original string
+	}{
+		{"investigation mode", "get logs", "why is cron-scheduler broken"},
+		{"enumeration mode", "list errors in service-y", ""},
+		{"routine mode", "tail last 100 lines", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{
+				Query:         tc.query,
+				OriginalQuery: tc.original,
+			})
+			body := strings.Join(prompt.Instructions, "\n")
+			assert.Contains(t, body, "kubectl_disclosure",
+				"prompt should tell the LLM to surface kubectl_disclosure from the fetch envelope when present")
+		})
+	}
+}
+
 // TestLogAgent_BundleToolNotInToolset locks the change: after moving the
 // bundle to deterministic auto-fire inside fetch_logs, the LLM's tool list
 // must not include standard_diagnostic_grep — the LLM already has the
@@ -663,4 +696,36 @@ func TestGetLogAgent(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, agent)
 	assert.Equal(t, LegacyLogsAgentName, agent.GetName())
+}
+
+// The original question is per-request text (an event investigation carries the
+// whole event payload). Everything before it must be identical across requests
+// in the same mode so the provider can reuse the cached prompt across runs.
+func TestLogAgent_SystemPrompt_OriginalQuestionIsLast(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgent("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+	req := func(orig string) core.NBAgentRequest {
+		return core.NBAgentRequest{Query: "find errors in checkout logs", OriginalQuery: orig, ParentAgentId: "11111111-1111-1111-1111-111111111111", AgentId: "22222222-2222-2222-2222-222222222222"}
+	}
+	a := agent.GetSystemPrompt(ctx, req("Identify RootCause of the event with id 1: checkout 5xx spike at 06:02 UTC"))
+	b := agent.GetSystemPrompt(ctx, req("Identify RootCause of the event with id 2: payments OOMKilled at 07:15 UTC"))
+
+	require.NotEmpty(t, a.Instructions)
+	assert.Contains(t, a.Instructions[len(a.Instructions)-1], "**Original user question:**")
+	assert.Contains(t, a.Instructions[len(a.Instructions)-1], "checkout 5xx spike")
+	assert.Equal(t, a.Instructions[:len(a.Instructions)-1], b.Instructions[:len(b.Instructions)-1], "everything before the original question is request-independent")
+	assert.Equal(t, a.Constraints, b.Constraints)
+	assert.Equal(t, a.Role, b.Role)
+
+	// The rendered system prompt (what the provider sees) must also share
+	// everything up to the original question.
+	ra := core.GetPromptTemplate(a, req(""), core.AgentPlannerTypeReAct).Template
+	rb := core.GetPromptTemplate(b, req(""), core.AgentPlannerTypeReAct).Template
+	q := strings.Index(ra, "**Original user question:**")
+	require.Positive(t, q)
+	assert.Equal(t, ra[:q], rb[:q], "rendered prompt is identical up to the original question")
+	assert.Greater(t, q, len(ra)*3/4, "the per-request text sits in the last part of the rendered prompt")
+
+	same := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "find errors in checkout logs", OriginalQuery: "find errors in checkout logs"})
+	assert.NotContains(t, strings.Join(same.Instructions, "\n"), "**Original user question:**", "not repeated when it equals the query")
 }

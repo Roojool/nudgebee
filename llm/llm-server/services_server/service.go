@@ -587,8 +587,9 @@ func QueryTraces(ctx security.RequestContext, request core.ObservabilityTracesV3
 func decodeTraceQueryBody(jsonBody []byte, observabilityResp *core.ObservabilityTraceResponse) error {
 	// Three body shapes reach here, distinguished by the first non-space byte:
 	//   {"result":{columns,…}}          the free-form ClickHouse path (IncludeRawResult)
-	//   {"traces":[…],"suggestion":"…"} the validated path (ValidateRequest), where an empty
-	//                                   result carries the diagnosis of why it is empty
+	//   {"traces":[…],"suggestion":"…", the validated path (ValidateRequest), where an empty
+	//    "query":"…","provider":"…"}    result carries the diagnosis of why it is empty plus
+	//                                   the query that ran and the provider that answered
 	//   [ … ]                           the plain typed span array every other caller gets
 	// The two object shapes are decoded together rather than branched on includeRaw: a raw
 	// request whose provider returned no raw table falls through server-side to the typed path,
@@ -598,6 +599,8 @@ func decodeTraceQueryBody(jsonBody []byte, observabilityResp *core.Observability
 			Result     *core.ObservabilityTraceRawTable `json:"result"`
 			Traces     []core.ObservabilityTrace        `json:"traces"`
 			Suggestion string                           `json:"suggestion"`
+			Query      string                           `json:"query"`
+			Provider   string                           `json:"provider"`
 		}
 		if err := common.UnmarshalJson(jsonBody, &objResp); err != nil {
 			return err
@@ -605,6 +608,17 @@ func decodeTraceQueryBody(jsonBody []byte, observabilityResp *core.Observability
 		observabilityResp.Result = objResp.Result
 		observabilityResp.Traces = objResp.Traces
 		observabilityResp.Suggestion = objResp.Suggestion
+		// Carry the query/provider services-server actually executed into the metadata so the
+		// agent can report them on an empty result (#37406) — the canonical path sends both
+		// fields empty, so the request-seeded values below are placeholders. Guarded on
+		// non-empty: an older services-server, or a raw-table body, omits them and the seed
+		// (the requested provider) must survive. Mirrors the log path above.
+		if objResp.Query != "" {
+			observabilityResp.Metadata.Query = objResp.Query
+		}
+		if objResp.Provider != "" {
+			observabilityResp.Metadata.Provider = objResp.Provider
+		}
 		return nil
 	}
 

@@ -163,7 +163,8 @@ type AgenticAnalyzeRequest struct {
 	// Skills is a pre-rendered <skills> block of operator-authored skills mapped
 	// to the code agent. Resolved and forwarded by llm-server (which owns the
 	// skills DB); injected verbatim into the internal agent prompts.
-	Skills string `json:"skills,omitempty"`
+	Skills         string                   `json:"skills,omitempty"`
+	KnowledgeFiles []KnowledgeFileReference `json:"knowledge_files,omitempty"`
 
 	// PR followup fields — used to address CI failures and review comments on existing PRs
 	Followup bool   `json:"followup,omitempty"`
@@ -693,6 +694,9 @@ func (ah *AgenticAnalyzeHandler) resolveClients(req AgenticAnalyzeRequest, logge
 }
 
 func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req AgenticAnalyzeRequest) (*AgenticAnalyzeResponse, error) {
+	if len(req.KnowledgeFiles) > 0 {
+		req.Skills += NewFileHandler(ah.config).renderKnowledgeFiles(ctx, req.KnowledgeFiles)
+	}
 	// Normalize and validate request before processing
 	if err := ah.normalizeAndValidateRequest(&req); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
@@ -769,22 +773,39 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 			"url":  req.GitRepository.URL,
 		})
 	} else if req.GitRepository.URL != "" {
-		// Repository URL provided - create temp directory for agent-managed cloning
+		// Repository URL provided - reuse (or create) the workspace directory for
+		// this conversation. Keyed on ConversationId, not a per-request MkdirTemp
+		// suffix, so a followup turn in the same conversation (e.g. "raise pr?"
+		// after an earlier "show me the diff") lands in the same clone instead of
+		// starting a brand-new one from scratch — os.MkdirTemp guarantees a fresh
+		// random suffix every call, which meant a session's workspace was never
+		// actually reused, only re-derived at full cost each turn. Falls back to
+		// AnalysisID (unique per request) when there is no conversation to key on,
+		// to avoid two ID-less requests colliding on one directory.
+		sessionKey := req.ConversationId
+		if sessionKey == "" {
+			sessionKey = req.AnalysisID
+		}
 		sanitizedID := strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 				return r
 			}
 			return '_'
-		}, req.ConversationId)
-		tempDir, err := os.MkdirTemp("", fmt.Sprintf("code-analysis-%s-", sanitizedID))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create temporary directory: %w", err)
+		}, sessionKey)
+		tempDir := filepath.Join(os.TempDir(), fmt.Sprintf("code-analysis-%s", sanitizedID))
+		if err := os.MkdirAll(tempDir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to create session workspace directory: %w", err)
+		}
+		// MkdirAll leaves an existing workspace's permissions unchanged. Tighten
+		// it as well, since this directory can contain a private repository clone.
+		if err := os.Chmod(tempDir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to secure session workspace directory: %w", err)
 		}
 		repositoryPath = tempDir
 
 		logger.Log(common.EventAnalysisStart, "Repository URL provided - agents will handle cloning as needed", map[string]any{
-			"url":            req.GitRepository.URL,
-			"temp_workspace": repositoryPath,
+			"url":               req.GitRepository.URL,
+			"session_workspace": repositoryPath,
 		})
 	} else {
 		// No repository provided - this should be handled appropriately
@@ -799,13 +820,13 @@ func (ah *AgenticAnalyzeHandler) PerformAgenticAnalysis(ctx context.Context, req
 			return nil, fmt.Errorf("either repository URL or application logs must be provided for analysis")
 		}
 	}
-	if req.GitRepository.LocalPath == "" && repositoryPath != "" {
-		defer func() {
-			if err := os.RemoveAll(repositoryPath); err != nil {
-				logger.Log(common.EventAnalysisFailure, "Failed to clean analysis workspace", map[string]any{"path": repositoryPath, "error": err.Error()})
-			}
-		}()
-	}
+	// Deliberately not cleaned up here: repositoryPath is now the persistent
+	// per-conversation workspace (see above), and deleting it at the end of
+	// every single request defeated that persistence, forcing every followup
+	// turn to re-clone and re-derive its fix from scratch. Reclaimed instead by
+	// the age-based SweepOrphanedAnalysisWorkspaces sweep (startup + periodic
+	// ticker in cmd/main.go), which already tolerates an actively-reused
+	// workspace via its ModTime-based maxAge check.
 	// Log analysis start
 	logger.AnalysisStart(req.GitRepository.URL, len(req.Logs))
 

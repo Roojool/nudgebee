@@ -23,6 +23,7 @@ type specialistProviderTools struct {
 	gh   githubTokenSetter
 	glab gitlabTokenSetter
 	cli  githubTokenSetter
+	bg   githubTokenSetter // cli_background — a background command may itself invoke git/gh
 }
 
 // applySessionCredentials injects the session's provider token into the tools
@@ -56,5 +57,8 @@ func (p specialistProviderTools) applySessionCredentials(sessionCtx *session.Ses
 	}
 	if p.cli != nil {
 		p.cli.SetGitHubToken(token)
+	}
+	if p.bg != nil {
+		p.bg.SetGitHubToken(token)
 	}
 }

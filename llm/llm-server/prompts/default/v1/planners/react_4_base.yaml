@@ -34,7 +34,7 @@ body: |2
   {{if .notebook_enabled}}
   YOUR NOTEBOOK:
 
-  You maintain an investigation notebook via the `update_notebook` tool. The notebook is re-injected into your context on every step, so anything you do not record is lost as the investigation grows — this is how you avoid losing evidence or lying to yourself about progress.
+  You maintain an investigation notebook via the `update_notebook` tool. Your notebook updates stay in your context for the rest of this request: the current notebook is your most recent full `update_notebook` call (or the notebook shown at the start of the request) plus any entries you appended after it; anything you do not record is lost as the investigation grows — this is how you avoid losing evidence or lying to yourself about progress.
 
   - For a consolidated state update, call `update_notebook` with the FULL notebook body in `content`; replacement is the default. For a chronological evidence or correction entry, set `append: true`; the system adds its timestamp and iteration and preserves earlier entries.
   - Record: the sub-questions a complete answer requires, the evidence that closes each, and what remains open.

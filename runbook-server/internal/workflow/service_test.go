@@ -1958,6 +1958,65 @@ func TestAIOriginatedWritesCannotMoveTheOptIn(t *testing.T) {
 		assert.False(t, saved.AIInvocable)
 	})
 
+	// ai_auto_approve is the same kind of human grant and moves with ai_invocable
+	// through every one of the paths above.
+	t.Run("an AI edit keeps auto-approve but cannot grant it", func(t *testing.T) {
+		service, store := newService()
+		existing := optedInWorkflow("wf-ai-auto")
+		existing.AIAutoApprove = true
+		store.On("Find", mock.Anything, "test-tenant", "test-account", "wf-ai-auto").Return(existing, nil)
+
+		var saved model.Workflow
+		store.On("Update", mock.Anything, "test-tenant", "test-account", "wf-ai-auto", mock.Anything).
+			Return(nil).Run(func(args mock.Arguments) { saved = args.Get(4).(model.Workflow) })
+
+		_, err := service.UpdateWorkflow(aiRequestContext(true), "test-account", "wf-ai-auto", model.Workflow{
+			Name:       existing.Name,
+			Definition: aiDefinition(),
+		})
+		require.NoError(t, err)
+		assert.True(t, saved.AIAutoApprove, "AI edit must not revoke the human's auto-approve grant")
+
+		serviceGrant, storeGrant := newService()
+		notAuto := optedInWorkflow("wf-ai-auto-grant")
+		storeGrant.On("Find", mock.Anything, "test-tenant", "test-account", "wf-ai-auto-grant").Return(notAuto, nil)
+		var grantSaved model.Workflow
+		storeGrant.On("Update", mock.Anything, "test-tenant", "test-account", "wf-ai-auto-grant", mock.Anything).
+			Return(nil).Run(func(args mock.Arguments) { grantSaved = args.Get(4).(model.Workflow) })
+
+		_, err = serviceGrant.UpdateWorkflow(aiRequestContext(true), "test-account", "wf-ai-auto-grant", model.Workflow{
+			Name:          notAuto.Name,
+			AIAutoApprove: true, // the AI asking to skip its own confirmation
+			Definition:    aiDefinition(),
+		})
+		require.NoError(t, err)
+		assert.False(t, grantSaved.AIAutoApprove, "only a human may allow unattended runs")
+	})
+
+	// Losing the invocation grant must take auto-approve with it, or the row
+	// keeps an unattended-run opt-in waiting for the next time someone ticks
+	// ai_invocable.
+	t.Run("an AI edit that drops the opt-in drops auto-approve too", func(t *testing.T) {
+		service, store := newService()
+		existing := optedInWorkflow("wf-ai-auto-strip")
+		existing.AIAutoApprove = true
+		store.On("Find", mock.Anything, "test-tenant", "test-account", "wf-ai-auto-strip").Return(existing, nil)
+
+		var saved model.Workflow
+		store.On("Update", mock.Anything, "test-tenant", "test-account", "wf-ai-auto-strip", mock.Anything).
+			Return(nil).Run(func(args mock.Arguments) { saved = args.Get(4).(model.Workflow) })
+
+		stripped := aiDefinition()
+		stripped.LLMDescription = ""
+		_, err := service.UpdateWorkflow(aiRequestContext(true), "test-account", "wf-ai-auto-strip", model.Workflow{
+			Name:       existing.Name,
+			Definition: stripped,
+		})
+		require.NoError(t, err)
+		assert.False(t, saved.AIInvocable)
+		assert.False(t, saved.AIAutoApprove)
+	})
+
 	// The UI sends ai_invocable on every save including false — that is how the
 	// toggle is turned off, and a human turning it off must still work.
 	t.Run("a human save still owns the toggle", func(t *testing.T) {

@@ -276,7 +276,9 @@ func TestBuildKnowledgeCandidateMenuIsCompactAndLoadable(t *testing.T) {
 		},
 	}}
 
-	menu := buildKnowledgeCandidateMenu(ctx, request, docs, nil)
+	var selected []toolcore.KnowledgeCandidate
+	menu := buildKnowledgeCandidateMenuCollect(ctx, request, docs, nil, &selected)
+	require.Len(t, selected, 1)
 	assert.Contains(t, menu, "<skill-lists>")
 	assert.Contains(t, menu, "source: servicenow")
 	assert.Contains(t, menu, "id: knowledge:")
@@ -579,15 +581,15 @@ func TestKBPrestepTimeoutConfigurable(t *testing.T) {
 	prev := config.Config.LlmServerKBPrestepTimeoutSeconds
 	defer func() { config.Config.LlmServerKBPrestepTimeoutSeconds = prev }()
 
-	config.Config.LlmServerKBPrestepTimeoutSeconds = 5
-	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
+	config.Config.LlmServerKBPrestepTimeoutSeconds = 7
+	assert.Equal(t, 7*time.Second, kbPrestepTimeout())
 
 	// Unset / invalid values fall back to the default instead of a zero
 	// timeout (which would make every retrieval fail open instantly).
 	config.Config.LlmServerKBPrestepTimeoutSeconds = 0
-	assert.Equal(t, 3*time.Second, kbPrestepTimeout())
+	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
 	config.Config.LlmServerKBPrestepTimeoutSeconds = -3
-	assert.Equal(t, 3*time.Second, kbPrestepTimeout())
+	assert.Equal(t, 5*time.Second, kbPrestepTimeout())
 }
 
 // TestClassifyCollection pins the collection-name contract rag-server reports on
@@ -636,4 +638,15 @@ func TestFormatRetrievedKBBlockPurpose(t *testing.T) {
 			require.Contains(t, got, "Unique body")
 		})
 	}
+}
+
+func TestKnowledgeDiscoveryDisabledSkipsAgentAndServices(t *testing.T) {
+	for _, policy := range []KnowledgePolicy{KnowledgeDisabled, KnowledgeLLMOnly} {
+		// No services or agent are needed when automatic discovery is disabled.
+		require.Empty(t, DiscoverKnowledgeCandidates(nil, NBAgentRequest{KnowledgePolicy: policy}, nil))
+	}
+}
+
+func TestKnowledgeDiscoveryMissingAgentSkipsServices(t *testing.T) {
+	require.Empty(t, DiscoverKnowledgeCandidates(nil, NBAgentRequest{KnowledgePolicy: KnowledgeAlways}, nil))
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"nudgebee/llm/config"
 	nbprompts "nudgebee/llm/prompts"
 	"nudgebee/llm/security"
 
@@ -18,7 +19,7 @@ import (
 const claimCaptureVersion = "1"
 const claimShadowCritiqueType = "claim_shadow"
 
-// ClaimCritiqueAuditRecord is a shadow observation, never a planner decision.
+// ClaimCritiqueAuditRecord retains the independent audit and optional feedback selection.
 // A started row survives a crash or final-write failure, exposing missing data.
 type ClaimCritiqueAuditRecord struct {
 	AgentName, Input, Answer                      string
@@ -32,6 +33,10 @@ type ClaimCritiqueAuditRecord struct {
 }
 
 type claimCaptureDetail struct {
+	FeedbackEnabled   bool            `json:"feedback_enabled"`
+	FeedbackSelected  bool            `json:"feedback_selected"`
+	EffectiveDecision string          `json:"effective_decision,omitempty"`
+	EffectiveFeedback string          `json:"effective_feedback,omitempty"`
 	ErrorStage        string          `json:"error_stage,omitempty"`
 	ErrorDetail       string          `json:"error_detail,omitempty"`
 	Version           string          `json:"version"`
@@ -187,4 +192,21 @@ func (chat *ConversationDao) SaveClaimCritiqueAudit(ctx context.Context, record 
 		return fmt.Errorf("save claim capture: %w", err)
 	}
 	return nil
+}
+
+// Record the terminal candidate without calling a critic beyond the existing
+// budget. A budget stop is deliberately not an acceptance or a claim verdict.
+func captureClaimBudgetStop(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) {
+	if !config.Config.ClaimCritiqueFeedbackEnabled || ctx == nil ||
+		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId) {
+		return
+	}
+	record := newClaimCapture(ctx, request, planner, agentName, "unknown", "", input, answer, notebook, steps)
+	record.Status = "budget_exhausted"
+	record.Completed = true
+	record.Detail.FeedbackEnabled = true
+	record.Detail.EffectiveDecision = "budget_exhausted"
+	if err := persistClaimCapture(ctx, record); err != nil {
+		ctx.GetLogger().Error("claim critique budget outcome capture failed", "audit_id", record.ID)
+	}
 }

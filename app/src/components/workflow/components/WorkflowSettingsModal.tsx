@@ -44,6 +44,7 @@ const defaultSettings: WorkflowSettings = {
   status: 'ACTIVE',
   description: '',
   aiInvocable: false,
+  aiAutoApprove: false,
   llmDescription: '',
 };
 
@@ -282,11 +283,20 @@ const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
 
   // Never leave the flag on once its preconditions stop holding — otherwise the
   // toggle would read as enabled while the server refuses every run.
+  //
+  // Auto-approve rides along: it modifies the invocation grant and the server
+  // rejects the pair where only auto-approve is set, so it can never outlive it.
   useEffect(() => {
     if (aiInvocableBlockedReason && settings.aiInvocable) {
-      setSettings((prev) => ({ ...prev, aiInvocable: false }));
+      setSettings((prev) => ({ ...prev, aiInvocable: false, aiAutoApprove: false }));
     }
   }, [aiInvocableBlockedReason, settings.aiInvocable]);
+
+  useEffect(() => {
+    if (!settings.aiInvocable && settings.aiAutoApprove) {
+      setSettings((prev) => ({ ...prev, aiAutoApprove: false }));
+    }
+  }, [settings.aiInvocable, settings.aiAutoApprove]);
   const [newInput, setNewInput] = useState<WorkflowInput>({ ...defaultInput });
   const [outputsJson, setOutputsJson] = useState('');
   const [newTag, setNewTag] = useState('');
@@ -1236,6 +1246,28 @@ const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
             />
 
             <FormField
+              label='Run without asking the user to confirm'
+              description={
+                settings.aiInvocable
+                  ? 'Off by default: the assistant proposes the automation and waits for the user to say yes. Turn this on and it runs straight away, still using that user\u2019s own permissions \u2014 so only for automations that are safe to run unattended.'
+                  : 'Allow the assistant to run this automation first.'
+              }
+              value={settings.aiAutoApprove}
+              onChange={(e: any) => handleSettingChange('aiAutoApprove', Boolean(e?.target?.checked))}
+              fieldType='checkbox'
+              disabled={!settings.aiInvocable}
+              placeholder=''
+              minWidth='100%'
+              maxRows={1}
+              minRows={1}
+              maxLength={0}
+              limitTags={0}
+              options={[]}
+              onSelect={() => {}}
+              customRender={null}
+            />
+
+            <FormField
               label='Description for the AI'
               description='What this automation does and, more importantly, WHEN to use it. This is how the assistant decides whether it is the right one — e.g. "Restarts the payment consumers and drains the stuck queue. Use when payment-service pods are crashlooping with RabbitMQ timeouts."'
               value={settings.llmDescription}
@@ -1253,8 +1285,8 @@ const WorkflowSettingsModal: React.FC<WorkflowSettingsModalProps> = ({
             />
 
             <Typography variant='body2' sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[700] }}>
-              The description is published with the automation, so the assistant sees it after your next publish. Turning the toggle off takes effect
-              immediately.
+              The description is published with the automation, so the assistant sees it after your next publish. Turning either toggle off takes
+              effect immediately.
             </Typography>
           </FormCard>
         )}

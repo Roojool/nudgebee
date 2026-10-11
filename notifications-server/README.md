@@ -226,15 +226,12 @@ Configure the Google Cloud project's OAuth redirect to `${BASE_URL}/api/integrat
 
 ## Branding
 
-Email templates and bot replies pull their look and feel from a theme file. The bundled default ships at `notifications_server/branding/default/theme.json`.
+Branding is configured in the database, in the same `tenant_branding_override` table the web app uses. This service has no request host, so it applies the row whose host matches its **`BASE_URL`** hostname, fetched from services-server (`GET /v1/branding/overrides`, using `SERVICE_API_SERVER_URL` and `ACTION_API_SERVER_TOKEN`) at startup and every 60 seconds ([`configs/branding_overrides.py`](notifications_server/configs/branding_overrides.py)).
 
-To customize for your deployment, mount your own theme file and point the server at it:
+- The row's `title` names the product in every notification (email subject and footer, Slack, Teams, Discord, Google Chat).
+- The row's optional `email` block (`logoUrl`, `supportEmail`, `primaryColor`, `headerBgColor`, `footerBgColor`, `footerLinkColor`, `address`, `copyrightStartYear`) restyles email. `logoUrl` is root-relative and made absolute with `BASE_URL`.
 
-```bash
-TENANT_BRANDING_FILE=/etc/nudgebee/theme.json
-```
-
-The schema is documented inline in [`branding/default/theme.json`](notifications_server/branding/default/theme.json). The `email` block (logo, support email, colors, address, copyright year) drives email rendering; `colorTokens` and `theme.palette` are shared with the frontend's theme.
+The bundled [`branding/default/theme.json`](notifications_server/branding/default/theme.json) is the fallback for anything the row doesn't set, for a missing `BASE_URL`, and for messages sent before the first successful fetch. A failed refresh keeps the last values it applied. `TENANT_BRANDING_FILE` is no longer read.
 
 ## RabbitMQ Message Format
 

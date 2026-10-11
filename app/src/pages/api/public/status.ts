@@ -22,6 +22,12 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 // This endpoint also runs inside the cluster it reports on, so it cannot
 // observe its own total outage. A prober outside the cluster should treat this
 // as one input, not as the source of truth.
+//
+// `?component=a,b` narrows the payload to those components and maps the
+// narrowed rollup onto the HTTP status (200 healthy, 503 otherwise), so an
+// external URL prober that cannot read JSON (Upptime, a load balancer) can
+// watch one product area at a time. Unknown ids are a 404, so a typo in the
+// prober's config reads as misconfiguration rather than as a healthy service.
 
 export type ComponentStatus = 'operational' | 'degraded' | 'outage' | 'maintenance' | 'unknown';
 
@@ -304,6 +310,48 @@ function getStatus(): Promise<StatusPayload> {
   return inFlight;
 }
 
+/** Parse `?component=a,b` (repeated params allowed) into a de-duplicated id list. */
+export function parseComponentQuery(raw: string | string[] | undefined): string[] {
+  const parts = (Array.isArray(raw) ? raw : raw ? [raw] : []).flatMap((v) => v.split(','));
+  return Array.from(new Set(parts.map((p) => p.trim()).filter(Boolean)));
+}
+
+/**
+ * Narrow a payload to the requested component ids. The rollup is recomputed
+ * over the subset only, so an outage elsewhere does not colour the answer.
+ * Returns the ids that matched nothing so the caller can refuse them.
+ */
+export function selectComponents(payload: StatusPayload, ids: string[]): { payload: StatusPayload; missing: string[] } {
+  const byId = new Map(payload.components.map((c) => [c.id, c]));
+  const missing = ids.filter((id) => !byId.has(id));
+  const components = ids.flatMap((id) => byId.get(id) ?? []);
+  const { notice, ...rest } = payload;
+  const narrowed: StatusPayload = { ...rest, status: rollup(components), components };
+
+  // A notice scoped to specific components only belongs in the answer when at
+  // least one of them was asked for; a system-wide notice (no components)
+  // always applies. Otherwise a healthy subset would carry someone else's banner.
+  if (notice) {
+    const scope = notice.components ?? [];
+    if (scope.length === 0) {
+      narrowed.notice = notice;
+    } else {
+      const relevant = scope.filter((id) => ids.includes(id));
+      if (relevant.length > 0) narrowed.notice = { ...notice, components: relevant };
+    }
+  }
+  return { payload: narrowed, missing };
+}
+
+/**
+ * HTTP code a status maps to when a prober only reads the code. `maintenance`
+ * is planned, so it is not an outage; `unknown` is "not being checked", which a
+ * prober pointed at this environment should hear about rather than see as green.
+ */
+export function httpStatusFor(status: ComponentStatus): 200 | 503 {
+  return status === 'operational' || status === 'maintenance' ? 200 : 503;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
@@ -311,7 +359,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
-  const payload = await getStatus();
+  const full = await getStatus();
   res.setHeader('Cache-Control', `public, max-age=${CACHE_TTL_MS / 1000}, s-maxage=${CACHE_TTL_MS / 1000}`);
-  res.status(200).json(payload);
+
+  if (req.query.component === undefined) {
+    res.status(200).json(full);
+    return;
+  }
+
+  // Present but empty (`?component=`, a templated URL whose variable did not
+  // resolve) is a prober misconfiguration; answering the full payload would
+  // read as "everything is fine".
+  const ids = parseComponentQuery(req.query.component);
+  if (ids.length === 0) {
+    res.status(400).json({ error: 'component is empty' });
+    return;
+  }
+
+  const { payload, missing } = selectComponents(full, ids);
+  if (missing.length > 0) {
+    res.status(404).json({ error: 'unknown component', unknown: missing });
+    return;
+  }
+  res.status(httpStatusFor(payload.status)).json(payload);
 }

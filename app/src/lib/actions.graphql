@@ -443,6 +443,24 @@ type Mutation {
 }
 
 type Mutation {
+  ai_delete_conversation_queued_message(
+    request: AiDeleteQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
+  ai_update_conversation_queued_message(
+    request: AiUpdateQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
+  ai_execute_queued_message(
+    request: AiForceExecuteQueuedMessageRequest!
+  ): AiQueuedMessageResponse
+}
+
+type Mutation {
   ai_update_function(
     account_id: String!
     function_id: String!
@@ -1928,6 +1946,13 @@ type Query {
     column_transformations: [QueryColumnTransformationRequest!]
     group_by: [String!]
   ): SpendGroupingsResponse
+}
+
+type Query {
+  spend_summary_windows_v2(
+    where: SpendGroupingsWhereRequest
+    columns: [String]
+  ): SpendSummaryWindowsResponse
 }
 
 type Mutation {
@@ -4333,6 +4358,25 @@ input DeleteLlmConversationByIdRequest {
   conversation_id: uuid!
 }
 
+input AiDeleteQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+}
+
+input AiUpdateQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+  message: String!
+}
+
+input AiForceExecuteQueuedMessageRequest {
+  account_id: String!
+  conversation_id: String!
+  message_id: String!
+}
+
 input AiGetConversationV3Request {
   account_id: uuid!
   conversation_id: uuid
@@ -4570,6 +4614,7 @@ input FetchLogLabelRequest {
   end_time: Float
   fetch_index: Boolean
   integration_config_values: [IntegrationConfigValueInput]
+  integration_id: String
 }
 
 input FetchLogLabelValuesRequest {
@@ -5430,6 +5475,7 @@ input ListAIReferencesRequest {
 }
 
 input AITriggerInvestigationRequest {
+  queue_only: Boolean
   account_id: String!
   query: String!
   user_id: String
@@ -6625,6 +6671,25 @@ type SpendsRowResponse {
 
 type SpendGroupingsResponse {
   rows: [SpendGroupingsRowResponse]
+}
+
+type SpendSummaryWindowsResponse {
+  rows: [SpendSummaryWindowsRowResponse]
+}
+
+type SpendSummaryWindowsRowResponse {
+  tenant_id: String
+  account_id: String
+  currency_type: String
+  cm_net: Float
+  cm_gross: Float
+  cm_credits: Float
+  lm_net: Float
+  lm_gross: Float
+  lm_credits: Float
+  yr_net: Float
+  yr_gross: Float
+  yr_credits: Float
 }
 
 type SpendGroupingsRowResponse {
@@ -7833,6 +7898,11 @@ type DeleteLLMConversationResponse {
 
 type DeleteResponse {
   success: Boolean!
+}
+
+type AiQueuedMessageResponse {
+  data: jsonb
+  errors: jsonb
 }
 
 type DeleteLlmConversationByIdResponse {

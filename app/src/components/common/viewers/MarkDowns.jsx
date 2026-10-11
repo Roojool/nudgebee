@@ -2,7 +2,7 @@ import { Box } from '@mui/material';
 import { useRef, useEffect, useState, useMemo } from 'react';
 import PropTypes from 'prop-types';
 import dynamic from 'next/dynamic';
-import { marked } from 'marked';
+import { marked, Marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { withErrorBoundary, reportHandledError } from '@shared/ErrorBoundary';
 import { ds } from 'src/utils/colors';
@@ -96,22 +96,34 @@ const createMarkdownRenderer = (chartCodes) => {
   return renderer;
 };
 
-// GFM strikethrough in marked also matches a single tilde pair, so an LLM writing
-// "~1.0%" and "~0.69%" for approximate values in one paragraph gets everything
-// between them struck through (seen on the Investigation tab of the Investigation
-// Analysis card). Escape a lone tilde so it renders as the character the author
-// meant; "~~real strikethrough~~" is left alone. Code spans and fenced blocks are
-// skipped — a backslash inside them would be shown verbatim.
-export function escapeLoneTildes(text) {
-  if (!text || !text.includes('~')) {
-    return text || '';
-  }
-  // Odd-indexed segments are fenced blocks or inline code spans.
-  return text
-    .split(/(```[\s\S]*?```|`[^`\n]*`)/g)
-    .map((segment, index) => (index % 2 === 1 ? segment : segment.replace(/(?<!~)~(?!~)/g, '\\~')))
-    .join('');
-}
+// GFM strikethrough in marked also matches a SINGLE tilde pair, so an LLM writing
+// "~5.67 cores (peak ~40.97)" for approximate values gets everything between the two
+// tildes struck through (seen on the Investigation tab of the Investigation Analysis
+// card, and on Ask Nudgebee answers).
+//
+// This is handled in the tokenizer rather than by escaping the source text, because
+// escaping is not idempotent: callers that pre-escaped as well ("~" -> "\~") produced
+// "\\~", which marked renders as a literal backslash followed by a LIVE tilde — the
+// strikethrough came back and a stray "\" appeared with it. A tokenizer rule cannot
+// double-apply, and it leaves code spans and fenced blocks alone for free.
+const doubleTildeOnlyStrikethrough = {
+  tokenizer: {
+    del(src) {
+      const strike = /^~~(?=\S)([\s\S]*?\S)~~/.exec(src);
+      if (strike) {
+        return { type: 'del', raw: strike[0], text: strike[1], tokens: this.lexer.inlineTokens(strike[1]) };
+      }
+      // A lone tilde is the character the author meant: emit it as text so the
+      // built-in single-tilde `del` rule never gets to look at it.
+      return src.startsWith('~') ? { type: 'text', raw: '~', text: '~' } : false;
+    },
+  },
+};
+
+// A private parser instance: `marked.use()` on the module-level singleton would
+// change markdown parsing for any other importer too.
+const markedParser = new Marked();
+markedParser.use(doubleTildeOnlyStrikethrough);
 
 const MARKED_OPTIONS = {
   breaks: true,
@@ -404,7 +416,7 @@ function MarkDowns({ data, sx, allowExecutable, canRunCode = true, onLinkClick }
       .split('\n')
       .map((line) => line.trim()) // Removes leading spaces/tabs from every line
       .join('\n');
-    const convertedData = marked(escapeLoneTildes(cleanedData), { ...MARKED_OPTIONS, renderer: createMarkdownRenderer(codes) });
+    const convertedData = markedParser.parse(cleanedData, { ...MARKED_OPTIONS, renderer: createMarkdownRenderer(codes) });
     const sanitized = DOMPurify.sanitize(convertedData, {
       ADD_TAGS: ['div', 'svg', 'path', 'g', 'defs', 'marker', 'img'],
       ADD_ATTR: [

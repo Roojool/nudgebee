@@ -258,7 +258,11 @@ interface AutoSuggestTextareaProps {
   buttonProperties: {
     show: boolean;
     enable: boolean;
-    onClick: (e: string, config?: { llm_provider?: string; llm_model_name?: string; llm_config_source?: string }, images?: OutgoingImage[]) => void;
+    onClick: (
+      e: string,
+      config?: { llm_provider?: string; llm_model_name?: string; llm_config_source?: string },
+      images?: OutgoingImage[]
+    ) => void | boolean | Promise<void | boolean>;
     onClickStop: () => void;
   };
   chatScreen?: boolean;
@@ -278,6 +282,9 @@ interface AutoSuggestTextareaProps {
   onConfigClear?: () => void;
   popupInitial?: boolean;
   imageSupport?: ImageSupport;
+  imageDraft?: { id: string; text?: string; images: OutgoingImage[] };
+  onDraftChange?: (hasDraft: boolean) => void;
+  onDraftSubmitted?: (id: string) => void;
   externalAgentsLoading?: boolean;
   submitOnModEnter?: boolean;
 }
@@ -965,6 +972,9 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
     onConfigClear,
     popupInitial = false,
     imageSupport,
+    imageDraft,
+    onDraftSubmitted,
+    onDraftChange,
     externalAgentsLoading = false,
     submitOnModEnter = false,
   },
@@ -985,6 +995,18 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
   const agentButtonRef = useRef<HTMLDivElement | null>(null);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previousImageDraftRef = useRef(imageDraft);
+  useEffect(() => {
+    if (!imageDraft && previousImageDraftRef.current) {
+      const previousId = previousImageDraftRef.current.id;
+      setAttachedImages((current) => current.filter((image) => !image.id.startsWith(`${previousId}-`)));
+    }
+    previousImageDraftRef.current = imageDraft;
+    if (imageDraft) {
+      if (imageDraft.text !== undefined) setText(imageDraft.text);
+      setAttachedImages(imageDraft.images.map((image, index) => ({ ...image, id: `${imageDraft.id}-${index}`, name: `Attachment ${index + 1}` })));
+    }
+  }, [imageDraft]);
 
   const imagesEnabled = !!imageSupport?.enabled;
   const allowedMimeTypes = imageSupport?.allowedMimeTypes ?? [];
@@ -1047,18 +1069,34 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
 
   // Single send path used by every submit affordance so text + image clearing
   // and the outgoing payload stay consistent.
-  const handleSend = () => {
-    const config = selectedModel
-      ? {
-          llm_provider: selectedModel.provider,
-          llm_model_name: selectedModel.model,
-          ...(selectedModel.configSource && { llm_config_source: selectedModel.configSource }),
-        }
-      : undefined;
-    const images: OutgoingImage[] = attachedImages.map(({ data, mime_type }) => ({ data, mime_type }));
-    buttonProperties.onClick(text, config, images.length ? images : undefined);
-    setText('');
-    setAttachedImages([]);
+  const sendingRef = useRef(false);
+  const [isSending, setIsSending] = useState(false);
+  useEffect(() => {
+    onDraftChange?.(Boolean(text.trim() || attachedImages.length));
+  }, [text, attachedImages, onDraftChange]);
+
+  const handleSend = async () => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    setIsSending(true);
+    try {
+      const config = selectedModel
+        ? {
+            llm_provider: selectedModel.provider,
+            llm_model_name: selectedModel.model,
+            ...(selectedModel.configSource && { llm_config_source: selectedModel.configSource }),
+          }
+        : undefined;
+      const images: OutgoingImage[] = attachedImages.map(({ data, mime_type }) => ({ data, mime_type }));
+      const sent = await buttonProperties.onClick(text, config, images.length ? images : undefined);
+      if (sent === false) return;
+      if (imageDraft) onDraftSubmitted?.(imageDraft.id);
+      setText((current) => (current === text ? '' : current));
+      setAttachedImages((current) => current.filter((image) => !attachedImages.some((sentImage) => sentImage.id === image.id)));
+    } finally {
+      sendingRef.current = false;
+      setIsSending(false);
+    }
   };
 
   const buildFunctionCall = (selectedFunction: { name: string; variables?: any; variable_defaults?: any }) => {
@@ -1171,7 +1209,8 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (submitOnModEnter && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      if (!(isFollowUp && allowStop) && text.trim() && buttonProperties.enable) {
+      const isStop = isFollowUp && allowStop && !text.trim();
+      if (!isStop && text.trim() && buttonProperties.enable) {
         handleSend();
       }
       return;
@@ -1438,21 +1477,28 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
             </>
           )}
           <Box sx={{ width: '1px', height: ds.space[5], backgroundColor: 'var(--ds-brand-200)', mx: 'var(--ds-space-3)' }} />
-          <Button
-            size='md'
-            onClick={() => {
-              if (isFollowUp && allowStop) {
-                buttonProperties.onClickStop();
-              } else {
-                handleSend();
-              }
-            }}
-            icon={
-              isFollowUp && allowStop ? <StopIcon sx={{ color: 'white' }} /> : <SafeIcon src={ArrowRightWhiteIcon} alt='' width={18} height={18} />
-            }
-            aria-label={isFollowUp && allowStop ? 'Stop' : 'Send'}
-            disabled={!(isFollowUp && allowStop) && (!text || !buttonProperties.enable)}
-          />
+          {isFollowUp && allowStop && text.trim() && (
+            <Button size='md' onClick={() => buttonProperties.onClickStop?.()} icon={<StopIcon sx={{ color: 'white' }} />} aria-label='Stop' />
+          )}
+          {(() => {
+            const isStop = isFollowUp && allowStop && !text.trim();
+            return (
+              <Button
+                size='md'
+                onClick={() => {
+                  if (isStop) {
+                    buttonProperties.onClickStop?.();
+                  } else {
+                    handleSend();
+                  }
+                }}
+                icon={isStop ? <StopIcon sx={{ color: 'white' }} /> : <SafeIcon src={ArrowRightWhiteIcon} alt='' width={18} height={18} />}
+                aria-label={isStop ? 'Stop' : isSending ? 'Sending' : 'Send'}
+                loading={!isStop && isSending}
+                disabled={!isStop && (isSending || !text || !buttonProperties.enable)}
+              />
+            );
+          })()}
         </Box>
       )}
 
@@ -1662,22 +1708,29 @@ const AutoSuggestTextarea = React.forwardRef<HTMLTextAreaElement, AutoSuggestTex
             </Typography>
           )}
           {/* Submit / Stop button */}
-          <Button
-            id='set-config-btn'
-            size='md'
-            onClick={() => {
-              if (isFollowUp && allowStop) {
-                buttonProperties.onClickStop();
-              } else {
-                handleSend();
-              }
-            }}
-            icon={
-              isFollowUp && allowStop ? <StopIcon sx={{ color: 'white' }} /> : <SafeIcon src={ArrowRightWhiteIcon} alt='' width={18} height={18} />
-            }
-            aria-label={isFollowUp && allowStop ? 'Stop' : 'Send'}
-            disabled={!(isFollowUp && allowStop) && (!text || !buttonProperties.enable)}
-          />
+          {isFollowUp && allowStop && text.trim() && (
+            <Button size='md' onClick={() => buttonProperties.onClickStop?.()} icon={<StopIcon sx={{ color: 'white' }} />} aria-label='Stop' />
+          )}
+          {(() => {
+            const isStop = isFollowUp && allowStop && !text.trim();
+            return (
+              <Button
+                id='set-config-btn'
+                size='md'
+                onClick={() => {
+                  if (isStop) {
+                    buttonProperties.onClickStop?.();
+                  } else {
+                    handleSend();
+                  }
+                }}
+                icon={isStop ? <StopIcon sx={{ color: 'white' }} /> : <SafeIcon src={ArrowRightWhiteIcon} alt='' width={18} height={18} />}
+                aria-label={isStop ? 'Stop' : isSending ? 'Sending' : 'Send'}
+                loading={!isStop && isSending}
+                disabled={!isStop && (isSending || !text || !buttonProperties.enable)}
+              />
+            );
+          })()}
         </Box>
       ) : null}
     </Box>

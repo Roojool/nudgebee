@@ -32,6 +32,7 @@ import apiAutoPlaybook from '@api1/autoPlaybook';
 import apiDashboard from '@api1/home';
 import apiNotifications from '@api1/notification';
 import CustomSwitch from '@shared/CustomSwitch';
+import apiIntegrations from '@api1/integrations';
 import { styles } from './NotificationPopupStyles';
 import apiAccount from '@api1/account';
 import { Button as DsButton } from '@ui/Button';
@@ -130,6 +131,11 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const [emailToggle, setEmailToggle] = useState<boolean>(false);
   const [msChannelList, setMsChannelList] = useState([]);
   const [installationId, setInstallationId] = useState<any>({});
+  // One webhook target per rule (notification_rule_mappings is UNIQUE per
+  // rule+platform), so a single-select.
+  const [msWebhookTargets, setMsWebhookTargets] = useState<Option[]>([]);
+  const [selectedMsWebhookTarget, setSelectedMsWebhookTarget] = useState<string>('');
+  const [msWebhookToggle, setMsWebhookToggle] = useState<boolean>(false);
   const [loadingChannelList, setLoadingChannelList] = useState({
     slack: false,
     ms_teams: false,
@@ -153,6 +159,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
   const visibleConfigured = [
     basedOnValue !== 'daily_recap' && slackToggle && 'Slack',
     basedOnValue !== 'daily_recap' && teamsToggle && 'MS Teams',
+    basedOnValue !== 'daily_recap' && msWebhookToggle && 'MS Teams Webhook',
     basedOnValue !== 'daily_recap' && gChatToggle && 'Google Chat',
     basedOnValue !== 'daily_recap' && discordToggle && 'Discord',
     basedOnValue === 'daily_recap' && emailToggle && 'Email',
@@ -171,6 +178,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     teamsToggle: false,
     msTeamId: '',
     msChannelId: '',
+    msWebhookToggle: false,
+    selectedMsWebhookTarget: '',
     gChatToggle: false,
     selectedGChatChannel: '',
     discordToggle: false,
@@ -188,6 +197,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setTeamsToggle(defaultFormState.teamsToggle);
     setMSTeamId(defaultFormState.msTeamId);
     setMSChannelId(defaultFormState.msChannelId);
+    setMsWebhookToggle(defaultFormState.msWebhookToggle);
+    setSelectedMsWebhookTarget(defaultFormState.selectedMsWebhookTarget);
     setGChatToggle(defaultFormState.gChatToggle);
     setSelectedGChatChannel(defaultFormState.selectedGChatChannel);
     setDiscordToggle(defaultFormState.discordToggle);
@@ -208,6 +219,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
           teamsToggle,
           msTeamId,
           msChannelId,
+          msWebhookToggle,
+          selectedMsWebhookTarget,
           gChatToggle,
           selectedGChatChannel,
           discordToggle,
@@ -230,6 +243,8 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setTeamsToggle(oldState.teamsToggle);
     setMSTeamId(oldState.msTeamId);
     setMSChannelId(oldState.msChannelId);
+    setMsWebhookToggle(oldState.msWebhookToggle);
+    setSelectedMsWebhookTarget(oldState.selectedMsWebhookTarget);
     setGChatToggle(oldState.gChatToggle);
     setSelectedGChatChannel(oldState.selectedGChatChannel);
     setDiscordToggle(oldState.discordToggle);
@@ -622,6 +637,18 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       });
   }, [open]);
 
+  // Webhook targets aren't MessagingPlatform installs, so fetch them separately.
+  useEffect(() => {
+    if (!open) return;
+    apiIntegrations
+      .listIntegrations({ type: 'ms_teams_webhook', limit: 200 })
+      .then((res: any) => {
+        const rows = res?.data?.data?.integrations_list?.rows || [];
+        setMsWebhookTargets(rows.filter((r: any) => r.status !== 'disabled').map((r: any) => ({ label: r.name, value: r.id })));
+      })
+      .catch(() => setMsWebhookTargets([]));
+  }, [open]);
+
   const fetchCluster = (notificationRuleObject: any) => {
     getClustersData();
     if (!notificationRuleObject || Object.keys(notificationRuleObject).length === 0) {
@@ -698,6 +725,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     setMSTeamId('');
     setSlackToggle(false);
     setTeamsToggle(false);
+    setMsWebhookToggle(false);
+    setSelectedMsWebhookTarget('');
+    setMsWebhookTargets([]);
     setGChatToggle(false);
     setDiscordToggle(false);
     setEmailToggle(false);
@@ -738,6 +768,9 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         setMSTeamId(item.channels.team_id);
         setMSChannelId(item.channels.channels[0].id);
         setTeamsToggle(true);
+      } else if (item.platform === 'ms_teams_webhook' && item.channels?.webhook_target_id) {
+        setSelectedMsWebhookTarget(item.channels.webhook_target_id);
+        setMsWebhookToggle(true);
       }
       if (item.channels.id && item.platform == 'google_chat') {
         setSelectedGChatChannel(item.channels.id);
@@ -781,7 +814,7 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (!isValidString(notificationName)) {
       error.notificationName = 'Rule name must start with letter or number and can include spaces, underscores, and hyphens.';
     }
-    if (!suppressed && !slackToggle && !teamsToggle && !gChatToggle && !discordToggle && !emailToggle) {
+    if (!suppressed && !slackToggle && !teamsToggle && !msWebhookToggle && !gChatToggle && !discordToggle && !emailToggle) {
       error.general = 'Please enable at least one notification platform or email';
     }
 
@@ -793,6 +826,11 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
     if (teamsToggle && (!msTeamId || !msChannelId)) {
       error.msTeams = 'MS Teams team and channel must be selected';
       snackbar.error('MS Teams team and channel must be selected');
+    }
+
+    if (msWebhookToggle && !selectedMsWebhookTarget) {
+      error.msWebhook = 'Select an MS Teams webhook target';
+      snackbar.error('Select an MS Teams webhook target');
     }
 
     if (gChatToggle && !selectedGChatChannel) {
@@ -953,6 +991,21 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
         });
       }
     }
+    // Target id goes in the channels JSON (no platform_installation_id FK for
+    // integration-backed targets); notifications-server routes on that id.
+    if (selectedMsWebhookTarget && msWebhookToggle && !suppressed) {
+      const target = msWebhookTargets.find((item: any) => item.value === selectedMsWebhookTarget);
+      if (!target) {
+        snackbar.warning('MS Teams webhook target is no longer available and will be removed from this rule.');
+        setMsWebhookToggle(false);
+        setSelectedMsWebhookTarget('');
+      } else {
+        queryParams.mappings.push({
+          channels: { webhook_target_id: target.value, name: target.label },
+          platform: 'ms_teams_webhook',
+        });
+      }
+    }
     // email mapping object
     if ((email || selectedExclusionEmails.length > 0) && emailToggle && !suppressed) {
       const emailChannels = {
@@ -1086,6 +1139,16 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
       });
     }
   }, [msTeamId, msChannelId, teamsToggle, errors.msTeams]);
+
+  useEffect(() => {
+    if (errors.msWebhook && (!msWebhookToggle || selectedMsWebhookTarget)) {
+      setErrors((prev: any) => {
+        const newErrors = { ...prev };
+        delete newErrors.msWebhook;
+        return newErrors;
+      });
+    }
+  }, [selectedMsWebhookTarget, msWebhookToggle, errors.msWebhook]);
 
   useEffect(() => {
     if (errors.gChat && (!gChatToggle || selectedGChatChannel)) {
@@ -1588,6 +1651,50 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
               </Box>
             )}
 
+            {/* MS Teams Webhook Badge — hidden for daily_recap (email-only). Shown
+                when a target is selected even if the list is empty (deleted/disabled
+                target on a rehydrated rule) so the stale selection stays removable. */}
+            {basedOnValue !== 'daily_recap' && (msWebhookToggle || msWebhookTargets.length > 0) && (
+              <Box
+                id='msteams-webhook-badge'
+                onClick={() => setActiveChannel(activeChannel === 'ms_teams_webhook' ? null : 'ms_teams_webhook')}
+                sx={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: ds.space[1],
+                  px: ds.space.mul(0, 5),
+                  py: ds.space[1],
+                  borderRadius: 'var(--ds-radius-xl)',
+                  border: `1.5px solid ${getBadgeBorderColor(activeChannel === 'ms_teams_webhook', !!selectedMsWebhookTarget)}`,
+                  backgroundColor: activeChannel === 'ms_teams_webhook' ? ds.blue[100] : ds.background[100],
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                  '&:hover': {
+                    borderColor: getBadgeHoverBorderColor(activeChannel === 'ms_teams_webhook', !!selectedMsWebhookTarget),
+                  },
+                }}
+              >
+                <SafeIcon src={MSTeamsIcon} alt='MS Teams Webhook' width={14} height={14} />
+                <Typography sx={{ fontSize: 'var(--ds-text-small)', fontWeight: 'var(--ds-font-weight-medium)', color: ds.gray[700] }}>
+                  Teams Webhook
+                </Typography>
+                {selectedMsWebhookTarget && (
+                  <>
+                    <CheckCircleOutlineIcon sx={{ fontSize: 14, color: 'var(--ds-green-500)', ml: ds.space[0] }} />
+                    <CloseIcon
+                      sx={{ fontSize: 13, color: 'var(--ds-gray-400)', ml: ds.space[0], '&:hover': { color: 'var(--ds-red-500)' } }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedMsWebhookTarget('');
+                        setMsWebhookToggle(false);
+                        if (activeChannel === 'ms_teams_webhook') setActiveChannel(null);
+                      }}
+                    />
+                  </>
+                )}
+              </Box>
+            )}
+
             {/* Google Chat Badge — hidden for daily_recap (email-only) */}
             {basedOnValue !== 'daily_recap' && (gChatChannelList.length > 0 || loadingChannelList.google_chat) && (
               <Box
@@ -1807,6 +1914,40 @@ const NotificationRuleModal: React.FC<NotificationRuleModalProps> = ({
                       {errors.msTeams}
                     </FormHelperText>
                   )}
+                </Box>
+              )}
+
+              {/* MS Teams Webhook Config */}
+              {activeChannel === 'ms_teams_webhook' && (
+                <Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], mb: ds.space[3] }}>
+                    <SafeIcon src={MSTeamsIcon} alt='MS Teams Webhook' width={16} height={16} />
+                    <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>
+                      MS Teams Webhook Configuration
+                    </Typography>
+                  </Box>
+                  <Box sx={{ maxWidth: ds.space.mul(1, 80) }}>
+                    <InputLabel sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600], mb: ds.space[1] }}>Webhook target</InputLabel>
+                    <Box sx={{ width: '60%' }}>
+                      <Select
+                        id='msteams-webhook-target'
+                        placeholder='Webhook target'
+                        onChange={(value) => {
+                          setSelectedMsWebhookTarget(value);
+                          if (value) setMsWebhookToggle(true);
+                          else setMsWebhookToggle(false);
+                        }}
+                        value={selectedMsWebhookTarget || null}
+                        options={msWebhookTargets}
+                        size='sm'
+                      />
+                    </Box>
+                    {errors.msWebhook && (
+                      <FormHelperText error sx={{ mt: ds.space[1] }}>
+                        {errors.msWebhook}
+                      </FormHelperText>
+                    )}
+                  </Box>
                 </Box>
               )}
 

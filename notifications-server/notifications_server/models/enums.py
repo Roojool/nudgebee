@@ -52,3 +52,5 @@ class PlatformTypes(str, Enum):
     MS_TEAMS = "ms_teams"
     GOOGLE_CHAT = "google_chat"
     DISCORD = "discord"
+    # Power Automate webhook URL; many per tenant, routed by target id, no default.
+    MS_TEAMS_WEBHOOK = "ms_teams_webhook"

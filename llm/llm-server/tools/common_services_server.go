@@ -380,21 +380,20 @@ func getProvider(accountId, providerType, requestedProvider string) (services_se
 	return provider, nil
 }
 
-// tracePayloadForResponse picks what a trace tool hands back to the agent. Normally that is the
-// bare span array. When the query matched nothing AND services-server diagnosed why (the
-// ValidateRequest empty-result check named a mistyped field or value), hand back the full object
-// so the suggestion travels with the empty list — otherwise the agent sees "[]" and can only
-// guess, which is what drives it to re-issue near-identical queries. Mirrors tool_logs_v2.go.
-func tracePayloadForResponse(resp core.ObservabilityTraceResponse) any {
-	if len(resp.Traces) == 0 {
-		if resp.Suggestion != "" {
-			return resp
-		}
+// tracePayloadForResponse shapes what a trace tool hands back to the agent: the spans plus the
+// metadata naming the query services-server actually ran and the provider that answered it. The
+// metadata travels on every path, empty results included — that is the point (#37406). A bare span
+// array (what this used to return on success and on a clean empty result) leaves an answer of "no
+// traces found" unable to say what was asked or which backend answered, the same defect the logs
+// path fixed in tool_logs_v2.go. Suggestion and Result stay omitempty, so the payload only grows by
+// the metadata object.
+func tracePayloadForResponse(resp core.ObservabilityTraceResponse) core.ObservabilityTraceResponse {
+	if resp.Traces == nil {
 		// Explicit empty array: a nil slice marshals to `null`, and "null" reads to the agent
 		// as a broken tool rather than a window with no spans in it.
-		return []core.ObservabilityTrace{}
+		resp.Traces = []core.ObservabilityTrace{}
 	}
-	return resp.Traces
+	return resp
 }
 
 // traceValidateRequestEnabled reads the trace-validation flag from package scope.
@@ -484,6 +483,12 @@ func executeFetchTrace(ctx core.NbToolContext, traceProvider string, traceProvid
 		// where-clause path — the raw-SQL and Datadog facet paths carry no canonical where
 		// clause, so services-server finds nothing to validate and the flag is a no-op there.
 		ValidateRequest: traceValidateRequestEnabled(),
+		// Always ask for the executed query and resolved provider so an empty result can still
+		// name what ran and where (#37406). Unconditional, mirroring the log path where
+		// FetchLogs resolves them for every caller: the canonical path sends an empty Query and
+		// ProviderType, so without this the metadata reaching the agent is blank. Free on the
+		// raw-SQL and Datadog paths, where a non-empty Query short-circuits the resolution.
+		IncludeExecutedQuery: true,
 	}
 	traces, err := services_server.QueryTraces(*ctx.Ctx, traceRequest)
 	if err != nil {

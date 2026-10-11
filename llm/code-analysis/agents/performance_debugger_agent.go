@@ -36,9 +36,12 @@ func NewPerformanceDebuggerAgentWithTracker(cfg *config.Config, llmClient *llm.C
 	// Initialize raw tools for the Performance Debugger agent
 	cliTool := tools.NewCLITool(workspaceDir)
 	cliTool.SetRestrictPROperations(true) // Only orchestrator creates PRs
+	bgTool := tools.NewBackgroundExecTool(workspaceDir)
+	bgTool.SetRestrictPROperations(true)
 
 	var rawTools []core.NBTool
 	rawTools = append(rawTools, cliTool)
+	rawTools = append(rawTools, bgTool)
 	rawTools = append(rawTools, tools.NewSubmitAnalysisTool())
 
 	// Use the provided shared tracker and wrap tools for comprehensive tracking
@@ -124,16 +127,14 @@ func (a *PerformanceDebuggerAgent) buildEnhancedQuery(ctx context.Context, sessi
 }
 
 func (a *PerformanceDebuggerAgent) buildPerformanceDebuggerPrompt(sessionCtx *session.SessionContext) (string, error) {
-	contextInfo := ""
-	if sessionCtx.RepoContext != nil {
-		contextInfo = sessionCtx.RepoContext.GetRepositoryGuidance()
-	}
+	contextInfo, repoSkills := repoScopedPromptContext(sessionCtx, a.logger)
 
 	// Prepare template data (tools are now passed via native function calling, not prompt text)
 	templateData := map[string]any{
 		"ContextInfo":   contextInfo,
 		"OriginalQuery": sessionCtx.OriginalQuery,
 		"Skills":        sessionCtx.SkillsContext,
+		"RepoSkills":    repoSkills,
 	}
 
 	// Load and execute template

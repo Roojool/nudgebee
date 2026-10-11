@@ -47,7 +47,17 @@ func init() {
 // well means the user finds out at save time, not at the first failed run.
 func validateWorkflowStructLevel(sl validator.StructLevel) {
 	wf, ok := sl.Current().Interface().(Workflow)
-	if !ok || !wf.AIInvocable {
+	if !ok {
+		return
+	}
+	// Auto-approve is a modifier on the AI-invocation grant, never a grant of
+	// its own. Rejecting the combination rather than quietly clearing it means a
+	// caller that sets only this one is told it did nothing, instead of saving
+	// what looks like an unattended-run opt-in that no run will ever consult.
+	if wf.AIAutoApprove && !wf.AIInvocable {
+		sl.ReportError(wf.AIAutoApprove, "ai_auto_approve", "AIAutoApprove", "ai_auto_approve_needs_ai_invocable", "")
+	}
+	if !wf.AIInvocable {
 		return
 	}
 	if strings.TrimSpace(wf.Definition.LLMDescription) == "" {

@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import pandas as pd
 import requests
@@ -236,6 +236,29 @@ class MetricsServerConfigs:
     health_check_endpoints = list(set(default_health_check_endpoints))
 
 
+class ApiServerMetricsConfigs:
+    """api-server as the PromQL transport, so a query reaches whichever Prometheus the
+    account actually has.
+
+    The relay only ever reaches the cluster agent's Prometheus, so an account that
+    connected Prometheus directly (no agent) got nothing back. api-server's
+    ``metrics_query`` action resolves the account's metrics provider and picks the
+    source -- agent relay or the user's endpoint -- and normalises both into one
+    response shape, so this service does not need a second transport of its own.
+
+    Both vars ship in the shared nudgebee secret that this chart mounts via envFrom.
+    Unlike ``MetricsServerConfigs`` they do not raise when unset, because the relay
+    config is still required for the Kubernetes object reads and must keep booting.
+    """
+
+    url = os.environ.get("SERVICE_API_SERVER_URL", "")
+    url = url.rstrip("/")
+    token = os.environ.get("ACTION_API_SERVER_TOKEN", "")
+    # Under api-server's own 180s cap (handle_actions_metrics_timeout.go), so a slow
+    # query surfaces here as a timeout naming the query rather than as a bare 400.
+    timeout = int(os.environ.get("ML_METRICS_HTTP_TIMEOUT", 170))
+
+
 class OTELConfig:
     OTEL_EXPORTER_OTLP_ENDPOINT: str = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
     OTEL_EXPORTER: str = os.environ.get("OTEL_EXPORTER", "")
@@ -420,6 +443,43 @@ class DatabaseEngine:
 
 
 SQL_QUERY = "SELECT value FROM cloud_account_attrs WHERE cloud_account_id = :account_id AND UPPER(name) = :name"
+
+TENANT_SQL_QUERY = "SELECT tenant FROM cloud_accounts WHERE id = :account_id"
+
+# Process-local, mirroring the equivalent cache in llm-server's security package. An
+# account's tenant never changes, so a miss is a one-time cost per account per pod.
+_tenant_id_cache: Dict[str, str] = {}
+
+
+def resolve_tenant_id(account_id: str) -> str:
+    """Tenant for an account, for the ``x-tenant-id`` header api-server requires.
+
+    Several entry points (POST /metrics most of all) only ever receive an account id,
+    so the tenant has to come from the metastore this service already reads. Returns
+    "" when it cannot be resolved, which callers treat as "stay on the relay" rather
+    than sending a request api-server would refuse for having no tenant.
+    """
+    if not account_id:
+        return ""
+    cached = _tenant_id_cache.get(account_id)
+    if cached:
+        return cached
+    try:
+        engine = DatabaseEngine.get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(TENANT_SQL_QUERY), {"account_id": account_id})
+            for row in result:
+                # A NULL tenant would stringify to "None", which is truthy -- it would be
+                # cached and then sent as the x-tenant-id header.
+                if row[0] is None:
+                    continue
+                tenant_id = str(row[0]).strip()
+                if tenant_id:
+                    _tenant_id_cache[account_id] = tenant_id
+                    return tenant_id
+    except Exception as e:
+        logger.warning(f"Failed to resolve tenant from DB for account:{account_id}, {e}")
+    return ""
 
 
 def get_prediction_duration(account_id: str) -> int:

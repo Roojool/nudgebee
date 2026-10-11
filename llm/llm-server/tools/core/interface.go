@@ -298,6 +298,21 @@ type ToolConfirmationScope interface {
 	ConfirmationKey(toolInput string) string
 }
 
+// ToolConfirmationExempt is an optional interface for write tools that may skip
+// the user-confirmation card for a particular invocation. It never affects
+// authorization: the tool is still classified as a write, so the RBAC check in
+// IsAgentToolAuthorizedToProcessRequest runs exactly as it would otherwise, and
+// a user who may not perform the action is still refused. All this removes is
+// the "are you sure" step.
+//
+// It exists for automations whose author has explicitly opted them in to
+// unattended AI invocation (workflows.ai_auto_approve). Returning true on a
+// tool nobody made that decision about would be a silent removal of the only
+// human checkpoint on a write, so implement it only where a human said so.
+type ToolConfirmationExempt interface {
+	SkipWriteConfirmation(toolInput string) bool
+}
+
 // ToolConfirmationPrompt is an optional interface for write tools that can
 // express a pending action in operator terms. The confirmation card shows the
 // returned question instead of the default "Tool(x) is trying to <type>

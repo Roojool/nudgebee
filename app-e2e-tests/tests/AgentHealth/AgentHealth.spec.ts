@@ -1,7 +1,23 @@
 // Not for OSS
 import { test, expect } from "@playwright/test";
-import { openAgentHealth, openAgentHealthUnscoped, expectSelectedTab, expectFragment } from "./agentHealthHelper";
-import { AGENT_HEADERS, AGENT_FEATURES, FEATURE_STATE, NOT_CONNECTED, OBSERVABILITY_HEADERS } from "./agentHealthLocators";
+import {
+  openAgentHealth,
+  openAgentHealthUnscoped,
+  expectSelectedTab,
+  expectFragment,
+  hasRedesignedAgentTab,
+  PREDATES_REDESIGN,
+} from "./agentHealthHelper";
+import {
+  AGENT_COMPONENTS,
+  AGENT_FACTS,
+  COMPONENT_HEADERS,
+  COMPONENT_STATE,
+  NOT_CONNECTED,
+  OBSERVABILITY_SIGNALS,
+  SCHEDULED_JOB_HEADERS,
+  SIGNAL_STATE,
+} from "./agentHealthLocators";
 
 // Troubleshoot > Agent Health — the per-account agent reporting page
 // (app/src/pages/agentHealth.jsx), reached from the cluster dropdown's health indicator.
@@ -40,79 +56,164 @@ test(
 );
 
 test(
-  "Agent Health sanity - open the Agent tab, verify the table lists Status, Agent Version, Latest Version, Last Connected and K8s(Provider/Version)",
+  "Agent Health sanity - open the Agent tab, verify the summary card reports a status and states the agent version, Kubernetes flavour, namespace and URL",
   { tag: ["@dev", "@sanity", "@functional"] },
   async ({ page }) => {
     const agentHealth = await openAgentHealth(page, "agent");
-    await agentHealth.waitForTable(agentHealth.agentTable, agentHealth.agentEmpty);
 
-    for (const header of AGENT_HEADERS) {
-      await expect(agentHealth.columnHeaderIn(agentHealth.agentTable, header)).toBeVisible();
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
+
+    // The status chip is the card's own load signal: it renders only once the account row
+    // has come back, so it stands in for the removed table's skeleton wait.
+    await expect(agentHealth.agentStatusChip).toBeVisible({ timeout: 60000 });
+    await expect(agentHealth.agentStatusChip).toHaveText(/Connected|NOT CONNECTED|Unknown/);
+
+    for (const fact of AGENT_FACTS) {
+      await test.step(`The card states ${fact}`, async () => {
+        await expect(agentHealth.agentFact(fact)).toBeVisible();
+      });
     }
 
-    // A cloud account swaps in a four-column layout (HEADERS_CLOUD), so the count is what
-    // proves the k8s contract rather than a coincidental overlap of the first two names.
-    await expect(agentHealth.agentTable.locator("thead th")).toHaveCount(AGENT_HEADERS.length);
+    // The count is the contract, not merely that each is present: a fact silently dropped
+    // from the grid would still leave the other three visible.
+    await expect(agentHealth.agentCard.locator('[data-testid^="agent-fact-"]')).toHaveCount(AGENT_FACTS.length);
   }
 );
 
 test(
-  "Agent Health - open the Agent tab, verify the Features block reports a connection state for Relay, Prometheus, Alert Manager, Logs, Traces, OpenCost and Node Agent",
+  "Agent Health - open the Agent tab, verify the Components table reports a state for Relay, Prometheus, Alert Manager, Logs, Traces, OpenCost and Node Agent",
   { tag: ["@dev", "@smoke", "@functional"] },
   async ({ page }) => {
     const agentHealth = await openAgentHealth(page, "agent");
 
-    await expect(agentHealth.featuresHeading).toBeVisible();
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
 
-    for (const feature of AGENT_FEATURES) {
-      await test.step(`${feature} reports a state`, async () => {
-        const item = agentHealth.featureItem(feature);
-        await expect(item).toBeVisible();
-        await expect(item).toContainText(FEATURE_STATE);
+    await agentHealth.waitForTable(agentHealth.componentsTable, agentHealth.componentsEmpty);
+
+    for (const header of COMPONENT_HEADERS) {
+      await expect(agentHealth.columnHeaderIn(agentHealth.componentsTable, header)).toBeVisible();
+    }
+    await expect(agentHealth.componentsTable.locator("thead th")).toHaveCount(COMPONENT_HEADERS.length);
+
+    for (const component of AGENT_COMPONENTS) {
+      await test.step(`${component} reports a state`, async () => {
+        const row = agentHealth.componentRow(component);
+        await expect(row).toBeVisible();
+        await expect(row).toContainText(COMPONENT_STATE);
       });
     }
 
-    // The installation namespace rides in the same list and is the one entry with a free-text
-    // value, so it is checked for presence rather than for a connection word.
-    await expect(agentHealth.featureItem("Agent Namespace")).toBeVisible();
+    // One row per component, always — a component the agent does not serve still says so
+    // rather than being omitted, which is the difference between "no backend" and "no row".
+    await expect(agentHealth.dataRowsIn(agentHealth.componentsTable)).toHaveCount(AGENT_COMPONENTS.length);
   }
 );
 
 test(
-  "Agent Health - read the agent row, verify the update-agent warning shows only when the reported version differs from the latest version",
+  "Agent Health - read the summary card, verify the update callout and its guide link appear only when the reported version differs from the latest version",
   { tag: ["@dev", "@regression", "@functional", "@validation"] },
   async ({ page }) => {
     const agentHealth = await openAgentHealth(page, "agent");
-    await agentHealth.waitForTable(agentHealth.agentTable, agentHealth.agentEmpty);
 
-    const rows = await agentHealth.dataRowsIn(agentHealth.agentTable).count();
-    expect(rows, "The cluster reported no agent row, so there is no version pair to compare — connect the agent on the configured cluster").toBeGreaterThan(0);
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
 
-    // Checked before destructuring: a row short of its columns would hand back undefined
-    // here, and undefined slips through every branch below as a silent pass.
-    const cells = await agentHealth.rowCells(agentHealth.agentTable);
-    expect(cells).toHaveLength(AGENT_HEADERS.length);
-
-    const [status, agentVersion, latestVersion] = cells;
+    await expect(agentHealth.agentStatusChip).toBeVisible({ timeout: 60000 });
+    const status = ((await agentHealth.agentStatusChip.textContent()) ?? "").trim();
     expect(status).not.toEqual("");
 
     if (status === NOT_CONNECTED) {
-      // agentHealth.jsx renders the two banners as an either/or: a disconnected agent gets
-      // the connectivity message and never the version one, whatever the versions say.
-      await expect(agentHealth.notConnectedMessage).toBeVisible();
-      await expect(agentHealth.upgradeWarning).toHaveCount(0);
+      // agentHealth.jsx renders one banner, most severe first: a disconnected agent gets
+      // the connectivity callout and never the version one, whatever the versions say.
+      await expect(agentHealth.disconnectedBanner).toBeVisible();
+      await expect(agentHealth.updateBanner).toHaveCount(0);
       return;
     }
 
-    await expect(agentHealth.notConnectedMessage).toHaveCount(0);
+    await expect(agentHealth.disconnectedBanner).toHaveCount(0);
 
-    // shouldUpgrade is only ever set when a latest version came back, so an unknown latest
-    // ("-") must leave the warning off however old the installed agent is.
-    const knownLatest = latestVersion !== "" && latestVersion !== "-";
-    if (knownLatest && agentVersion !== latestVersion) {
-      await expect(agentHealth.upgradeWarning).toBeVisible();
-    } else {
-      await expect(agentHealth.upgradeWarning).toHaveCount(0);
+    const version = ((await agentHealth.agentFact("version").textContent()) ?? "").trim();
+
+    // The update callout names both versions, so when it is showing, what it claims is
+    // checkable — and the guide button is the action it exists to offer. A disconnected
+    // component outranks it, so its absence is only evidence when no services banner shows.
+    if (await agentHealth.updateBanner.isVisible()) {
+      await expect(agentHealth.updateBanner).toContainText("Update available.");
+      await expect(agentHealth.updateBanner).toContainText(/the latest release is \S+/);
+      await expect(agentHealth.updateGuideButton).toBeVisible();
+    } else if ((await agentHealth.servicesBanner.count()) === 0) {
+      // No callout and nothing more severe suppressing it: the agent is current, so the
+      // version the card states must be the latest one — and no guide button is offered.
+      expect(version).not.toEqual("");
+      await expect(agentHealth.updateGuideButton).toHaveCount(0);
+    }
+  }
+);
+
+test(
+  "Agent Health - open the Agent tab, verify Scheduled Jobs lists a readable schedule beside each cron and right-aligns the execution count",
+  { tag: ["@dev", "@regression", "@functional"] },
+  async ({ page }) => {
+    const agentHealth = await openAgentHealth(page, "agent");
+
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
+
+    // The card renders only for a cluster whose agent reported schedule_jobs, so a cluster
+    // with none is a skip rather than a failure — same pattern the Optimize specs use.
+    test.skip((await agentHealth.scheduledJobsCard.count()) === 0, "This cluster's agent reported no scheduled jobs.");
+
+    await agentHealth.waitForTable(agentHealth.scheduledJobsTable, agentHealth.emptyIn(agentHealth.scheduledJobsCard));
+
+    for (const header of SCHEDULED_JOB_HEADERS) {
+      await expect(agentHealth.columnHeaderIn(agentHealth.scheduledJobsTable, header)).toBeVisible();
+    }
+    await expect(agentHealth.scheduledJobsTable.locator("thead th")).toHaveCount(SCHEDULED_JOB_HEADERS.length);
+
+    const cells = await agentHealth.rowCells(agentHealth.scheduledJobsTable);
+    expect(cells).toHaveLength(SCHEDULED_JOB_HEADERS.length);
+
+    const [name, jobStatus, schedule, , executions] = cells;
+    expect(name).not.toEqual("");
+    expect(jobStatus).toMatch(/New|Running|Done/);
+    // The Schedule cell carries the raw cron; the readable line above it is present only
+    // when cronstrue could describe the expression, so the cron is what is asserted.
+    expect(schedule).toMatch(/[*\d]/);
+    expect(executions).toMatch(/^\d+$/);
+  }
+);
+
+test(
+  "Agent Health - open Scheduled Jobs with overdue jobs present, verify the Overdue filter narrows the table to them",
+  { tag: ["@dev", "@regression", "@functional"] },
+  async ({ page }) => {
+    const agentHealth = await openAgentHealth(page, "agent");
+
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
+
+    test.skip((await agentHealth.scheduledJobsCard.count()) === 0, "This cluster's agent reported no scheduled jobs.");
+    await agentHealth.waitForTable(agentHealth.scheduledJobsTable, agentHealth.emptyIn(agentHealth.scheduledJobsCard));
+
+    // The filter is offered only when something is overdue — a lone "Overdue 0" control is
+    // a dead end, so the page hides it. Both shapes are legitimate; which one appears
+    // depends on the cluster, not on the change.
+    test.skip((await agentHealth.scheduledJobsFilter.count()) === 0, "No job on this cluster is past its expected run.");
+
+    const overdueOption = agentHealth.jobFilterOption(/Overdue/);
+    const claimed = Number(/Overdue\s+(\d+)/.exec((await overdueOption.textContent()) ?? "")?.[1] ?? "0");
+    expect(claimed).toBeGreaterThan(0);
+
+    const total = await agentHealth.dataRowsIn(agentHealth.scheduledJobsTable).count();
+
+    await overdueOption.click();
+    await expect(overdueOption).toHaveAttribute("aria-checked", "true");
+
+    // What the control claims and what filtering produces have to agree — they are computed
+    // from the same records, so a mismatch means the filter and the count disagree about
+    // what "overdue" is. Capped by the page size, which the unfiltered count also is.
+    await expect(agentHealth.dataRowsIn(agentHealth.scheduledJobsTable)).toHaveCount(Math.min(claimed, total));
+    // Every remaining row is one the page flagged.
+    const rows = agentHealth.dataRowsIn(agentHealth.scheduledJobsTable);
+    for (let i = 0; i < (await rows.count()); i++) {
+      await expect(rows.nth(i)).toContainText("Overdue");
     }
   }
 );
@@ -134,10 +235,11 @@ test(
 );
 
 test(
-  "Agent Health - switch to Proxy Agent and back to Agent, verify the Agent Health card and its table return",
+  "Agent Health - switch to Proxy Agent and back to Agent, verify the Agent Health card and its Components table return",
   { tag: ["@dev", "@regression", "@functional"] },
   async ({ page }) => {
     const agentHealth = await openAgentHealth(page, "agent");
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
 
     await agentHealth.proxyAgentTab.click();
     await expectSelectedTab(agentHealth.proxyAgentTab);
@@ -148,9 +250,9 @@ test(
     await expectFragment(page, "agent");
     await expectSelectedTab(agentHealth.agentTab);
     await expect(agentHealth.agentCard).toBeVisible();
-    // Re-read after the switch: the card is remounted, so the table is a fresh node and the
-    // previous assertion's element is gone.
-    await agentHealth.waitForTable(agentHealth.agentTable, agentHealth.agentEmpty);
+    // Re-read after the switch: the cards are remounted, so the table is a fresh node and
+    // the previous assertion's element is gone.
+    await agentHealth.waitForTable(agentHealth.componentsTable, agentHealth.componentsEmpty);
     await expect(agentHealth.proxyOnboarding).toHaveCount(0);
   }
 );
@@ -240,7 +342,7 @@ test(
 );
 
 test(
-  "Agent Health - open the Observability tab, verify each of logs, metrics and traces names the backend serving it",
+  "Agent Health - open the Observability tab, verify each of logs, metrics and traces gets a card naming the backend serving it",
   { tag: ["@dev", "@smoke", "@functional"] },
   async ({ page }) => {
     const agentHealth = await openAgentHealth(page, "agent");
@@ -248,21 +350,29 @@ test(
     // The deployed dev app only grows this tab once this change ships; until then there is
     // nothing to open. Same pattern the Optimize specs use for a dev tenant with no data.
     test.skip((await agentHealth.observabilityTab.count()) === 0, "The deployed app predates the Observability tab.");
+    test.skip(!(await hasRedesignedAgentTab(agentHealth)), PREDATES_REDESIGN);
 
     await agentHealth.observabilityTab.click();
     await expectSelectedTab(agentHealth.observabilityTab);
+    await expect(agentHealth.observabilityCard).toBeVisible({ timeout: 60000 });
 
-    const table = agentHealth.observabilityCard.getByRole("table").or(agentHealth.observabilityCard.locator("table")).first();
-    await agentHealth.waitForTable(table, agentHealth.observabilityCard.getByText("No Data Available").first());
-
-    for (const header of OBSERVABILITY_HEADERS) {
-      await expect(agentHealth.columnHeaderIn(table, header)).toBeVisible();
+    // One card per signal, always — a signal nothing serves still reports itself as
+    // unresolved rather than being omitted, which is the difference between "no backend"
+    // and "no card".
+    for (const signal of OBSERVABILITY_SIGNALS) {
+      await test.step(`${signal} names its backend and its state`, async () => {
+        const card = agentHealth.signalCard(signal);
+        await expect(card).toBeVisible();
+        await expect(card).toContainText(SIGNAL_STATE);
+        // The four facts every card states, whatever it resolved to.
+        for (const row of ["Provider", "Source", "Last checked", "Error"]) {
+          await expect(card).toContainText(row);
+        }
+      });
     }
+    await expect(agentHealth.observabilityCard.locator('[data-testid^="observability-"]')).toHaveCount(OBSERVABILITY_SIGNALS.length);
 
-    // One row per signal, always — a signal nothing serves still reports itself as unresolved
-    // rather than being omitted, which is the difference between "no backend" and "no row".
-    for (const signal of ["Logs", "Metrics", "Traces"]) {
-      await expect(table.locator("tbody tr", { hasText: signal }).first()).toBeVisible();
-    }
+    // The header chip counts the same cards below it, so the two cannot disagree.
+    await expect(agentHealth.observabilitySummary).toHaveText(new RegExp(`^\\d of ${OBSERVABILITY_SIGNALS.length} connected$`));
   }
 );

@@ -1,0 +1,3 @@
+-- Could not auto-generate a down migration.
+-- PostgreSQL does not support dropping individual enum values via ALTER TYPE.
+-- ALTER TYPE public."llm_conversation_status" ADD VALUE IF NOT EXISTS 'QUEUED';

@@ -33,18 +33,39 @@ func TestWriteConfirmationRequired(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, writeConfirmationRequired(tc.requestType, tc.toolName))
+			action := NBAgentPlannerToolAction{Tool: tc.toolName}
+			assert.Equal(t, tc.want, writeConfirmationRequired(confirmStubTool{name: tc.toolName}, tc.requestType, action))
 		})
 	}
+}
+
+// TestWriteConfirmationRequired_Exempt: a tool implementing
+// ToolConfirmationExempt suppresses the card only when it says so, and only for
+// write request types — a read was never confirmed in the first place.
+func TestWriteConfirmationRequired_Exempt(t *testing.T) {
+	rt := func(t toolcore.ToolRequestType) *toolcore.ToolRequestType { return &t }
+	action := NBAgentPlannerToolAction{Tool: "automation_restart_pods", ToolInput: `{"reason":"x"}`}
+
+	exempt := confirmExemptStubTool{confirmStubTool{name: "automation_restart_pods"}, true}
+	notExempt := confirmExemptStubTool{confirmStubTool{name: "automation_restart_pods"}, false}
+
+	assert.False(t, writeConfirmationRequired(exempt, rt(toolcore.ToolRequestTypeCreate), action))
+	assert.True(t, writeConfirmationRequired(notExempt, rt(toolcore.ToolRequestTypeCreate), action))
+	// Still no confirmation for reads, exempt or not.
+	assert.False(t, writeConfirmationRequired(notExempt, rt(toolcore.ToolRequestTypeRead), action))
 }
 
 // TestWriteConfirmationRequired_RecommendationWriteTools: the typed resolution
 // write tools must never slip into the watch_resource exemption.
 func TestWriteConfirmationRequired_RecommendationWriteTools(t *testing.T) {
 	rt := func(t toolcore.ToolRequestType) *toolcore.ToolRequestType { return &t }
-	assert.True(t, writeConfirmationRequired(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationApply))
-	assert.True(t, writeConfirmationRequired(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationExecuteCli))
-	assert.True(t, writeConfirmationRequired(rt(toolcore.ToolRequestTypeCreate), tools.ToolRecommendationRecordTicketResolution))
+	confirms := func(requestType *toolcore.ToolRequestType, name string) bool {
+		return writeConfirmationRequired(confirmStubTool{name: name}, requestType, NBAgentPlannerToolAction{Tool: name})
+	}
+	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationApply))
+	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationExecuteCli))
+	assert.True(t, confirms(rt(toolcore.ToolRequestTypeCreate), tools.ToolRecommendationRecordTicketResolution))
+	assert.True(t, confirms(rt(toolcore.ToolRequestTypeUpdate), tools.ToolRecommendationSetDismissal))
 }
 
 // confirmStubTool / confirmScopedStubTool exercise confirmationKeyForAction's two paths.
@@ -57,6 +78,13 @@ func (s confirmStubTool) InputSchema() toolcore.ToolSchema { return toolcore.Too
 func (s confirmStubTool) Call(toolcore.NbToolContext, toolcore.NBToolCallRequest) (toolcore.NBToolResponse, error) {
 	return toolcore.NBToolResponse{}, nil
 }
+
+type confirmExemptStubTool struct {
+	confirmStubTool
+	skip bool
+}
+
+func (s confirmExemptStubTool) SkipWriteConfirmation(string) bool { return s.skip }
 
 type confirmScopedStubTool struct{ confirmStubTool }
 

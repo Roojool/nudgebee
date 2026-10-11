@@ -200,9 +200,13 @@ func handleEventAction(actionPayload *ActionRequest, c *gin.Context, tracer *tra
 				"cluster", eventDto.Cluster,
 				"source", eventDto.Source)
 
-			if eventDto.FindingId == "" || eventDto.AggregationKey == "" || eventDto.Title == "" || eventDto.Tenant == "" || eventDto.AccountId == "" || eventDto.FindingType == "" || eventDto.Priority == "" || eventDto.SubjectName == "" || eventDto.Cluster == "" {
+			// A resolve may omit finding_id when it carries a fingerprint: it then
+			// closes every open event of that fingerprint (issue #39585).
+			findingIdMissing := eventDto.FindingId == "" && !event.IsResolveByFingerprint(eventDto)
+
+			if findingIdMissing || eventDto.AggregationKey == "" || eventDto.Title == "" || eventDto.Tenant == "" || eventDto.AccountId == "" || eventDto.FindingType == "" || eventDto.Priority == "" || eventDto.SubjectName == "" || eventDto.Cluster == "" {
 				tiLogger.Error("trigger_investigation: validation failed",
-					"finding_id_empty", eventDto.FindingId == "",
+					"finding_id_empty", findingIdMissing,
 					"aggregation_key_empty", eventDto.AggregationKey == "",
 					"title_empty", eventDto.Title == "",
 					"tenant_empty", eventDto.Tenant == "",

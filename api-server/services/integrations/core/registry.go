@@ -26,6 +26,20 @@ func RegisterIntegrationWithSource(providerName string, source string, integrati
 	nbSystemTools[key] = integration
 }
 
+// RegisteredIntegrations returns every integration registered under its plain
+// name. Source-qualified registrations ("name:source") are variants of those and
+// are left out.
+func RegisteredIntegrations() []Integration {
+	integrations := make([]Integration, 0, len(nbSystemTools))
+	for key, integration := range nbSystemTools {
+		if strings.Contains(key, ":") {
+			continue
+		}
+		integrations = append(integrations, integration)
+	}
+	return integrations
+}
+
 func GetIntegration(toolName string) (Integration, bool) {
 	key := strings.ToLower(toolName)
 	if toolFactory := nbSystemTools[key]; toolFactory != nil {

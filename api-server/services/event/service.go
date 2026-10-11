@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/event/lifecycle"
+	eventtypes "nudgebee/services/event/types"
 	"nudgebee/services/eventrule"
 	"nudgebee/services/eventrule/playbooks"
 	integrationcore "nudgebee/services/integrations/core"
@@ -152,6 +153,72 @@ const workloadCloudResourceSQL = `
 	  AND cloud_resource_id IS NOT NULL
 	ORDER BY is_active DESC, last_seen DESC
 	LIMIT 1
+`
+
+// configMapConsumersSQL resolves a ConfigMap to the workloads whose pod
+// template references it — mounted as a volume, or pulled in via envFrom /
+// valueFrom.configMapKeyRef. The knowledge graph's k8s source walks the real
+// pod spec on every build (knowledge_graph/sources/k8s/configsecret.go) and
+// stores the result as Workload -USES_CONFIG-> ConfigMap, so this reads an
+// already-computed relationship instead of re-deriving one from names.
+//
+// Deliberately no `level` filter: k8s edges are written without one, and
+// filtering on it returns nothing at all rather than failing loudly.
+const configMapConsumersSQL = `
+	SELECT w.properties->>'name' AS name, COALESCE(w.properties->>'kind', '') AS kind
+	FROM knowledge_graph_node cm
+	JOIN knowledge_graph_edge e
+	  ON e.destination_node_id = cm.id
+	 AND e.relationship_type = 'USES_CONFIG'
+	 AND e.is_active = true
+	JOIN knowledge_graph_node w
+	  ON w.id = e.source_node_id
+	 AND w.is_active = true
+	WHERE cm.tenant_id = $1 AND cm.cloud_account_id = $2
+	  AND cm.node_type = 'ConfigMap' AND cm.is_active = true
+	  AND cm.properties->>'namespace' = $3
+	  AND cm.properties->>'name' = $4
+	  AND w.properties->>'name' IS NOT NULL
+	ORDER BY 1, 2
+`
+
+// ingressBackendsSQL resolves an Ingress to the workloads it routes traffic
+// to, two hops through the knowledge graph:
+//
+//	Ingress -ROUTES_TO_SERVICE-> K8sService <-EXPOSES- Workload
+//
+// Note the second hop runs backwards. EXPOSES is declared as
+// "K8sService → Workload" (knowledge_graph/core/types.go) but written
+// Workload → K8sService, and a query built from the comment returns nothing
+// at all rather than failing.
+//
+// An Ingress name is a particularly bad guess at a workload name: in our own
+// dev cluster `nudgebee-oss/app` routes to service `notifications`, and
+// `nudgebee/k8s-collector` fans out to two Deployments. Matching by name
+// picks the same-named workload when one exists and silently drops the rest.
+const ingressBackendsSQL = `
+	SELECT DISTINCT w.properties->>'name' AS name, COALESCE(w.properties->>'kind', '') AS kind
+	FROM knowledge_graph_node ing
+	JOIN knowledge_graph_edge routes
+	  ON routes.source_node_id = ing.id
+	 AND routes.relationship_type = 'ROUTES_TO_SERVICE'
+	 AND routes.is_active = true
+	JOIN knowledge_graph_node svc
+	  ON svc.id = routes.destination_node_id
+	 AND svc.is_active = true
+	JOIN knowledge_graph_edge exposes
+	  ON exposes.destination_node_id = svc.id
+	 AND exposes.relationship_type = 'EXPOSES'
+	 AND exposes.is_active = true
+	JOIN knowledge_graph_node w
+	  ON w.id = exposes.source_node_id
+	 AND w.is_active = true
+	WHERE ing.tenant_id = $1 AND ing.cloud_account_id = $2
+	  AND ing.node_type = 'Ingress' AND ing.is_active = true
+	  AND ing.properties->>'namespace' = $3
+	  AND ing.properties->>'name' = $4
+	  AND w.properties->>'name' IS NOT NULL
+	ORDER BY 1, 2
 `
 
 // podCloudResourceSQL is the fallback for pod-subject events whose owning
@@ -355,6 +422,12 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 	if r.Id == "" {
 		return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: event not found - %s", query.EventId)
 	}
+	// The event is loaded by id alone, and every change below is dispatched to the
+	// event's own account. The account authorized above is the one the request
+	// named, so the two have to be the same account.
+	if r.CloudAccountId == nil || *r.CloudAccountId != query.AccountId {
+		return EventRecommendationApplyResponse{}, common.ErrorUnauthorized("error: account access not found")
+	}
 
 	var cr models.Resource
 	if r.CloudResourceId != nil {
@@ -455,7 +528,7 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 		return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: event has no aggregation key")
 	}
 	if undoResolutionID != "" {
-		undoRequest, action, err := buildUndoRequest(ctx, undoResolutionID)
+		undoRequest, action, err := buildUndoRequest(ctx, r.Id, undoResolutionID)
 		if err != nil {
 			return EventRecommendationApplyResponse{}, err
 		}
@@ -870,8 +943,18 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 			// Undo re-applies what the change introduced. It is the same operation in the other
 			// direction, so it goes through the same builder, dispatch, audit and record.
 			undo, _ := queryData["undo"].(bool)
-			request, err := getRevertRecommendationRequest(cr, r, undo)
+			// The operator can pick WHICH recorded change to undo. Without a selection this is
+			// the alert's own attached change, which is what the single-change card sends.
+			changeEventId, _ := queryData["change_event_id"].(string)
+			changeSource, err := resolveRevertSource(ctx, r, changeEventId)
 			if err != nil {
+				return EventRecommendationApplyResponse{}, err
+			}
+			request, err := getRevertRecommendationRequest(cr, changeSource, undo)
+			if err != nil {
+				return EventRecommendationApplyResponse{}, err
+			}
+			if err := assertNoLaterChangeOnSamePaths(ctx, changeSource, request); err != nil {
 				return EventRecommendationApplyResponse{}, err
 			}
 			recommendationRequest = adapter.ApplyRecommendationRequest{
@@ -1310,6 +1393,8 @@ func stringValue(v any) string {
 }
 
 // buildUndoRequest reconstructs the action that puts back what a previous attempt replaced.
+// The attempt is looked up on the event being acted on, so an id from another event — or another
+// tenant — is simply not found rather than replayed here.
 //
 // It re-dispatches the SAME action the attempt used, with the recorded before-state substituted for
 // the values that attempt wrote. That keeps undo uniform: an action becomes undoable by recording a
@@ -1318,15 +1403,15 @@ func stringValue(v any) string {
 // The coordinates (name, namespace, kind) are taken from the original task's params rather than
 // recomputed from the event, so an undo targets exactly what was changed even if the event's view of
 // the workload has since moved on.
-func buildUndoRequest(ctx *security.RequestContext, resolutionID string) (map[string]any, string, error) {
+func buildUndoRequest(ctx *security.RequestContext, eventID, resolutionID string) (map[string]any, string, error) {
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
 		return nil, "", err
 	}
 	var dataJSON, taskID string
 	if err := dbms.Db.QueryRow(
-		`SELECT COALESCE(data::text, '{}'), COALESCE(type_reference_id, '') FROM event_resolution WHERE id = $1`,
-		resolutionID).Scan(&dataJSON, &taskID); err != nil {
+		`SELECT COALESCE(data::text, '{}'), COALESCE(type_reference_id, '') FROM event_resolution WHERE id = $1 AND event_id = $2`,
+		resolutionID, eventID).Scan(&dataJSON, &taskID); err != nil {
 		// Only a genuinely missing row is the caller's fault. A dropped connection or a timeout is
 		// ours, and reporting it as 400 would tell the operator their undo was invalid when the
 		// database was simply unreachable.
@@ -1490,6 +1575,267 @@ func auditEventResolutionApply(ctx *security.RequestContext, r models.Event, req
 	if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); err != nil {
 		ctx.GetLogger().Error("failed to create audit event for event resolution apply", "error", err)
 	}
+}
+
+// resolveRevertSource picks the event whose recorded diff the revert acts on.
+//
+// An empty changeEventId keeps the historical behaviour: the alert carries one attached change
+// and that is what gets undone. When the operator picks a change from the history list instead,
+// the diff must come from THAT event — the alert's own attached change is a different change,
+// and reverting it while the UI showed another is the failure this whole path exists to stop.
+//
+// The selected event is checked against the alert rather than trusted: same tenant, same account,
+// same resource, and actually a configuration change. An id from a stale page or a hand-made
+// request must not be able to reach into another tenant's history or revert an unrelated workload.
+func resolveRevertSource(ctx *security.RequestContext, alert models.Event, changeEventId string) (models.Event, error) {
+	if strings.TrimSpace(changeEventId) == "" {
+		return alert, nil
+	}
+	if changeEventId == alert.Id {
+		return alert, nil
+	}
+	change, err := GetEvent(ctx, changeEventId)
+	if err != nil {
+		ctx.GetLogger().Error("error getting selected change event", "error", err, "change_event_id", changeEventId)
+		return models.Event{}, err
+	}
+	if change.Id == "" {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected change no longer exists")
+	}
+	if change.FindingType == nil || *change.FindingType != "configuration_change" {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected event is not a configuration change")
+	}
+	if !sameStringValue(change.Tenant, alert.Tenant) || !sameStringValue(change.CloudAccountId, alert.CloudAccountId) {
+		return models.Event{}, common.ErrorUnauthorized("event resolution: the selected change belongs to another account")
+	}
+	if !sameChangeTarget(change, alert) {
+		return models.Event{}, common.ErrorBadRequest("event resolution: the selected change is for a different resource than this event")
+	}
+	return change, nil
+}
+
+// sameChangeTarget compares what two events are about. cloud_resource_id is the reliable
+// identifier and is preferred; service_key is the fallback for an event recorded before its
+// resource synced, which is the same fallback the resource lookup above uses.
+func sameChangeTarget(change, alert models.Event) bool {
+	if change.CloudResourceId != nil && alert.CloudResourceId != nil {
+		return *change.CloudResourceId == *alert.CloudResourceId
+	}
+	if change.ServiceKey != nil && alert.ServiceKey != nil && *change.ServiceKey != "" {
+		return *change.ServiceKey == *alert.ServiceKey
+	}
+	return false
+}
+
+func sameStringValue(a, b *string) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// assertNoLaterChangeOnSamePaths refuses a revert that would silently undo a more recent change.
+//
+// The agent applies a revert by writing each recorded `old` value at its path on the LIVE object.
+// That is safe for the newest change and only for the newest change: if the image went v1 -> v2 in
+// the change being reverted and v2 -> v3 in a later one, writing v1 discards v3 with nothing said.
+// Reverting the newest change was accidentally safe from this; letting the operator choose an
+// older one removes that accident, so the check arrives with the choice.
+//
+// A conflict blocks rather than warns. The operator cannot see the later change from the revert
+// dialog, so a warning asks them to accept a risk they have no way to evaluate.
+func assertNoLaterChangeOnSamePaths(ctx *security.RequestContext, change models.Event, request map[string]any) error {
+	revertPaths, _ := request["revert_paths"].([]any)
+	// The conflict query filters on these, and Postgres compares NULL with `=` as UNKNOWN — a nil
+	// here returns no rows, which reads as "no later change" and waves the revert through. That is
+	// the one direction this guard must never fail in, so refuse instead. `tenant` is NOT NULL in
+	// the schema and cannot be nil for a persisted event; `cloud_account_id` is nullable and can.
+	if change.Tenant == nil || change.CloudAccountId == nil {
+		return common.ErrorBadRequest("event resolution: the selected change is missing its tenant or account, so later changes cannot be checked; not reverting")
+	}
+	if change.StartsAt == nil {
+		// Without a time for the change there is no "later" to compare against, and a revert that
+		// cannot be checked must not proceed on a mutation path.
+		return common.ErrorBadRequest("event resolution: the selected change has no recorded time, so a later change cannot be ruled out; not reverting")
+	}
+	if len(revertPaths) == 0 {
+		// No paths means this request carries the pre-change manifest instead, which the Python
+		// agent applies by REPLACING the whole object. Every field a later change touched is
+		// discarded by that, not just an overlapping one — so the guard has to be stricter here,
+		// not absent. Returning nil (as this did) left the entire un-migrated-tenant cohort with
+		// no protection at all, on the more destructive of the two paths.
+		if !hasManifestPayload(request) {
+			return nil
+		}
+		later, err := laterChangesOnResource(ctx, change)
+		if err != nil {
+			ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
+			return common.ErrorBadRequest("event resolution: cannot verify whether a later change exists; not reverting")
+		}
+		if len(later) > 0 {
+			when := ""
+			if later[0].StartsAt != nil {
+				when = later[0].StartsAt.UTC().Format(time.RFC3339)
+			}
+			return common.ErrorBadRequest(fmt.Sprintf(
+				"event resolution: this change has no field-level diff, so reverting it replaces the whole object and would discard the later change at %s. Revert the later change first.", when))
+		}
+		return nil
+	}
+	targeted := make(map[string]bool, len(revertPaths))
+	for _, raw := range revertPaths {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := entry["path"].(string); path != "" {
+			targeted[path] = true
+		}
+	}
+	if len(targeted) == 0 {
+		return nil
+	}
+
+	later, err := laterChangesOnResource(ctx, change)
+	if err != nil {
+		// Fail closed. Reverting without knowing what came after is the mutation this guards, so
+		// a lookup failure must not become a silent green light.
+		ctx.GetLogger().Error("event resolution: could not check for later changes", "error", err, "event_id", change.Id)
+		return common.ErrorBadRequest("event resolution: cannot verify whether a later change touched the same fields; not reverting")
+	}
+	// What the change being reverted left behind at each path. A later change only conflicts if it
+	// moved the field somewhere ELSE: reverting writes this change's `old` back, which is safe
+	// exactly while the live value is still this change's `new`.
+	appliedValues := changedValuesOf(change)
+
+	for _, l := range later {
+		for path, laterValue := range changedValuesOf(l) {
+			if !targeted[path] {
+				continue
+			}
+			// The same change recorded twice is not a later change. Dev has these in quantity —
+			// undo-test-app carries pairs of config-change events sharing a timestamp, a path and
+			// both values — and treating a duplicate record as a conflict would refuse a revert
+			// that is perfectly safe, which is worse than the gap it was meant to close.
+			if applied, ok := appliedValues[path]; ok && sameChangedValue(applied, laterValue) {
+				continue
+			}
+			when := ""
+			if l.StartsAt != nil {
+				when = l.StartsAt.UTC().Format(time.RFC3339)
+			}
+			return common.ErrorBadRequest(fmt.Sprintf(
+				"event resolution: %q was changed again by a later change (%s) — reverting this one would undo that too. Revert the later change first.",
+				path, when))
+		}
+	}
+	return nil
+}
+
+// hasManifestPayload reports whether the request carries a pre-change manifest under its per-kind
+// key ("deployment", "statefulset", ...). Those keys are whatever the resource's kind lowercases
+// to, so this asks the question the other way round: is there anything here beyond the fixed
+// fields the builder always sets.
+func hasManifestPayload(request map[string]any) bool {
+	for key := range request {
+		switch key {
+		case "name", "namespace", "kind", "revert_paths":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// laterChangesOnResource returns the configuration changes recorded on the same resource after
+// the given change. Bounded: a revert only needs to know whether ANY later change collides, and
+// the check runs on the click path.
+func laterChangesOnResource(ctx *security.RequestContext, change models.Event) ([]models.Event, error) {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{
+		"finding_type = 'configuration_change'",
+		"tenant = $1",
+		"cloud_account_id = $2",
+		// >= , not > . Two config changes recorded at the same instant is not a corner case:
+		// it is the reported one — a command edit and a replica edit that both land at the
+		// alert's offset 0. A strict > would let the sibling through unchecked, which is
+		// precisely the pair most likely to touch the same workload. id != $4 keeps the
+		// change being reverted out of its own conflict set.
+		"starts_at >= $3",
+		"id != $4",
+	}
+	args := []any{change.Tenant, change.CloudAccountId, change.StartsAt, change.Id}
+	if change.CloudResourceId != nil {
+		conditions = append(conditions, "cloud_resource_id = $5")
+		args = append(args, *change.CloudResourceId)
+	} else if change.ServiceKey != nil && *change.ServiceKey != "" {
+		// Non-empty, matching sameChangeTarget. An empty service_key identifies nothing, so
+		// querying for it would match every event that also has none and report their changes as
+		// conflicts — refusing reverts for an unrelated reason.
+		conditions = append(conditions, "service_key = $5")
+		args = append(args, *change.ServiceKey)
+	} else {
+		return nil, fmt.Errorf("event resolution: change %s identifies no resource", change.Id)
+	}
+
+	query := "SELECT id, starts_at, evidences FROM events WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY starts_at ASC LIMIT 50"
+	rows, err := dbms.Db.Queryx(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			ctx.GetLogger().Error("error closing rows", "error", closeErr)
+		}
+	}()
+
+	var later []models.Event
+	for rows.Next() {
+		var e models.Event
+		if scanErr := rows.Scan(&e.Id, &e.StartsAt, &e.Evidences); scanErr != nil {
+			return nil, scanErr
+		}
+		later = append(later, e)
+	}
+	return later, rows.Err()
+}
+
+// changedValuesOf maps each path a config-change event touched to the value it left there. Read
+// from the same diff evidence the revert itself is built from, so the two cannot disagree about
+// what a change covers. `undo` direction is used because it reports the change's `new` side, which
+// is what the live object should still hold if nothing has touched the field since.
+func changedValuesOf(e models.Event) map[string]any {
+	values := map[string]any{}
+	for _, entry := range extractRevertPaths(e, true) {
+		change, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if path, _ := change["path"].(string); path != "" {
+			values[path] = change["old"]
+		}
+	}
+	return values
+}
+
+// sameChangedValue compares two recorded diff values. They arrive as decoded JSON — strings,
+// numbers, maps, nil — so compare their canonical encodings rather than trying to type-switch
+// every shape a manifest field can take.
+func sameChangedValue(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	aJSON, errA := common.MarshalJson(a)
+	bJSON, errB := common.MarshalJson(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return string(aJSON) == string(bJSON)
 }
 
 // getRevertRecommendationRequest builds the params that undo the configuration
@@ -1838,6 +2184,7 @@ func truncateStringToMaxBytes(s string, maxBytes int) string {
 type insertConfig struct {
 	skipWorkflowRefire bool
 	publishCtx         context.Context
+	deferPostProcess   func(eventId string)
 }
 
 // InsertOption configures InsertEvent.
@@ -1861,6 +2208,19 @@ func WithPublishContext(ctx context.Context) InsertOption {
 // pass this, so repeat firings keep matching workflows (issue #25251).
 func WithoutWorkflowRefire() InsertOption {
 	return func(c *insertConfig) { c.skipWorkflowRefire = true }
+}
+
+// WithDeferredPostProcess redirects the post-process enqueue that InsertEvent
+// performs on a genuine insert. The caller becomes responsible for getting the
+// event to event_post_process eventually — used by asynchronous enrichment,
+// which must land the playbook's evidence on the row first, because triage reads
+// evidence content (getEvidenceBonus, parseServiceMapFromEvent) rather than a
+// mere has-evidence flag.
+//
+// The ON CONFLICT branches are deliberately not redirected: those rows have
+// already been through the pipeline once.
+func WithDeferredPostProcess(fn func(eventId string)) InsertOption {
+	return func(c *insertConfig) { c.deferPostProcess = fn }
 }
 
 // legacyEventSources maps event source values that were renamed in the
@@ -1914,6 +2274,25 @@ func normalizeSubjectNode(subjectNode string) string {
 	return subjectNode
 }
 
+// isPointInTime reports whether an event describes a moment that has already
+// passed rather than a condition that can recover. Pure so the rule can be
+// tested without a database; the feature flag is checked by the caller.
+//
+// Two shapes qualify:
+//   - configuration_change, which has no end time of its own, and
+//   - any event whose producer sent ends_at at or before starts_at, i.e. an
+//     explicitly zero-length (or inverted) interval.
+//
+// An event with ends_at AFTER starts_at is a condition that ran and stopped.
+// Its producer owns that lifecycle and sends its own resolve, so it is not
+// point-in-time and is left alone here.
+func isPointInTime(findingType string, startsAt, endsAt *time.Time) bool {
+	if findingType == "configuration_change" {
+		return true
+	}
+	return startsAt != nil && endsAt != nil && !endsAt.After(*startsAt)
+}
+
 func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	var cfg insertConfig
 	for _, o := range opts {
@@ -1949,10 +2328,32 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	// the one place that decides it at ingestion instead of re-deriving it
 	// per call site. Centralized in InsertEvent (not InvestigateEvent) so
 	// every insert path gets it automatically.
-	isPointInTimeEvent := config.Config.FeatureEventPointInTimeCloseEnabled && event.FindingType == "configuration_change"
+	//
+	// The same reasoning covers any event that ARRIVES ALREADY ENDED -- one whose
+	// producer sets ends_at at or before starts_at. A cloud notification like
+	// "ECS Task State Change", "GKE Resource Upgrade Started" or "Kubernetes
+	// Secret Modified" describes an instant, and the webhook says so by sending a
+	// zero-length interval. Storing that FIRING asserts an ongoing condition the
+	// producer never claimed, and nothing will ever close it: these sources send
+	// no resolve for a moment that has already passed. Measured on an anonymized production
+	// estate, 18,357 `ECS Task State Change` events sat FIRING at a median age of
+	// 52 days, every one of them carrying ends_at == starts_at, and they were 69%
+	// of everything stuck open there.
+	//
+	// Only ends_at <= starts_at qualifies. A genuine interval (ends_at AFTER
+	// starts_at) is a condition that ran and stopped, which the producer's own
+	// resolve path owns, so it is left alone.
+	isConfigChange := event.FindingType == "configuration_change"
+	isPointInTimeEvent := config.Config.FeatureEventPointInTimeCloseEnabled &&
+		isPointInTime(event.FindingType, event.StartsAt, event.EndsAt)
 	if isPointInTimeEvent {
 		event.Status = EventStatusClosed
-		event.EndsAt = event.StartsAt
+		if isConfigChange {
+			// configuration_change carries no end time of its own; stamp one so the
+			// row does not read as an open-ended incident. An already-ended event
+			// keeps the producer's timestamps untouched.
+			event.EndsAt = event.StartsAt
+		}
 	}
 
 	query := `INSERT INTO events ("id", "finding_id", "title", "description", "source", "aggregation_key", "priority", "subject_type", "subject_name", "subject_namespace", "subject_node", "service_key", "fingerprint", "evidences", "tenant", "cloud_account_id", "status", "finding_type","cluster", "starts_at", "labels", "updated_at", "ends_at", "cloud_resource_id", "category", "created_at", "urgency", "subject_owner", "subject_owner_kind", "nb_status")
@@ -2040,14 +2441,23 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	// worker logs at ERROR and increments common.MqBackgroundRetryDroppedTotal on terminal
 	// failure, so drops aren't invisible.
 	if isInsert {
-		_ = common.MqPublish(
-			config.Config.RabbitMqEventPostProcessExchange,
-			config.Config.RabbitMqEventPostProcessQueue,
-			map[string]any{"event_id": id},
-			common.MqPublishWithExpiration(1*time.Hour),
-			common.MqPublishWithBackgroundRetry(),
-			common.MqPublishWithContext(cfg.publishCtx),
-		)
+		// The deferral hook takes over only for a genuine insert. It must be decided
+		// here rather than by the caller: only this function knows whether the upsert
+		// inserted or updated (RETURNING xmax = 0). A caller that guessed would, on
+		// losing a race to a concurrent insert of the same finding_id, enqueue
+		// enrichment for a row that has already been through the whole pipeline.
+		if cfg.deferPostProcess != nil {
+			cfg.deferPostProcess(id)
+		} else {
+			_ = common.MqPublish(
+				config.Config.RabbitMqEventPostProcessExchange,
+				config.Config.RabbitMqEventPostProcessQueue,
+				map[string]any{"event_id": id},
+				common.MqPublishWithExpiration(1*time.Hour),
+				common.MqPublishWithBackgroundRetry(),
+				common.MqPublishWithContext(cfg.publishCtx),
+			)
+		}
 	} else if !cfg.skipWorkflowRefire &&
 		(strings.EqualFold(string(event.Status), string(EventStatusFiring)) || isPointInTimeEvent) {
 		// Re-fire of an existing event: ON CONFLICT updated an already-present row.
@@ -2296,11 +2706,35 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 	// as the event recurs).
 	linkK8sCloudResourceId(sc, dbms, tenantId, &webhookEvent)
 
-	var existingEventId string
-	var existingSubjectName sql.NullString
-	err = dbms.Db.QueryRowx("SELECT id, subject_name FROM events WHERE tenant = $1 AND cloud_account_id = $2 AND finding_id = $3", tenantId, accountId, webhookEvent.FindingId).Scan(&existingEventId, &existingSubjectName)
+	// A RESOLVED/CLOSED closes the event it names and never reopens one. A
+	// RESOLVED that names no event of its own sender closes by fingerprint
+	// instead of creating a closed row (issue #39585).
+	isResolve := isCloseStatus(webhookEvent.Status)
+	if webhookEvent.FindingId == "" && IsResolveByFingerprint(webhookEvent) {
+		// The sender does not know which firing ended, only the alert's identity.
+		return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
+	}
 
-	if err == nil { // event exists
+	var existingEventId string
+	var existingSubjectName, existingSource sql.NullString
+	err = dbms.Db.QueryRowx("SELECT id, subject_name, source FROM events WHERE tenant = $1 AND cloud_account_id = $2 AND finding_id = $3", tenantId, accountId, webhookEvent.FindingId).Scan(&existingEventId, &existingSubjectName, &existingSource)
+
+	if err == nil && isResolve && existingSource.String != webhookEvent.Source {
+		// finding_id is sender-chosen, so this one belongs to another integration's
+		// event and is not this sender's to close. Treat it as matching nothing —
+		// and do not fall through to the insert, whose upsert on the same finding_id
+		// would overwrite that event.
+		sc.GetLogger().Warn("event: resolve names an event from another source, leaving it untouched",
+			"event_id", existingEventId, "finding_id", webhookEvent.FindingId,
+			"event_source", existingSource.String, "resolve_source", webhookEvent.Source)
+		if resolvesUnmatchedByFingerprint(webhookEvent) {
+			return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
+		}
+		return "", nil
+	}
+
+	switch err {
+	case nil: // event exists
 		sc.GetLogger().Info("event: already processed, updating event details", "event_id", existingEventId, "finding_id", webhookEvent.FindingId)
 		labels, err1 := common.MarshalJson(webhookEvent.Labels)
 		if err1 != nil {
@@ -2319,6 +2753,17 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			return "", err
 		}
 
+		// Honour close transitions only: a FIRING on a CLOSED event leaves it
+		// CLOSED, and a new firing must arrive with a new finding_id.
+		if isResolve {
+			closed, err := closeEventById(dbms, existingEventId, webhookEvent.Source, resolveEndsAt(webhookEvent))
+			if err != nil {
+				sc.GetLogger().Error("event: failed to close resolved event", "error", err, "event_id", existingEventId)
+				return "", err
+			}
+			publishResolved(sc.GetContext(), closed)
+		}
+
 		oldSubjectEmpty := !existingSubjectName.Valid || existingSubjectName.String == ""
 		newSubjectResolved := webhookEvent.SubjectName != ""
 		if oldSubjectEmpty && newSubjectResolved {
@@ -2333,131 +2778,38 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 		}
 
 		return existingEventId, nil
-	} else if err == sql.ErrNoRows { // event does not exist, so process it
-		var evidenceResponse []eventrule.PlaybookActionExecutionResponse
-
-		// Snapshot original label keys so the subject/namespace/cluster fallback
-		// only considers labels from the webhook payload, not labels injected by
-		// playbook actions (e.g. prometheus_enricher metric labels like "pod", "job").
-		// Action-extracted labels still flow into webhookEvent.Labels for persistence.
-		originalLabelKeys := make(map[string]bool, len(webhookEvent.Labels))
-		for k := range webhookEvent.Labels {
-			originalLabelKeys[k] = true
+	case sql.ErrNoRows: // event does not exist, so process it
+		if resolvesUnmatchedByFingerprint(webhookEvent) {
+			return resolveByFingerprint(sc, dbms, tenantId, accountId, webhookEvent)
 		}
-
-		// Skip playbook execution for configuration change events
-		if webhookEvent.FindingType == "configuration_change" {
-			sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", id, "aggregation_key", webhookEvent.AggregationKey)
-		} else {
-			eventruleStart, eventruleEnd := getPlaybookStartEndTime(webhookEvent)
-
-			// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
-			// nb_alert_name is set during webhook enrichment and contains the correct alert name.
-			playbookName := webhookEvent.AggregationKey
-			if alertName, ok := webhookEvent.Labels["nb_alert_name"]; ok && alertName != "" {
-				playbookName = alertName
-			} else if alertName, ok := webhookEvent.Labels["alertname"]; ok && alertName != "" {
-				playbookName = alertName
-			}
-
-			existingEvidenceActions := extractEvidenceActionNames(webhookEvent.Evidences)
-
-			evidenceResponse, err = eventrule.ExecutePlaybook(sc, webhookEvent.AccountId, playbooks.PlaybookEvent{
-				EventId:     id,
-				Name:        playbookName,
-				Labels:      webhookEvent.Labels,
-				Annotations: map[string]string{},
-				StartedAt:   &eventruleStart,
-				EndedAt:     &eventruleEnd,
-				IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
-					webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
-				Source:                  webhookEvent.Source,
-				SubjectName:             webhookEvent.SubjectName,
-				SubjectType:             webhookEvent.SubjectType,
-				SubjectOwner:            webhookEvent.SubjectOwner,
-				SubjectOwnerKind:        webhookEvent.SubjectOwnerKind,
-				SubjectNamespace:        webhookEvent.SubjectNamespace,
-				SubjectNode:             webhookEvent.SubjectNode,
-				AggregationKey:          webhookEvent.AggregationKey,
-				ExistingEvidenceActions: existingEvidenceActions,
-			})
-			if err != nil {
-				sc.GetLogger().Error("event: unable to process playbook for event", "error", err, "aggregation_key", webhookEvent.AggregationKey, "account_id", webhookEvent.AccountId, "event_id", webhookEvent.Fingerprint)
-			}
-
-			for _, e := range evidenceResponse {
-				if e.Error != nil {
-					common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonActionExecutionError)
-				} else {
-					common.MetricsPlaybookActionTotal(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricStatusCompleted)
-				}
-				// Record individual action duration
-				common.MetricsPlaybookActionDuration(sc.GetContext(), e.DurationSeconds, e.ActionName, eventSource, tenantId, accountId)
-
-				if e.Response == nil {
-					continue
-				}
-				structResponse, err := common.MarshalStructToMap(e.Response)
-				if err != nil {
-					common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonEvidenceMarshalFailed)
-					webhookEvent.Evidences = append(webhookEvent.Evidences, e.Response)
-					continue
-				}
-				structResponse["type"] = e.Response.GetFormatName()
-				additionalInfo, ok := structResponse["additional_info"].(map[string]any)
-				if !ok {
-					additionalInfo = map[string]any{}
-					structResponse["additional_info"] = additionalInfo
-				}
-				if e.ActionTitle != "" {
-					additionalInfo["title"] = e.ActionTitle
-				}
-				// Only set action_name if not already set by the action response
-				if _, exists := additionalInfo["action_name"]; !exists {
-					additionalInfo["action_name"] = e.ActionName
-				}
-
-				playbooks.ShapeEvidenceForFrontend(structResponse)
-				webhookEvent.Evidences = append(webhookEvent.Evidences, structResponse)
-			}
-		}
-
-		mergeAggregatedAlertLabels(webhookEvent.Labels, aggregationKey, evidenceResponse)
-		linkCloudResourceId(&webhookEvent, evidenceResponse)
-
-		if webhookEvent.Labels == nil {
-			webhookEvent.Labels = map[string]string{}
-		}
-
-		if webhookEvent.Cluster == "" {
-			for _, key := range clusterKeys {
-				if cluster, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.Cluster = cluster
-					break
-				}
-			}
-		}
-
-		if webhookEvent.SubjectNamespace == "" {
-			for _, key := range namespaceKeys {
-				if namespace, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.SubjectNamespace = namespace
-					break
-				}
-			}
-		}
-
-		if webhookEvent.SubjectName == "" {
-			for _, key := range subjectKeys {
-				if subject, ok := webhookEvent.Labels[key]; ok && originalLabelKeys[key] {
-					webhookEvent.SubjectName = subject
-					break
-				}
-			}
-		}
+		// Resolve subject/namespace/cluster from the webhook's own labels before
+		// anything else. These fallbacks only ever consult labels that arrived in
+		// the payload, so they need nothing the playbook produces, and running them
+		// first means the row commits with subject_name already filled — which is
+		// what k8s-collector's RESOLVED lookup and the duplicate branch above read
+		// while asynchronous enrichment is still in flight.
+		//
+		// Behaviour note: the playbook (and mergeAggregatedAlertLabels) may
+		// overwrite the value of a payload label. Previously the fallback ran
+		// afterwards and would have picked up that overwritten value; now it takes
+		// the pre-playbook one. That only differs when the field arrived empty AND
+		// the label it resolves from is both present in the payload and later
+		// rewritten by an enricher.
+		applySubjectFallbacks(&webhookEvent)
 
 		if webhookEvent.CreatedAt == nil {
 			webhookEvent.CreatedAt = &start
+		}
+
+		// With the flag on, the playbook runs on the event_enrich queue instead of
+		// here. configuration_change never defers: the inline path already skips the
+		// playbook for it below, and its point-in-time CLOSED handling has to fire at
+		// insert time.
+		asyncEnrichment := config.Config.FeatureEventAsyncEnrichmentEnabled &&
+			webhookEvent.FindingType != "configuration_change"
+
+		if !asyncEnrichment {
+			runPlaybookEnrichment(sc, &webhookEvent, id, time.Time{})
 		}
 
 		sc.GetLogger().Info("InvestigateEvent: calling InsertEvent",
@@ -2465,9 +2817,17 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			"finding_id", webhookEvent.FindingId,
 			"source", eventSource,
 			"tenant", tenantId,
-			"account_id", accountId)
+			"account_id", accountId,
+			"async_enrichment", asyncEnrichment)
 
-		id, err := InsertEvent(webhookEvent, id, WithPublishContext(sc.GetContext()))
+		insertOpts := []InsertOption{WithPublishContext(sc.GetContext())}
+		if asyncEnrichment {
+			insertOpts = append(insertOpts, WithDeferredPostProcess(func(eventId string) {
+				publishEventEnrichment(sc, eventId, tenantId, webhookEvent.AccountId)
+			}))
+		}
+
+		id, err := InsertEvent(webhookEvent, id, insertOpts...)
 
 		if err != nil {
 			sc.GetLogger().Error("InvestigateEvent: InsertEvent failed",
@@ -2488,10 +2848,197 @@ func InvestigateEvent(sc *security.RequestContext, webhookEvent Event, id string
 			"account_id", accountId)
 		common.MetricsEventProcessingTotal(sc.GetContext(), eventSource, tenantId, accountId, common.MetricStatusCompleted)
 		return id, err
-	} else { // some other db error
+	default: // some other db error
 		sc.GetLogger().Error("event: failed to check for existing event", "error", err, "source", eventSource, "finding_id", webhookEvent.FindingId)
 		return "", err
 	}
+}
+
+// publishEventEnrichment hands a freshly inserted event to the event_enrich queue.
+//
+// Persistent delivery on a durable queue: unlike event_post_process, losing one of
+// these on a broker restart would leave the event both unenriched and never
+// post-processed, since the post-process publish is the consumer's job. For the
+// same reason there is deliberately no expiration — a backlog longer than an hour
+// must survive rather than silently evaporate, and there is no DLX to catch it.
+func publishEventEnrichment(sc *security.RequestContext, eventId, tenantId, accountId string) {
+	err := common.MqPublish(
+		config.Config.RabbitMqEventEnrichExchange,
+		config.Config.RabbitMqEventEnrichQueue,
+		eventtypes.EventEnrichmentMessage{
+			EventID:   eventId,
+			TenantID:  tenantId,
+			AccountID: accountId,
+		},
+		common.MqPublishWithPersistentDelivery(),
+		common.MqPublishWithBackgroundRetry(),
+		common.MqPublishWithContext(sc.GetContext()),
+	)
+	if err != nil {
+		sc.GetLogger().Error("event: failed to enqueue enrichment", "error", err, "event_id", eventId)
+	}
+}
+
+// applySubjectFallbacks fills Cluster, SubjectNamespace and SubjectName from the
+// event's own labels when they arrived empty. Only labels already on the event are
+// consulted, which is what keeps playbook-injected labels (prometheus_enricher's
+// "pod"/"job", say) from being mistaken for the real subject.
+func applySubjectFallbacks(webhookEvent *Event) {
+	if webhookEvent.Labels == nil {
+		webhookEvent.Labels = map[string]string{}
+	}
+
+	if webhookEvent.Cluster == "" {
+		for _, key := range clusterKeys {
+			if cluster, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.Cluster = cluster
+				break
+			}
+		}
+	}
+
+	if webhookEvent.SubjectNamespace == "" {
+		for _, key := range namespaceKeys {
+			if namespace, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.SubjectNamespace = namespace
+				break
+			}
+		}
+	}
+
+	if webhookEvent.SubjectName == "" {
+		for _, key := range subjectKeys {
+			if subject, ok := webhookEvent.Labels[key]; ok {
+				webhookEvent.SubjectName = subject
+				break
+			}
+		}
+	}
+}
+
+// runPlaybookEnrichment executes the event's playbook and applies every
+// post-playbook mutation to webhookEvent in place: it appends evidence cards,
+// merges aggregated-alert labels and links the cloud resource.
+//
+// deadline, when non-zero, bounds the run — ExecutePlaybook stops before starting
+// an action once it passes and returns what it has, so partial evidence is real
+// evidence rather than an abandoned goroutine's.
+//
+// Returns the evidence cards appended and the labels added or changed, which the
+// asynchronous path needs in order to merge them into an already-persisted row.
+// The inline path mutates webhookEvent and ignores both.
+func runPlaybookEnrichment(sc *security.RequestContext, webhookEvent *Event, eventId string, deadline time.Time) (addedEvidences []any, labelDelta map[string]string) {
+	eventSource := webhookEvent.Source
+	tenantId := sc.GetSecurityContext().GetTenantId()
+	accountId := webhookEvent.AccountId
+	aggregationKey := webhookEvent.AggregationKey
+
+	labelsBefore := make(map[string]string, len(webhookEvent.Labels))
+	for k, v := range webhookEvent.Labels {
+		labelsBefore[k] = v
+	}
+	evidenceCountBefore := len(webhookEvent.Evidences)
+
+	var evidenceResponse []eventrule.PlaybookActionExecutionResponse
+
+	// Skip playbook execution for configuration change events
+	if webhookEvent.FindingType == "configuration_change" {
+		sc.GetLogger().Info("event: skipping playbook execution for configuration change event", "event_id", eventId, "aggregation_key", webhookEvent.AggregationKey)
+	} else {
+		eventruleStart, eventruleEnd := getPlaybookStartEndTime(*webhookEvent)
+
+		// Use the actual alert name for playbook lookup instead of AggregationKey (which is the PagerDuty service name).
+		// nb_alert_name is set during webhook enrichment and contains the correct alert name.
+		playbookName := webhookEvent.AggregationKey
+		if alertName, ok := webhookEvent.Labels["nb_alert_name"]; ok && alertName != "" {
+			playbookName = alertName
+		} else if alertName, ok := webhookEvent.Labels["alertname"]; ok && alertName != "" {
+			playbookName = alertName
+		}
+
+		existingEvidenceActions := extractEvidenceActionNames(webhookEvent.Evidences)
+
+		var err error
+		evidenceResponse, err = eventrule.ExecutePlaybook(sc, webhookEvent.AccountId, playbooks.PlaybookEvent{
+			EventId:     eventId,
+			Deadline:    deadline,
+			Name:        playbookName,
+			Labels:      webhookEvent.Labels,
+			Annotations: map[string]string{},
+			StartedAt:   &eventruleStart,
+			EndedAt:     &eventruleEnd,
+			IncidentAt: resolveIncidentAt(sc, webhookEvent.AggregationKey, webhookEvent.AccountId,
+				webhookEvent.SubjectName, webhookEvent.SubjectNamespace, webhookEvent.SubjectType, webhookEvent.StartsAt),
+			Source:                  webhookEvent.Source,
+			SubjectName:             webhookEvent.SubjectName,
+			SubjectType:             webhookEvent.SubjectType,
+			SubjectOwner:            webhookEvent.SubjectOwner,
+			SubjectOwnerKind:        webhookEvent.SubjectOwnerKind,
+			SubjectNamespace:        webhookEvent.SubjectNamespace,
+			SubjectNode:             webhookEvent.SubjectNode,
+			AggregationKey:          webhookEvent.AggregationKey,
+			ExistingEvidenceActions: existingEvidenceActions,
+		})
+		if err != nil {
+			sc.GetLogger().Error("event: unable to process playbook for event", "error", err, "aggregation_key", webhookEvent.AggregationKey, "account_id", webhookEvent.AccountId, "event_id", webhookEvent.Fingerprint)
+		}
+
+		for _, e := range evidenceResponse {
+			if e.Error != nil {
+				common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonActionExecutionError)
+			} else {
+				common.MetricsPlaybookActionTotal(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricStatusCompleted)
+			}
+			// Record individual action duration
+			common.MetricsPlaybookActionDuration(sc.GetContext(), e.DurationSeconds, e.ActionName, eventSource, tenantId, accountId)
+
+			if e.Response == nil {
+				continue
+			}
+			structResponse, err := common.MarshalStructToMap(e.Response)
+			if err != nil {
+				common.MetricsPlaybookActionFailed(sc.GetContext(), e.ActionName, eventSource, tenantId, accountId, common.MetricReasonEvidenceMarshalFailed)
+				webhookEvent.Evidences = append(webhookEvent.Evidences, e.Response)
+				continue
+			}
+			structResponse["type"] = e.Response.GetFormatName()
+			additionalInfo, ok := structResponse["additional_info"].(map[string]any)
+			if !ok {
+				additionalInfo = map[string]any{}
+				structResponse["additional_info"] = additionalInfo
+			}
+			if e.ActionTitle != "" {
+				additionalInfo["title"] = e.ActionTitle
+			}
+			// Only set action_name if not already set by the action response
+			if _, exists := additionalInfo["action_name"]; !exists {
+				additionalInfo["action_name"] = e.ActionName
+			}
+
+			playbooks.ShapeEvidenceForFrontend(structResponse)
+			webhookEvent.Evidences = append(webhookEvent.Evidences, structResponse)
+		}
+	}
+
+	mergeAggregatedAlertLabels(webhookEvent.Labels, aggregationKey, evidenceResponse)
+	linkCloudResourceId(webhookEvent, evidenceResponse)
+
+	if len(webhookEvent.Evidences) > evidenceCountBefore {
+		addedEvidences = webhookEvent.Evidences[evidenceCountBefore:]
+	}
+
+	// Both the playbook itself (it writes back into the same Labels map) and
+	// mergeAggregatedAlertLabels can add or rewrite labels. The async path needs
+	// just those, so it can merge them into the persisted row rather than
+	// overwriting a labels map another writer may have touched meanwhile.
+	labelDelta = map[string]string{}
+	for k, v := range webhookEvent.Labels {
+		if before, existed := labelsBefore[k]; !existed || before != v {
+			labelDelta[k] = v
+		}
+	}
+
+	return addedEvidences, labelDelta
 }
 
 // resolveIncidentAt returns when the subject container actually terminated, for
@@ -2695,6 +3242,9 @@ func RefreshInvestigation(sc *security.RequestContext, eventId string) error {
 
 	if accountId == "" {
 		return errors.New("account ID is not available in the event")
+	}
+	if !sc.GetSecurityContext().HasAccountAccess(accountId, security.SecurityAccessTypeUpdate) {
+		return common.ErrorUnauthorized("access denied for account: " + accountId)
 	}
 
 	tenantId := ""
@@ -3042,6 +3592,27 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 	case "", "pod":
 		// Pod (or unspecified subject) → resolve via its owning workload.
 		workloadName = webhookEvent.SubjectOwner
+	case "configmap":
+		// A ConfigMap is not a workload, and its name collides with one
+		// constantly — charts routinely name a Deployment and its config
+		// the same thing. Falling through to the name match below would
+		// link an edit of `grafana` the ConfigMap onto `grafana` the
+		// Deployment whether or not that Deployment reads it, which is
+		// worse than no attribution: it asserts a causal link that may not
+		// exist. Resolve the workloads that actually consume it instead.
+		linkRelatedWorkloads(sc, dbms, configMapConsumersSQL, "configmap",
+			ConfigMapConsumersLabel, tenantId, ns, subjectName, webhookEvent)
+		return
+	case "ingress":
+		// Same trap, and this one has been firing all along: Ingress
+		// changes are already emitted, so the name match below has been
+		// attributing them by naming coincidence. It picks the same-named
+		// workload when one exists and silently drops every other backend
+		// — including, in the common case of one Ingress fronting several
+		// services, the one whose traffic the change actually broke.
+		linkRelatedWorkloads(sc, dbms, ingressBackendsSQL, "ingress",
+			IngressBackendsLabel, tenantId, ns, subjectName, webhookEvent)
+		return
 	default:
 		// Subject is itself a workload.
 		workloadName = subjectName
@@ -3069,6 +3640,123 @@ func linkK8sCloudResourceId(sc *security.RequestContext, dbms *database.Database
 		case err != nil && err != sql.ErrNoRows:
 			sc.GetLogger().Warn("link_k8s_cloud_resource: pod lookup failed", "error", err, "namespace", ns, "pod", subjectName)
 		}
+	}
+}
+
+// ConfigMapConsumersLabel carries the workloads that consume the changed
+// ConfigMap, as "Kind/name" entries joined by ",". A ConfigMap edit is
+// otherwise an orphan event: nothing in it says which application just had
+// its configuration changed, which is the only reason anyone cares.
+const ConfigMapConsumersLabel = "nb_configmap_consumers"
+
+// IngressBackendsLabel carries the workloads the changed Ingress routes to,
+// in the same shape. An Ingress name is not a workload name — routing is the
+// only thing that says whose traffic just changed.
+const IngressBackendsLabel = "nb_ingress_backends"
+
+// maxRelatedWorkloadsLabelled bounds these labels. A ConfigMap read by
+// hundreds of workloads (a cluster-wide CA bundle) or an Ingress fronting a
+// large namespace would otherwise write an unbounded string into every event
+// row.
+const maxRelatedWorkloadsLabelled = 20
+
+// relatedWorkload is a workload reached from the changed object through the
+// knowledge graph — a ConfigMap's consumer, an Ingress's backend.
+type relatedWorkload struct {
+	Name string `db:"name"`
+	Kind string `db:"kind"`
+}
+
+func (w relatedWorkload) String() string {
+	if w.Kind == "" {
+		return w.Name
+	}
+	return w.Kind + "/" + w.Name
+}
+
+// relatedWorkloads runs one of the graph traversals above. Best-effort: an
+// empty result (graph not built yet, or the relationship created since the
+// last build — the graph rebuilds hourly) leaves the event unattributed,
+// which is the correct outcome. Guessing from names is what this exists to
+// avoid.
+func relatedWorkloads(sc *security.RequestContext, dbms *database.DatabaseManager,
+	query, subjectKind, tenantId, accountId, namespace, name string) []relatedWorkload {
+
+	rows, err := dbms.Db.QueryxContext(sc.GetContext(), query, tenantId, accountId, namespace, name)
+	if err != nil {
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload lookup failed",
+			"error", err, "subject_kind", subjectKind, "namespace", namespace, "name", name)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+
+	var related []relatedWorkload
+	for rows.Next() {
+		var w relatedWorkload
+		if err := rows.StructScan(&w); err != nil {
+			sc.GetLogger().Warn("link_k8s_cloud_resource: related workload scan failed",
+				"error", err, "subject_kind", subjectKind)
+			return nil
+		}
+		if w.Name != "" {
+			related = append(related, w)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload rows failed",
+			"error", err, "subject_kind", subjectKind)
+		return nil
+	}
+	return related
+}
+
+// linkRelatedWorkloads attributes a change on a non-workload object to the
+// workloads the graph connects it to. All of them are recorded in `label`;
+// the resource link is only set when there is exactly one, because with
+// several any single choice would be arbitrary and the label already carries
+// the full set.
+func linkRelatedWorkloads(sc *security.RequestContext, dbms *database.DatabaseManager,
+	query, subjectKind, label, tenantId, namespace, name string, webhookEvent *Event) {
+
+	if name == "" {
+		return
+	}
+	related := relatedWorkloads(sc, dbms, query, subjectKind, tenantId, webhookEvent.AccountId, namespace, name)
+	if len(related) == 0 {
+		return
+	}
+
+	labelled := related
+	suffix := ""
+	if len(labelled) > maxRelatedWorkloadsLabelled {
+		suffix = fmt.Sprintf(",+%d more", len(labelled)-maxRelatedWorkloadsLabelled)
+		labelled = labelled[:maxRelatedWorkloadsLabelled]
+	}
+	names := make([]string, 0, len(labelled))
+	for _, w := range labelled {
+		names = append(names, w.String())
+	}
+	if webhookEvent.Labels == nil {
+		webhookEvent.Labels = map[string]string{}
+	}
+	webhookEvent.Labels[label] = strings.Join(names, ",") + suffix
+
+	if len(related) != 1 {
+		return
+	}
+	only := related[0]
+	webhookEvent.SubjectOwner = only.Name
+	webhookEvent.SubjectOwnerKind = only.Kind
+
+	var crid string
+	err := dbms.Db.QueryRowxContext(sc.GetContext(), workloadCloudResourceSQL,
+		tenantId, webhookEvent.AccountId, namespace, only.Name).Scan(&crid)
+	switch {
+	case err == nil && crid != "":
+		webhookEvent.CloudResourceId = crid
+	case err != nil && err != sql.ErrNoRows:
+		sc.GetLogger().Warn("link_k8s_cloud_resource: related workload resource lookup failed",
+			"error", err, "subject_kind", subjectKind, "namespace", namespace, "workload", only.Name)
 	}
 }
 

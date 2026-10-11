@@ -8,6 +8,23 @@ import (
 )
 
 func TestBuildInvestigationEvidenceContext(t *testing.T) {
+	t.Run("verbose interpretations cannot evict observed errors", func(t *testing.T) {
+		ev := events.InvestigateData{
+			Deployment:   events.InvestigateDataInsight{Insight: []events.Insight{{Message: strings.Repeat("suspected deployment cause ", 2000)}}},
+			LogSummary:   map[string]any{"log_patterns": []any{map[string]any{"count": 1, "template": strings.Repeat("pattern ", 2000)}}},
+			ErrorLogData: []string{"FIRST-ERROR", strings.Repeat("error ", 2000), "LAST-ERROR"},
+			LogData:      strings.Repeat("raw line\n", 2000),
+		}
+		got := buildInvestigationEvidenceContext(ev)
+		if len(got) > maxInvestigationEvidenceBytes {
+			t.Fatalf("evidence exceeds inline budget: %d", len(got))
+		}
+		for _, want := range []string{"FIRST-ERROR", "LAST-ERROR", "output truncated", "Collected Logs"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("missing %q after bounding evidence", want)
+			}
+		}
+	})
 	t.Run("empty evidence returns empty string", func(t *testing.T) {
 		if got := buildInvestigationEvidenceContext(events.InvestigateData{}); got != "" {
 			t.Errorf("expected empty string, got %q", got)

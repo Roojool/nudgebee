@@ -39,7 +39,11 @@ func trimmedK8sCoreToolNames() []string {
 		tools.ToolResourceSearch,
 		tools.ToolCloudResourceSearch,
 		ServiceDependencyGraph,
-		RecommendationsAgentName,
+		// Recommendation records come from the raw SQL tool, one hop and a
+		// query: the tool carries the SQL and listing rules in its ToolPrompt.
+		// finops (below) is the agent for cost analysis, resolution history
+		// and every write on a recommendation.
+		tools.ToolRecommendationExecuteSql,
 		// websearch is preloaded so the model can ground error-message /
 		// version-specific investigation questions ("what's the fix for X CVE",
 		// "is Y a known bug in kubernetes 1.29") without needing to route via

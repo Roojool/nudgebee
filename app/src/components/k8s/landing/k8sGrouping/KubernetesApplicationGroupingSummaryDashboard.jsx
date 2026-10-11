@@ -80,6 +80,8 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     if (accountId && applications) {
       // Set all to loading initially
       setLoading({
@@ -243,6 +245,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
             const latencyResults = await Promise.allSettled(
               latencyApiCalls.map(({ labelName, promise }) => promise.then((response) => ({ response, labelName })))
             );
+            if (cancelled) {
+              return;
+            }
 
             // Process successful responses
             const processedLatencyData = [];
@@ -264,6 +269,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
               handleError('latency', new Error('All latency API calls failed'));
             }
           } catch (error) {
+            if (cancelled) {
+              return;
+            }
             console.error('Error in fetchLatencyData:', error);
             handleError('latency', error);
           }
@@ -311,6 +319,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
         apiCalls.forEach(({ key, labelName, promise }) => {
           promise
             .then((response) => {
+              if (cancelled) {
+                return;
+              }
               mergePromQueries(response);
               const seriesList = response?.[0]?.payload || [];
               let seriesData = {
@@ -350,6 +361,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
               updateChartData(key, seriesData);
             })
             .catch((error) => {
+              if (cancelled) {
+                return;
+              }
               console.error('Error fetching data', { key, error });
               handleError(key, error);
             });
@@ -360,9 +374,15 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
       };
       fetchData();
     }
-  }, [selectedDateRange]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, applications, selectedDateRange]);
 
   useEffect(() => {
+    let cancelled = false;
+
     const containerIdRegex = applications.map((a) => `.*/${a.namespace_name}/${a.workload_name}.*`).join('|');
     const workloadRegex = [...new Set(applications.map((a) => `${a.workload_name}.*`))].join('|');
     const namespace = [...new Set(applications.map((a) => a.namespace_name))].join('|');
@@ -413,6 +433,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
           ...params,
         });
 
+        if (cancelled) {
+          return;
+        }
         mergePromQueries(response);
 
         const seriesList = response?.[0]?.payload || [];
@@ -445,6 +468,9 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
         }
         updateChartData('services', parsed);
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         console.error('Failed to fetch service metric:', error);
         handleError('services', error);
       }
@@ -453,7 +479,11 @@ const KubernetesApplicationGroupingSummaryDashboard = ({ accountId, applications
     };
 
     fetchServiceMetric();
-  }, [selectedServiceMetric]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, applications, selectedServiceMetric]);
 
   const handleDateRangeChange = (passedSelectedDateTime) => {
     setSelectedDateRange({

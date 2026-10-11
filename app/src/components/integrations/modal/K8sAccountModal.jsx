@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { Grid, Typography, Box, Divider, ButtonBase } from '@mui/material';
 import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
 import apiAccount from '@api1/account';
+import apiKubernetes1 from '@api1/kubernetes1';
 import { Modal } from '@ui/Modal';
 import { Stepper } from '@ui/Stepper';
 import { Input } from '@ui/Input';
@@ -21,7 +22,14 @@ import { useUpdateAllClusterOption } from '@shared/layout/UpdateDataContext';
 import { CopyIconBlue, PlayCircleIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { useBrandingConfig } from '@hooks/useTenantBranding';
+import { ProgressLinear } from '@ui/ProgressLinear';
 import { useTour } from '@components/common/tour';
+import { addPendingAgentInstall, AGENT_CONNECTED } from '@components/integrations/pendingAgentInstall';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
+
+// How often the install step re-checks the agent for the new account. The
+// Helm/script run itself takes minutes.
+const AGENT_INSTALL_POLL_MS = 10000;
 
 // The chart enables these three by default; a minimum install has to turn them
 // off explicitly. Isolated here so the whole set is one edit when the chart's
@@ -147,6 +155,12 @@ const K8sAccountModal = ({ openModal, handleClose, handleOnAccountCreate }) => {
   const [currentStep, setCurrentStep] = useState(1);
 
   const [authKey, setAuthKey] = useState('');
+  // Id of the account created in step 1, and whether its agent has reported in.
+  // The agent ROW is not the signal: one is written when the account is created,
+  // before anything is installed. Only status CONNECTED means the agent is
+  // actually running in a cluster.
+  const [createdAccountId, setCreatedAccountId] = useState('');
+  const [agentInstalled, setAgentInstalled] = useState(false);
   // Both read from the nodes themselves — no hosted tool can substitute for
   // either, and changing them later means re-running the install.
   const [nodeAgentEnabled, setNodeAgentEnabled] = useState(true);
@@ -190,6 +204,8 @@ const K8sAccountModal = ({ openModal, handleClose, handleOnAccountCreate }) => {
     setValidationError({});
     setCurrentStep(1);
     setAuthKey('');
+    setCreatedAccountId('');
+    setAgentInstalled(false);
     setNodeAgentEnabled(true);
     setPodMonitorEnabled(true);
     setImageRegistry(DEFAULT_IMAGE_REGISTRY);
@@ -223,6 +239,7 @@ const K8sAccountModal = ({ openModal, handleClose, handleOnAccountCreate }) => {
       if (res.data.status === 'SUCCESS') {
         const newAuthKey = `${res.data?.data?.accounts_create?.access_key}:${res.data?.data?.accounts_create?.access_secret}`;
         setAuthKey(newAuthKey);
+        setCreatedAccountId(res.data?.data?.accounts_create?.id || '');
         setCurrentStep(2);
         updateAllClusters(true);
         if (handleOnAccountCreate) {
@@ -256,6 +273,78 @@ const K8sAccountModal = ({ openModal, handleClose, handleOnAccountCreate }) => {
         k8sName: k8sNameValue,
       });
     }
+  };
+
+  // The install step stays open until the agent lands, so nobody walks away
+  // believing the cluster is connected when nothing was ever installed.
+  const isWaitingForAgent = currentStep === 2 && !isPreview && !!createdAccountId && !agentInstalled;
+
+  // accounts_create returns the new id, and everything below keys off it. If a
+  // deployment ever answers without one, resolve it by name rather than letting
+  // the whole step silently fall back to closing on the first click — a missing
+  // id is invisible from the UI, which is exactly how this shipped broken once.
+  useEffect(() => {
+    if (currentStep !== 2 || isPreview || createdAccountId || !k8sNameValue) {
+      return undefined;
+    }
+    let cancelled = false;
+    console.warn('K8sAccountModal: accounts_create returned no id; resolving the new account by name');
+    apiKubernetes1.listAcc({ nameSearch: k8sNameValue, statusSearch: 'active', limit: 1 }).then((res) => {
+      const rows = res?.data?.data?.accounts_list?.rows || [];
+      const match = rows.find((row) => row?.account_name === k8sNameValue);
+      if (!cancelled && match?.id) {
+        setCreatedAccountId(match.id);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentStep, isPreview, createdAccountId, k8sNameValue]);
+
+  useEffect(() => {
+    if (!isWaitingForAgent) {
+      return undefined;
+    }
+    let cancelled = false;
+    const checkAgent = () => {
+      apiKubernetes1.listK8sAccAgentHealth(createdAccountId).then((res) => {
+        const connected = (res?.data?.data?.agent || []).some((row) => row?.status === AGENT_CONNECTED);
+        if (!cancelled && connected) {
+          setAgentInstalled(true);
+        }
+      });
+    };
+    checkAgent();
+    const timer = setInterval(checkAgent, AGENT_INSTALL_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [isWaitingForAgent, createdAccountId]);
+
+  // The agent reported in — the whole point of holding the modal open. Close it
+  // rather than making the user acknowledge a done deal.
+  useEffect(() => {
+    if (!agentInstalled) {
+      return;
+    }
+    snackbar.success('Agent connected from your cluster. Setup is complete.');
+    updateAllClusters(true);
+    resetState();
+    handleClose();
+    // resetState/handleClose are stable enough for this one-shot close.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentInstalled]);
+
+  // Closing the install step before the agent shows up isn't an error, but it
+  // leaves an account nothing is collecting for — record it so the reminder
+  // banner can carry the message until the install actually happens.
+  const handleForcedClose = () => {
+    if (isWaitingForAgent) {
+      addPendingAgentInstall(createdAccountId, k8sNameValue);
+    }
+    resetState();
+    handleClose();
   };
 
   const handleFinish = () => {
@@ -365,11 +454,12 @@ helm repo update`;
     <Modal
       width='md'
       open={openModal}
-      handleClose={() => {
-        resetState();
-        handleClose();
-      }}
+      handleClose={handleForcedClose}
+      // While waiting on the agent, only the explicit close button gets out — a
+      // stray backdrop click shouldn't drop the install instructions.
+      backdropClickClose={!isWaitingForAgent}
       title='Add Kubernetes Account'
+      subtitle={getIntegrationDescription('K8S')}
       rightComponentOnTitle={
         <Box sx={{ mr: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
           <Button
@@ -424,7 +514,7 @@ helm repo update`;
             </Button>
           </>
         ) : (
-          <Button id='finish-btn' tone='primary' size='md' onClick={handleFinish}>
+          <Button id='finish-btn' tone='primary' size='md' disabled={isWaitingForAgent} onClick={handleFinish}>
             Finish
           </Button>
         )
@@ -900,6 +990,20 @@ helm repo update`;
                 )}
               </Box>
             </Box>
+
+            {isWaitingForAgent && (
+              <Box mt={3} data-testid='agent-install-waiting'>
+                <ProgressLinear surface='section' tone='info' aria-label='Waiting for the agent to connect' />
+                <Box mt='var(--ds-space-2)'>
+                  <Banner
+                    tone='info'
+                    surface='section'
+                    title='Waiting for the agent to connect from your cluster'
+                    message='Run the command above on your cluster. This window closes on its own once the agent connects — or close it now and a reminder stays on screen until it does.'
+                  />
+                </Box>
+              </Box>
+            )}
           </>
         )}
       </Box>

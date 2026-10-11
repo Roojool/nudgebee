@@ -534,6 +534,18 @@ async def send_test_notification(request: Request, body: Dict[Any, Any]):
         return JSONResponse({"success": False, "error": "Unexpected error"})
 
 
+@router.post("/integrations/messaging/invalidate-cache", dependencies=[Depends(verify_action_token)])
+async def invalidate_messaging_cache(body: Dict[Any, Any]):
+    """Drop a tenant's cached messaging installs. Called by api-server on
+    ms_teams_webhook create/update/delete so the change is routable without the
+    cache TTL."""
+    tenant = body.get("tenant_id")
+    if not tenant:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    _get_message_service().cache.delete_cached_installations(tenant)
+    return JSONResponse({"success": True})
+
+
 @router.post("/integrations/google-chat/notify", dependencies=[Depends(verify_action_token)])
 async def notify_google_chat_binding(body: Dict[Any, Any]):
     """Post a binding-change notice into a Google Chat space (and leave on unbind).

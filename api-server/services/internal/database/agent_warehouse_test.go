@@ -1,7 +1,9 @@
 package database
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,4 +100,39 @@ func TestAgentDriver(t *testing.T) {
 		assert.Equal(t, accountId, dummyAccountId)
 	}
 
+}
+
+// TestAgentDriverStaleConnectionContext reproduces the pooled-connection failure:
+// a prepared stmt carries a context that a previous query already cancelled, and a
+// later QueryContext call must run against its own live context instead of the
+// dead one baked into the connection.
+func TestAgentDriverStaleConnectionContext(t *testing.T) {
+	ts, err := mockRelayServer()
+	assert.Nil(t, err)
+	defer ts.Close()
+
+	staleCtx, cancel := context.WithCancel(context.Background())
+	cancel() // mimic the previous query's `defer cancel()` firing
+	stmt := agentWarehouseStmt{query: "SELECT 1", ctx: staleCtx}
+
+	args := []driver.NamedValue{
+		{Ordinal: 1, Value: "dummy"},
+		{Ordinal: 2, Value: "agent_warehouse_clickhouse"},
+	}
+
+	// Fresh live context => the relay request is attempted and succeeds.
+	rows, err := stmt.QueryContext(context.Background(), args)
+	assert.NoError(t, err)
+	assert.NotNil(t, rows)
+	if rows != nil {
+		assert.NoError(t, rows.Close())
+	}
+
+	// When this call's own context is dead, the retry loop bails immediately
+	// instead of firing the POST and burning its one retry.
+	deadCtx, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	_, err = stmt.QueryContext(deadCtx, args)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "context canceled")
 }

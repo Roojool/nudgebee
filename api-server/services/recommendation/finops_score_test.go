@@ -2,7 +2,9 @@ package recommendation
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
+	"nudgebee/services/security"
 	"testing"
 	"time"
 )
@@ -207,5 +209,23 @@ func TestGetNFSCategory(t *testing.T) {
 		if got := GetNFSCategory(c.category, c.ruleName); got != c.want {
 			t.Errorf("GetNFSCategory(%q, %q) = %q, want %q", c.category, c.ruleName, got, c.want)
 		}
+	}
+}
+
+func TestRecomputeFinOpsScores_SkipsWhenAlreadyInFlight(t *testing.T) {
+	finopsRecomputeMu.Lock()
+	defer finopsRecomputeMu.Unlock()
+
+	ctx := security.NewRequestContextForSuperAdmin(slog.Default(), nil, nil)
+	done := make(chan error, 1)
+	go func() { done <- recomputeFinOpsScores(ctx, recentRecomputeWindow) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected a skipped run to return nil, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("recompute blocked on the in-flight guard instead of skipping")
 	}
 }

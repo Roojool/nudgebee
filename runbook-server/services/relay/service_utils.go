@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"nudgebee/runbook/common"
 	"nudgebee/runbook/config"
 	"nudgebee/runbook/services/integrations"
@@ -425,7 +426,36 @@ EOF`, oracleService, safeQuery)
 	return string(responseParsedbytes), nil
 }
 
+// relayAgentRefusal returns the failure a relay reply reports through a
+// top-level status_code of 400 or more, or nil. The relay forwards the agent's
+// reply with HTTP 200, so a refused or failed action (a write sent to a
+// read-only agent, a request that expired in the queue) arrives as
+// {"status_code": 403, "data": {"error": ...}}; data is a plain string when the
+// relay answers for an agent it lost. Mirrors relayAgentRefusal in
+// llm/llm-server/tools/common_relay.go.
+func relayAgentRefusal(relayResponse map[string]any) error {
+	statusCode, ok := relayResponse["status_code"].(float64)
+	if !ok || statusCode < 400 {
+		return nil
+	}
+	message := ""
+	switch data := relayResponse["data"].(type) {
+	case string:
+		message = data
+	case map[string]any:
+		message, _ = data["error"].(string)
+	}
+	if strings.TrimSpace(message) == "" {
+		message = http.StatusText(int(statusCode))
+	}
+	return fmt.Errorf("cluster agent returned status %d: %s", int(statusCode), message)
+}
+
 func getRelayCommandResponseData(relayResponse map[string]any) (map[string]any, error) {
+	if err := relayAgentRefusal(relayResponse); err != nil {
+		return nil, err
+	}
+
 	data1, ok := relayResponse["data"].(map[string]any)
 	if !ok || data1 == nil {
 		return nil, errors.New("data1 field not found or is nil from response")
@@ -770,6 +800,10 @@ func executeViaProxyAgentRunbook(integration integrations.IntegrationConfig, mod
 // parseProxyDBResponseRunbook converts the proxy agent's {columns, rows, row_count} response
 // into an array-of-objects JSON string matching what callers expect.
 func parseProxyDBResponseRunbook(response map[string]any) (string, error) {
+	if err := relayAgentRefusal(response); err != nil {
+		return "", err
+	}
+
 	dataStr, ok := response["data"].(string)
 	if !ok {
 		return "", errors.New("proxy response missing 'data' field")
@@ -889,6 +923,10 @@ func executeSSHViaProxyAgentRunbook(integration integrations.IntegrationConfig, 
 
 // parseProxySSHResponseRunbook extracts stdout/stderr from the proxy agent's SSH response.
 func parseProxySSHResponseRunbook(response map[string]any) (string, error) {
+	if err := relayAgentRefusal(response); err != nil {
+		return "", err
+	}
+
 	dataStr, ok := response["data"].(string)
 	if !ok {
 		return "", errors.New("proxy SSH response missing 'data' field")

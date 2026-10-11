@@ -24,6 +24,7 @@ func TestTerminateConversationIncludesClientToolWaitingMessages(t *testing.T) {
 	ctx := security.NewRequestContextForSuperAdmin()
 
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT status FROM llm_conversations").WithArgs("conversation-1", "account-1").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(ConversationStatusInProgress))
 	messageQuery := `UPDATE llm_conversation_messages SET updated_at = now(), status = $2, response = $4 WHERE conversation_id = $1 AND account_id = $3 AND status in ('IN_PROGRESS', 'WAITING', 'WAITING_FOR_CLIENT_TOOL', 'PENDING') RETURNING id`
 	mock.ExpectQuery(regexp.QuoteMeta(messageQuery)).
 		WithArgs("conversation-1", string(ConversationStatusTerminated), "account-1", "Conversation terminated by user").

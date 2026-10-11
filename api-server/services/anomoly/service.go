@@ -95,7 +95,13 @@ func Execute(context *security.RequestContext) error {
 	if err != nil {
 		return err
 	}
-	rows, err := dbms.Db.Queryx(`select ca.id as cloud_account_id , ca.tenant as tenant from cloud_accounts ca inner join agent a on ca.id = a.cloud_account_id where ca.cloud_provider = 'K8s' and a.status = 'CONNECTED' group by ca.tenant, ca.id`)
+	// The agent join MUST pin a.type = 'k8s'. An account can carry several agent
+	// rows (k8s, proxy, and the cloud-sync AWS/Azure/GCP registrations); without
+	// the type filter a CONNECTED *proxy* row makes an account whose in-cluster
+	// agent is long dead look eligible, and every work item it generates then
+	// fails at the relay with "agent not connected". ca.status keeps retired
+	// accounts out for the same reason (insight/service.go filters the same way).
+	rows, err := dbms.Db.Queryx(`select ca.id as cloud_account_id , ca.tenant as tenant from cloud_accounts ca inner join agent a on ca.id = a.cloud_account_id where ca.cloud_provider = 'K8s' and ca.status = 'active' and a.type = 'k8s' and a.status = 'CONNECTED' group by ca.tenant, ca.id`)
 	if err != nil {
 		slog.Error("anomaly: failed to query accounts for processing", "error", err)
 		return err
@@ -136,13 +142,16 @@ func ExecuteForAccount(context *security.RequestContext, accountId string) error
 		return err
 	}
 
-	// Validate account exists, is K8s type, and has connected agent
+	// Validate account exists, is active, is K8s type, and has a connected
+	// in-cluster agent. Same predicate as Execute above — a.type = 'k8s' keeps a
+	// CONNECTED proxy row from vouching for a dead cluster agent.
 	var tenantId string
 	err = dbms.Db.Get(&tenantId, `
 		SELECT ca.tenant
 		FROM cloud_accounts ca
 		INNER JOIN agent a ON ca.id = a.cloud_account_id
-		WHERE ca.id = $1 AND ca.cloud_provider = 'K8s' AND a.status = 'CONNECTED'
+		WHERE ca.id = $1 AND ca.cloud_provider = 'K8s' AND ca.status = 'active'
+			AND a.type = 'k8s' AND a.status = 'CONNECTED'
 		LIMIT 1
 	`, accountId)
 	if err != nil {

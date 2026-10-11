@@ -241,13 +241,15 @@ func evaluateClaimResponse(response *llms.ContentResponse, count int) (result cl
 	return claimShadowResult{Status: "ok", Decision: decision, Feedback: feedback, Audit: &audit}
 }
 
-// Shadow-only: never returns a decision to the planner or writes a synthetic
-// tool call. Existing critique retains all timing, formatting and intent checks.
-func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) {
-	if !config.Config.ClaimCritiqueShadowEnabled || ctx == nil ||
+// The enabled audit captures its result and can request refinement,
+// but can never clear an incumbent rejection or create a separate retry budget.
+func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest, planner, agentName, baseline, baselineFeedback, input, answer, notebook string, steps []NBAgentPlannerToolActionStep) (effectiveDecision, effectiveFeedback string) {
+	effectiveDecision, effectiveFeedback = baseline, baselineFeedback
+	if !config.Config.ClaimCritiqueFeedbackEnabled || ctx == nil ||
 		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId) {
 		return
 	}
+	baseline = strings.ToLower(strings.TrimSpace(baseline))
 	if baseline != "accept" && baseline != "refine" {
 		baseline = "unknown"
 	}
@@ -258,6 +260,7 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 	bounded = context.WithValue(bounded, contextKeyPreserveInput, true)
 	auditCtx := security.NewRequestContext(bounded, ctx.GetSecurityContext(), ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 	record := newClaimCapture(auditCtx, request, planner, agentName, baseline, baselineFeedback, input, answer, notebook, steps)
+	record.Detail.FeedbackEnabled = config.Config.ClaimCritiqueFeedbackEnabled
 	if err := persistClaimCapture(auditCtx, record); err != nil {
 		MetricsClaimCritiqueShadow(planner, baseline, "unknown", "capture_error", time.Since(started).Seconds())
 		ctx.GetLogger().Error("claim critique capture failed before inference", "audit_id", record.ID)
@@ -277,9 +280,14 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 	record.Detail.RawResponse, record.Detail.ResponseTruncated = result.RawResponse, result.ResponseTruncated
 	record.LatencySeconds = time.Since(started).Seconds()
 	record.Completed = true
+	decisionForPlanner, feedbackForPlanner := claimFeedbackDecision(record.Detail.FeedbackEnabled, effectiveDecision, effectiveFeedback, result)
+	record.Detail.EffectiveDecision, record.Detail.EffectiveFeedback = decisionForPlanner, feedbackForPlanner
+	record.Detail.FeedbackSelected = decisionForPlanner != effectiveDecision || feedbackForPlanner != effectiveFeedback
 	if err := persistClaimCapture(auditCtx, record); err != nil {
 		result.Status, result.Decision = "capture_error", ""
 		ctx.GetLogger().Error("claim critique capture completion failed", "audit_id", record.ID)
+	} else {
+		effectiveDecision, effectiveFeedback = decisionForPlanner, feedbackForPlanner
 	}
 
 	decision := result.Decision
@@ -293,4 +301,24 @@ func runClaimCritiqueShadow(ctx *security.RequestContext, request NBAgentRequest
 	ctx.GetLogger().Info("claim critique shadow", "audit_id", record.ID, "planner", planner, "status", result.Status,
 		"baseline", baseline, "decision", decision, "latency_seconds", latency,
 		"conversation_id", request.ConversationId, "message_id", request.MessageId, "agent_id", request.AgentId)
+	return
+}
+
+// Only a valid audit may add feedback. Unknown incumbent outcomes retain their
+// existing fallback; a successful claim audit is not a replacement critic.
+func claimFeedbackDecision(enabled bool, baseline, feedback string, result claimShadowResult) (string, string) {
+	if !enabled || result.Status != "ok" || result.Decision != "refine" || strings.TrimSpace(result.Feedback) == "" {
+		return baseline, feedback
+	}
+	switch strings.ToLower(strings.TrimSpace(baseline)) {
+	case "accept":
+		return "refine", result.Feedback
+	case "refine":
+		if strings.TrimSpace(feedback) == "" {
+			return "refine", result.Feedback
+		}
+		return "refine", feedback + "\n\nAdditional claim audit feedback:\n" + result.Feedback
+	default:
+		return baseline, feedback
+	}
 }

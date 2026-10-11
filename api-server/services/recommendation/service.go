@@ -733,6 +733,19 @@ func ScanImage(ctx *security.RequestContext, query RecommendationScanImageReques
 	if err != nil {
 		return RecommendationApplyResponse{}, err
 	}
+
+	// Same per-account configuration the scheduled scan honours (Kubernetes
+	// account → Settings). A manual scan is still a scan: if the account or this
+	// namespace is excluded, say so rather than scheduling a Job the operator
+	// asked the product not to run.
+	settings := getImageScanSettings(ctx, dbms, query.AccountId)
+	if !settings.IsEnabled() {
+		return RecommendationApplyResponse{}, common.ErrorBadRequest("image scanning is disabled for this account")
+	}
+	if settings.isNamespaceExcluded(query.Namespace) {
+		return RecommendationApplyResponse{}, common.ErrorBadRequest("image scanning is disabled for namespace " + query.Namespace)
+	}
+
 	// Distinct running images of the workload, plus the node each runs on and a
 	// pod name — needed for the node-pinned fs-scan and pull-secret sourcing.
 	rows, err := dbms.Db.Queryx(`

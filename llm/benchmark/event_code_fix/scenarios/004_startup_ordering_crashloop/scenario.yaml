@@ -1,0 +1,53 @@
+name: startup_ordering_crashloop
+type: event
+tags: [code_fix, crashloop, startup_ordering, real_incident]
+
+# Mined from a real, merged fix: PR #37133 ("fix workflow-server
+# CrashLoopBackOff due to synchronous schedule sync blocking HTTP health
+# server startup"), account k8s-dev — the same internal test account used
+# throughout this repo's own test suites, no anonymization needed.
+
+alert:
+  alertname: PodCrashLoopBackOff
+  labels:
+    deployment: runbook-worker
+    namespace: benchmark-scenarios
+    severity: critical
+  summary: "runbook-worker CrashLoopBackOff"
+  # The shape is "never came up," not "came up then crashed" — repeated
+  # readiness-probe connection refusals followed by SIGTERM, in a loop, not a
+  # single crash after running fine for a while.
+  log_lines: |
+    2026-09-18T12:00:03Z level=info msg="starting runbook-worker"
+    2026-09-18T12:00:03Z level=info msg="loading cron triggers and ensuring system schedules"
+    2026-09-18T12:00:13Z level=warn msg="readiness probe failed" reason="dial tcp <pod-ip>:8000: connect: connection refused"
+    2026-09-18T12:00:23Z level=warn msg="readiness probe failed" reason="dial tcp <pod-ip>:8000: connect: connection refused"
+    2026-09-18T12:00:33Z level=warn msg="liveness probe failed" reason="dial tcp <pod-ip>:8000: connect: connection refused"
+    2026-09-18T12:00:33Z level=error msg="container terminated" signal=15 exit_code=137
+    2026-09-18T12:00:34Z level=info msg="starting runbook-worker"
+    2026-09-18T12:00:34Z level=info msg="loading cron triggers and ensuring system schedules"
+  fingerprint: bench-startup-ordering-crashloop-004
+
+workload:
+  manifests: manifests/all.yaml
+  namespace: benchmark-scenarios
+  deployment: runbook-worker
+
+fixture_repo:
+  url: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  subdir: startup_ordering_crashloop
+  bug_commit: REPLACE_WITH_BUG_COMMIT_SHA
+  test_command: pytest -q
+  fail_to_pass:
+    - tests/test_startup.py::test_health_server_starts_before_slow_setup_completes
+  pass_to_pass:
+    - tests/test_startup.py::test_health_reports_true_after_run_with_no_delay
+
+expected_diagnosis:
+  - "The response must identify that a slow synchronous startup task (e.g. schedule/cron sync) runs before the HTTP health server starts listening, so the readiness/liveness probe deadline is exceeded before the server can bind."
+  - "The response must NOT attribute this to resource limits, an external dependency outage, or a runtime crash after the service was already healthy — the pattern is repeated connection-refused on the health port from the very start of every restart, not a crash mid-operation."
+
+expected_fix:
+  file: startup_ordering_crashloop/src/startup.py
+  function: run
+  description: "The slow setup task runs synchronously before the health server starts; background it so the health server binds immediately."

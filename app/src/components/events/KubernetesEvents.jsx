@@ -1052,7 +1052,15 @@ const KubernetesEventsTable = ({
       shortcutClickTime: passedSelectedDateTime.shortcutClickTime ?? 0,
     };
     setSelectedDateRange(next);
-    applyFiltersOnRouter(router, { start_time: passedSelectedDateTime.startTime, end_time: passedSelectedDateTime.endTime });
+    // A filter-less table is embedded (row drill-down): its picker scopes only
+    // its own list. start_time/end_time in the URL are the page's scope — the
+    // Troubleshoot sub-tab remount key and the briefing both follow them.
+    if (!enableFilters) return;
+    applyFiltersOnRouter(router, {
+      start_time: passedSelectedDateTime.startTime,
+      end_time: passedSelectedDateTime.endTime,
+      time_shortcut: isTroubleshootPage ? undefined : next.shortcutClickTime || undefined,
+    });
     // Persist the shortcut duration when known so we can rehydrate as a relative
     // range. For a custom range (shortcutClickTime = 0) persist the absolute
     // bounds; getInitialTime() ignores them once they're > 30 days old.
@@ -1091,9 +1099,19 @@ const KubernetesEventsTable = ({
       query = { ...query, ...defaultQuery };
     }
     if (isK8sFilterVisible) {
+      // Clearing a filter must drop the key from the query (#34105) — but only for keys
+      // that the filter state actually owns. defaultQuery is mirrored into that state
+      // under camelCase aliases only (namespace / workloadName / subjectName /
+      // aggregation_key), so a caller passing the raw snake_case subject_name /
+      // subject_namespace scope (Pod Details, drill-down tables) left the selections
+      // empty and had its scope deleted here — showing every account event instead.
+      const scopedByCaller = (key) => {
+        const scope = defaultQuery?.[key];
+        return Array.isArray(scope) ? scope.length > 0 : Boolean(scope);
+      };
       if (selectedNamespace) {
         query.subject_namespace = selectedNamespace;
-      } else {
+      } else if (!scopedByCaller('subject_namespace')) {
         delete query.subject_namespace;
       }
       if (selectedAggregationKey?.length > 0) {
@@ -1103,7 +1121,7 @@ const KubernetesEventsTable = ({
       }
       if (selectedWorkload) {
         query.subject_name = selectedWorkload;
-      } else {
+      } else if (!scopedByCaller('subject_name')) {
         delete query.subject_name;
       }
     }

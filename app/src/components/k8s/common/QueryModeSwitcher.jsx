@@ -508,19 +508,24 @@ const QueryModeSwitcher = ({
     if (isPromQLMetricProvider(logProvider)) {
       const fetchMetrics = async () => {
         try {
-          const cachedPrometheusLabels = cache.getWithSuffix(`${accountId}.prometheus.labels`, null, {});
+          // Keyed by provider: the old `${accountId}.prometheus.labels` key was shared
+          // by every PromQL-family provider, so Chronosphere and Victoria Metrics read
+          // each other's (and Prometheus's) metric names out of one another's cache.
+          const promqlCacheKey = `${accountId}.${logProvider}.promql.labels`;
+          const cachedPrometheusLabels = cache.getWithSuffix(promqlCacheKey, null, {});
           if (cachedPrometheusLabels) {
             setMetricsList(cachedPrometheusLabels);
           } else {
             setMetricsList([]);
-            const res = await observability.metricsList(accountId);
+            // Pin the provider, else the completion list comes from the account default.
+            const res = await observability.metricsList(accountId, providerOverride ? { metricProvider: providerOverride } : undefined);
             if (res?.errors) {
               snackbar.error(`failed to fetch labels- ${parseHttpResponseBodyMessage(res)}`);
               return;
             }
             const metricsList = res?.data?.data?.metrics_list_names?.map((m) => m.metric) || [];
             if (metricsList.length) {
-              cache.setWithSuffix(`${accountId}.prometheus.labels`, metricsList, {}, 60 * 60 * 6);
+              cache.setWithSuffix(promqlCacheKey, metricsList, {}, 60 * 60 * 6);
               setMetricsList(metricsList);
             }
           }

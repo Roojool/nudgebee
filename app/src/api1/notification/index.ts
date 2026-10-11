@@ -1,4 +1,4 @@
-import { gqlStringify, queryGraphQL } from '@lib/HttpService';
+import { gqlStringify, queryGraphQL, unwrapGraphQL } from '@lib/HttpService';
 import apiIntegrations from '@api1/integrations';
 
 export const LIST_INSTALLED_NOTIFICATION_TOOLS = `query ListInstalledNotificationTools {
@@ -278,13 +278,8 @@ const apiNotifications = {
     }
   },
   async insertChannelAccountMapping(data: { ac_id: string; platform: string; team_id: string; channel_id: string }) {
-    try {
-      const response = await queryGraphQL(INSERT_NOTIFICATION_CHANNEL_ACCOUNT_MAPPING, 'InsertNotificationChannelAccountMapping', data);
-      return { data: response?.data?.data };
-    } catch (e) {
-      console.log('Error inserting channel account mapping:', e);
-      return { error: e };
-    }
+    const response = await queryGraphQL(INSERT_NOTIFICATION_CHANNEL_ACCOUNT_MAPPING, 'InsertNotificationChannelAccountMapping', data);
+    return { data: unwrapGraphQL(response, 'Failed to create channel mapping') };
   },
   async listChannelAccountMappings(platform: string) {
     try {
@@ -314,21 +309,11 @@ const apiNotifications = {
     }
   },
   async updateChannelAccountMapping(data: { id: string; account_id: string; team_id: string; channel_id: string }) {
-    try {
-      if (data.account_id === 'demo') {
-        return {
-          data: {
-            data: null,
-            errors: [{ message: 'Updating channel account mapping is not supported for Demo account.' }],
-          },
-        };
-      }
-      const response = await queryGraphQL(UPDATE_NOTIFICATION_CHANNEL_ACCOUNT_MAPPING, 'UpdateNotificationChannelAccountMapping', data);
-      return { data: response?.data?.data };
-    } catch (e) {
-      console.log('Error updating channel account mapping:', e);
-      return { error: e };
+    if (data.account_id === 'demo') {
+      throw new Error('Updating channel account mapping is not supported for Demo account.');
     }
+    const response = await queryGraphQL(UPDATE_NOTIFICATION_CHANNEL_ACCOUNT_MAPPING, 'UpdateNotificationChannelAccountMapping', data);
+    return { data: unwrapGraphQL(response, 'Failed to update channel mapping') };
   },
   async listWatchableChannels(platform: string, teamId?: string) {
     try {

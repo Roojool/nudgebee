@@ -113,6 +113,7 @@ class SyncRecommendationData(MlMessageAbstract):
                     deployment_name=deployment,
                     account_id=account_id,
                     from_time=from_timestamp,
+                    tenant_id=tenant_id,
                 )
                 dt = prometheus_instance.get_metrics()
                 if dt.empty:

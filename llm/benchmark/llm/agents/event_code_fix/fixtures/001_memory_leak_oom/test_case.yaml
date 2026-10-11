@@ -1,0 +1,14 @@
+user_prompt: subscriber-cache-worker OOMKilled
+expected_output:
+- The response must identify unbounded growth of an in-memory cache/map (no eviction or TTL) as the root
+  cause, citing the rising heap_alloc_mb trend across the log lines.
+- "The response must NOT attribute this to an undersized memory limit \u2014 the pattern is gradual growth\
+  \ over time, not a one-off spike against a fixed ceiling."
+tags:
+- event_code_fix
+- event
+- code_fix
+- oom
+- memory_leak
+type: rca
+event_code_fix_scenario: memory_leak_oom

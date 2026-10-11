@@ -868,10 +868,13 @@ func GetDatabaseManager(name DatabaseManagerType) (*DatabaseManager, error) {
 
 var databaseManagerHooks map[DatabaseManagerType]func() (*DatabaseManager, error) = make(map[DatabaseManagerType]func() (*DatabaseManager, error))
 
+// RegisterDatabaseManagerHook makes the next GetDatabaseManager(name) build its
+// manager from callback, replacing any manager already cached for name.
 func RegisterDatabaseManagerHook(name DatabaseManagerType, callback func() (*DatabaseManager, error)) {
 	databaseManagerMu.Lock()
 	defer databaseManagerMu.Unlock()
 	databaseManagerHooks[name] = callback
+	delete(databaseManager, name)
 }
 
 func Close() {

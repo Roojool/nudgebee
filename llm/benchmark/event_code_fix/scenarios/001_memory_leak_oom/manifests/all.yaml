@@ -1,0 +1,35 @@
+# Workload for the memory_leak_oom scenario. Apply with: kubectl apply -f all.yaml
+#
+# Unlike nb_scenarios' workloads, this one does NOT need to actually leak
+# memory or crash — the event is injected directly (see event_rca_client.py's
+# post_alert), not organically detected. This Deployment exists only so the
+# code-fix stage's capability resolution (ResolveEventCodeCapabilities,
+# llm/llm-server/services_server/source_code.go) finds a repo for the
+# workload the injected alert names — the git.repo/git.hash annotations are
+# the load-bearing part, not the container's actual behavior.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: benchmark-scenarios
+  labels:
+    benchmark: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: subscriber-cache-worker
+  namespace: benchmark-scenarios
+  labels: {app: subscriber-cache-worker, scenario: event-code-fix-001-memory-leak-oom}
+  annotations:
+    workloads.nudgebee.com/git.repo: https://github.com/nudgebee-org/nb-benchmark-fixtures
+    workloads.nudgebee.com/git.hash: REPLACE_WITH_BUG_COMMIT_SHA  # must match scenario.yaml's fixture_repo.bug_commit
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: subscriber-cache-worker}}
+  template:
+    metadata: {labels: {app: subscriber-cache-worker}}
+    spec:
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh", "-c", "sleep 3600"]

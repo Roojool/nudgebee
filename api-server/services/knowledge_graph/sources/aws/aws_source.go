@@ -20,9 +20,31 @@ import (
 var (
 	// CloudFormation stack names: alphanumeric + hyphens, starts with letter, max 128 chars
 	validStackNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{0,127}$`)
-	// AWS regions: e.g., us-east-1, eu-west-2, ap-southeast-1
-	validAWSRegionRegex = regexp.MustCompile(`^[a-z]{2}-[a-z]+-\d+$`)
+	// AWS regions: e.g., us-east-1, eu-west-2, ap-southeast-1. The repeated middle
+	// group also admits four-segment partition regions (us-gov-west-1, us-iso-east-1);
+	// a two-segment pattern would reject those and silently skip GovCloud accounts.
+	// Deliberately rejects "global" (the value IAM nodes carry) so that a global
+	// resource can never produce a "--region global" CLI call.
+	validAWSRegionRegex = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-\d+$`)
+	// AWS resource ids interpolated into CLI commands: a lowercase type prefix
+	// plus a hex id, e.g. nat-0a1b2c3d4e5f67890, fs-12345678. Both the NAT
+	// gateway and EFS lookups fall back to the node's *name* when resource_id is
+	// empty, and a name derives from a customer-controlled tag — so it has to be
+	// shape-checked before it reaches a shell command.
+	validAWSResourceIDRegex = regexp.MustCompile(`^[a-z]+-[0-9a-f]{8,17}$`)
 )
+
+// validateAWSResourceID validates that an AWS resource id is safe for CLI usage.
+// Rejecting a non-id here also skips a call that AWS would reject anyway.
+func validateAWSResourceID(resourceID string) error {
+	if resourceID == "" {
+		return fmt.Errorf("resource id cannot be empty")
+	}
+	if !validAWSResourceIDRegex.MatchString(resourceID) {
+		return fmt.Errorf("invalid AWS resource id format: %s", resourceID)
+	}
+	return nil
+}
 
 // validateStackName validates that a CloudFormation stack name is safe for CLI usage
 func validateStackName(stackName string) error {
@@ -975,6 +997,10 @@ var cloudFormationResourceTypeMap = map[string]cloudFormationResourceTypeMapping
 
 // ENINetworkInterface represents an AWS ENI from describe-network-interfaces
 type ENINetworkInterface struct {
+	// Region is stamped from cloud_resourses.region by fetchENIDataFromAWS, not
+	// decoded from CLI JSON (describe-network-interfaces does not return it), hence
+	// json:"-". Keep it excluded: these structs are re-marshalled into node meta.
+	Region             string `json:"-"`
 	NetworkInterfaceId string `json:"NetworkInterfaceId"`
 	SubnetId           string `json:"SubnetId"`
 	VpcId              string `json:"VpcId"`
@@ -1053,6 +1079,11 @@ type VPCData struct {
 
 // RouteTableData represents Route Table information from AWS CLI describe-route-tables
 type RouteTableData struct {
+	// Region is stamped from cloud_resourses.region by fetchRouteTablesFromAWS, not
+	// decoded from CLI JSON, hence json:"-". ensureRouteTableNodes builds its meta
+	// map from explicit fields rather than marshalling this struct — keep it that
+	// way, or the region leaks into node meta.
+	Region       string `json:"-"`
 	RouteTableId string `json:"RouteTableId"`
 	VpcId        string `json:"VpcId"`
 	OwnerId      string `json:"OwnerId"`

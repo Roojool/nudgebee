@@ -8,7 +8,6 @@ import (
 	"math"
 	"nudgebee/services/cloud"
 	"nudgebee/services/internal/database/models"
-	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"regexp"
 	"sort"
@@ -43,7 +42,7 @@ var gcpMetricTypeRegex = regexp.MustCompile(`metric\.type\s*=\s*"([^"]+)"`)
 var promQLParser = parser.NewParser(parser.Options{})
 
 // GetThresholdSuggestion analyzes an alert event and suggests a threshold adjustment
-func GetThresholdSuggestion(ctx context.Context, db *sqlx.DB, ev models.Event, tenantID string) ThresholdSuggestionResponse {
+func GetThresholdSuggestion(ctx context.Context, db *sqlx.DB, ev models.Event, tenantID string, fetchSeries PromQLRangeSeries) ThresholdSuggestionResponse {
 	source := ""
 	if ev.Source != nil {
 		source = *ev.Source
@@ -122,7 +121,7 @@ func GetThresholdSuggestion(ctx context.Context, db *sqlx.DB, ev models.Event, t
 	}
 
 	// Fetch metric history from source API
-	metricHistory := fetchMetricHistory(ctx, ev, alertDef, tenantID)
+	metricHistory := fetchMetricHistory(ctx, ev, alertDef, tenantID, fetchSeries)
 
 	// Compute suggestion. Prefer the baseline-fidelity path — segment the history into off-alert
 	// vs firing windows and diagnose deterministically — and fall back to the legacy statistical
@@ -542,7 +541,7 @@ func buildQueryMetadata(source string, labels map[string]interface{}, alertDef *
 	return nil
 }
 
-func fetchMetricHistory(ctx context.Context, ev models.Event, alertDef *AlertDefinition, tenantID string) *MetricHistory {
+func fetchMetricHistory(ctx context.Context, ev models.Event, alertDef *AlertDefinition, tenantID string, fetchSeries PromQLRangeSeries) *MetricHistory {
 	labels := GetLabelsMap(ev)
 	if labels == nil {
 		return nil
@@ -567,12 +566,12 @@ func fetchMetricHistory(ctx context.Context, ev models.Event, alertDef *AlertDef
 	case "azure_monitor_webhook", "Azure_Monitor_Alert":
 		return fetchAzureMetricHistory(ctx, labels, alertDef, tenantID, cloudAccountID, sevenDaysAgo, now)
 	case "prometheus", "prometheus_alertmanager_webhook":
-		return fetchPrometheusMetricHistory(ctx, ev, alertDef, sevenDaysAgo, now)
+		return fetchPrometheusMetricHistory(ctx, ev, alertDef, tenantID, fetchSeries, sevenDaysAgo, now)
 	case "GCP_Metric_Alert":
 		return fetchGCPMetricHistory(ctx, labels, alertDef, tenantID, cloudAccountID, sevenDaysAgo, now)
 	case "pagerduty_webhook":
 		// PagerDuty alerts originate from prometheus/alertmanager, reuse prometheus metric fetch
-		return fetchPrometheusMetricHistory(ctx, ev, alertDef, sevenDaysAgo, now)
+		return fetchPrometheusMetricHistory(ctx, ev, alertDef, tenantID, fetchSeries, sevenDaysAgo, now)
 	}
 
 	return nil
@@ -1360,8 +1359,23 @@ func extractPrometheusAlertDefinition(ctx context.Context, db *sqlx.DB, ev model
 	}, nil
 }
 
-// fetchPrometheusMetricHistory fetches 7-day metric data from Prometheus via relay
-func fetchPrometheusMetricHistory(ctx context.Context, ev models.Event, alertDef *AlertDefinition, startTime, endTime time.Time) *MetricHistory {
+// PromQLRangeSeries runs one PromQL range query against the account's metrics
+// backend and returns one MetricHistory per matched series, each sorted by
+// timestamp. Timestamps are unix SECONDS, which is what the Prometheus sources
+// emit and what the step arithmetic below assumes.
+//
+// It is supplied by the caller rather than called directly here because
+// resolving the account's metrics provider lives in the observability package,
+// which this package cannot import (observability reaches triage through
+// event). Passing the capability down from the composition root keeps the
+// provider decision in one place instead of giving triage a second one.
+type PromQLRangeSeries func(sc *security.RequestContext, accountID, query string, start, end time.Time) ([]*MetricHistory, error)
+
+// fetchPrometheusMetricHistory fetches 7-day metric data from the account's
+// Prometheus. It used to go through relay-server, which reaches only the cluster
+// agent's Prometheus -- so an account whose Prometheus is connected directly got
+// no threshold suggestions at all.
+func fetchPrometheusMetricHistory(ctx context.Context, ev models.Event, alertDef *AlertDefinition, tenantID string, fetchSeries PromQLRangeSeries, startTime, endTime time.Time) *MetricHistory {
 	accountID := ""
 	if ev.CloudAccountId != nil {
 		accountID = *ev.CloudAccountId
@@ -1376,9 +1390,13 @@ func fetchPrometheusMetricHistory(ctx context.Context, ev models.Event, alertDef
 		return nil
 	}
 
-	queriesMap := map[string]string{"threshold_query": queryExpr}
+	if fetchSeries == nil {
+		slog.WarnContext(ctx, "threshold_suggestion: no metrics fetcher wired for prometheus event")
+		return nil
+	}
 
-	respMap, err := relay.ExecutePrometheus(accountID, startTime, endTime, queriesMap, false)
+	reqCtx := security.NewRequestContextForTenantAdmin(tenantID, slog.Default(), nil, nil)
+	seriesList, err := fetchSeries(reqCtx, accountID, queryExpr, startTime, endTime)
 	if err != nil {
 		slog.WarnContext(ctx, "threshold_suggestion: failed to query Prometheus", "error", err, "query", queryExpr)
 		return nil
@@ -1386,7 +1404,10 @@ func fetchPrometheusMetricHistory(ctx context.Context, ev models.Event, alertDef
 
 	// Phase B — analyze the series that actually fired, not a synthetic cross-series max-envelope
 	// (which matches no real series and lets one bad pod poison the whole rule).
-	seriesList := parsePrometheusSeriesList(respMap, "threshold_query", startTime, endTime)
+	for _, series := range seriesList {
+		series.StartTime = startTime.Format(time.RFC3339)
+		series.EndTime = endTime.Format(time.RFC3339)
+	}
 	if len(seriesList) == 0 {
 		return nil
 	}
@@ -1394,87 +1415,6 @@ func fetchPrometheusMetricHistory(ctx context.Context, ev models.Event, alertDef
 	// series aligns with the fingerprint's firing intervals; fall back to the top-violating series
 	// when no series' labels match.
 	return selectSeriesForEvent(seriesList, GetLabelsMap(ev), alertDef.CurrentThreshold, isGreaterThanOperator(alertDef.Operator))
-}
-
-// parseSeriesLabels extracts the label set from a relay series entry's "metric" map (dropping the
-// __name__ meta-label). These labels are already in the relay response; the tuner just reads them now.
-func parseSeriesLabels(seriesMap map[string]any) map[string]string {
-	raw, ok := seriesMap["metric"].(map[string]any)
-	if !ok {
-		return nil
-	}
-	labels := make(map[string]string, len(raw))
-	for k, v := range raw {
-		if k == "__name__" {
-			continue
-		}
-		if s, ok := v.(string); ok {
-			labels[k] = s
-		}
-	}
-	return labels
-}
-
-// parsePrometheusSeriesList parses the relay response into one MetricHistory per returned series (no
-// cross-series collapsing), each sorted by timestamp. Phase B selects among these.
-func parsePrometheusSeriesList(respMap map[string]any, queryKey string, startTime, endTime time.Time) []*MetricHistory {
-	queryResult, ok := respMap[queryKey]
-	if !ok {
-		return nil
-	}
-	qMap, ok := queryResult.(map[string]any)
-	if !ok {
-		return nil
-	}
-	seriesList, ok := qMap["series_list_result"].([]any)
-	if !ok || len(seriesList) == 0 {
-		return nil
-	}
-
-	var out []*MetricHistory
-	for _, seriesRaw := range seriesList {
-		seriesMap, ok := seriesRaw.(map[string]any)
-		if !ok {
-			continue
-		}
-		labels := parseSeriesLabels(seriesMap)
-		tsRaw, tsOK := seriesMap["timestamps"].([]any)
-		valRaw, valOK := seriesMap["values"].([]any)
-		if !tsOK || !valOK || len(tsRaw) == 0 {
-			continue
-		}
-		timestamps, values := parseSeriesData(tsRaw, valRaw)
-		if len(timestamps) == 0 {
-			continue
-		}
-		// Sort the (ts, value) pairs by timestamp — the relay does not guarantee ordering.
-		idx := make([]int, len(timestamps))
-		for i := range idx {
-			idx[i] = i
-		}
-		sort.Slice(idx, func(a, b int) bool { return timestamps[idx[a]] < timestamps[idx[b]] })
-		ts := make([]int64, len(timestamps))
-		vs := make([]float64, len(values))
-		for i, j := range idx {
-			ts[i] = timestamps[j]
-			vs[i] = values[j]
-		}
-		step := 60
-		if len(ts) > 1 {
-			if d := int(ts[1] - ts[0]); d >= 1 {
-				step = d
-			}
-		}
-		out = append(out, &MetricHistory{
-			Timestamps: ts,
-			Values:     vs,
-			Labels:     labels,
-			StartTime:  startTime.Format(time.RFC3339),
-			EndTime:    endTime.Format(time.RFC3339),
-			Step:       step,
-		})
-	}
-	return out
 }
 
 // parsePrometheusRangeResponse parses the relay ExecutePrometheus response into MetricHistory.

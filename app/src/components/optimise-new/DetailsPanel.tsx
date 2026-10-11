@@ -61,7 +61,7 @@ import OwnershipSection from './OwnershipSection';
 import { hasWriteAccess } from '@lib/auth';
 import InterpretationPanel from './interpretation/InterpretationPanel';
 import { buildInterpretation } from './interpretation/buildInterpretation';
-import { extractContainerData, summarizeCloudRightSizing, formatCloudTargetSpec } from './rightSizingData';
+import { splitSavings, extractContainerData, summarizeCloudRightSizing, formatCloudTargetSpec } from './rightSizingData';
 import { ResourceChangeCell } from './ResourceChangeCell';
 import ConfigIssuesList, { summarizeConfigIssues, LEVEL_TONE, LEVEL_NAME } from './evidence/configIssues';
 
@@ -882,6 +882,9 @@ const SummaryCard = ({
 
 const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
   const containers = extractContainerData(recData);
+  // Per-container dollars, when the producers stamped the per-entry figures.
+  const split = splitSavings(recData);
+  const dollarsByContainer = new Map(split?.containers.map((c) => [c.name, c.total]) ?? []);
   if (containers.length === 0) return null;
   return (
     <Card
@@ -903,7 +906,7 @@ const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
       }
     >
       <CustomTable
-        headers={['Container', 'CPU Request', 'Memory Request']}
+        headers={split ? ['Container', 'CPU Request', 'Memory Request', 'Monthly ($)'] : ['Container', 'CPU Request', 'Memory Request']}
         tableData={containers.map(({ containerName, cpu, memory }) => [
           {
             component: (
@@ -927,9 +930,32 @@ const K8sRightSizingSummary = ({ recData }: { recData: any }) => {
               <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{'—'}</Typography>
             ),
           },
+          ...(split
+            ? [
+                {
+                  component: <ContainerDollarsCell dollars={dollarsByContainer.get(containerName)} />,
+                  data: dollarsByContainer.get(containerName) ?? 0,
+                },
+              ]
+            : []),
         ])}
       />
     </Card>
+  );
+};
+
+// Signed monthly figure for one container: green saves, red costs more, a
+// dash when the row predates the per-entry stamp.
+const ContainerDollarsCell = ({ dollars }: { dollars: number | undefined }) => {
+  if (dollars == null) return <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{'—'}</Typography>;
+  const rounded = Math.round(Math.abs(dollars));
+  // Under a dollar either way is flat: no sign, neutral colour.
+  const color = rounded === 0 ? ds.gray[500] : dollars > 0 ? ds.green[600] : ds.red[600];
+  const sign = rounded === 0 ? '' : dollars > 0 ? '+' : '−';
+  return (
+    <Typography sx={{ fontSize: ds.text.small, fontWeight: ds.weight.medium, color, whiteSpace: 'nowrap' }}>
+      {sign}${rounded}
+    </Typography>
   );
 };
 

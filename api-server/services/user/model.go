@@ -46,12 +46,12 @@ type UserAuthTokenResponse struct {
 }
 
 type UserAuthToken struct {
-	Id         string `json:"id" db:"id"`
-	Name       string `json:"name" db:"name"`
-	Provider   string `json:"provider" db:"provider"`
-	Status     string `json:"status" db:"status"`
-	CreatedAt  string `json:"created_at" db:"created_at"`
-	AccessedAt string `json:"accessed_at" db:"accessed_at"`
+	Id         string  `json:"id" db:"id"`
+	Name       string  `json:"name" db:"name"`
+	Provider   string  `json:"provider" db:"provider"`
+	Status     string  `json:"status" db:"status"`
+	CreatedAt  string  `json:"created_at" db:"created_at"`
+	AccessedAt *string `json:"accessed_at" db:"accessed_at"`
 }
 
 type UserTenantRolesRequest struct {

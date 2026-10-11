@@ -1,0 +1,51 @@
+name: redis_fallback_crashloop
+type: event
+tags: [code_fix, crashloop, dependency_resilience, real_incident]
+
+# Mined from a real, merged fix: PR #38409 ("graceful fallback to in-memory
+# rate limiting on Redis initialization error"), same internal k8s-dev
+# account, no anonymization needed.
+
+alert:
+  alertname: PodCrashLoopBackOff
+  labels:
+    deployment: llm-gateway-worker
+    namespace: benchmark-scenarios
+    severity: critical
+  summary: "llm-gateway-worker CrashLoopBackOff"
+  # Other services stay healthy — this is a code-level resilience gap in one
+  # service, not a real Redis outage affecting everything.
+  log_lines: |
+    2026-09-18T09:30:01Z level=info msg="starting llm-gateway"
+    2026-09-18T09:30:01Z level=info msg="connecting to redis" addr="redis:6379"
+    2026-09-18T09:30:06Z level=error msg="redis: connection refused" addr="redis:6379"
+    2026-09-18T09:30:06Z level=fatal msg="rate-limit counter store init failed" error="dial tcp redis:6379: connect: connection refused"
+    2026-09-18T09:30:06Z level=error msg="container terminated" exit_code=1
+    2026-09-18T09:30:16Z level=info msg="starting llm-gateway"
+    2026-09-18T09:30:21Z level=error msg="redis: connection refused" addr="redis:6379"
+    2026-09-18T09:30:21Z level=fatal msg="rate-limit counter store init failed" error="dial tcp redis:6379: connect: connection refused"
+  fingerprint: bench-redis-fallback-crashloop-005
+
+workload:
+  manifests: manifests/all.yaml
+  namespace: benchmark-scenarios
+  deployment: llm-gateway-worker
+
+fixture_repo:
+  url: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  subdir: redis_fallback_crashloop
+  bug_commit: REPLACE_WITH_BUG_COMMIT_SHA
+  test_command: pytest -q
+  fail_to_pass:
+    - tests/test_ratelimit.py::test_build_falls_back_to_memstore_when_redis_unavailable
+  pass_to_pass:
+    - tests/test_ratelimit.py::test_build_uses_redis_when_available
+
+expected_diagnosis:
+  - "The response must identify that the service treats a Redis connection failure at startup as fatal (crashes/exits) instead of falling back to an in-memory rate limiter."
+  - "The response must NOT recommend fixing or scaling Redis itself, or attribute this to resource limits — the log shows a connection refusal, not a Redis outage, and the fix is making the service resilient to it, not the dependency more available."
+
+expected_fix:
+  file: redis_fallback_crashloop/src/ratelimit.py
+  function: build
+  description: "build() re-raises when the Redis-backed counter store fails to connect; catch it and fall back to an in-memory store instead."

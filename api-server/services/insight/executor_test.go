@@ -193,11 +193,20 @@ func TestComputeRedirectURL_Families(t *testing.T) {
 		{
 			name: "cloud recommendation by category (security)",
 			rule: InsightRule{
-				UniqueID: "103", Source: InsightSourceRecommendation, Type: InsightTypeAddition, InsightCategory: Security,
+				UniqueID: "104", Source: InsightSourceRecommendation, Type: InsightTypeAddition, InsightCategory: Security,
 				Filters: []InsightFilters{{Column: "status", Value: "Open", Operator: "="}, {Column: "category", Value: "Security", Operator: "="}},
 			},
-			title: "1 CRITICAL security vulnerabilities require immediate action", cloudProvider: "aws",
+			title: "1 security vulnerabilities require attention", cloudProvider: "aws",
 			want: "/cloud-account/details/acct-1?accountId=acct-1#optimize/security",
+		},
+		{
+			name: "cloud recommendation uid 103 (critical security vulnerabilities, severity-scoped)",
+			rule: InsightRule{
+				UniqueID: "103", Source: InsightSourceRecommendation, Type: InsightTypeAddition, InsightCategory: Security,
+				Filters: []InsightFilters{{Column: "status", Value: "Open", Operator: "="}, {Column: "category", Value: "Security", Operator: "="}, {Column: "severity", Value: "Critical", Operator: "="}},
+			},
+			title: "1 CRITICAL security vulnerabilities require immediate action", cloudProvider: "aws",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&severity=Critical#optimize/security",
 		},
 		{
 			name: "cloud recommendation uid 114 (missing tags, severity-scoped)",
@@ -207,6 +216,42 @@ func TestComputeRedirectURL_Families(t *testing.T) {
 			},
 			title: "187 resources missing required tags/labels", cloudProvider: "aws",
 			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_tags,azure_missing_tags&severity=Low,Medium#optimize/configuration",
+		},
+		{
+			name: "cloud recommendation uid 105 (missing encryption at rest, severity-scoped)",
+			rule: InsightRule{
+				UniqueID: "105", Source: InsightSourceRecommendation, Type: InsightTypeAddition, InsightCategory: Security,
+				Filters: []InsightFilters{{Column: "rule_name", Value: []interface{}{"aws_rds_storage_encrypted", "aws_ec2_ebs_encrypt"}, Operator: "in"}, {Column: "status", Value: "Open", Operator: "="}, {Column: "severity", Value: []interface{}{"Critical", "High"}, Operator: "in"}},
+			},
+			title: "3 critical resources missing encryption at rest", cloudProvider: "aws",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_rds_storage_encrypted,aws_ec2_ebs_encrypt&severity=Critical,High#optimize/security",
+		},
+		{
+			name: "cloud recommendation uid 115 (configuration issues, severity-scoped)",
+			rule: InsightRule{
+				UniqueID: "115", Source: InsightSourceRecommendation, Type: InsightTypeAddition, InsightCategory: "Configuration",
+				Filters: []InsightFilters{{Column: "status", Value: "Open", Operator: "="}, {Column: "category", Value: "Configuration", Operator: "="}, {Column: "severity", Value: []interface{}{"Critical", "High"}, Operator: "in"}},
+			},
+			title: "62 High/Critical configuration issues need attention", cloudProvider: "aws",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&severity=Critical,High#optimize/configuration",
+		},
+		{
+			name: "cloud recommendation uid 101 (wasted resources, routes to right-sizing not summary)",
+			rule: InsightRule{
+				UniqueID: "101", Source: InsightSourceRecommendation, Type: InsightTypeRatio, InsightCategory: "Cost",
+				InsightFormat: "Wasting ${}/month on unattached resources (EBS/IPs/Disks)",
+			},
+			title: "Wasting $404.00/month on unattached resources (EBS/IPs/Disks)", cloudProvider: "aws",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_ec2_orphaned_volume,aws_vpc_unallocated_elastic_ip,azure_disk_unattached_volume&status=Open#optimize/right-sizing",
+		},
+		{
+			name: "cloud recommendation uid 102 (rightsizing, routes to right-sizing not summary)",
+			rule: InsightRule{
+				UniqueID: "102", Source: InsightSourceRecommendation, Type: InsightTypeRatio, InsightCategory: "Cost",
+				InsightFormat: "Save ${}/month by rightsizing underutilized instances",
+			},
+			title: "Save $48.00/month by rightsizing underutilized instances", cloudProvider: "azure",
+			want: "/cloud-account/details/acct-1?accountId=acct-1&ruleName=aws_ec2_underutilized,aws_ec2_idle_instance,aws_ec2_alternate_instances,aws_rds_alternate_instances,azure_vm_auto_shutdown_disabled&status=Open#optimize/right-sizing",
 		},
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -519,7 +520,56 @@ func TestReAct4_RefreshNotebookFromSteps_ReplacementAfterAppendStillReplacesWhol
 	assert.Equal(t, "consolidated state", o.Notebook)
 }
 
-func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
+func notebookUpdateStep(id, input string) NBAgentPlannerToolActionStep {
+	return NBAgentPlannerToolActionStep{
+		Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: input, ToolID: id},
+		Status: ToolStatusSuccess,
+	}
+}
+
+// Several update_notebook calls in one batch must all land, not only the last.
+func TestReAct4_RefreshNotebookFromSteps_AppliesEveryUpdateInABatch(t *testing.T) {
+	o := &NBReActPlanner4{Notebook: "base"}
+	o.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{
+		notebookUpdateStep("a1", `{"content":"first finding","append":true}`),
+		notebookUpdateStep("a2", `{"content":"second finding","append":true}`),
+	})
+	assert.Contains(t, o.Notebook, "base")
+	assert.Contains(t, o.Notebook, "first finding")
+	assert.Contains(t, o.Notebook, "second finding")
+	assert.Less(t, strings.Index(o.Notebook, "first finding"), strings.Index(o.Notebook, "second finding"))
+	assert.Equal(t, 1, o.notebookUpdateCount)
+}
+
+// A replacement followed by an append in the same batch keeps both, and later
+// Plan calls over the same steps (more steps appended) change nothing.
+func TestReAct4_RefreshNotebookFromSteps_ReplaceThenAppendIsStable(t *testing.T) {
+	o := &NBReActPlanner4{Notebook: "old"}
+	steps := []NBAgentPlannerToolActionStep{
+		notebookUpdateStep("r1", `{"content":"consolidated"}`),
+		notebookUpdateStep("a1", `{"content":"new finding","append":true}`),
+	}
+	o.refreshNotebookFromSteps(steps)
+	after := o.Notebook
+	assert.True(t, strings.HasPrefix(after, "consolidated"))
+	assert.Contains(t, after, "new finding")
+	assert.NotContains(t, after, "old")
+
+	steps = append(steps, NBAgentPlannerToolActionStep{Action: NBAgentPlannerToolAction{Tool: "kubectl"}, Status: ToolStatusSuccess})
+	o.refreshNotebookFromSteps(steps)
+	o.refreshNotebookFromSteps(steps)
+	assert.Equal(t, after, o.Notebook)
+	assert.Equal(t, 1, o.notebookUpdateCount)
+
+	state, err := o.Marshal()
+	require.NoError(t, err)
+	resumed := &NBReActPlanner4{}
+	require.NoError(t, resumed.Unmarshal(state))
+	resumed.refreshNotebookFromSteps(steps)
+	assert.Equal(t, after, resumed.Notebook, "a resumed planner builds on the applied replacement")
+}
+
+func TestReAct4_RenderStepsToMessages_PairsAndReplaysNotebook(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
 		{
@@ -535,11 +585,15 @@ func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
 		{
 			Action:      NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"nb"}`, ToolID: "call_nb"},
 			Observation: "nb",
+			Status:      ToolStatusSuccess,
 		},
 	}
 	msgs := o.renderStepsToMessages(steps)
-	// One non-notebook step -> assistant(tool_use) + tool(tool_result). Notebook step skipped.
-	assert.Len(t, msgs, 2)
+	// Each step -> assistant(tool_use) + tool(tool_result); the notebook step is
+	// replayed too, with a short acknowledgement as its result.
+	assert.Len(t, msgs, 4)
+	assert.Equal(t, "call_nb", msgs[2].Parts[0].(llms.ToolCall).ID)
+	assert.Equal(t, notebookReplacedReplay, msgs[3].Parts[0].(llms.ToolCallResponse).Content)
 
 	assert.Equal(t, llms.ChatMessageTypeAI, msgs[0].Role)
 	// assistant parts: thought text + tool call

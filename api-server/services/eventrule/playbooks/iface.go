@@ -37,6 +37,17 @@ type PlaybookEvent struct {
 	AggregationKey          string          `json:"aggregation_key"`
 	Fingerprint             string          `json:"fingerprint"`
 	ExistingEvidenceActions map[string]bool `json:"existing_evidence_actions,omitempty"`
+	// Deadline, when non-zero, bounds the whole playbook run. ExecutePlaybook checks
+	// it before starting each action and stops early, returning the results it has
+	// so far rather than abandoning them. Actions themselves are not cancellable
+	// (PlaybookActionContext carries no context.Context), so the real overrun is
+	// bounded by this deadline plus one action's own HTTP timeout — worst case the
+	// 180s cloud_service_map call.
+	//
+	// Set by the async enrichment consumer so one event cannot outlive the broker's
+	// consumer_timeout and get its message redelivered forever. Zero means no bound,
+	// which is the inline request path's behaviour.
+	Deadline time.Time `json:"deadline,omitempty"`
 }
 
 type PlaybookActionContext interface {
@@ -81,4 +92,17 @@ type PlaybookAutoAction interface {
 // configuration, must NOT implement this.
 type PlaybookActionVariant interface {
 	VariantKey() string
+}
+
+// PlaybookActionAgentOptional is implemented by a k8s_*-prefixed action that no
+// longer needs a connected agent.
+//
+// Auto-discovery skips every k8s_* action when the account has no agent, because
+// those actions used to reach the cluster through relay-server and would only
+// produce "agent not connected" errors. An action that now reads from the
+// account's own metrics provider — which may be a Prometheus connected directly,
+// with no agent anywhere — is no longer in that category, and says so here.
+// Implement it only after the action has genuinely stopped calling the relay.
+type PlaybookActionAgentOptional interface {
+	AgentOptional() bool
 }

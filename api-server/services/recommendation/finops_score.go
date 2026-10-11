@@ -7,6 +7,7 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/knowledge_graph/core"
 	"nudgebee/services/security"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -307,6 +308,15 @@ func UpdateFinOpsScoreForRecommendation(ctx *security.RequestContext, dbms *data
 	return nil
 }
 
+// finopsRecomputeMu makes a cron tick that lands while a pass is still running
+// a no-op rather than a second concurrent walk of the table. It is per process,
+// so it only holds within one replica.
+var finopsRecomputeMu sync.Mutex
+
+// recentRecomputeWindow spans the gap between daily full passes so a row whose
+// resource the knowledge graph has not ingested yet keeps being retried hourly.
+const recentRecomputeWindow = 24 * time.Hour
+
 // recencyBoostLastStepDays is the age at which getRecencyBoost reaches zero.
 // The recompute's "can this row still change" predicate is derived from it, so
 // the two cannot drift apart.
@@ -319,16 +329,18 @@ const recencyBoostLastStepDays = 30
 const recencyRescoreGraceDays = 7
 
 // RecomputeAllFinOpsScores recomputes scores for all open recommendations.
-// Called by the finops-score-recompute cron every 6 hours. This is the only
-// path that writes scores for existing rows — scanner upserts intentionally
-// skip finops_* on conflict because they don't know the row's true created_at.
+// Called by the finops-score-recompute cron daily. This is the only path that
+// writes scores for existing rows — scanner upserts intentionally skip
+// finops_* on conflict because they don't know the row's true created_at.
 func RecomputeAllFinOpsScores(ctx *security.RequestContext) error {
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return err
-	}
-	_, err = recomputeFinOpsScoresWith(ctx, dbms, 0)
-	return err
+	return recomputeFinOpsScores(ctx, 0)
+}
+
+// RecomputeRecentFinOpsScores scores and blast-radius-annotates only the Open
+// recommendations created inside recentRecomputeWindow. Called hourly so a new
+// recommendation is not left "not assessed" until the daily full pass.
+func RecomputeRecentFinOpsScores(ctx *security.RequestContext) error {
+	return recomputeFinOpsScores(ctx, recentRecomputeWindow)
 }
 
 // recRow is one Open recommendation as the recompute reads it. Only the class
@@ -367,6 +379,23 @@ type recomputeStats struct {
 	resolved    int
 	unresolved  int
 	pages       int
+}
+
+// recomputeFinOpsScores walks Open recommendations created within window of
+// now (the whole Open set when window is zero), rescoring and annotating each.
+func recomputeFinOpsScores(ctx *security.RequestContext, window time.Duration) error {
+	if !finopsRecomputeMu.TryLock() {
+		ctx.GetLogger().Warn("finops score recompute already in flight; skipping this run", "window", window)
+		return nil
+	}
+	defer finopsRecomputeMu.Unlock()
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return err
+	}
+	_, err = recomputeFinOpsScoresWith(ctx, dbms, window)
+	return err
 }
 
 // recomputeFinOpsScoresWith is the walk itself, on the given database so a
@@ -698,7 +727,7 @@ func ComputeAndSetFinOpsScoreFields(data map[string]any) {
 		// Scanner payloads carry no created_at; now() is correct for the INSERT
 		// case (the DB defaults created_at to now()). Re-upserts of existing rows
 		// no longer overwrite finops_* on conflict, so this fresh-recency score
-		// never lands on old rows — the 6h recompute cron refreshes those from
+		// never lands on old rows — the daily recompute cron refreshes those from
 		// the true created_at.
 		now := time.Now()
 		createdAt = &now

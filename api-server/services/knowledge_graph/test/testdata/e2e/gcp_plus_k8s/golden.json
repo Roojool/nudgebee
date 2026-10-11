@@ -65,7 +65,7 @@
       "dst_key": "gcp:test-account-gcp-1:global:ServiceIdentity:GCPServiceAccount:sa@proj-1.iam.gserviceaccount.com",
       "relationship_type": "ASSUMES",
       "cloud_account_id": "test-account-gcp-1",
-      "tenant_id": "",
+      "tenant_id": "test-tenant-1",
       "level": "",
       "source": "cross_account",
       "properties": {

@@ -195,13 +195,11 @@ const PaneHeader = ({ costByCurrency, costLoading }: { costByCurrency?: Currency
 const AccountCard = ({
   account,
   acctCost,
-  defaultCurrencySymbol,
   selected,
   onSelect,
 }: {
   account: AccountSummary;
   acctCost?: AccountCost;
-  defaultCurrencySymbol: string;
   selected: boolean;
   onSelect: (accountId: string) => void;
 }) => {
@@ -266,8 +264,9 @@ const AccountCard = ({
               flexShrink: 0,
             }}
           >
+            {/* Savings are USD from every producer; say so when the account bills in another currency. */}
             {account.totalDollarImpact > 0
-              ? `${formatCurrency(account.totalDollarImpact, acctCost?.currencySymbol || defaultCurrencySymbol)}/mo savings`
+              ? `${formatCurrency(account.totalDollarImpact, '$')}/mo savings${acctCost && acctCost.currencySymbol !== '$' ? ' (USD)' : ''}`
               : 'no savings'}
           </Typography>
         </Box>
@@ -298,21 +297,11 @@ interface AccountClusterPaneProps {
   costByCurrency?: CurrencyCostSummary[];
   accountCosts?: Record<string, AccountCost>;
   costLoading?: boolean;
-  /** Currency symbol for an account's savings when it has no billing data of its own. */
-  defaultCurrencySymbol?: string;
   selectedAccountId?: string | null;
   onSelectAccount?: (accountId: string | null) => void;
 }
 
-const AccountClusterPane = ({
-  accounts,
-  costByCurrency,
-  accountCosts,
-  costLoading,
-  defaultCurrencySymbol = '$',
-  selectedAccountId,
-  onSelectAccount,
-}: AccountClusterPaneProps) => {
+const AccountClusterPane = ({ accounts, costByCurrency, accountCosts, costLoading, selectedAccountId, onSelectAccount }: AccountClusterPaneProps) => {
   const handleSelect = (accountId: string) => {
     if (!onSelectAccount) return;
     onSelectAccount(selectedAccountId === accountId ? null : accountId);
@@ -335,7 +324,6 @@ const AccountClusterPane = ({
             key={acct.accountId}
             account={acct}
             acctCost={accountCosts?.[acct.accountId]}
-            defaultCurrencySymbol={defaultCurrencySymbol}
             selected={selectedAccountId === acct.accountId}
             onSelect={handleSelect}
           />

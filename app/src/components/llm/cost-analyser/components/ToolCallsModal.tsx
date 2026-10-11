@@ -20,6 +20,14 @@ import { EmptyState } from '@ui/EmptyState';
 import { listToolCalls, toolStatusesFor, TOOL_TYPE_LABEL, type ToolCallRow, type ToolStatusGroup } from '@api1/ai-cost';
 import type { CostFilters } from '../types';
 
+/** True per-status totals from the leaderboard aggregate — the row fetch below is capped at `limit` and can't be trusted for these counts. */
+export interface ToolCallCounts {
+  calls: number;
+  successCount: number;
+  errorCount: number;
+  inProgressCount: number;
+}
+
 interface ToolCallsModalProps {
   open: boolean;
   toolName: string;
@@ -28,6 +36,8 @@ interface ToolCallsModalProps {
   filters: CostFilters;
   /** Status view to open on (defaults to 'errors' when the tool has failures). */
   initialStatus?: ToolStatusGroup;
+  /** True counts from the leaderboard row; falls back to the fetched row count when absent. */
+  counts?: ToolCallCounts;
   onClose: () => void;
   /** Open the full conversation detail, focused on this invocation's agent. */
   onSelectRun: (sessionId: string, accountId?: string, agentId?: string) => void;
@@ -149,6 +159,7 @@ export function ToolCallsModal({
   accountId,
   filters,
   initialStatus = 'errors',
+  counts,
   onClose,
   onSelectRun,
 }: ToolCallsModalProps) {
@@ -207,8 +218,22 @@ export function ToolCallsModal({
   // The count reflects the active status filter — on the Errors tab these are the
   // tool's failures, not its total invocations, so label them as such (otherwise
   // "N invocations" reads as the tool's whole call count and contradicts the card).
+  // Prefer the true aggregate count over the fetched (possibly-capped) row count.
+  const trueTotal =
+    counts &&
+    (status === 'errors'
+      ? counts.errorCount
+      : status === 'in_progress'
+      ? counts.inProgressCount
+      : status === 'success'
+      ? counts.successCount
+      : counts.calls);
+  const displayTotal = trueTotal ?? state.rows.length;
   const countNoun = status === 'errors' ? 'error' : status === 'in_progress' ? 'in-progress invocation' : 'invocation';
-  const countLabel = `${state.rows.length} ${countNoun}${state.rows.length === 1 ? '' : 's'}`;
+  const countLabel = `${displayTotal.toLocaleString()} ${countNoun}${displayTotal === 1 ? '' : 's'}`;
+  // True when the row fetch hit its cap and more rows exist than were fetched; skipped
+  // while loading/erroring since `state.rows` is stale or empty then.
+  const isRowListTruncated = trueTotal !== undefined && !state.loading && !state.error && state.rows.length < trueTotal;
 
   return (
     <Modal
@@ -223,6 +248,7 @@ export function ToolCallsModal({
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-3)', flexWrap: 'wrap' }}>
           <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
             {countLabel} · newest first · click a conversation to open the full run
+            {isRowListTruncated && ` · showing latest ${state.rows.length.toLocaleString()}`}
           </Box>
           <ToggleGroup
             selection='single'

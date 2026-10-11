@@ -1847,6 +1847,40 @@ func DeleteNotificationRule(ctx *security.RequestContext, request NotificationRu
 	return NotificationRuleDeleteResponse(request), nil
 }
 
+// conflictingChannelMapping looks up the account and tenant that already own
+// (platform, teamID, channelID), for a specific unique-violation message.
+// excludeID skips a given mapping id (an update never conflicts with itself).
+// Returns empty strings if the owning row can't be resolved (e.g. dangling FK).
+func conflictingChannelMapping(manager *database.DatabaseManager, platform, teamID, channelID, excludeID string) (accountName, tenantName string) {
+	query := `SELECT ca.account_name, t.name
+		FROM notification_channel_account_mappings m
+		JOIN cloud_accounts ca ON ca.id = m.account_id
+		JOIN tenant t ON t.id = m.tenant_id
+		WHERE m.platform = $1 AND m.team_id = $2 AND m.channel_id = $3`
+	args := []any{platform, teamID, channelID}
+	if excludeID != "" {
+		query += " AND m.id != $4"
+		args = append(args, excludeID)
+	}
+	query += " LIMIT 1"
+	if err := manager.Db.QueryRowx(query, args...).Scan(&accountName, &tenantName); err != nil {
+		return "", ""
+	}
+	return accountName, tenantName
+}
+
+// channelMappingConflictError builds the "already mapped" message for a
+// unique-violation on notification_channel_account_mappings, naming the
+// account and tenant that already hold the mapping when they can be
+// resolved, falling back to a generic message otherwise.
+func channelMappingConflictError(manager *database.DatabaseManager, platform, teamID, channelID, excludeID string) error {
+	accountName, tenantName := conflictingChannelMapping(manager, platform, teamID, channelID, excludeID)
+	if accountName == "" {
+		return common.ErrorConflict("This channel is already mapped")
+	}
+	return common.ErrorConflict(fmt.Sprintf("%s is already mapped with account %s in %s tenant", channelID, accountName, tenantName))
+}
+
 func CreateNotificationChannelMapping(ctx *security.RequestContext, request NotificationChannelMappingCreateRequest) (NotificationChannelMappingCreateResponse, error) {
 	if !ctx.GetSecurityContext().CanManage("messagingplatforms", "Write") {
 		return NotificationChannelMappingCreateResponse{}, common.ErrorUnauthorized("Not Allowed")
@@ -1870,6 +1904,9 @@ func CreateNotificationChannelMapping(ctx *security.RequestContext, request Noti
 		ctx.GetSecurityContext().GetUserId(), ctx.GetSecurityContext().GetTenantId(),
 	).StructScan(&resp)
 	if err != nil {
+		if pgUniqueViolation(err) {
+			return NotificationChannelMappingCreateResponse{}, channelMappingConflictError(manager, request.Platform, request.TeamId, request.ChannelId, "")
+		}
 		ctx.GetLogger().Error("Error creating notification channel mapping", "error", err)
 		return NotificationChannelMappingCreateResponse{}, common.ErrorInternal("Error creating notification channel mapping")
 	}
@@ -1932,6 +1969,13 @@ func UpdateNotificationChannelMapping(ctx *security.RequestContext, request Noti
 		request.Id, ctx.GetSecurityContext().GetTenantId(),
 	).StructScan(&resp)
 	if err != nil {
+		if pgUniqueViolation(err) {
+			// Platform isn't part of the update request (it never changes), so
+			// resolve it from the row being updated to look up the conflict.
+			var platform string
+			_ = manager.Db.Get(&platform, "SELECT platform FROM notification_channel_account_mappings WHERE id = $1", request.Id)
+			return NotificationChannelMappingUpdateResponse{}, channelMappingConflictError(manager, platform, request.TeamId, request.ChannelId, request.Id)
+		}
 		ctx.GetLogger().Error("Error updating notification channel mapping", "error", err)
 		return NotificationChannelMappingUpdateResponse{}, common.ErrorInternal("Error updating notification channel mapping")
 	}

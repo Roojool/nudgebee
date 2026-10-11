@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"nudgebee/services/common"
 	"nudgebee/services/internal/database"
-	"nudgebee/services/relay"
 	"nudgebee/services/security"
 	"strings"
 
@@ -73,19 +72,41 @@ func LoadEventActions(context *security.RequestContext) error {
 	return nil
 }
 
-func ListAction(context *security.RequestContext, request ListActionsRequest) ([]AlertActionTemplate, error) {
+// PromQLLabelNames runs one instant PromQL query against the account's metrics
+// backend and returns the label NAMES carried by the series it matched. It is
+// supplied by the caller rather than called directly here because resolving the
+// account's metrics provider lives in the observability package, which this
+// package cannot import (observability imports eventrule).
+//
+// A nil slice with a nil error is not a valid result: returning no error must
+// mean "the backend answered", because ListAction uses exactly that distinction
+// to decide whether to narrow the action list or fall back to nudgebee-source
+// actions only.
+type PromQLLabelNames func(sc *security.RequestContext, accountID, query string) ([]string, error)
+
+func ListAction(context *security.RequestContext, request ListActionsRequest, labelNames PromQLLabelNames) ([]AlertActionTemplate, error) {
 	source := request.Source
 	if source == "" {
 		source = "prometheus"
 	}
 
 	var labels []string
-	if source == "prometheus" {
-		prometheusResponse, err := executePrometheusQuery(request)
+	if source == "prometheus" && labelNames != nil {
+		// topk(1, ...) keeps the probe cheap: we only need the label names of one
+		// matching series, not the data. Some expressions are not valid inside
+		// topk, so fall back to the query as written when the wrapped form matches
+		// nothing -- the same reason the previous relay-based probe kept a
+		// bare-query fallback.
+		found, err := labelNames(context, request.CloudAccountId, fmt.Sprintf("topk(1, %s)", request.Query))
+		if err != nil || len(found) == 0 {
+			if bare, bareErr := labelNames(context, request.CloudAccountId, request.Query); bareErr == nil {
+				found, err = bare, nil
+			}
+		}
 		if err != nil {
 			context.GetLogger().Warn("prometheus query failed, will return non-prometheus actions only", "error", err)
 		} else {
-			labels = extractLabelsFromPrometheusResult(prometheusResponse)
+			labels = found
 		}
 	}
 
@@ -298,167 +319,6 @@ func extractQueryTypeFromLabels(labels []string) string {
 		}
 	}
 	return "All"
-}
-
-func extractLabelsFromPrometheusResult(result PrometheusQueryResult) []string {
-	labels := make([]string, 0)
-	for _, series := range result.SeriesListResult {
-		for key := range series.Metric {
-			labels = append(labels, key)
-		}
-	}
-	for _, vector := range result.VectorResult {
-		for key := range vector.Metric {
-			labels = append(labels, key)
-		}
-	}
-	return labels
-}
-
-func executePrometheusQuery(request ListActionsRequest) (PrometheusQueryResult, error) {
-	accountId := request.CloudAccountId
-	optimizedQuery := fmt.Sprintf("topk(1, %s)", request.Query)
-	prometheusRequest :=
-		relay.ActionExecuteBody{
-			AccountID:  accountId,
-			ActionName: "prometheus_enricher",
-			ActionParams: map[string]any{
-				"promql_query": optimizedQuery,
-				"instant":      true,
-			},
-			NoSinks: true,
-		}
-
-	resp, err := relay.Execute(relay.RelayExecuteRequest{
-		NoSinks: true,
-		Cache:   false,
-		Body:    prometheusRequest,
-	})
-
-	if err != nil {
-		slog.Error("Failed to execute relay task", "error", resp["response"], "accountId", accountId)
-		return PrometheusQueryResult{}, err
-	}
-
-	if resp["status_code"] == 500 {
-		slog.Error("Failed to execute relay task", "error", resp["response"], "accountId", accountId)
-		return PrometheusQueryResult{}, fmt.Errorf("alerts: failed to execute relay task error %s accountId %s ", resp["response"], accountId)
-	}
-	if resp["status"] == 400 {
-		slog.Error("Failed to execute relay task", "error", resp["response"], "accountId", accountId)
-		// Fallback to original query if optimized query failed
-		return executeOriginalQuery(request)
-	}
-	result, err := processResponse(resp)
-	if err != nil {
-		slog.Error("Failed to process response with optimized query, falling back to original", "error", err, "accountId", accountId)
-		// Fallback to original query if parsing failed
-		return executeOriginalQuery(request)
-	}
-	return result, nil
-}
-
-func processResponse(data map[string]any) (PrometheusQueryResult, error) {
-	// Check if "data" exists in response
-	findingsData, ok := data["data"].(map[string]any)
-	if !ok {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: response data is empty")
-	}
-
-	// Check if "findings" exists and has elements
-	findings, ok := findingsData["findings"].([]any)
-	if !ok || len(findings) == 0 {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: response data findings is empty")
-	}
-
-	// Get first finding
-	firstFinding, ok := findings[0].(map[string]any)
-	if !ok {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: invalid findings structure")
-	}
-
-	// Check if "evidence" exists and has elements
-	evidence, ok := firstFinding["evidence"].([]any)
-	if !ok || len(evidence) == 0 {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: response data evidence is empty")
-	}
-
-	// Get first evidence
-	firstEvidence, ok := evidence[0].(map[string]any)
-	if !ok {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: invalid evidence structure")
-	}
-
-	// Check if "data" exists in firstEvidence
-	rawData, ok := firstEvidence["data"].(string)
-	if !ok {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: response data evidence is empty")
-	}
-
-	// Parse JSON data
-	var result []map[string]any
-	if err := common.UnmarshalJson([]byte(rawData), &result); err != nil {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to parse metrics data: %v", err)
-	}
-
-	if len(result) == 0 {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to fetch metrics from server: parsed data is empty")
-	}
-
-	// Convert first item in result back to JSON
-	marshaledData, err := common.MarshalJson(result[0]["data"])
-	if err != nil {
-		return PrometheusQueryResult{}, fmt.Errorf("failed to marshal first result item: %v", err)
-	}
-
-	// Unmarshal JSON into PrometheusQueryResult
-	var prometheusResult PrometheusQueryResult
-	err = common.UnmarshalJson(marshaledData, &prometheusResult)
-	if err != nil {
-		slog.Error("Failed to unmarshal json data", "error", err)
-		return PrometheusQueryResult{}, err
-	}
-
-	return prometheusResult, nil
-}
-
-func executeOriginalQuery(request ListActionsRequest) (PrometheusQueryResult, error) {
-	accountId := request.CloudAccountId
-	prometheusRequest :=
-		relay.ActionExecuteBody{
-			AccountID:  accountId,
-			ActionName: "prometheus_enricher",
-			ActionParams: map[string]any{
-				"promql_query": request.Query,
-				"instant":      true,
-			},
-			NoSinks: true,
-		}
-
-	resp, err := relay.Execute(relay.RelayExecuteRequest{
-		NoSinks: true,
-		Cache:   false,
-		Body:    prometheusRequest,
-	})
-
-	if err != nil {
-		slog.Error("Failed to execute relay task with original query", "error", resp["response"], "accountId", accountId)
-		return PrometheusQueryResult{}, err
-	}
-
-	if resp["status_code"] == 500 {
-		slog.Error("Failed to execute relay task with original query", "error", resp["response"], "accountId", accountId)
-		return PrometheusQueryResult{}, fmt.Errorf("alerts: failed to execute relay task error %s accountId %s ", resp["response"], accountId)
-	}
-	if resp["status"] == 400 {
-		slog.Error("Failed to execute relay task with original query", "error", resp["response"], "accountId", accountId)
-		return PrometheusQueryResult{}, fmt.Errorf("alerts: failed to execute relay task error %s accountId %s ", resp["response"], accountId)
-	}
-	result, err := processResponse(resp)
-	if err != nil {
-		return PrometheusQueryResult{}, err
-	}
-	return result, nil
 }
 
 // listIntegrationsForDropdown queries enabled integrations of the given types

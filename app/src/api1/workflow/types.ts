@@ -122,6 +122,9 @@ export interface WorkflowRequest {
   /** Opt-in for AI invocation. Workflow-level rather than in the definition so
    * revoking it takes effect immediately, without a publish. */
   ai_invocable?: boolean;
+  /** Opt-in for running without an in-chat confirmation. Only meaningful with
+   * ai_invocable; the server rejects it otherwise. */
+  ai_auto_approve?: boolean;
 }
 
 export interface WorkflowCreateRequest {

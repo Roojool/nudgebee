@@ -1,0 +1,19 @@
+name: explore_memory_leak
+type: explore
+tags: [explore, oom, memory_leak]
+
+# Reuses scenario 001's fixture repo/commit — no new fixture needed. No
+# alert, no event, no fixture-repo test verification; a direct question to
+# code_analyzer in explore mode (read-only by contract — never runs the
+# fixer, never opens a PR — see docs/code-analysis-eval-spec.md §2/§5b).
+
+explore:
+  query: "Why might subscriber-cache-worker's memory grow over time? Look at the cache implementation."
+  git_repo: https://github.com/nudgebee-org/nb-benchmark-fixtures
+  git_commit: REPLACE_WITH_BUG_COMMIT_SHA   # same commit as scenario 001's fixture_repo.bug_commit
+
+expected_diagnosis:
+  - "The response must identify that put() never evicts entries from the cache, so it grows without bound as new subscriber ids come in."
+
+expected_citation:
+  file_contains: memory_leak_oom/src/cache.py

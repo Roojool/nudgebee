@@ -3,6 +3,7 @@ package recommendation
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/lib/pq"
@@ -12,20 +13,25 @@ import (
 
 // PodRightSizingRow represents a single row in the pod right sizing export
 type PodRightSizingRow struct {
-	WorkloadName      string
-	PodName           string
-	Namespace         string
-	Kind              string
-	CPURequest        float64
-	CPURecommended    float64
-	CPUSavings        float64
-	MemoryRequest     float64
-	MemoryRecommended float64
-	MemorySavings     float64
-	MonthlySavings    float64
-	UpdatedAt         time.Time
-	Status            string
-	AccountName       string
+	WorkloadName         string
+	PodName              string
+	Namespace            string
+	Kind                 string
+	CPURequest           float64
+	CPURecommended       float64
+	CPUSavings           float64
+	CPUMonthlySavings    *float64
+	MemoryRequest        float64
+	MemoryRecommended    float64
+	MemorySavings        float64
+	MemoryMonthlySavings *float64
+	// The workload's figure, carried on its first container row only: the
+	// producers store one signed number per workload, so repeating it on every
+	// container would make the column sum to a multiple of the real savings.
+	WorkloadSavings *float64
+	UpdatedAt       time.Time
+	Status          string
+	AccountName     string
 }
 
 // ToStringSlice implements ExportRow interface
@@ -38,10 +44,12 @@ func (r *PodRightSizingRow) ToStringSlice() []string {
 		fmt.Sprintf("%.3f", r.CPURequest),
 		fmt.Sprintf("%.3f", r.CPURecommended),
 		fmt.Sprintf("%.2f", r.CPUSavings),
+		formatOptional(r.CPUMonthlySavings),
 		fmt.Sprintf("%.2f", r.MemoryRequest),
 		fmt.Sprintf("%.2f", r.MemoryRecommended),
 		fmt.Sprintf("%.2f", r.MemorySavings),
-		fmt.Sprintf("%.2f", r.MonthlySavings),
+		formatOptional(r.MemoryMonthlySavings),
+		formatOptional(r.WorkloadSavings),
 		r.UpdatedAt.Format(time.RFC3339),
 		r.Status,
 	}
@@ -60,10 +68,12 @@ func (e *PodRightSizingExporter) GetColumns() []ColumnDefinition {
 		{Name: "CPU Request (cores)", Width: 18},
 		{Name: "CPU Recommended (cores)", Width: 18},
 		{Name: "CPU Savings (%)", Width: 18},
+		{Name: "CPU Monthly Savings ($)", Width: 20},
 		{Name: "Memory Request (MB)", Width: 18},
 		{Name: "Memory Recommended (MB)", Width: 18},
 		{Name: "Memory Savings (%)", Width: 18},
-		{Name: "Monthly Savings ($)", Width: 15},
+		{Name: "Memory Monthly Savings ($)", Width: 22},
+		{Name: "Workload Monthly Savings ($)", Width: 22},
 		{Name: "Updated At", Width: 20},
 		{Name: "Status", Width: 12},
 	}
@@ -192,57 +202,14 @@ func (e *PodRightSizingExporter) FetchData(
 			continue
 		}
 
-		// Extract container recommendations
-		for containerName, containerRecs := range recMap {
-			var cpuRec, memoryRec *ContainerRecommendation
-			for i := range containerRecs {
-				switch containerRecs[i].Resource {
-				case "cpu":
-					cpuRec = &containerRecs[i]
-				case "memory":
-					memoryRec = &containerRecs[i]
-				}
-			}
-
-			row := &PodRightSizingRow{
-				WorkloadName:   safeString(workloadName),
-				PodName:        containerName,
-				Namespace:      safeString(namespace),
-				Kind:           safeString(kind),
-				MonthlySavings: estimatedSavings,
-				UpdatedAt:      updatedAt,
-				Status:         status,
-				AccountName:    accountName,
-			}
-
-			// Extract CPU metrics
-			if cpuRec != nil {
-				if cpuRec.Allocated.Request != nil {
-					row.CPURequest = *cpuRec.Allocated.Request
-				}
-				if cpuRec.Recommended.Request != nil {
-					row.CPURecommended = *cpuRec.Recommended.Request
-				}
-				if row.CPURequest > 0 {
-					row.CPUSavings = ((row.CPURequest - row.CPURecommended) / row.CPURequest) * 100
-				}
-			}
-
-			// Extract Memory metrics (convert bytes to MB)
-			if memoryRec != nil {
-				if memoryRec.Allocated.Request != nil {
-					row.MemoryRequest = *memoryRec.Allocated.Request / (1024 * 1024)
-				}
-				if memoryRec.Recommended.Request != nil {
-					row.MemoryRecommended = *memoryRec.Recommended.Request / (1024 * 1024)
-				}
-				if row.MemoryRequest > 0 {
-					row.MemorySavings = ((row.MemoryRequest - row.MemoryRecommended) / row.MemoryRequest) * 100
-				}
-			}
-
-			exportRows = append(exportRows, row)
-		}
+		exportRows = append(exportRows, podRightSizingRows(PodRightSizingRow{
+			WorkloadName: safeString(workloadName),
+			Namespace:    safeString(namespace),
+			Kind:         safeString(kind),
+			UpdatedAt:    updatedAt,
+			Status:       status,
+			AccountName:  accountName,
+		}, recMap, estimatedSavings)...)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -250,4 +217,72 @@ func (e *PodRightSizingExporter) FetchData(
 	}
 
 	return exportRows, accountName, nil
+}
+
+func formatOptional(v *float64) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%.2f", *v)
+}
+
+// podRightSizingRows expands one workload recommendation into a row per
+// container, in name order so the file is stable between downloads.
+func podRightSizingRows(workload PodRightSizingRow, recMap map[string][]ContainerRecommendation, estimatedSavings float64) []ExportRow {
+	names := make([]string, 0, len(recMap))
+	for name := range recMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	rows := make([]ExportRow, 0, len(names))
+	for i, containerName := range names {
+		var cpuRec, memoryRec *ContainerRecommendation
+		containerRecs := recMap[containerName]
+		for j := range containerRecs {
+			switch containerRecs[j].Resource {
+			case "cpu":
+				cpuRec = &containerRecs[j]
+			case "memory":
+				memoryRec = &containerRecs[j]
+			}
+		}
+
+		row := workload
+		row.PodName = containerName
+		if i == 0 {
+			savings := estimatedSavings
+			row.WorkloadSavings = &savings
+		}
+
+		if cpuRec != nil {
+			if cpuRec.Allocated.Request != nil {
+				row.CPURequest = *cpuRec.Allocated.Request
+			}
+			if cpuRec.Recommended.Request != nil {
+				row.CPURecommended = *cpuRec.Recommended.Request
+			}
+			if row.CPURequest > 0 {
+				row.CPUSavings = ((row.CPURequest - row.CPURecommended) / row.CPURequest) * 100
+			}
+			row.CPUMonthlySavings = cpuRec.AddInfo.EstimatedSavings
+		}
+
+		// Memory is stored in bytes; the sheet shows MB.
+		if memoryRec != nil {
+			if memoryRec.Allocated.Request != nil {
+				row.MemoryRequest = *memoryRec.Allocated.Request / (1024 * 1024)
+			}
+			if memoryRec.Recommended.Request != nil {
+				row.MemoryRecommended = *memoryRec.Recommended.Request / (1024 * 1024)
+			}
+			if row.MemoryRequest > 0 {
+				row.MemorySavings = ((row.MemoryRequest - row.MemoryRecommended) / row.MemoryRequest) * 100
+			}
+			row.MemoryMonthlySavings = memoryRec.AddInfo.EstimatedSavings
+		}
+
+		rows = append(rows, &row)
+	}
+	return rows
 }

@@ -125,3 +125,30 @@ func TestProcessEventResolved_NonHighPriorityReachesSuppressionLookup(t *testing
 		t.Errorf("Expectations were not met: %v", err)
 	}
 }
+
+// A triage "drop" rule hides an event completely, a stronger action than
+// "suppress", so a DROPPED event must stay silent on resolve too.
+func TestProcessEventResolved_DroppedEventIsNotNotified(t *testing.T) {
+	mock := mockMetastore(t)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	ctx := security.NewRequestContext(context.TODO(), &security.SecurityContext{}, logger, nil, nil)
+
+	mock.ExpectQuery(`SELECT nb_status FROM events WHERE id = \$1`).
+		WithArgs("event-1").
+		WillReturnRows(sqlmock.NewRows([]string{"nb_status"}).AddRow("DROPPED"))
+
+	err := ProcessEventResolved(ctx, map[string]any{
+		"id":       "event-1",
+		"priority": "HIGH",
+		"source":   "AWS_CloudWatch_Alarm",
+		"tenant":   "tenant-1",
+	})
+	// No broker is configured in tests, so reaching the publish returns an
+	// error: NoError proves the DROPPED gate returned before publishing.
+	assert.NoError(t, err)
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Expectations were not met: %v", err)
+	}
+}

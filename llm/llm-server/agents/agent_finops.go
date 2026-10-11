@@ -20,6 +20,12 @@ import (
 
 const FinOpsAgentName = "finops"
 
+// RecommendationsAgentName is the retired recommendations agent. FinOps owns
+// every recommendation question now; the name stays registered as an alias
+// so stored conversation history, @recommendations mentions and the router's
+// recommendation names all resolve here.
+const RecommendationsAgentName = "recommendations"
+
 // finOpsAccountContextCacheNS caches the rendered <account_context> block per
 // account.
 const finOpsAccountContextCacheNS = "llm_finops_account_ctx"
@@ -48,9 +54,12 @@ func init() {
 	common.CacheCreateNamespace(finOpsAccountContextCacheNS, common.CacheNamespaceWithExpiration(finOpsContextRetainFor))
 
 	toolDescription := `Answers questions about cloud cost, spend, savings, budgets, optimization opportunities, ` +
-		`rightsizing financial impact, idle/unattached resources, cost anomalies, and commitment coverage. ` +
-		`Provides evidence-backed cost analysis with dollar figures and actionable next steps.`
-	toolInput := "Provide a question about cloud cost, spend, or optimization in natural language."
+		`rightsizing financial impact, idle/unattached resources, cost anomalies, and commitment coverage, ` +
+		`and every Nudgebee recommendation whatever its category — RightSizing (pod, pv, replica, abandoned), ` +
+		`Security (image CVEs, CIS), InfraUpgrade (helm chart, k8s api), Spot, Configuration (misconfigurations, certificate expiry) — ` +
+		`plus their resolution history (pull requests, tickets, deployment changes, who initiated them, whether they succeeded). ` +
+		`Provides evidence-backed analysis with dollar figures for cost questions and actionable next steps.`
+	toolInput := "Provide a question about cloud cost, spend, optimization, or any recommendation in natural language."
 	// The relay contract in the output line is load-bearing: an orchestrator that
 	// received this tool's fully formatted markdown answer re-encoded it into a
 	// raw JSON object as its user-facing reply. The narrowest place to stop that
@@ -59,9 +68,13 @@ func init() {
 		"When this answers the user's question, relay the markdown as-is (preserving tables and citations) — " +
 		"do NOT re-encode it into JSON or restructure it."
 
-	core.RegisterNBAgentFactoryAndTool(FinOpsAgentName, func(accountId string) (core.NBAgent, error) {
+	// The retired recommendations agent's name resolves here for @mentions and
+	// stored history (agent alias) and for tool calls replayed from history
+	// (tool alias); only "finops" is exposed as a tool to parent orchestrators.
+	toolcore.RegisterNBToolAlias(RecommendationsAgentName, FinOpsAgentName)
+	core.RegisterNBAgentFactoryAndToolWithAliases(FinOpsAgentName, func(accountId string) (core.NBAgent, error) {
 		return &FinOpsAgent{accountId: accountId}, nil
-	}, toolDescription, toolInput, toolOutput)
+	}, toolDescription, toolInput, toolOutput, RecommendationsAgentName)
 }
 
 // FinOpsAgent is a ReAct3 supervisor that orchestrates cloud cost analysis
@@ -76,12 +89,13 @@ func (a *FinOpsAgent) GetName() string {
 }
 
 func (a *FinOpsAgent) GetNameAliases() []string {
-	return []string{"FinOps Cost Advisor", "finops", "cost", "spend", "FinOps"}
+	return []string{"FinOps Cost Advisor", "finops", "cost", "spend", "FinOps", "Recommendation Explorer", "Recommendations"}
 }
 
 func (a *FinOpsAgent) GetDescription() string {
-	return "FinOps cost optimization supervisor. Analyzes cloud spend, surfaces savings opportunities, " +
-		"and provides evidence-backed cost reduction recommendations by orchestrating spend, recommendation, " +
+	return "FinOps cost optimization supervisor and the owner of every recommendation question. Analyzes cloud spend, " +
+		"surfaces savings opportunities, answers Security, Configuration, InfraUpgrade and Spot recommendation questions " +
+		"and their resolution history, and provides evidence-backed next steps by orchestrating spend, recommendation, " +
 		"cloud debug, and observability tools."
 }
 
@@ -131,22 +145,24 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 	instructions := []string{promptText}
 
 	constraints := []string{
-		"You hold no credentials and change nothing except through the platform's typed write tools (recommendation_apply, recommendation_execute_cli, recommendation_record_ticket_resolution, ticket_master_v2), each of which pauses for the user's explicit per-action approval. When the user explicitly asks you to resolve, apply, or fix a recommendation, use the write tools — a review link alone is not an answer to a direct ask.",
+		"You hold no credentials and change nothing except through the platform's typed write tools (recommendation_apply, recommendation_execute_cli, recommendation_record_ticket_resolution, recommendation_set_dismissal, ticket_master_v2), each of which pauses for the user's explicit per-action approval. When the user explicitly asks you to resolve, apply, or fix a recommendation, use the write tools — a review link alone is not an answer to a direct ask.",
+		"Scope of the cost rules: the investigation layers, the dollar-figure rule, the savings sanity check, resource verification before advising, and the Optimise deep links below apply to COST questions — spend, savings, budgets, rightsizing financial impact. A Security, Configuration, InfraUpgrade or Spot recommendation question, or a resolution-history question, is answered on its own terms: severity, resource, rule, what to change, safety band and recommendation id, cited to recommendation_execute or recommendation_resolution_execute. Give such an answer a dollar figure only when the row carries one; never pad it with spend context, and never give a Security row an Optimise deep link (Security findings live on their own page).",
 		"Every cost answer MUST include a dollar figure. If data is unavailable, state that explicitly.",
 		"Always cite which tool provided the data (spend_summary, recommendation_execute, metrics, etc.).",
 		"The metrics and kubectl tools are full investigators, not raw query executors: give each a specific, self-contained question (e.g. \"p95 CPU and memory usage for pod X in namespace Y over the last 7 days, with absolute values\", \"find the deployment matching service X\") and they return a synthesized answer with concrete values already extracted -- read the data directly from their response for your tables/charts, do not expect raw JSON or kubectl output back.",
 		"Do not expose internal SQL queries, table names, or database structure to the user.",
 		"When comparing periods, always state the exact date ranges being compared.",
-		"If recommendations reference a cloud resource, verify the resource exists before advising action.",
+		"Before advising a cost action on a recommendation that references a cloud resource, verify the resource exists.",
 		"The anomaly table is named 'anomaly' (singular). Never use 'anomalies' in SQL queries.",
 		"Always provide arguments to spend_summary. Minimum: {\"group_by\":\"cloud_account\"}. Never call with empty input.",
 		"For cloud-specific investigation, use delegate_agent with explicit tool selection (e.g., {\"tools\": [\"aws\"]}). Do NOT call aws_debug, gcp_debug, or azure_debug directly -- they are not in your tool list.",
-		"Follow the FinOps Investigation Model layers: Spend Context -> Anomaly & Change -> Optimization -> Resource Verification. Do not skip layers.",
+		"For cost questions, follow the FinOps Investigation Model layers: Spend Context -> Anomaly & Change -> Optimization -> Resource Verification. Do not skip layers.",
 		"For spike/increase questions, NEVER guess the cause. After identifying the top cost driver from spend_summary, use delegate_agent with cloud-specific tools (gcp/aws/azure) to investigate WHAT changed -- new resources, scaling events, usage increases, config changes. An answer like 'likely due to increased usage' without tool-verified evidence is insufficient.",
 		"Only count recommendations with status='Open' as actionable savings. Archive/Closed recommendations were already handled.",
-		"Savings sanity check (MANDATORY): before presenting any savings figure, compare it to the spend it would reduce. If a recommendation's savings exceed that resource's own spend, or total savings exceed total spend, the estimates are unreliable — you MUST surface the discrepancy (⚠ with both numbers, e.g. \"claimed $410/mo savings vs $26/mo actual spend — estimate looks inflated, verify before acting\") and never present such savings as achievable or as 'offsetting' anything.",
+		"Savings sanity check (MANDATORY for cost answers): before presenting any savings figure, compare it to the spend it would reduce. If a recommendation's savings exceed that resource's own spend, or total savings exceed total spend, the estimates are unreliable — you MUST surface the discrepancy (⚠ with both numbers, e.g. \"claimed $410/mo savings vs $26/mo actual spend — estimate looks inflated, verify before acting\") and never present such savings as achievable or as 'offsetting' anything.",
 		"To help a user act on a recommendation, ALWAYS first present its safety band in the product's words — safe → Safe, review → Quick check, risky → Plan it, a destructive change_class → Irreversible, NULL/unknown → Not assessed (the stored value goes unchanged to tools that take safety_band) — its blast radius (dependent services / production dependents), and the estimated monthly savings — select safety_band, safety_reason, change_class, dependent_count, and production_dependents from recommendation_view (they are in the default column set). If safety_band is NULL, say impact analysis has not run for this recommendation; NEVER substitute other data (strategy settings, replica counts, percentile windows) and present it as the safety band or blast radius. Then either hand off with propose_recommendation_apply (a review-and-apply link) or, when the user asks you to do it, resolve it directly with the typed write tools. Voice: the product's promise is that applying saves money — state the fact and the safeguard (no-restart apply, maintenance window, a heads-up to the owner) and never talk the user out of applying.",
 		"Resolution tool selection: recommendation_apply for the platform apply flow (deployment change, pull request, or cloud alarm); recommendation_execute_cli for recommendations resolved by cloud CLI commands (always pass recommendation_id so the run lands in its resolution history); ticket_master_v2 to create a tracking ticket, followed by recommendation_record_ticket_resolution to link that ticket to the recommendation.",
+		"Parking a recommendation: when the user says a finding is accepted risk, not worth doing, or should wait, use recommendation_set_dismissal — dismiss to keep it off the list until someone reactivates it, snooze with snooze_days to bring it back on a date (default 30), reactivate to put a dismissed or snoozed row back. Pass the user's reason. Only an Open row can be dismissed or snoozed and only a Dismissed one reactivated; if the tool reports the status does not allow it, say so rather than retrying.",
 		"Before recommendation_apply: fetch that recommendation's concrete values first (SELECT the `recommendation` column from recommendation_view for that id) — the backend applies EXACTLY the `data` payload, with no fallback to the recommendation's own values, so for rightsizing `data` (per-container current → proposed) is required and an empty payload changes nothing. Fill `summary` with the numbers — the approval card shows your summary plus the exact values from `data`. Pass `safety_band`, `safety_reason` and `change_class` exactly as read from recommendation_view — the apply refuses without the band and re-checks it against the store; change_class is what makes the approval card read Irreversible.",
 		"Every write tool pauses for the user's explicit confirmation before running — state what you are about to do, then call the tool and let the platform ask. Never claim a recommendation was applied, executed, or ticketed unless the tool returned success; report failures verbatim.",
 		"For a recommendation whose safety band is 'risky' (Plan it), 'unknown' (Not assessed) or whose change is destructive (Irreversible), state the impact and the safeguard plainly, then proceed the way the user chooses — the propose_recommendation_apply hand-off or a direct apply after confirmation.",
@@ -181,7 +197,7 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 5. **One short paragraph after the table** — headline finding + top 1-2 next steps. No bullet lists restating rows.
 6. **Surface data quality.** Null or clearly-wrong values render as "—"/"⚠" with a footnote; never present corrupt data as fact, never silently drop it.
 7. **Cite inline.** Append the source tool in the cell or header: [spend_summary], [recommendation_execute], [anomaly_execute], [metrics], [kubectl_execute].
-8. **Make rows clickable.** For optimization/rightsizing/recommendation tables, the Action cell is a Markdown link [<label>](<url>): <label> is a DYNAMIC, intent-aware next step for that row (e.g. "Resize to 10Gi ▸", "Delete unused PVC ▸" — derive it, don't use a fixed string); <url> is the optimize deep-link base from your account context with <Category> and <workload_name> filled in for that row. <workload_name> MUST be the workload/controller name (the row's 'name'), NEVER a pod name (pod_name) — the optimise recommendations table is keyed by workload, so a pod name with a ReplicaSet hash suffix (e.g. 'web-7d9f8b6c5-abcde') matches zero recommendations. If a row is a pod, use its owning workload's name. One click takes the user into the optimise workflow filtered to that resource. Omit the link for purely informational rows. A summary-level link for a whole table follows the same substitution rule: set <Category> to the rows' category when every row shares one (drop the category parameter only for genuinely mixed results) and drop the search parameter rather than leaving it empty. NEVER emit a link with an unreplaced placeholder or an empty parameter value like 'category=&search=' — the page must open filtered to what your table shows.
+8. **Make rows clickable.** For cost recommendation tables (RightSizing, Spot, InfraUpgrade, Configuration rows, which live on Optimise), the Action cell is a Markdown link [<label>](<url>): <label> is a DYNAMIC, intent-aware next step for that row (e.g. "Resize to 10Gi ▸", "Delete unused PVC ▸" — derive it, don't use a fixed string); <url> is the optimize deep-link base from your account context with <Category> and <workload_name> filled in for that row. <workload_name> MUST be the workload/controller name (the row's 'name'), NEVER a pod name (pod_name) — the optimise recommendations table is keyed by workload, so a pod name with a ReplicaSet hash suffix (e.g. 'web-7d9f8b6c5-abcde') matches zero recommendations. If a row is a pod, use its owning workload's name. One click takes the user into the optimise workflow filtered to that resource. Omit the link for purely informational rows. A summary-level link for a whole table follows the same substitution rule: set <Category> to the rows' category when every row shares one (drop the category parameter only for genuinely mixed results) and drop the search parameter rather than leaving it empty. NEVER emit a link with an unreplaced placeholder or an empty parameter value like 'category=&search=' — the page must open filtered to what your table shows.
 9. **Chart when it helps.** When a visual makes the finding land faster, embed ONE ` + "```nb-chart" + ` fenced JSON block right after the table, choosing type and data DYNAMICALLY: bar (compare a measure across resources, e.g. provisioned vs used), doughnut/pie (share of a total, e.g. spend by service), line/area (trend over time). Spec: {"type":"bar","title":"...","labels":[...],"series":[{"key":"Provisioned","data":[...]},{"key":"Used","data":[...]}],"format":"gi|usd|percent|number"} — doughnut/pie use "values":[...] instead of series. Keep it ≤12 labels / ≤4 series and reuse the table's own numbers (never raw time-series). Skip the chart for single-row, clarification, or pure-text answers.
 
 Mark rows (stable) for <5% change (only when the row is not NEW), NEW when is_new is true or the entity is absent in the prior period, GONE for terminated. Every cost answer includes a dollar figure (state explicitly if unavailable). Plain Markdown only — never LaTeX markup (write "300m → 10m", not "$\rightarrow$"), and remember bare dollar signs before numbers are fine.`
@@ -572,6 +588,8 @@ func (a *FinOpsAgent) GetSupportedTools(ctx *security.RequestContext) []toolcore
 		tools.ToolRecommendationApply,
 		tools.ToolRecommendationExecuteCli,
 		tools.ToolRecommendationRecordTicketResolution,
+		// Park or restore a row: the same endpoint as Dismiss / snooze on Optimise.
+		tools.ToolRecommendationSetDismissal,
 		// Ticket creation itself: the existing config-aware ticket tool.
 		tools.TicketMasterToolNameV2,
 	}

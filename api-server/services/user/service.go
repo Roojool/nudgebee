@@ -516,8 +516,8 @@ func CreateUserAuthToken(context *security.RequestContext, tokenCreateRequest Us
 	// and token.ts backfill compute (sha256 of the token string, lowercase hex).
 	tokenSha256 := common.HashTextFast(token)
 
-	// store hashed value
-	_, err = databaseManager.Db.Exec(`INSERT INTO user_auths ("user", tenant_id, name, credential, token_sha256, provider_type, provider, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, context.GetSecurityContext().GetUserId(), context.GetSecurityContext().GetTenantId(), tokenCreateRequest.Name, hashedToken, tokenSha256, "credentials", "token", "active")
+	// store hashed value (accessed_at explicitly NULL for freshly created tokens)
+	_, err = databaseManager.Db.Exec(`INSERT INTO user_auths ("user", tenant_id, name, credential, token_sha256, provider_type, provider, status, accessed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)`, context.GetSecurityContext().GetUserId(), context.GetSecurityContext().GetTenantId(), tokenCreateRequest.Name, hashedToken, tokenSha256, "credentials", "token", "active")
 
 	if err != nil {
 		return UserTokenCreateResponse{}, err

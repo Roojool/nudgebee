@@ -120,6 +120,7 @@ const CloudAccountServices = (props: {
     if (!props?.accountId) {
       return;
     }
+    let cancelled = false;
     apiResources
       .getResourceGroupings(
         1000,
@@ -134,6 +135,9 @@ const CloudAccountServices = (props: {
         { name: 'resource_service_name', order: 'asc' }
       )
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         const serviceNames = (res.data?.resource_groupings || [])
           .map((item: any) => ({
             label: item.resource_service_name,
@@ -143,13 +147,21 @@ const CloudAccountServices = (props: {
         setAvailableServiceNames(serviceNames);
       })
       .catch((error) => {
+        if (cancelled) {
+          return;
+        }
         console.error(error);
         setAvailableServiceNames([]);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, selectedDateRange.startTime, selectedDateRange.endTime]);
 
   useEffect(() => {
     if (!props?.accountId) return;
+    let cancelled = false;
     apiResources
       .getResourceGroupings(
         1000,
@@ -160,18 +172,41 @@ const CloudAccountServices = (props: {
         { name: 'resource_region', order: 'asc' }
       )
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         const regions = (res.data?.resource_groupings || [])
           .map((item: any) => ({ label: item.resource_region, value: item.resource_region }))
           .filter((item: any) => item.value);
         setAvailableRegions(regions);
       })
-      .catch(() => setAvailableRegions([]));
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setAvailableRegions([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, selectedServiceName]);
 
   useEffect(() => {
+    let cancelled = false;
+
     if (props?.accountId) {
-      apiCloudAccount.getDistinctTagKeys(props.accountId, selectedServiceName || undefined).then(setAvailableTagKeys);
+      apiCloudAccount.getDistinctTagKeys(props.accountId, selectedServiceName || undefined).then((tagKeys) => {
+        if (cancelled) {
+          return;
+        }
+        setAvailableTagKeys(tagKeys);
+      });
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, selectedServiceName]);
 
   // Fetch previous-period costs for trend calculation
@@ -179,6 +214,7 @@ const CloudAccountServices = (props: {
     if (!props?.accountId || !selectedDateRange.startTime || !selectedDateRange.endTime) {
       return;
     }
+    let cancelled = false;
     const duration = selectedDateRange.endTime - selectedDateRange.startTime;
     const prevStart = new Date(selectedDateRange.startTime - duration);
     const prevEnd = new Date(selectedDateRange.startTime);
@@ -204,6 +240,9 @@ const CloudAccountServices = (props: {
         order: 'desc',
       })
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         const map: Record<string, number> = {};
         (res.data?.resource_groupings || []).forEach((item: any) => {
           if (item.resource_service_name && item.sum_spend_amount != null) {
@@ -213,14 +252,22 @@ const CloudAccountServices = (props: {
         setPrevPeriodCosts(map);
       })
       .catch(() => {
+        if (cancelled) {
+          return;
+        }
         setPrevPeriodCosts({});
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, selectedDateRange.startTime, selectedDateRange.endTime, selectedServiceName, selectedRegion, selectedTagKey]);
 
   useEffect(() => {
     if (!props?.accountId || !routerReady) {
       return;
     }
+    let cancelled = false;
     setLoading(true);
 
     const filters: any = {
@@ -269,13 +316,23 @@ const CloudAccountServices = (props: {
         }
       )
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         setLoading(false);
         setRawServices(res.data?.resource_groupings || []);
         setServicesCount(res.data?.resource_groupings_aggregate?.aggregate?.count ?? 0);
       })
       .catch(() => {
+        if (cancelled) {
+          return;
+        }
         setLoading(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     props?.accountId,
     page,
@@ -519,10 +576,14 @@ const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
       return;
     }
 
+    let cancelled = false;
     setLoading(true);
     apiResources
       .getResourceDetils(props.resourceData.resource_id, {})
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         const data = res.data;
         if (data) {
           data.meta = parseMaybeJSON(data.meta);
@@ -532,9 +593,16 @@ const ResourceDetails = (props: { resourceData: IResourceDetail }) => {
         setLoading(false);
       })
       .catch((error) => {
+        if (cancelled) {
+          return;
+        }
         console.error('Error fetching resource details:', error);
         setLoading(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [props.resourceData?.resource_id]);
 
   if (loading) {
@@ -807,15 +875,27 @@ const CloudAccountResources = (props: {
   }, [props?.serviceName]);
 
   useEffect(() => {
+    let cancelled = false;
+
     if (props?.accountId && props?.serviceName) {
-      apiCloudAccount.getDistinctTagKeys(props.accountId, props.serviceName).then(setAvailableTagKeys);
+      apiCloudAccount.getDistinctTagKeys(props.accountId, props.serviceName).then((tagKeys) => {
+        if (cancelled) {
+          return;
+        }
+        setAvailableTagKeys(tagKeys);
+      });
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, props?.serviceName]);
 
   useEffect(() => {
     if (!props?.accountId || isECSService || !props?.serviceName) {
       return;
     }
+    let cancelled = false;
     apiResources
       .getResourceGroupings(
         1000,
@@ -829,6 +909,9 @@ const CloudAccountResources = (props: {
         { name: 'resource_type', order: 'asc' }
       )
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         const data = res.data?.resource_groupings || [];
 
         const uniqueTypes = new Set();
@@ -860,10 +943,17 @@ const CloudAccountResources = (props: {
         setAvailableRegions(regions);
       })
       .catch((error) => {
+        if (cancelled) {
+          return;
+        }
         console.error(error);
         setAvailableTypes([]);
         setAvailableRegions([]);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [props?.accountId, props?.serviceName, isECSService]);
 
   useEffect(() => {
@@ -872,6 +962,7 @@ const CloudAccountResources = (props: {
       setResourcesCount(0);
       return;
     }
+    let cancelled = false;
     setLoading(true);
 
     // Build filter object with selected type, region, and date range
@@ -925,6 +1016,9 @@ const CloudAccountResources = (props: {
         }
       )
       .then((res: any) => {
+        if (cancelled) {
+          return;
+        }
         setLoading(false);
         const genericResourceData = (res.data?.resource_groupings || []).map((item: IResourceDetail) => {
           let data: ICustomTableRow[] = [];
@@ -963,10 +1057,17 @@ const CloudAccountResources = (props: {
         setResourcesCount(res.data?.resource_groupings_aggregate?.aggregate?.count || 0);
       })
       .catch(() => {
+        if (cancelled) {
+          return;
+        }
         setLoading(false);
         setResources([]);
         setResourcesCount(0);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     props?.accountId,
     page,

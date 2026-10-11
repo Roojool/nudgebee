@@ -3,24 +3,86 @@ import React, { useEffect, useState, useMemo } from 'react';
 import Box from '@mui/material/Box';
 import apiTickets from '@api1/tickets';
 import apiRecommendations from '@api1/recommendation';
-import { Modal } from '@shared/modal';
-import CustomDropdown from '@shared/CustomDropdown';
-import { snackbar } from '@shared/snackbarService';
+import { Modal } from '@ui/Modal';
+import { Select } from '@ui/Select';
+import { toast as snackbar } from '@ui/Toast';
 import { ANNOTATIONS, CI_PREFIX, CI_REQUEST_ANNOTATIONS } from '@lib/annotationKeys';
 import k8sApi from '@api1/kubernetes';
-import Link from 'next/link';
+import { Link } from '@ui/Link';
 import AutoOptimizeForm from '@components/autopilot/form/AutoOptimizeVerticalRightSizingForm';
 
 import PropTypes from 'prop-types';
-import CustomButton from '@shared/NewCustomButton';
 import { Button } from '@ui/Button';
 import { PrOpenIcon, UpdateIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import { SummaryBlock } from '@components/k8s/KubernetesClusterSummary';
 import MarkDowns from '@shared/viewers/MarkDowns';
-import { colors, ds } from 'src/utils/colors';
+import { ds } from 'src/utils/colors';
 import { parseHttpResponseBodyMessage } from 'src/utils/common';
 import { detectGitProvider } from '@components/optimise-new/gitProvider';
+
+// Kubernetes resource quantity ("128Mi", "1.5Gi", "100m", "512M", "2", "1e3") ->
+// a plain number: bytes for memory, cores for CPU. Returns null for anything it
+// can't parse so callers can tell "not set" apart from zero.
+const K8S_QUANTITY_MULTIPLIERS = {
+  Ki: 1024,
+  Mi: 1024 ** 2,
+  Gi: 1024 ** 3,
+  Ti: 1024 ** 4,
+  Pi: 1024 ** 5,
+  k: 1e3,
+  K: 1e3,
+  M: 1e6,
+  G: 1e9,
+  T: 1e12,
+  P: 1e15,
+  m: 1e-3,
+};
+const parseK8sQuantity = (raw) => {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  // The exponent has to be part of the number capture: Kubernetes accepts
+  // scientific notation, and a suffix group of [A-Za-z]* can never hold "e3" or
+  // "e-3", so without it the whole quantity fails to match and reads as unset.
+  const match = s.match(/^(-?[0-9.]+(?:[eE][-+]?\d+)?)([A-Za-z]*)$/);
+  if (!match) return null;
+  const num = parseFloat(match[1]);
+  if (!Number.isFinite(num)) return null;
+  const suffix = match[2];
+  if (!suffix) return num;
+  const multiplier = K8S_QUANTITY_MULTIPLIERS[suffix];
+  return multiplier === undefined ? null : num * multiplier;
+};
+
+// Current requests/limits read off the workload's own container spec — the
+// authoritative values collected from the K8s API. Needed because the
+// event-evidence path reports 0 for both whenever the
+// kube_pod_container_resource_* series are missing (pod already gone, KSM scrape
+// gap), which leaves the "Current" column blank on a workload that does have
+// requests and limits set.
+const containerSpecAllocation = (workload, containerName) => {
+  const containers = workload?.meta?.config?.containers;
+  if (!Array.isArray(containers) || containers.length === 0) return null;
+  // Only guess the container when there is nothing to guess between — a wrong
+  // container's spec is worse than no spec.
+  const container = containers.find((c) => c?.name === containerName) || (containers.length === 1 ? containers[0] : null);
+  if (!container) return null;
+  const requests = container?.resources?.requests || {};
+  const limits = container?.resources?.limits || {};
+  return {
+    cpu: { request: parseK8sQuantity(requests.cpu), limit: parseK8sQuantity(limits.cpu) },
+    memory: { request: parseK8sQuantity(requests.memory), limit: parseK8sQuantity(limits.memory) },
+  };
+};
+
+// A value the producer actually knows. Neither source expresses "unset" as
+// anything but 0 (the evidence path defaults missing requests/limits to 0), so
+// 0 means "fall back to the workload spec", not "zero cores".
+const knownValue = (v) => {
+  const num = typeof v === 'string' ? parseFloat(v) : v;
+  return Number.isFinite(num) && num > 0 ? num : null;
+};
 
 // Detects whether a workload is declaratively managed (GitOps / Helm / Argo CD /
 // Flux) so a manual "Update" — which patches the live pods directly — can warn
@@ -73,6 +135,9 @@ const KubernetesRightSizingPopupForm = ({
   // large-change confirmation rows (null = no confirmation open).
   const [gitOpsInfo, setGitOpsInfo] = useState({ manager: null, gitRepo: null });
   const [driftConfirm, setDriftConfirm] = useState(null);
+  // Container spec (requests/limits) of the workload being tuned, used as the
+  // fallback current allocation when the caller's data carries none.
+  const [specAllocation, setSpecAllocation] = useState(null);
 
   const parsedOldRequest =
     data?.memory?.oldRequest && typeof data?.memory?.oldRequest === 'string'
@@ -81,20 +146,49 @@ const KubernetesRightSizingPopupForm = ({
   const parsedOldLimit =
     data?.memory?.oldLimit && typeof data?.memory?.oldLimit === 'string' ? parseFloat(data.memory.oldLimit.split(' ')[0]) : data?.memory?.oldLimit;
 
-  // nbalgoBase is the unbuffered base for algo/buffer toggles. Prefer it over
-  // oldRequest/oldLimit so a workload with zero current requests/limits but
-  // real observed usage still drives the toggle math (without it,
-  // `parsedOldRequest || ''` collapses 0 to '' and toggles clear the input).
-  const memNbalgoBase = data?.memory?.nbalgoBase ?? parsedOldRequest;
-  const memNbalgoLimit = data?.memory?.nbalgoBase ?? parsedOldLimit;
-  const cpuNbalgoBase = data?.cpu?.nbalgoBase ?? data?.cpu?.oldRequest;
+  // Memory is displayed in MB for event-sourced tuning and GB elsewhere; the
+  // submit path converts back with the same divisor.
+  const memBytesToDisplay = (bytes) => {
+    if (bytes == null) return null;
+    const divisor = recommendationSource === 'event' ? 1024 ** 2 : 1024 ** 3;
+    return Math.round((bytes / divisor) * 100) / 100;
+  };
+
+  // The current allocation the "Current" column shows and the toggles compute
+  // against: what the caller passed, else the workload's container spec.
+  const currentCpuRequest = knownValue(data?.cpu?.oldRequest) ?? knownValue(specAllocation?.cpu?.request);
+  const currentCpuLimit = knownValue(data?.cpu?.oldLimit) ?? knownValue(specAllocation?.cpu?.limit);
+  const currentMemRequest = knownValue(parsedOldRequest) ?? memBytesToDisplay(knownValue(specAllocation?.memory?.request));
+  const currentMemLimit = knownValue(parsedOldLimit) ?? memBytesToDisplay(knownValue(specAllocation?.memory?.limit));
+
+  // The unbuffered base the algo/buffer toggles multiply against: the caller's
+  // observed-usage base (nbalgoBase), but never below what the workload already
+  // has allocated.
+  //
+  // Taking nbalgoBase on its own recommends a shrink on the workload that just
+  // ran out of room: the usage series behind it is truncated precisely because
+  // the container died, so an OOMKilled pod's samples stop at a few MB. A
+  // 128Mi/192Mi pod whose last four samples read 2.74MB got "+10% buffer" =
+  // 2.87MB for both request and limit. These modals only open on a
+  // resource-pressure event (OOM, memory reaching limit, CPU throttling), so the
+  // current allocation is a floor. Usage alone still drives the math when the
+  // current allocation is unknown — the case nbalgoBase was added for.
+  const higherOf = (a, b) => {
+    const values = [a, b].map((v) => (typeof v === 'string' ? parseFloat(v) : v)).filter((v) => Number.isFinite(v));
+    return values.length ? Math.max(...values) : null;
+  };
+  const memNbalgoBase = higherOf(data?.memory?.nbalgoBase, currentMemRequest);
+  // The limit's base is the current LIMIT, not the request — sharing one base
+  // collapses a 192Mi limit onto the request's value.
+  const memNbalgoLimit = higherOf(data?.memory?.nbalgoBase, currentMemLimit);
+  const cpuNbalgoBase = higherOf(data?.cpu?.nbalgoBase, currentCpuRequest);
 
   // `|| undefined` (not `|| ''`) so `'' * bufferMultiplier === 0` can't sneak a
   // zero recommendation into the input. With undefined, `undefined * mult` is
   // NaN, which `parseMemValue` returns as null and the box stays empty.
   const additionalMemInfo = {
-    req: parsedOldRequest || '',
-    limit: parsedOldLimit || '',
+    req: currentMemRequest ?? '',
+    limit: currentMemLimit ?? '',
     nbalgoReq: memNbalgoBase || undefined,
     nbalgoLimit: memNbalgoLimit || undefined,
   };
@@ -108,12 +202,12 @@ const KubernetesRightSizingPopupForm = ({
 
   const allocatedData = {
     cpu: {
-      request: data?.cpu?.oldRequest || '',
-      limit: data?.cpu?.oldLimit || '',
+      request: currentCpuRequest ?? '',
+      limit: currentCpuLimit ?? '',
     },
     memory: {
-      request: parsedOldRequest || '',
-      limit: parsedOldLimit || '',
+      request: currentMemRequest ?? '',
+      limit: currentMemLimit ?? '',
     },
   };
 
@@ -162,6 +256,7 @@ const KubernetesRightSizingPopupForm = ({
       setSelectedWorkloadAnnotations({});
       setGitOpsInfo({ manager: null, gitRepo: null });
       setDriftConfirm(null);
+      setSpecAllocation(null);
     }
   }, [open]);
 
@@ -373,6 +468,8 @@ const KubernetesRightSizingPopupForm = ({
           const annotations = workload.meta?.config?.annotations || {};
           const labels = workload.meta?.config?.labels || {};
           setGitOpsInfo(detectGitOpsManager(annotations, labels));
+          // Set before the annotation branches below, each of which returns early.
+          setSpecAllocation(containerSpecAllocation(workload, data?.container_name || data?.cloud_resourse?.meta?.container));
 
           // Check k8s annotations first
           const filteredKeys = Object.keys(annotations).filter((key) => key.startsWith(CI_PREFIX));
@@ -574,6 +671,40 @@ const KubernetesRightSizingPopupForm = ({
     updateDataBasedOnButtonValueForMemory(buttonValue);
   };
 
+  // Prefill Recommended from the spec-derived base when the caller had no signal
+  // to prefill with (event evidence reports 0 for a workload whose
+  // kube_pod_container_resource_* series are missing). The numbers match what the
+  // toggles rendered next to the inputs already claim — memory +10% buffer, CPU
+  // no buffer — so the form opens consistent with its own selection instead of
+  // empty.
+  useEffect(() => {
+    if (!specAllocation) return;
+    setUpdatedData((prevData) => {
+      if (!prevData) return prevData;
+      const next = { ...prevData };
+      let changed = false;
+      if (prevData.memory) {
+        const memory = { ...prevData.memory };
+        if (!knownValue(memory.request) && memNbalgoBase) {
+          memory.request = parseMemValue(memNbalgoBase * 1.1);
+          changed = true;
+        }
+        if (!knownValue(memory.limit) && memNbalgoLimit) {
+          memory.limit = parseMemValue(memNbalgoLimit * 1.1);
+          changed = true;
+        }
+        next.memory = memory;
+      }
+      if (prevData.cpu && !knownValue(prevData.cpu.request) && cpuNbalgoBase) {
+        next.cpu = { ...prevData.cpu, request: formatCpuRequest(cpuNbalgoBase) };
+        changed = true;
+      }
+      return changed ? next : prevData;
+    });
+    // `data` is a dependency because the effect above it re-seeds updatedData from
+    // `data` whenever the caller re-renders; without it the prefill would be lost.
+  }, [specAllocation, data]);
+
   const handleInputChange = (value, type, type1) => {
     if (type == 'cpu' && type1 == 'request') {
       setUpdatedData((prevData) => ({
@@ -617,20 +748,32 @@ const KubernetesRightSizingPopupForm = ({
     }
   };
 
-  // Event-sourced Raise PR replays the code fix stored by the event's log
-  // analysis. Until that analysis is COMPLETED and actually stored a diff, the
-  // backend rejects the request — so block submission instead of letting the
-  // user fire a doomed call.
-  // The overall investigation can remain IN_PROGRESS while a later stage runs,
-  // even after the log-analysis stage has produced the diff this action uses.
-  // Gate on that specific stage; use the overall status only for legacy
-  // responses that do not yet include task_statuses.
+  // The code-fix Raise PR replays the fix stored by the event's log analysis
+  // (aiData.source_updates.gitDiff). Until that analysis is COMPLETED and
+  // actually stored a diff, the backend rejects the request — so block
+  // submission instead of letting the user fire a doomed call.
+  //
+  // Resource tuning is the other event-sourced Raise PR and has nothing to do
+  // with log analysis: it edits requests/limits in the GitOps source through the
+  // code agent. Gating every event-sourced Raise PR on the analysis left resource
+  // tuning permanently disabled — it carries no aiData, so the status read as
+  // "still running" forever.
+  //
+  // The split is card_id, mirroring how the backend routes the two apart
+  // (ApplyEventResolution excludes MemoryAllocationCard from the code-fix
+  // branch). Keyed the same way on both sides, a card can't be routed to the
+  // code-fix path by the backend while the UI treats it as resource tuning.
+  const isCodeFixPR = recommendationSource === 'event' && data?.card_id !== 'MemoryAllocationCard';
+  // The investigation as a whole can still read IN_PROGRESS while a later stage runs, long after the
+  // log-analysis stage produced the diff this action replays — so the overall status blocks a PR
+  // that is ready to raise. Gate on that one stage, falling back to the overall status only for
+  // responses old enough to carry no task_statuses.
   const logAnalysisStatus = data?.aiData?.task_statuses?.log_analysis;
   const eventAnalysisStatus = typeof logAnalysisStatus === 'string' ? logAnalysisStatus.toLowerCase() : data?.aiData?.status?.toLowerCase();
   const eventAnalysisCompleted = eventAnalysisStatus === 'completed';
   const eventAnalysisFailed = eventAnalysisStatus === 'failed';
   const eventAnalysisHasDiff = Boolean(data?.aiData?.source_updates?.gitDiff);
-  const eventAnalysisReady = recommendationSource !== 'event' || (eventAnalysisCompleted && eventAnalysisHasDiff);
+  const eventAnalysisReady = !isCodeFixPR || (eventAnalysisCompleted && eventAnalysisHasDiff);
 
   return (
     <Modal
@@ -680,8 +823,8 @@ const KubernetesRightSizingPopupForm = ({
               filter: 'brightness(0) saturate(100%) invert(74%) sepia(24%) saturate(1%) hue-rotate(314deg) brightness(82%) contrast(88%)',
             },
             '& .Mui-selected': {
-              color: `${colors.text.primary} !important`,
-              backgroundColor: colors.background.toggle,
+              color: `${ds.blue[500]} !important`,
+              backgroundColor: ds.blue[100],
               img: {
                 filter: 'brightness(0) saturate(100%) invert(45%) sepia(23%) saturate(3237%) hue-rotate(195deg) brightness(98%) contrast(98%)',
               },
@@ -689,12 +832,12 @@ const KubernetesRightSizingPopupForm = ({
           }}
         >
           {updateResourceType != 'raise-pr' ? (
-            <ToggleButton value='resourceChange' sx={{ gap: 'var(--ds-space-2)', color: colors.text.secondaryDark }}>
+            <ToggleButton value='resourceChange' sx={{ gap: 'var(--ds-space-2)', color: ds.gray[400] }}>
               <SafeIcon src={UpdateIcon} alt='Update' />
               Update
             </ToggleButton>
           ) : null}
-          <ToggleButton value='raise-pr' sx={{ gap: 'var(--ds-space-2)', color: colors.text.secondaryDark }}>
+          <ToggleButton value='raise-pr' sx={{ gap: 'var(--ds-space-2)', color: ds.gray[400] }}>
             <SafeIcon src={PrOpenIcon} alt='Raise PR' />
             Raise PR
           </ToggleButton>
@@ -705,21 +848,17 @@ const KubernetesRightSizingPopupForm = ({
         (isGitIntegrationsLoading || filteredGitIntegrations.length > 0 ? (
           <>
             <Grid container xs={12} gap={3}>
-              <CustomDropdown
+              <Select
                 label={'Git Integration'}
-                value={filteredGitIntegrations.find((i) => i.key === selectedGitIntegration)?.label || ''}
+                value={selectedGitIntegration || ''}
                 minWidth={'250px'}
-                options={filteredGitIntegrations.map((i) => i.label)}
-                onChange={(e) => {
-                  const selected = filteredGitIntegrations.find((i) => i.label === e.target.value);
-                  if (selected) setSelectedGitIntegration(selected.key);
-                }}
-                showNormalField={true}
-                isLoading={isGitIntegrationsLoading}
-                isDisabled={recommendationSource !== 'event' && Object.keys(selectedWorkloadAnnotations).length == 0}
+                options={filteredGitIntegrations.map((i) => ({ value: i.key, label: i.label }))}
+                onChange={(v) => setSelectedGitIntegration(v)}
+                loading={isGitIntegrationsLoading}
+                disabled={!isCodeFixPR && Object.keys(selectedWorkloadAnnotations).length == 0}
               />
             </Grid>
-            {recommendationSource === 'event' ? (
+            {isCodeFixPR ? (
               eventAnalysisReady ? (
                 <Typography sx={{ mt: 'var(--ds-space-4)', mb: 'var(--ds-space-5)', fontSize: 'var(--ds-text-body-lg)', color: ds.gray[700] }}>
                   A pull request will be raised against the mapped source repository with the generated fix.
@@ -748,8 +887,8 @@ const KubernetesRightSizingPopupForm = ({
               <SummaryBlock
                 hideTitle
                 sx={{
-                  backgroundColor: colors.button.secondaryHover,
-                  border: `0.5px solid ${colors.border.summaryBlock} !important`,
+                  backgroundColor: ds.background[200],
+                  border: `0.5px solid ${ds.brand[300]} !important`,
                   mt: 'var(--ds-space-4)',
                   mb: 'var(--ds-space-7)',
                   ul: {
@@ -761,7 +900,7 @@ const KubernetesRightSizingPopupForm = ({
                   },
                 }}
               >
-                <Typography sx={{ fontWeight: 'var(--ds-font-weight-regular)', fontSize: 'var(--ds-text-body-lg)', color: colors.text.secondary }}>
+                <Typography sx={{ fontWeight: 'var(--ds-font-weight-regular)', fontSize: 'var(--ds-text-body-lg)', color: ds.gray[700] }}>
                   There are no annotations configured at Deployment. To make this functionality work, the following annotations are required at
                   Deployment:
                 </Typography>
@@ -777,7 +916,7 @@ const KubernetesRightSizingPopupForm = ({
             {renderDiffData()}
             <Box
               sx={{
-                borderTop: `0.5px solid ${colors.border.vertical}`,
+                borderTop: `0.5px solid ${ds.gray[200]}`,
                 button: {
                   minWidth: '140px',
                 },
@@ -796,20 +935,20 @@ const KubernetesRightSizingPopupForm = ({
                 gap={1}
               >
                 <Grid item>
-                  <CustomButton text='Cancel' size='Medium' variant='secondary' onClick={onClose} />
+                  <Button size='md' tone='secondary' onClick={onClose}>
+                    Cancel
+                  </Button>
                 </Grid>
                 <Grid item>
-                  <CustomButton
-                    size='Medium'
+                  <Button
+                    size='md'
                     disabled={
-                      !selectedGitIntegration ||
-                      (recommendationSource !== 'event' && !Object.keys(selectedWorkloadAnnotations).length) ||
-                      !eventAnalysisReady ||
-                      loading
+                      !selectedGitIntegration || (!isCodeFixPR && !Object.keys(selectedWorkloadAnnotations).length) || !eventAnalysisReady || loading
                     }
-                    text='Save'
                     onClick={handleCreatePR}
-                  />
+                  >
+                    Save
+                  </Button>
                 </Grid>
               </Grid>
             </Box>
@@ -856,12 +995,12 @@ const KubernetesRightSizingPopupForm = ({
             </Box>
           </Box>
 
-          <Box sx={{ borderTop: `0.5px solid ${colors.border.vertical}` }}>
+          <Box sx={{ borderTop: `0.5px solid ${ds.gray[200]}` }}>
             <Box
               display={'flex'}
               alignItems='center'
               justifyContent={'flex-end'}
-              gap={'12px'}
+              gap={ds.space[3]}
               my={2}
               mr='0px'
               sx={{
@@ -870,8 +1009,12 @@ const KubernetesRightSizingPopupForm = ({
                 },
               }}
             >
-              <CustomButton size='Medium' text='Cancel' variant='secondary' onClick={onClose} />
-              <CustomButton size='Medium' type='submit' text={'Update'} onClick={() => submitRecommendation()} disabled={loading} loading={loading} />
+              <Button size='md' tone='secondary' onClick={onClose}>
+                Cancel
+              </Button>
+              <Button size='md' type='submit' onClick={() => submitRecommendation()} disabled={loading} loading={loading}>
+                Update
+              </Button>
             </Box>
           </Box>
         </Box>

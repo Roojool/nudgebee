@@ -93,6 +93,10 @@ type FetchLogLabelRequest struct {
 	// IntegrationConfigValues asks for fields from an unsaved integration
 	// configuration. The API handler authorizes and scopes this override.
 	IntegrationConfigValues []core.IntegrationConfigValue `json:"integration_config_values,omitempty"`
+	// IntegrationId names the saved integration being edited. Required when any of
+	// IntegrationConfigValues is flagged is_encrypted (a secret the user left masked):
+	// the saved value is looked up on this integration — see core.ResolveKeptSecrets.
+	IntegrationId string `json:"integration_id,omitempty"`
 }
 
 type OutputLogLabel struct {
@@ -251,6 +255,12 @@ type GetUtilisationTrendRequest struct {
 	StartTime            int64          `json:"start_time"`
 	EndTime              int64          `json:"end_time"`
 	Request              map[string]any `json:"request"`
+
+	// StepInterval is the resolution in seconds. Zero leaves the choice to
+	// getStepDuration, which spreads ~60 points across the range with a 60s floor
+	// — right for a picker-driven chart, too coarse for an evidence card drawn
+	// over a ten-minute incident window, where it halves the points.
+	StepInterval int `json:"step_interval,omitempty"`
 }
 
 // OutputMetricQuery represents the response structure for metric and log group queries.

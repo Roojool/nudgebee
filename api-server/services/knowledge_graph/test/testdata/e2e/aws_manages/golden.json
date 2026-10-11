@@ -1,6 +1,86 @@
 {
   "nodes": [
     {
+      "unique_key": "aws:test-account-aws-1:eu-west-1:InfraStack::eu-stack",
+      "node_type": "InfraStack",
+      "specific_type": "CloudFormationStack",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "cloud_provider": "AWS",
+        "external_resource_id": "cfn-2",
+        "is_active": true,
+        "labels": null,
+        "name": "eu-stack",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "cfn-2",
+        "region": "eu-west-1",
+        "resource_id": "eu-stack",
+        "service_name": "AWSCloudFormation",
+        "source": "aws",
+        "status": "",
+        "subtype": "stack",
+        "type": "stack"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "eu-stack"
+      },
+      "ontology_attributes": {
+        "location": "eu-west-1",
+        "name": "eu-stack"
+      }
+    },
+    {
+      "unique_key": "aws:test-account-aws-1:eu-west-1:Storage::eu-bucket",
+      "node_type": "Storage",
+      "specific_type": "S3Bucket",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "account_number": "",
+        "arn": "",
+        "aws_account_number": "",
+        "bucket_name": "eu-bucket",
+        "cloud_provider": "AWS",
+        "dns_aliases": [
+          "eu-bucket.s3.dualstack.eu-west-1.amazonaws.com",
+          "eu-bucket.s3-website-eu-west-1.amazonaws.com",
+          "eu-bucket.s3.amazonaws.com"
+        ],
+        "dns_name": "eu-bucket.s3.eu-west-1.amazonaws.com",
+        "external_resource_id": "s3-2",
+        "is_active": true,
+        "labels": null,
+        "name": "eu-bucket",
+        "nb_account_id": "123456789012",
+        "nb_resource_id": "s3-2",
+        "region": "eu-west-1",
+        "resource_id": "eu-bucket",
+        "service_name": "AmazonS3",
+        "source": "aws",
+        "status": "",
+        "subtype": "storage",
+        "type": "storage"
+      },
+      "labels": {},
+      "query_attributes": {
+        "name": "eu-bucket",
+        "subtype": "storage"
+      },
+      "ontology_attributes": {
+        "location": "eu-west-1",
+        "name": "eu-bucket"
+      }
+    },
+    {
       "unique_key": "aws:test-account-aws-1:us-east-1:InfraStack::my-stack",
       "node_type": "InfraStack",
       "specific_type": "CloudFormationStack",
@@ -82,6 +162,27 @@
     }
   ],
   "edges": [
+    {
+      "src_key": "aws:test-account-aws-1:eu-west-1:InfraStack::eu-stack",
+      "dst_key": "aws:test-account-aws-1:eu-west-1:Storage::eu-bucket",
+      "relationship_type": "MANAGES",
+      "cloud_account_id": "test-account-aws-1",
+      "tenant_id": "test-tenant-1",
+      "level": "",
+      "source": "aws",
+      "properties": {
+        "connection_type": "cloudformation_managed",
+        "contributing_sources": [
+          "aws"
+        ],
+        "logical_resource_id": "EuBucket",
+        "resource_status": "CREATE_COMPLETE",
+        "resource_type": "AWS::S3::Bucket"
+      },
+      "contributing_sources": [
+        "aws"
+      ]
+    },
     {
       "src_key": "aws:test-account-aws-1:us-east-1:InfraStack::my-stack",
       "dst_key": "aws:test-account-aws-1:us-east-1:Storage::app-bucket",

@@ -46,6 +46,7 @@ func TestFinOpsPrompt_MentionsOnlyRealTools(t *testing.T) {
 		tools.ToolRecommendationApply:                  true,
 		tools.ToolRecommendationExecuteCli:             true,
 		tools.ToolRecommendationRecordTicketResolution: true,
+		tools.ToolRecommendationSetDismissal:           true,
 		tools.TicketMasterToolNameV2:                   true,
 	}
 	// Referenced in prose as data fields / sub-agent internals, not as tools
@@ -173,20 +174,18 @@ func TestFinOpsPrompt_CaveatTravelsInsideTheTable(t *testing.T) {
 	assert.Contains(t, flat, "Carry that warning inside the split table",
 		"the tool-strategy bullet must match the output-format rule")
 
-	recFlat := flattenAgentPrompt(newRecommendationAgent("test-recommendations-prompt").
-		GetSystemPrompt(ctx, core.NBAgentRequest{}))
-	assert.Contains(t, recFlat, "in-table placement survives",
-		"the recommendations agent's citation must stay in the table for the same relay reason")
+	assert.Contains(t, flat, "in-table placement survives",
+		"the recommendation listing's citation must stay in the table for the same relay reason")
 }
 
-// TestRecommendationsPrompt_AggregateIsTheAnswer pins the rule that stops the
-// most expensive query this agent runs. Having computed an aggregate that
+// TestFinOpsPrompt_AggregateIsTheAnswer pins the rule that stops the most
+// expensive query on recommendation_view. Having computed an aggregate that
 // answers the question, the agent was following it with an unlimited
 // ORDER BY over the account's recommendations, which returns nothing the
 // aggregate had not already stated.
-func TestRecommendationsPrompt_AggregateIsTheAnswer(t *testing.T) {
+func TestFinOpsPrompt_AggregateIsTheAnswer(t *testing.T) {
 	ctx := security.NewRequestContextForSuperAdmin()
-	agent := newRecommendationAgent("test-recommendations-prompt")
+	agent := &FinOpsAgent{accountId: "test-finops-prompt"}
 	flat := flattenAgentPrompt(agent.GetSystemPrompt(ctx, core.NBAgentRequest{}))
 
 	assert.Contains(t, flat, "An aggregate is the answer",
@@ -195,32 +194,52 @@ func TestRecommendationsPrompt_AggregateIsTheAnswer(t *testing.T) {
 		"row listings must carry a limit")
 }
 
-// TestFinOpsAndRecommendationsShareOneSQLContract pins the anti-drift property
-// of the un-nesting: FinOps queries recommendation_view directly now, so the
-// SQL rules and schema it renders must be the very lines the recommendations
-// agent renders — both consume the tools' ToolPrompt(). If either side stops
-// doing so, the two paths to the same data drift apart again.
-func TestFinOpsAndRecommendationsShareOneSQLContract(t *testing.T) {
+// TestFinOpsRendersTheRecommendationSQLContract pins the single-source
+// property: FinOps queries recommendation_view directly and the SQL rules,
+// schema and listing presentation it renders are the tools' ToolPrompt()
+// lines — the same lines the orchestrators get when they mount the raw
+// tools. If FinOps stops rendering them, the two paths to the same data
+// drift apart again.
+func TestFinOpsRendersTheRecommendationSQLContract(t *testing.T) {
 	ctx := security.NewRequestContextForSuperAdmin()
 	finops := flattenAgentPrompt((&FinOpsAgent{accountId: "test-finops-prompt"}).GetSystemPrompt(ctx, core.NBAgentRequest{}))
-	recs := flattenAgentPrompt(newRecommendationAgent("test-finops-prompt").GetSystemPrompt(ctx, core.NBAgentRequest{}))
 
 	for _, line := range (tools.RecommendationExecuteTool{}).ToolPrompt() {
 		assert.Contains(t, finops, line, "FinOps must render every recommendation_execute ToolPrompt line")
-		assert.Contains(t, recs, line, "the recommendations agent must render every recommendation_execute ToolPrompt line")
 	}
 	for _, line := range (tools.RecommendationResolutionExecuteTool{}).ToolPrompt() {
 		assert.Contains(t, finops, line)
-		assert.Contains(t, recs, line)
 	}
 
-	// The un-nesting itself: FinOps carries the raw tools, not the sub-agent.
+	// FinOps carries the raw tools; the retired agent is not nested anywhere.
 	names := map[string]bool{}
 	for _, tool := range (&FinOpsAgent{accountId: "test-finops-prompt"}).GetSupportedTools(ctx) {
 		names[tool.Name()] = true
 	}
 	assert.True(t, names[tools.ToolRecommendationExecuteSql])
 	assert.True(t, names[tools.ToolRecommendationResolutionExecuteSql])
-	assert.False(t, names[RecommendationsAgentName],
-		"the nested recommendations agent must be gone from FinOps, or every savings answer is composed twice")
+	assert.False(t, names[RecommendationsAgentName])
+}
+
+// TestFinOpsPrompt_NonCostRecommendationsAreNotCostAnswers pins the gate on
+// the cost absolutes: a Security or Configuration recommendation question is
+// answered on its own terms, and every rule that would force spend context,
+// a savings sanity check or an Optimise deep link onto it is scoped to cost.
+func TestFinOpsPrompt_NonCostRecommendationsAreNotCostAnswers(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	flat := flattenAgentPrompt((&FinOpsAgent{accountId: "test-finops-prompt"}).GetSystemPrompt(ctx, core.NBAgentRequest{}))
+
+	assert.Contains(t, flat, "Scope of the cost rules")
+	assert.Contains(t, flat, "never give a Security row an Optimise deep link")
+	assert.Contains(t, flat, "For cost questions, follow the FinOps Investigation Model layers")
+	assert.Contains(t, flat, "Savings sanity check (MANDATORY for cost answers)")
+	assert.Contains(t, flat, "Before advising a cost action on a recommendation")
+	assert.Contains(t, flat, "For cost recommendation tables")
+	assert.NotContains(t, flat, "Follow the FinOps Investigation Model layers: Spend Context",
+		"the investigation layers must not be an unconditional instruction")
+	assert.NotContains(t, flat, "If recommendations reference a cloud resource, verify the resource exists before advising action.",
+		"resource verification must not be an unconditional instruction")
+	// The listing rules the retired agent carried now render through the tool.
+	assert.Contains(t, flat, "Presenting a recommendation listing (any category)")
+	assert.Contains(t, flat, "non-cost rows (Security, Configuration, InfraUpgrade) by severity")
 }

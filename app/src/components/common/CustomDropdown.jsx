@@ -509,7 +509,7 @@ const CustomDropdown = ({
               showStatusIndicator && clusterData ? (
                 <InputAdornment position='start'>
                   <Link passHref href={`/agentHealth?accountId=${clusterData?.value}#agent`}>
-                    <Tooltip title='Cluster Health' placement='bottom'>
+                    <Tooltip title='Check Cluster Health Details' placement='bottom'>
                       <span style={{ display: 'inline-block', cursor: 'pointer' }}>
                         <ClusterStatusIndicator showBorder={true} clusterData={clusterData} />
                       </span>

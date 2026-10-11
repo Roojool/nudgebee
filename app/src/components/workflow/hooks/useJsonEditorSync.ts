@@ -264,6 +264,7 @@ export function useJsonEditorSync({
         // ai_invocable is workflow-level, the rest live in the definition.
         description: parsed.description ?? prev.description,
         aiInvocable: parsed.ai_invocable ?? prev.aiInvocable,
+        aiAutoApprove: parsed.ai_auto_approve ?? prev.aiAutoApprove,
         llmDescription: def.llm_description ?? prev.llmDescription,
       }));
 

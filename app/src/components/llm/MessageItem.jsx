@@ -124,6 +124,7 @@ const MessageItem = ({
   showFullText,
   onShowFullText,
   isLoadingInvestigation,
+  isResponseInProgress,
   siblingTasks,
   // Context Props
   accountId,
@@ -598,6 +599,7 @@ const MessageItem = ({
                   toolCall={message}
                   messages={siblingTasks || []}
                   isLoadingInvestigation={isLoadingInvestigation}
+                  isResponseInProgress={isResponseInProgress}
                   generateQuestionText={generateQuestionText}
                   accountId={accountId}
                   handleShare={handleShare}
@@ -682,6 +684,7 @@ MessageItem.propTypes = {
   showFullText: PropTypes.bool,
   onShowFullText: PropTypes.func,
   isLoadingInvestigation: PropTypes.bool,
+  isResponseInProgress: PropTypes.bool,
   siblingTasks: PropTypes.array,
   accountId: PropTypes.string,
   generateQuestionText: PropTypes.string,

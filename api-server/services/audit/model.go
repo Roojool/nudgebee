@@ -35,6 +35,11 @@ const (
 	EventCategoryTriage      EventCategory = "TRIAGE"
 	EventCategoryOwnership   EventCategory = "OWNERSHIP"
 	EventCategoryDashboard   EventCategory = "DASHBOARDS"
+	// Runtime branding overrides (tenant_branding_override). Writes are
+	// super-admin-only, and audit.LogChange skips super-admin actors, so these
+	// rows appear only for a non-super-admin actor; recovery does not depend on
+	// them (see tenant_branding_override.previous_overrides).
+	EventCategoryBranding EventCategory = "BRANDING"
 	// Operator edits to what the Knowledge Graph is built from: the coverage
 	// filter (cloud accounts / flow sources) and manual dependency
 	// declarations. Both deactivate nodes or edges on write, so who changed
@@ -51,6 +56,10 @@ const (
 	EventTypeOwnershipDelete     EventType = "OWNERSHIP_DELETE"
 	EventTypeOwnershipRuleUpsert EventType = "OWNERSHIP_RULE_UPSERT"
 	EventTypeOwnershipRuleDelete EventType = "OWNERSHIP_RULE_DELETE"
+
+	EventTypeBrandingOverrideUpsert  EventType = "BRANDING_OVERRIDE_UPSERT"
+	EventTypeBrandingOverrideDelete  EventType = "BRANDING_OVERRIDE_DELETE"
+	EventTypeBrandingOverrideRestore EventType = "BRANDING_OVERRIDE_RESTORE"
 
 	EventTypeUserCreate EventType = "USER_CREATE"
 	EventTypeUserUpdate EventType = "USER_UPDATE"

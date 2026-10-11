@@ -138,6 +138,14 @@ func CreateIntegrationConfig(
 		return IntegrationDto{}, errors.New("integrations: vm_agent requires exactly one account")
 	}
 
+	// Secrets the user left masked arrive flagged is_encrypted; swap in the saved
+	// values before anything reads the slice. Runs even with skipValidation, which
+	// would otherwise store the client's ciphertext as-is.
+	integrationConfigValues, err := ResolveKeptSecrets(ctx, integrationId, integrationConfigValues)
+	if err != nil {
+		return IntegrationDto{}, err
+	}
+
 	integrationConfigSchema := integration.ConfigSchema()
 
 	// Auto-allow account_mapping on all incident webhook integrations. Mapping is
@@ -361,15 +369,6 @@ func CreateIntegrationConfig(
 		for _, accId := range accountsToValidate {
 			for integrationconfig := range integrationConfigValues {
 				integrationConfigValues[integrationconfig].Value = strings.TrimSpace(integrationConfigValues[integrationconfig].Value)
-				if integrationConfigValues[integrationconfig].IsEncrypted {
-					// encrypted values should not be empty
-					decryptedValue, err := common.Decrypt(integrationConfigValues[integrationconfig].Value)
-					if err != nil {
-						return IntegrationDto{}, fmt.Errorf("failed to decrypt value for field %s: %w", integrationConfigValues[integrationconfig].Name, err)
-					}
-					integrationConfigValues[integrationconfig].Value = decryptedValue
-					integrationConfigValues[integrationconfig].IsEncrypted = false
-				}
 			}
 			// Canonicalise user input before validation so both ValidateConfig and
 			// the save loop below see the stored form (the loop persists this slice).
@@ -693,21 +692,20 @@ func CreateIntegrationConfig(
 			if err != nil {
 				return IntegrationDto{}, err
 			}
-			integrations, err := dbms.Db.Queryx(`
+			// Existence check only — QueryRow releases the pooled connection as
+			// soon as Scan runs, so it needs no defer'd Close (a defer here binds
+			// to the whole function, not this loop iteration).
+			var dupID string
+			dupErr := dbms.Db.QueryRow(`
 				SELECT integration_id
 				FROM integration_config_values
-				WHERE value = $1 AND name = 'token'`, randomToken)
-			if err != nil {
-				return IntegrationDto{}, err
-			}
-			defer func() {
-				err := integrations.Close()
-				if err != nil {
-					slog.Error("Error closing response body", "error", err)
-				}
-			}()
-			if integrations.Next() {
+				WHERE value = $1 AND name = 'token'
+				LIMIT 1`, randomToken).Scan(&dupID)
+			if dupErr == nil {
 				return IntegrationDto{}, errors.New("duplicate token found")
+			}
+			if !errors.Is(dupErr, sql.ErrNoRows) {
+				return IntegrationDto{}, dupErr
 			}
 			integrationConfigValues[i].Value = randomToken
 			value = randomToken
@@ -720,10 +718,7 @@ func CreateIntegrationConfig(
 		// Those rows must still be encrypted at rest — otherwise the global
 		// `llm_provider_api_key` lands encrypted but the per-agent variant
 		// lands in plaintext, an asymmetry that defeats encryption-at-rest.
-		shouldEncrypt := integrationConfigSchema.Properties[v.Name].IsEncrypted
-		if intgerationType == "llm" && IsLLMSecretFieldName(v.Name) {
-			shouldEncrypt = true
-		}
+		shouldEncrypt := isSecretConfigField(intgerationType, integrationConfigSchema, v.Name)
 		if shouldEncrypt && value != "" && !v.IsEncrypted {
 			value, err = common.Encrypt(value)
 			if err != nil {
@@ -974,8 +969,10 @@ func CreateIntegrationConfig(
 		}
 	}
 
+	// The slice now holds plaintext secrets (typed ones, and kept ones resolved
+	// above) — never send those back.
 	return IntegrationDto{
-		Configs: integrationConfigValues,
+		Configs: redactSecretConfigValues(intgerationType, integrationConfigSchema, integrationConfigValues),
 		Name:    integrationConfigName,
 		Tags:    tags,
 		Schema:  integrationConfigSchema,
@@ -1849,9 +1846,10 @@ func applySchemaDefaults(integration Integration, configValues []IntegrationConf
 }
 
 // DecryptConfigValues returns a copy of the config values with encrypted fields
-// decrypted in place (is_encrypted cleared). Used by connectivity/index probes that
-// build a client from raw config values before the integration is saved (the edit
-// form sends the stored ciphertext with is_encrypted=true when a secret isn't re-typed).
+// decrypted (is_encrypted cleared). For values read from the database ONLY. Never
+// pass it values from a request: decrypting client-supplied ciphertext is the
+// decryption oracle of #39639. Request values go through ResolveKeptSecrets, which
+// swaps a kept secret for the stored one instead.
 func DecryptConfigValues(values []IntegrationConfigValue) ([]IntegrationConfigValue, error) {
 	out := make([]IntegrationConfigValue, len(values))
 	copy(out, values)
@@ -1887,16 +1885,10 @@ func TestIntegrationConnectionByConfig(
 		return fmt.Errorf("integration type '%s' not registered", integrationType)
 	}
 
-	// Decrypt encrypted values
-	for i := range configValues {
-		if configValues[i].IsEncrypted && configValues[i].Value != "" {
-			decrypted, decErr := common.Decrypt(configValues[i].Value)
-			if decErr != nil {
-				return fmt.Errorf("failed to decrypt field %s: %w", configValues[i].Name, decErr)
-			}
-			configValues[i].Value = decrypted
-			configValues[i].IsEncrypted = false
-		}
+	// Secrets the user left masked arrive flagged is_encrypted; swap in the saved values.
+	configValues, err := ResolveKeptSecrets(ctx, integrationID, configValues)
+	if err != nil {
+		return err
 	}
 
 	// Edit-flow augmentation: when the user clicks Test Connection on an edit
@@ -2033,12 +2025,12 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 	tenantID := ctx.GetSecurityContext().GetTenantId()
 
 	// Fetch integration record
-	var integrationType, integrationSource string
+	var integrationType, integrationSource, integrationName string
 	err = dbms.Db.QueryRow(`
-		SELECT type::text, source::text
+		SELECT type::text, source::text, COALESCE(name::text, '')
 		FROM integrations
 		WHERE id = $1 AND tenant_id = $2
-	`, integrationID, tenantID).Scan(&integrationType, &integrationSource)
+	`, integrationID, tenantID).Scan(&integrationType, &integrationSource, &integrationName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("integration not found")
@@ -2111,10 +2103,14 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 		accountIDs = append(accountIDs, accID)
 	}
 
-	if len(accountIDs) == 0 {
+	// Tenant-scoped integrations (messaging, ticketing, llm_gateway) have no
+	// cloud-account mapping, so an empty list is expected for them.
+	testAccountID := ""
+	if len(accountIDs) > 0 {
+		testAccountID = accountIDs[0]
+	} else if !isTenantScoped(integration) {
 		return errors.New("no accounts associated with this integration")
 	}
-	testAccountID := accountIDs[0]
 	if requestedAccountID != "" {
 		linked := false
 		for _, accountID := range accountIDs {
@@ -2127,6 +2123,12 @@ func testIntegrationConnection(ctx *security.RequestContext, integrationID, requ
 			return errors.New("integrations: connection test is not permitted")
 		}
 		testAccountID = requestedAccountID
+	}
+
+	// Surface the name to ValidateConfig / TestConnection (as CreateIntegrationConfig
+	// does); some probes name the target in their output.
+	if integrationName != "" {
+		configValues = append(configValues, IntegrationConfigValue{Name: IntegrationConfigName, Value: integrationName})
 	}
 
 	// Apply schema defaults so hidden fields like connection_mode are always present

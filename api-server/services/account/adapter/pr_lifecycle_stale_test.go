@@ -158,6 +158,9 @@ func TestReclaimStuckAddressingInTable_DB(t *testing.T) {
 		pr_followup_pending boolean NOT NULL DEFAULT false,
 		status_message text,
 		last_pr_check_at timestamptz,
+		run_token uuid,
+		run_conversation_id text,
+		run_heartbeat_at timestamptz,
 		created_at timestamptz NOT NULL
 	)`, tbl))
 	t.Cleanup(func() { _, _ = dbms.Db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, tbl)) })

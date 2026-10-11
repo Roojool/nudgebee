@@ -114,6 +114,14 @@ func TestKnowledgeWorkspaceToolRoundTrip(t *testing.T) {
 	require.Equal(t, 1, downloads)
 	require.Equal(t, 1, uploads)
 	require.Equal(t, 1, validations)
+	inline, ref, err := PrepareKnowledgeForAnalysis(ctx, c)
+	require.NoError(t, err)
+	require.Empty(t, inline)
+	require.NotNil(t, ref)
+	require.Equal(t, "conv", ref.ConversationID)
+	require.Equal(t, cached.Path, ref.Path)
+	require.Equal(t, version, ref.SHA256)
+	require.Equal(t, int64(len(body)), ref.Bytes)
 	allowed = false
 	require.Equal(t, core.NBToolResponseStatusError, call().Status)
 	allowed = true

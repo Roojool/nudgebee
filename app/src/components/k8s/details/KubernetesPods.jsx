@@ -339,7 +339,7 @@ const KubernetesPodsTable = ({ accountId, defaultQuery = {}, enableFilters = tru
             {
               component: hasWriteAccess(accountId) ? (
                 <Box display={'flex'} justifyContent={'flex-end'} alignItems={'center'}>
-                  <ThreeDotsMenu sx={{ ...action.primary }} menuItems={MENU_ITEMS} data={item} onMenuClick={onMenuClick} />
+                  <ThreeDotsMenu sx={{ ...action.primary }} menuItems={MENU_ITEMS} data={item} onMenuClick={onMenuClick} disablePortal={false} />
                 </Box>
               ) : (
                 <></>

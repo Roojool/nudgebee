@@ -36,7 +36,8 @@ type ConfigOverride struct {
 	// Source is stamped onto the synthetic integration so provider config getters
 	// that filter on Source == "user" still find it.
 	Source string
-	// Values must already be decrypted — see core.DecryptConfigValues.
+	// Values must already be plaintext — resolve a request's kept secrets with
+	// core.ResolveKeptSecrets first. WithConfigOverride clears any is_encrypted flag.
 	Values []IntegrationConfigValue
 }
 
@@ -47,6 +48,14 @@ func WithConfigOverride(ctx *security.RequestContext, o ConfigOverride) *securit
 	if ctx == nil {
 		return nil
 	}
+	// Override values come from a request. A flag left set here would be a
+	// client-supplied ciphertext that provider config getters then decrypt — the
+	// oracle ResolveKeptSecrets exists to close — so the values are taken as-is.
+	values := make([]IntegrationConfigValue, len(o.Values))
+	for i, v := range o.Values {
+		values[i] = IntegrationConfigValue{Name: v.Name, Value: v.Value}
+	}
+	o.Values = values
 	return security.NewRequestContext(
 		context.WithValue(ctx.GetContext(), configOverrideKey, o),
 		ctx.GetSecurityContext(),

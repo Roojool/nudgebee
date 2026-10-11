@@ -239,9 +239,20 @@ func main() {
 	gitClient := git.NewGitClient(cfg.Analysis.WorkspaceDir, cfg.Git.CloneTimeout, cfg.Git.MaxRepoSize)
 	credHandler := credentials.NewCredentialHandler()
 
-	// Startup is the only point where an unconditional sweep is safe: no
-	// in-process analysis can own one of these temp workspaces yet.
-	handlers.SweepOrphanedAnalysisWorkspaces(0)
+	// Workspaces now persist across conversation turns (see agentic_analyze.go's
+	// session-scoped workspace directory), so a paused-between-turns
+	// conversation can legitimately own one across a restart — an unconditional
+	// sweep here would delete it out from under the next turn and leave the
+	// shared bare-repo mirror's git worktree registration dangling (the
+	// directory is gone but git still thinks it's checked out, which fails
+	// every subsequent repo_clone for that conversation with "missing but
+	// already registered worktree"). Use the same age threshold as the
+	// periodic sweep instead of an unconditional one.
+	startupMaxAge := cfg.Analysis.MaxProcessingTime + time.Hour
+	if startupMaxAge < 2*time.Hour {
+		startupMaxAge = 2 * time.Hour
+	}
+	handlers.SweepOrphanedAnalysisWorkspaces(startupMaxAge)
 	if reclaimed, err := handlers.CollectWorkspaceGarbage(cfg.Analysis.WorkspaceDir); err != nil {
 		log.Printf("WARN: workspace cache cleanup failed: %v", err)
 	} else if reclaimed > 0 {

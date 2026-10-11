@@ -73,12 +73,6 @@ func TestStage22CanAutoExecutePredicates(t *testing.T) {
 		{"resource_events/fires on warning event with pod subject", &resourceEventsAction{},
 			makeCtx("Kubernetes Warning Event", "pod", "p1", "ns", nil), true},
 
-		// impacted_services
-		{"impacted_services/fires on crash_loop", &impactedServicesAction{},
-			makeCtx("report_crash_loop", "pod", "p1", "ns", nil), true},
-		{"impacted_services/skips on OOM", &impactedServicesAction{},
-			makeCtx("pod_oom_killer_enricher", "pod", "p1", "ns", nil), false},
-
 		// job_info / job_events / job_pod
 		{"job_info/fires on job_failure", &jobInfoAction{},
 			makeCtx("job_failure", "job", "j1", "ns", nil), true},

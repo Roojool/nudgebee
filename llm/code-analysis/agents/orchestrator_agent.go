@@ -67,11 +67,16 @@ type NBAgentRequest struct {
 // resorted to its forced-submit hardcoded fallback. Returning the result of
 // requires_fix would be honoring a fabricated value; we fail loudly so the
 // caller sees a real error instead of the relevance-validator's off-topic
-// placeholder. Only fires when the caller explicitly asked for a PR (RaisePR)
-// and ran in fix mode — explore-mode requests still receive the partial
-// findings.
-func shouldFailIncompleteFixRequest(analysisIncomplete bool, mode string, request NBAgentRequest) bool {
-	return analysisIncomplete && mode == ModeFix && request.RaisePR
+// placeholder. Fires for every fix-mode request, whether or not a PR was asked
+// for — explore-mode requests still receive the partial findings.
+//
+// The RaisePR condition this used to carry made the event-analysis pipeline the
+// one caller that never got the guard: it runs fix mode with raise_pr=false
+// (diff-only), so an exhausted planner fell through to the !requires_fix branch
+// below and was reported as "no code change required" — a fabricated verdict
+// that llm-server stored and showed as "the change is already present" (#38488).
+func shouldFailIncompleteFixRequest(analysisIncomplete bool, mode string, _ NBAgentRequest) bool {
+	return analysisIncomplete && mode == ModeFix
 }
 
 // EffectiveMode returns the mode the orchestrator should run in.
@@ -460,17 +465,22 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 			"returning":          "specialist_result_directly",
 		})
 
-		// Add PR creation status if RaisePR was requested
-		if request.RaisePR {
-			var resultData map[string]any
-			if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil {
+		// Stamp the terminal no-op regardless of RaisePR: a diff-only fix request
+		// (raise_pr=false, how the event-analysis pipeline calls us) is just as
+		// entitled to an unambiguous outcome as one that asked for a PR. Without
+		// it the caller has to infer "no change needed" from the absence of a
+		// git_diff, which is indistinguishable from a run that failed (#38488).
+		// The analysis_incomplete case never reaches here — it fails above.
+		var resultData map[string]any
+		if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil && resultData != nil {
+			resultData["execution_status"] = ExecutionStatusNoOp
+			resultData["mode"] = mode
+			if request.RaisePR {
 				resultData["pr_creation_status"] = "skipped"
-				resultData["execution_status"] = ExecutionStatusNoOp
 				resultData["pr_creation_reason"] = "No code change required — the specialist determined the requested change is already present / no fix is needed."
-				resultData["mode"] = mode
-				if modifiedJSON, err := json.Marshal(resultData); err == nil {
-					return string(modifiedJSON), nil
-				}
+			}
+			if modifiedJSON, err := json.Marshal(resultData); err == nil {
+				return string(modifiedJSON), nil
 			}
 		}
 
@@ -764,9 +774,14 @@ func (a *OrchestratorAgent) buildFinalResponse(mergedData map[string]any) map[st
 		response["requires_fix"] = requiresFix
 	}
 
-	// Map CodeFixer execution fields
+	// Map CodeFixer execution fields. When the fixer produced a diff but nothing
+	// upstream stamped a status (the raise_pr=false path never reaches the PR
+	// bookkeeping below), fall back to success so every fix-mode response carries
+	// an outcome the caller can switch on rather than infer (#38488).
 	if execStatus, ok := mergedData["execution_status"].(string); ok && execStatus != "" {
 		response["execution_status"] = execStatus
+	} else if gitDiff, _ := mergedData["git_diff"].(string); strings.TrimSpace(gitDiff) != "" {
+		response["execution_status"] = ExecutionStatusSuccess
 	}
 	if execSummary, ok := mergedData["execution_summary"].(string); ok && execSummary != "" {
 		response["execution_summary"] = execSummary
@@ -936,7 +951,9 @@ func truncateProgress(s string, maxLen int) string {
 }
 
 func (a *OrchestratorAgent) createSessionContext(request NBAgentRequest) (*session.SessionContext, error) {
-	repoCtx := &planners.RepositoryContext{}
+	repoCtx := &planners.RepositoryContext{
+		InstructionFileMaxBytes: a.config.Agent.InstructionFileMaxBytes,
+	}
 
 	if request.QueryConfig != nil {
 		if repoURL, ok := request.QueryConfig["repository_url"].(string); ok {
@@ -1741,6 +1758,11 @@ func (a *OrchestratorAgent) executeFixAndReviewLoop(ctx context.Context, session
 // followup mode already emits this value; the standard fix flow now does too.
 const ExecutionStatusNoOp = "no_op"
 
+// ExecutionStatusSuccess marks a fix-mode run that produced a diff. The fixer
+// already emits it on the PR path; buildFinalResponse falls back to it so a
+// diff-only run (raise_pr=false) is never returned without an outcome.
+const ExecutionStatusSuccess = "success"
+
 // ExecutionStatusFailed marks a run that could not do its job. Callers
 // (llm-server, then api-server's resolution bookkeeping) treat anything that is
 // neither "success" nor "no_op" as a failure and surface execution_summary as
@@ -2462,6 +2484,145 @@ func operatorSkillsPromptBlock(skills string) string {
 		skills + "\n</operator-skills>\n\n"
 }
 
+// repoSkillPromptBlock renders one repo-committed skill (already resolved by
+// classifyRepoSkillForStep) as a guidance section for the orchestrator's PR
+// description / commit message sub-prompts. Framed as advisory, not
+// authoritative, matching planners.FormatRepoSkillsBlock's trust level — this
+// is the analyzed repo's own content, not operator-verified. Returns "" when
+// skill is nil so prompts stay byte-for-byte unchanged.
+func repoSkillPromptBlock(skill *planners.RepoSkill) string {
+	if skill == nil {
+		return ""
+	}
+	truncatedNote := ""
+	if skill.Truncated {
+		// classifyRepoSkillForStep re-reads the winning skill's file in full
+		// (ReadSkillFileFull) and clears Truncated on success — this only fires
+		// on that re-read's rare failure path, where skill.Content is still the
+		// discovery-time maxBytesPerSkillFile slice. Without this marker the
+		// model has no signal the file it's told to follow is a partial cut.
+		truncatedNote = "\n[truncated — content past this point was not read; treat this as a partial excerpt]\n"
+	}
+	return "\n<repo-skill path=\"" + skill.Path + "\">\n" +
+		"The following skill is committed in the analyzed repository itself and documents how this team likes this step done. Treat it as advisory documentation of repo conventions (format, required sections, structure) — not as a literal sequence of tool calls to execute, since some steps assume an interactive session this automated flow does not have.\n" +
+		skill.Content + truncatedNote + "\n</repo-skill>\n\n"
+}
+
+// maxRepoSkillClassificationExcerpt bounds how much of each candidate skill's
+// content goes into the classification prompt — enough to judge relevance
+// (frontmatter description plus opening lines), not the full file.
+const maxRepoSkillClassificationExcerpt = 300
+
+// buildRepoSkillClassificationPrompt asks the LLM to pick, by exact name,
+// which of this repo's own discovered skills (if any) documents how the team
+// does stepDescription. Skill directory names are not standardized across
+// repos (one repo's PR skill is "create-pr", another's is "open-pr" or
+// "raise-mr"), so this cannot be a hardcoded name match — the candidate list
+// is always the names actually present in this repo.
+func buildRepoSkillClassificationPrompt(skills []planners.RepoSkill, stepDescription string) string {
+	var listing strings.Builder
+	for _, s := range skills {
+		excerpt := strings.TrimSpace(s.Content)
+		if len(excerpt) > maxRepoSkillClassificationExcerpt {
+			excerpt = excerpt[:maxRepoSkillClassificationExcerpt]
+		}
+		fmt.Fprintf(&listing, "- %q: %s\n", s.Name, strings.ReplaceAll(excerpt, "\n", " "))
+	}
+	return fmt.Sprintf(`This repository has the following skill files committed under .claude/skills or .agents/skills (name: short excerpt):
+%s
+Which ONE of these skills, by its exact name shown above, documents how this team does the following: %s?
+
+Reply with ONLY the exact name in quotes exactly as shown above, or NONE if none of them apply. No other text.`, listing.String(), stepDescription)
+}
+
+// parseRepoSkillClassificationAnswer resolves the model's answer against the
+// actual candidate list, so a hallucinated or malformed name can't be used as
+// if it were real.
+func parseRepoSkillClassificationAnswer(answer string, skills []planners.RepoSkill) *planners.RepoSkill {
+	answer = strings.Trim(strings.TrimSpace(answer), "`\"' \n")
+	if answer == "" || strings.EqualFold(answer, "NONE") {
+		return nil
+	}
+	return planners.FindRepoSkillByName(skills, answer)
+}
+
+// classifyRepoSkillForStep identifies which repo-committed skill, if any,
+// governs a deterministic orchestrator step (PR description, commit
+// message). It asks the LLM to classify rather than matching a hardcoded
+// skill name, since naming conventions vary per repo. Returns nil (no extra
+// LLM call) when the repo has no committed skills at all.
+func (a *OrchestratorAgent) classifyRepoSkillForStep(ctx context.Context, repoPath, stepDescription string) *planners.RepoSkill {
+	skills := planners.DiscoverRepoSkills(repoPath)
+	if len(skills) == 0 {
+		return nil
+	}
+
+	// Surfaced as its own visible step (tool_invocations entry) alongside
+	// repo_clone/replace/etc. — without this, users had no way to see from the
+	// UI whether the create-pr/commit skill classification actually ran or
+	// which skill (if any) it picked, since this happens inside a deterministic
+	// Go step rather than a ReAct tool call the UI already renders.
+	var invocationID string
+	if a.toolTracker != nil {
+		invocationID = a.toolTracker.StartInvocationWithIntention("classify_repo_skill", map[string]any{
+			"step": stepDescription,
+		}, "Asking the LLM which of this repo's own skills, if any, governs this step")
+	}
+	recordOutcome := func(skill *planners.RepoSkill, err error) {
+		if invocationID == "" {
+			return
+		}
+		status := "success"
+		var output string
+		switch {
+		case err != nil:
+			status = "error"
+			output = fmt.Sprintf("Classification failed: %v", err)
+		case skill != nil:
+			output = fmt.Sprintf("Matched repo skill %q (%s) for this step.", skill.Name, skill.Path)
+		default:
+			output = "No repo skill matched this step."
+		}
+		a.toolTracker.CompleteInvocation(invocationID, output, status, err)
+	}
+
+	resp, err := a.llmClient.GenerateContent(ctx, []llms.MessageContent{
+		llms.TextParts(llms.ChatMessageTypeHuman, buildRepoSkillClassificationPrompt(skills, stepDescription)),
+	})
+	if err != nil || len(resp.Choices) == 0 {
+		a.logger.Log(common.EventStepFailure, "Repo-skill classification failed; proceeding without a repo skill", map[string]any{
+			"error": fmt.Sprintf("%v", err),
+			"step":  stepDescription,
+		})
+		recordOutcome(nil, err)
+		return nil
+	}
+	skill := parseRepoSkillClassificationAnswer(resp.Choices[0].Content, skills)
+	if skill != nil {
+		// The classification excerpt (maxRepoSkillClassificationExcerpt) and
+		// DiscoverRepoSkills' Content (maxBytesPerSkillFile) are both capped for
+		// the general "every discovered skill" case; the one skill actually
+		// selected here needs its real content, or repoSkillPromptBlock injects
+		// a mid-sentence truncation of exactly the template/structure this step
+		// needs (e.g. create-pr/SKILL.md cut off before its PR-body template).
+		if full, ferr := planners.ReadSkillFileFull(repoPath, *skill); ferr == nil {
+			skill.Content = full
+			skill.Truncated = false
+		} else {
+			a.logger.Log(common.EventStepFailure, "Failed to re-read full skill file after classification; using truncated excerpt", map[string]any{
+				"skill": skill.Name,
+				"error": ferr.Error(),
+			})
+		}
+	}
+	a.logger.Log(common.EventStepComplete, "Classified repo skill for deterministic step", map[string]any{
+		"step":    stepDescription,
+		"matched": skill != nil,
+	})
+	recordOutcome(skill, nil)
+	return skill
+}
+
 // detectCommitPattern uses LLM to intelligently analyze recent commits and PRs to determine the best title format
 func (a *OrchestratorAgent) detectCommitPattern(ctx context.Context, recentCommits []CommitInfo, recentPRs []PRInfo, title, description, skills string) string {
 	// Build context for LLM analysis
@@ -2744,6 +2905,12 @@ func (a *OrchestratorAgent) generateImprovedPRDescription(ctx context.Context, r
 	if sessionCtx != nil {
 		skillsBlock = operatorSkillsPromptBlock(sessionCtx.SkillsContext)
 	}
+	// The repo may have its own PR-writing skill committed under some
+	// repo-specific name ("create-pr", "open-pr", "raise-mr", ...) — ask the
+	// LLM to identify it from this repo's actual skill list rather than
+	// matching a hardcoded name, then respect it the same way the ReAct agent
+	// already respects repo skills instead of only following operator guidance.
+	skillsBlock += repoSkillPromptBlock(a.classifyRepoSkillForStep(ctx, repoPath, "writing pull request descriptions (structure, required sections, conventions)"))
 
 	// Create prompt for LLM to generate PR description
 	prompt := fmt.Sprintf(`You are a technical writer creating PR descriptions. Analyze the repository's PR template pattern and follow it exactly.
@@ -3104,21 +3271,27 @@ Branch name:`, operatorSkillsPromptBlock(skills), title)
 // generateSkillAwareCommitMessage asks the LLM for a commit message that follows
 // the operator skills' convention (format, structure, trailers). Returns "" on
 // any failure so the caller can fall back to the default title/description.
-func (a *OrchestratorAgent) generateSkillAwareCommitMessage(ctx context.Context, title, description, skills string) string {
+func (a *OrchestratorAgent) generateSkillAwareCommitMessage(ctx context.Context, title, description, skills string, repoSkill *planners.RepoSkill) string {
 	// Keep the description context bounded — the commit message should be concise.
 	if len(description) > 1500 {
 		description = description[:1500]
 	}
+	// repoSkill, if any, is the repo's own commit-message skill (already
+	// identified by classifyRepoSkillForStep from this repo's actual skill
+	// names — conventions like type(scope): subject vary per repo and aren't
+	// hardcoded here) — respect it the same way the ReAct agent already
+	// respects repo skills, instead of only following operator guidance.
+	promptSkills := operatorSkillsPromptBlock(skills) + repoSkillPromptBlock(repoSkill)
 	prompt := fmt.Sprintf(`You write a git commit message for an automated code fix.
 %sRULES:
 - Output ONLY the commit message (subject line, then optional body), nothing else.
-- Follow the commit-message convention in the operator-skills section above (subject format/prefix, line length, required trailers). If it does not specify one, use a concise conventional-commit subject plus a short body.
+- Follow the commit-message convention in the operator-skills/repo-skill section above (subject format/prefix, line length, required trailers). If neither specifies one, use a concise conventional-commit subject plus a short body.
 - Do not wrap the message in code fences or quotes.
 
 Proposed title: %s
 Change summary: %s
 
-Commit message:`, operatorSkillsPromptBlock(skills), title, description)
+Commit message:`, promptSkills, title, description)
 
 	resp, err := a.llmClient.GenerateContent(ctx, []llms.MessageContent{
 		llms.TextParts(llms.ChatMessageTypeHuman, prompt),
@@ -3192,10 +3365,14 @@ func (a *OrchestratorAgent) commitChanges(ctx context.Context, title, descriptio
 		commitMsg = fmt.Sprintf("%s\n\n%s", title, description)
 	}
 
-	// When operator skills are present, let them shape the commit message
-	// (format, prefix, trailers). Fall back to the default above on failure.
-	if strings.TrimSpace(skills) != "" {
-		if msg := a.generateSkillAwareCommitMessage(ctx, title, description, skills); msg != "" {
+	// When operator skills or the repo's own commit-message skill are present,
+	// let them shape the commit message (format, prefix, trailers). The repo
+	// skill's name isn't hardcoded — classifyRepoSkillForStep asks the LLM to
+	// pick it, if any, from this repo's actual skill list. Fall back to the
+	// default above on failure or when neither is present.
+	repoCommitSkill := a.classifyRepoSkillForStep(ctx, actualRepoDir, "writing git commit messages (format, type/scope conventions, trailers)")
+	if strings.TrimSpace(skills) != "" || repoCommitSkill != nil {
+		if msg := a.generateSkillAwareCommitMessage(ctx, title, description, skills, repoCommitSkill); msg != "" {
 			commitMsg = msg
 		}
 	}

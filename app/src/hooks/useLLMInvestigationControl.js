@@ -198,10 +198,11 @@ export const buildDrawerTasks = (agents, message) => {
 
 const parseConversationMessages = (conversationMessages, accountId) => {
   const allMessages = [];
+  const queuedMessages = [];
   const collapsedIndexes = {}; // To track which items should be auto-collapsed
 
   if (!conversationMessages || conversationMessages.length === 0) {
-    return { allMessages, collapsedIndexes };
+    return { allMessages, queuedMessages, collapsedIndexes };
   }
 
   const agentIdMap = {};
@@ -235,6 +236,7 @@ const parseConversationMessages = (conversationMessages, accountId) => {
   const sortedByCreated = [...conversationMessages].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   let currentGenId = null;
   sortedByCreated.forEach((cm) => {
+    if (cm.status === 'QUEUED') return;
     if (cm.message_type !== 'followup') {
       currentGenId = cm.id;
       return;
@@ -268,6 +270,20 @@ const parseConversationMessages = (conversationMessages, accountId) => {
 
   conversationMessages.forEach((conversationMessage) => {
     if (conversationMessage.message_type === 'followup') {
+      return;
+    }
+
+    if (conversationMessage.status === 'QUEUED') {
+      queuedMessages.push({
+        id: conversationMessage.id,
+        text: conversationMessage.message,
+        images: conversationMessage.attachments || [],
+        config: conversationMessage.message_config,
+        createdAt: new Date(conversationMessage.created_at).getTime(),
+        user: conversationMessage?.user?.display_name || conversationMessage?.user_display_name || 'Workspace member',
+        userId: conversationMessage.user_id,
+        isServer: true,
+      });
       return;
     }
 
@@ -573,7 +589,7 @@ const parseConversationMessages = (conversationMessages, accountId) => {
     }
   });
 
-  return { allMessages };
+  return { allMessages, queuedMessages };
 };
 
 // Each task pick is a complete (credential, model) choice, so the credential
@@ -624,10 +640,12 @@ const initialState = {
   isProcessing: false,
   currentlyProcessingQuestion: null,
   messages: [],
+  queuedMessages: [],
   conversationStatus: '',
   conversationTitle: '',
   conversationIdAtDb: '',
   isLoading: false,
+  needsConversationRefresh: false,
   availableCredentials: [],
   // Flat (config, model) rows straight from the server. Unlike
   // availableCredentials this keeps every config's own name, so the picker can
@@ -647,6 +665,7 @@ const initialState = {
   configCleared: false,
   // Server-advertised image capability (from ai_list_models). Defaults to
   // disabled so the attach UI stays hidden until the backend confirms support.
+  queueSupport: { enabled: false, maxMessages: 5 },
   imageSupport: { enabled: false, maxPerMessage: 0, maxSizeMb: 0, allowedMimeTypes: [] },
 };
 
@@ -656,6 +675,11 @@ function investigationReducer(state, action) {
       return {
         ...state,
         messages: typeof action.payload === 'function' ? action.payload(state.messages) : action.payload,
+      };
+    case 'SET_QUEUED_MESSAGES':
+      return {
+        ...state,
+        queuedMessages: typeof action.payload === 'function' ? action.payload(state.queuedMessages) : action.payload,
       };
     case 'SET_CONVERSATION_STATUS':
       return { ...state, conversationStatus: action.payload };
@@ -705,6 +729,7 @@ function investigationReducer(state, action) {
           availableModels: action.availableModels ?? state.availableModels,
           defaultModel: action.defaultModel,
           imageSupport: action.imageSupport ?? state.imageSupport,
+          queueSupport: action.queueSupport ?? state.queueSupport,
         },
         action.availableModels
       );
@@ -721,6 +746,7 @@ function investigationReducer(state, action) {
         availableModels: state.availableModels,
         defaultModel: state.defaultModel,
         imageSupport: state.imageSupport,
+        queueSupport: state.queueSupport,
       };
     default:
       return state;
@@ -791,55 +817,77 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
       return;
     }
     let cancelled = false;
+    let retryTimer;
 
-    apiAskNudgebee
-      .listModels(accountId)
-      .then((res) => {
-        if (!isMountedRef.current || cancelled) return;
-        // credentials[] is the server's collapsed view: one entry per distinct
-        // destination (provider + endpoint + key + type + version + region +
-        // aws creds + adapter), each carrying the models reachable through it.
-        // Only the server can compute this — endpoints and api keys are never
-        // serialized — so no grouping happens here.
-        //
-        // sources[] is not for display. It maps every configured slot that
-        // resolves to this credential, so a conversation pinned to e.g.
-        // '…:tier:summary' still resolves to the credential that now
-        // represents it.
-        const availableCredentials = (res?.data?.credentials || []).map((c) => ({
-          id: c.id,
-          name: c.name,
-          provider: c.provider,
-          configSource: c.llm_config_source,
-          sources: (c.sources || []).map((s) => s.llm_config_source),
-          models: (c.models || []).map((m) => ({ model: m.model })),
-        }));
-        // models[] is the ungrouped view: one row per configured slot, each
-        // naming its own config. credentials[] folds these together by
-        // destination, which loses the per-config names the picker lists.
-        const availableModels = (res?.data?.models || []).map((m) => ({
-          model: m.model,
-          provider: m.provider,
-          configSource: m.llm_config_source,
-          configName: m.config_name,
-          isFallback: !!m.is_fallback,
-        }));
-        const defaultModel = res?.data?.default || null;
-        const rawImageSupport = res?.data?.image_support;
-        const imageSupport = rawImageSupport
-          ? {
-              enabled: !!rawImageSupport.enabled,
-              maxPerMessage: rawImageSupport.max_per_message || 0,
-              maxSizeMb: rawImageSupport.max_size_mb || 0,
-              allowedMimeTypes: rawImageSupport.allowed_mime_types || [],
-            }
-          : undefined;
-        dispatch({ type: 'SET_MODELS', availableCredentials, availableModels, defaultModel, imageSupport });
-      })
-      .catch((err) => console.error('Failed to fetch models', err));
+    const loadModels = () =>
+      apiAskNudgebee
+        .listModels(accountId)
+        .then((res) => {
+          if (!isMountedRef.current || cancelled) return;
+          if (res?.errors?.length || !res?.data) {
+            throw new Error('Unable to load model capabilities');
+          }
+          // credentials[] is the server's collapsed view: one entry per distinct
+          // destination (provider + endpoint + key + type + version + region +
+          // aws creds + adapter), each carrying the models reachable through it.
+          // Only the server can compute this — endpoints and api keys are never
+          // serialized — so no grouping happens here.
+          //
+          // sources[] is not for display. It maps every configured slot that
+          // resolves to this credential, so a conversation pinned to e.g.
+          // '…:tier:summary' still resolves to the credential that now
+          // represents it.
+          const availableCredentials = (res?.data?.credentials || []).map((c) => ({
+            id: c.id,
+            name: c.name,
+            provider: c.provider,
+            configSource: c.llm_config_source,
+            sources: (c.sources || []).map((s) => s.llm_config_source),
+            models: (c.models || []).map((m) => ({ model: m.model })),
+          }));
+          // models[] is the ungrouped view: one row per configured slot, each
+          // naming its own config. credentials[] folds these together by
+          // destination, which loses the per-config names the picker lists.
+          const availableModels = (res?.data?.models || []).map((m) => ({
+            model: m.model,
+            provider: m.provider,
+            configSource: m.llm_config_source,
+            configName: m.config_name,
+            isFallback: !!m.is_fallback,
+          }));
+          const defaultModel = res?.data?.default || null;
+          const rawImageSupport = res?.data?.image_support;
+          const imageSupport = rawImageSupport
+            ? {
+                enabled: !!rawImageSupport.enabled,
+                maxPerMessage: rawImageSupport.max_per_message || 0,
+                maxSizeMb: rawImageSupport.max_size_mb || 0,
+                allowedMimeTypes: rawImageSupport.allowed_mime_types || [],
+              }
+            : undefined;
+          dispatch({
+            type: 'SET_MODELS',
+            availableCredentials,
+            availableModels,
+            defaultModel,
+            imageSupport,
+            queueSupport: {
+              enabled: !!res?.data?.queue_support?.enabled,
+              maxMessages: res?.data?.queue_support?.max_messages > 0 ? res.data.queue_support.max_messages : 5,
+            },
+          });
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          console.error('Failed to fetch models', err);
+          // A server restart must not leave queuing disabled until a page reload.
+          retryTimer = setTimeout(loadModels, 5000);
+        });
+    loadModels();
 
     return () => {
       cancelled = true;
+      clearTimeout(retryTimer);
     };
   }, [accountId]);
 
@@ -873,7 +921,19 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         const response = res?.data?.data?.ai_cancel_investigation || {};
 
         if (response?.data?.status === 'terminated') {
-          dispatch({ type: 'SET_ALLOW_STOP', payload: false });
+          // The cancellation response confirms the transaction committed. Retire
+          // older polls so they cannot restore an in-progress snapshot afterward.
+          fetchIdRef.current++;
+          dispatch({
+            type: 'UPDATE_CONVERSATION_META',
+            fields: {
+              conversationStatus: 'TERMINATED',
+              currentlyProcessingQuestion: null,
+              allowStop: false,
+              isProcessing: false,
+              needsConversationRefresh: true,
+            },
+          });
           snackbar.success('Investigation terminated successfully');
           if (onStopSuccess) {
             onStopSuccess();
@@ -970,7 +1030,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   );
 
   const handleInvestigationGeneration = useCallback(
-    async (finalQuery, llmSessionId, onSuccess, categorySource, images) => {
+    async (finalQuery, llmSessionId, onSuccess, categorySource, images, optimisticMessageId) => {
       const sessionKey = currentSessionRef.current;
       const requestPayload = {
         account_id: accountId,
@@ -1030,6 +1090,31 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         throw new Error('Investigation generation failed');
       }
 
+      if (response.data.status === 'QUEUED' && response.data.message_id) {
+        // This request raced with active work on the server. Retire only its
+        // optimistic bubble; the persisted message belongs in the waiting list.
+        if (optimisticMessageId) {
+          dispatch({ type: 'SET_MESSAGES', payload: (previous) => previous.filter((m) => m.id !== optimisticMessageId) });
+        }
+        dispatch({
+          type: 'SET_QUEUED_MESSAGES',
+          payload: (previous) =>
+            previous.some((m) => m.id === response.data.message_id)
+              ? previous
+              : [
+                  ...previous,
+                  {
+                    id: response.data.message_id,
+                    text: finalQuery,
+                    images: images || [],
+                    createdAt: Date.now(),
+                    user: 'You',
+                    isServer: true,
+                  },
+                ],
+        });
+        dispatch({ type: 'UPDATE_CONVERSATION_META', fields: { currentlyProcessingQuestion: null, isProcessing: false } });
+      }
       dispatch({ type: 'SET_CONVERSATION_STATUS', payload: 'IN_PROGRESS' });
       // The reset is one-shot: it has reached the server, and re-sending it on
       // every later turn would keep clearing a config the user may have since
@@ -1047,6 +1132,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   const startInvestigation = useCallback(
     async ({
       text,
+      optimisticMessageId,
       queryPrefix: _queryPrefix,
       querySuffix,
       selectedSessionId,
@@ -1072,7 +1158,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         if (apiMode === 'workflow') {
           await handleWorkflowGeneration(finalQuery, llmSessionId, workflowId, workflowDefinition, currentCluster, onSuccess);
         } else {
-          await handleInvestigationGeneration(finalQuery, llmSessionId, onSuccess, categorySource, images);
+          await handleInvestigationGeneration(finalQuery, llmSessionId, onSuccess, categorySource, images, optimisticMessageId);
         }
       } catch (error) {
         console.error(error);
@@ -1086,7 +1172,9 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
         if (onFailure) {
           onFailure();
         }
+        return false;
       }
+      return true;
     },
     [accountId, handleWorkflowGeneration, handleInvestigationGeneration]
   );
@@ -1105,10 +1193,12 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
   }, []);
 
   const fetchConversation = useCallback(
-    async (sessionId, conversationId, source, isNewChat) => {
+    async (sessionId, conversationId, source, isNewChat, forceFull = false) => {
       if ((!sessionId && !conversationId) || (isNewChat && source === 'poll')) {
         return;
       }
+
+      if (forceFull) conversationFetcherRef.current?.reset();
 
       // Abort previous in-flight request when starting a new non-poll fetch
       if (source !== 'poll' && abortControllerRef.current) {
@@ -1204,6 +1294,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
                 conversationTitle: conversationResponses[0].title,
                 conversationIdAtDb: conversationResponses[0].id,
                 conversationStatus: effectiveStatus,
+                needsConversationRefresh: false,
               },
             });
           }
@@ -1271,8 +1362,9 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
             dispatch({ type: 'SET_ALLOW_STOP', payload: true });
           }
 
-          const { allMessages } = parseConversationMessages(response.llm_conversation_messages, accountId);
+          const { allMessages, queuedMessages } = parseConversationMessages(response.llm_conversation_messages, accountId);
           if (!isNewChat && !isStale()) {
+            dispatch({ type: 'SET_QUEUED_MESSAGES', payload: queuedMessages });
             dispatch({
               type: 'SET_MESSAGES',
               payload: (prev) => {
@@ -1320,7 +1412,7 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
             const isTerminalStatus = ['COMPLETED', 'FAILED', 'KILLED', 'TERMINATED'].includes(effectiveStatus);
             const isWaitingStatus = effectiveStatus === 'WAITING';
             if (isTerminalStatus || isWaitingStatus) {
-              dispatch({ type: 'SET_CURRENTLY_PROCESSING_QUESTION', payload: null });
+              dispatch({ type: 'UPDATE_CONVERSATION_META', fields: { currentlyProcessingQuestion: null, isProcessing: false } });
             }
           }
         } else if (!isStale() && source !== 'poll') {
@@ -1370,9 +1462,84 @@ export const useLLMInvestigationControl = (accountId, eventId) => {
     [accountId]
   );
 
+  const queueInvestigationMessage = useCallback(
+    async ({ text, images }) => {
+      if (!text || !text.trim()) return null;
+      const sessionKey = currentSessionRef.current;
+      const requestPayload = {
+        account_id: accountId,
+        query: text.trim(),
+        queue_only: true,
+        session_id: currentSessionRef.current || undefined,
+      };
+      if (conversationIdAtDb) {
+        requestPayload.conversation_id = conversationIdAtDb;
+      }
+      if (selectedModel) {
+        requestPayload.config = {
+          llm_provider: selectedModel.provider,
+          llm_model_name: selectedModel.model,
+          ...(selectedModel.configSource && { llm_config_source: selectedModel.configSource }),
+        };
+      } else if (selectedTierModels && Object.keys(selectedTierModels).length > 0) {
+        requestPayload.config = {
+          llm_tier_models: serializeTierModels(selectedTierModels),
+        };
+      } else if (selectedConfig) {
+        requestPayload.config = { llm_config_source: selectedConfig.configSource };
+      }
+      if (images?.length) {
+        requestPayload.images = images;
+      }
+      const res = await apiAskNudgebee.aiGenerateInvestigate(requestPayload);
+      const result = res?.data?.data?.ai_execute_investigation;
+      const errors = res?.data?.errors?.length ? res.data.errors : result?.errors;
+      if ((Array.isArray(errors) && errors.length > 0) || result?.data?.status !== 'QUEUED' || !result?.data?.message_id) {
+        const error = new Error(errors?.[0]?.message || 'Unable to queue message. Please try again.');
+        error.queueNotReady =
+          getUpstreamStatus(res?.data) === 409 && error.message === 'Conversation is not ready to queue a message. Please retry your message.';
+        // Only explicit queue-admission rejections prove nothing was saved.
+        error.notAdmitted =
+          getUpstreamStatus(res?.data) === 409 &&
+          [
+            'Conversation is not ready to queue a message. Please retry your message.',
+            'history: conversation is no longer running; retry your message',
+            'history: queued message capacity reached',
+          ].includes(error.message);
+        throw error;
+      }
+      if (isMountedRef.current && currentSessionRef.current === sessionKey && result.data.status === 'QUEUED' && result.data.message_id) {
+        dispatch({
+          type: 'SET_QUEUED_MESSAGES',
+          payload: (previous) =>
+            previous.some((m) => m.id === result.data.message_id)
+              ? previous
+              : [
+                  ...previous,
+                  {
+                    id: result.data.message_id,
+                    text: text.trim(),
+                    images: images || [],
+                    createdAt: Date.now(),
+                    user: 'You',
+                    isServer: true,
+                  },
+                ],
+        });
+      }
+      return result.data;
+    },
+    [accountId, conversationIdAtDb, selectedModel, selectedTierModels, selectedConfig]
+  );
+
   return {
     messages,
     setMessages,
+    queuedMessages: state.queuedMessages,
+    queueSupport: state.queueSupport,
+    needsConversationRefresh: state.needsConversationRefresh,
+    setQueuedMessages: (msgs) => dispatch({ type: 'SET_QUEUED_MESSAGES', payload: msgs }),
+    queueInvestigationMessage,
     conversationStatus,
     setConversationStatus,
     conversationTitle,

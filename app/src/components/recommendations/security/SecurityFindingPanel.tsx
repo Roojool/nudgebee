@@ -11,12 +11,16 @@ import { Label, type LabelTone } from '@ui/Label';
 import { Button } from '@ui/Button';
 import { Link } from '@ui/Link';
 import { Skeleton } from '@ui/Skeleton';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import PRLink, { resolutionsDeepLink } from '@shared/links/PRLink';
 import { ds } from '@utils/colors';
 import recommendationApi from '@api1/recommendation';
 import apiVm from '@api1/vm';
 import { useLatestRequest } from '@components/vm/common';
+import OwnershipSection from '@components/optimise-new/OwnershipSection';
 import { type SecurityFinding, findingHeadline, findingLocation, normalizeSeverity } from './securityFinding';
+import { useFindingOwnerTarget } from './findingOwnership';
 import { EmptyNote, Field, FieldList, Mono, PanelActions, Section, SectionHeading } from './panelPrimitives';
 
 const SEVERITY_TONE: Record<string, LabelTone> = {
@@ -51,6 +55,9 @@ interface SecurityFindingPanelProps {
   onCreatePR?: (finding: SecurityFinding) => void;
   /** Disables Create Pull Request, with the reason as a tooltip. */
   createPRDisabledReason?: string;
+  onAskNubi?: (finding: SecurityFinding) => void;
+  /** Dismiss / snooze an Open finding, reactivate a Dismissed one. */
+  onDismiss?: (finding: SecurityFinding) => void;
 }
 
 /**
@@ -75,14 +82,19 @@ const SecurityFindingPanel = ({
   onCreateTicket,
   onCreatePR,
   createPRDisabledReason,
+  onAskNubi,
+  onDismiss,
 }: SecurityFindingPanelProps) => {
   const [activeTab, setActiveTab] = useState(0);
+  const { assistantName } = useTenantBranding();
   const [affected, setAffected] = useState<AffectedRow[] | null>(null);
   const [affectedLoading, setAffectedLoading] = useState(false);
   // Switching findings while a lookup is in flight must not let the older
   // response land on the newer finding — it would sit in `affected` and be
   // reused, since the tab only fetches when that state is still null.
   const beginRequest = useLatestRequest();
+  // The workload or VM this occurrence sits on, for the ownership card.
+  const ownerTarget = useFindingOwnerTarget(finding);
 
   // Reset to the first tab whenever a different finding is opened, so the panel
   // never starts on a tab the reader did not choose for this row.
@@ -372,6 +384,16 @@ const SecurityFindingPanel = ({
                 </FieldList>
               </Section>
 
+              {/* Ownership — the same card as the Cost drawer, so who owns the
+                  workload or VM behind this finding is answerable and settable
+                  here. Keyed by finding so the card resets when the drawer swaps
+                  to another row rather than remounting. */}
+              {ownerTarget && (
+                <Box sx={{ mb: ds.space[5] }}>
+                  <OwnershipSection key={`ownership-${finding.id}`} rec={ownerTarget} />
+                </Box>
+              )}
+
               <Section title='Package'>
                 <FieldList>
                   {finding.packageName && <Field label='Name'>{finding.packageName}</Field>}
@@ -476,7 +498,7 @@ const SecurityFindingPanel = ({
         </Box>
 
         {/* Actions — pinned to the bottom, matching the cost panel's action bar */}
-        {(onCreatePR || onCreateTicket) && (
+        {(onCreatePR || onCreateTicket || onAskNubi || onDismiss) && (
           <PanelActions testId='security-finding-actions'>
             {onCreatePR && (
               <Button
@@ -500,6 +522,23 @@ const SecurityFindingPanel = ({
                 onClick={() => onCreateTicket(finding)}
               >
                 Create ticket
+              </Button>
+            )}
+            {onAskNubi && (
+              <Button
+                id='security-finding-ask-nubi'
+                tone='secondary'
+                size='sm'
+                icon={<SafeIcon src={getNubiIconUrl()} alt='' width={14} height={14} />}
+                iconPlacement='start'
+                onClick={() => onAskNubi(finding)}
+              >
+                Ask {assistantName}
+              </Button>
+            )}
+            {onDismiss && (
+              <Button id='security-finding-dismiss' tone='ghost' size='sm' onClick={() => onDismiss(finding)}>
+                {finding.status === 'Dismissed' ? 'Reactivate' : 'Dismiss / Snooze'}
               </Button>
             )}
           </PanelActions>

@@ -50,6 +50,30 @@ export const formatMemShort = (bytes: number | null | undefined): string => {
   return `${Math.round(mi)} Mi`;
 };
 
+export type RightSizingDirection = 'reduce' | 'increase' | 'set' | 'mixed' | 'none';
+
+export interface RightSizingSummary {
+  containerCount: number;
+  primary: string;
+  direction: RightSizingDirection;
+  /** Primary container change, e.g. "CPU 20m → 10m · Mem 100 Mi → 68 Mi". */
+  changeText: string;
+  /** Freed capacity across containers, e.g. "10m vCPU & 32 Mi" (reductions only). */
+  reclaimText: string;
+  /** Compact usage evidence (primary container) for the strip under "why". */
+  evidence: { label: string; value: string }[];
+  /** Lookback the recommendation was computed over, e.g. "14 days · 1.25-min step". */
+  observedWindow: string | null;
+  /** Robustness of the call, derived from the lookback length. */
+  confidence: 'High' | 'Medium' | 'Low' | null;
+  /**
+   * Replica count the savings were scaled by: the time-weighted average over
+   * the observation window, with the range seen. Absent on rows written before
+   * the producers recorded it, in which case the saving used the live count.
+   */
+  replicas: ReplicaWindow | null;
+}
+
 export interface ReplicaWindow {
   avg: number;
   min: number;
@@ -69,24 +93,6 @@ export const replicaWindowOf = (entries: any[]): ReplicaWindow | null => {
   return null;
 };
 
-export type RightSizingDirection = 'reduce' | 'increase' | 'set' | 'mixed' | 'none';
-
-export interface RightSizingSummary {
-  containerCount: number;
-  primary: string;
-  direction: RightSizingDirection;
-  /** Primary container change, e.g. "CPU 20m → 10m · Mem 100 Mi → 68 Mi". */
-  changeText: string;
-  /** Freed capacity across containers, e.g. "10m vCPU & 32 Mi" (reductions only). */
-  reclaimText: string;
-  /** Compact usage evidence (primary container) for the strip under "why". */
-  evidence: { label: string; value: string }[];
-  /** Lookback the recommendation was computed over, e.g. "14 days · 1.25-min step". */
-  observedWindow: string | null;
-  /** Robustness of the call, derived from the lookback length. */
-  confidence: 'High' | 'Medium' | 'Low' | null;
-}
-
 // "336" (hours) + "1.25" (minutes) → "14 days · 1.25-min step".
 const formatWindow = (hours: number | null, stepMin: number | null): string | null => {
   if (hours == null) return null;
@@ -103,6 +109,37 @@ const allocOf = (entry: any): number | null => {
   const v = entry?.allocated?.request;
   return typeof v === 'number' ? v : null;
 };
+
+export interface SavingsSplit {
+  /** Sum of the entries that save money, per month. */
+  gross: number;
+  /** Sum of the entries that cost money, per month, as a positive number. */
+  cost: number;
+  net: number;
+  containers: { name: string; cpu: number | null; memory: number | null; total: number }[];
+}
+
+/** Per-entry signed figures the producers stamp on add_info; null on rows written before. */
+export function splitSavings(recData: any): SavingsSplit | null {
+  const containers = extractContainerData(recData);
+  let seen = false;
+  let gross = 0;
+  let cost = 0;
+  const out: SavingsSplit['containers'] = [];
+  for (const c of containers) {
+    const cpu = typeof c.cpu?.add_info?.estimated_savings === 'number' ? c.cpu.add_info.estimated_savings : null;
+    const memory = typeof c.memory?.add_info?.estimated_savings === 'number' ? c.memory.add_info.estimated_savings : null;
+    if (cpu == null && memory == null) continue;
+    seen = true;
+    for (const v of [cpu, memory]) {
+      if (v == null) continue;
+      if (v > 0) gross += v;
+      else cost -= v;
+    }
+    out.push({ name: c.containerName, cpu, memory, total: (cpu || 0) + (memory || 0) });
+  }
+  return seen ? { gross, cost, net: gross - cost, containers: out } : null;
+}
 
 export function summarizeRightSizing(recData: any): RightSizingSummary | null {
   const containers = extractContainerData(recData);
@@ -209,6 +246,7 @@ export function summarizeRightSizing(recData: any): RightSizingSummary | null {
     evidence,
     observedWindow,
     confidence,
+    replicas: replicaWindowOf([primary.cpu, primary.memory]),
   };
 }
 

@@ -197,6 +197,10 @@ func classifyAndRewriteEdgeForCollapse(
 	e.Properties[CollapseEdgePropOriginalHostname] = entry.originalHostname
 	e.Properties[CollapseEdgePropOriginalESUniqueKey] = entry.originalUniqKey
 	e.DestinationNodeID = entry.targetID
+	// The ID is derived from the endpoints; repointing one without regenerating
+	// it leaves the edge hashing the collapsed ExternalService it no longer
+	// points at. See EdgeIDFor.
+	e.ID = EdgeIDFor(e.SourceNodeID, e.DestinationNodeID, e.RelationshipType, e.CloudAccountID, e.TenantID)
 	return true, collapseActionRewroteCalls
 }
 

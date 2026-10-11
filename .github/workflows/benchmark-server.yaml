@@ -57,4 +57,4 @@ jobs:
 
       - name: Run unit tests
         working-directory: ./llm/benchmark
-        run: uv run pytest benchmark_server/tests -m "not benchmark"
+        run: uv run pytest benchmark_server/tests llm/agents/event_code_fix -m "not benchmark"

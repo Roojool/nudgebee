@@ -1,5 +1,6 @@
 import React from 'react';
-import { Box, Typography, Divider } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Divider } from '@ui/Divider';
 import Currency from '@shared/format/Currency';
 import DSCard from '@ui/Card';
 import Heading from '@components/common/Heading';
@@ -124,7 +125,7 @@ const CustomOptimizationsSummaryCard = ({ clusterSummary, accountId, loading = f
         </Box>
       )}
 
-      <Divider sx={{ backgroundColor: 'var(--ds-gray-200)', marginTop: 'calc(var(--ds-space-1) * 5)' }} />
+      <Divider sx={{ marginTop: 'calc(var(--ds-space-1) * 5)', marginBottom: 0 }} />
       <Box mt='calc(var(--ds-space-1) * 5)'>
         {loading ? (
           <Skeleton shape='rect' height={40} />
@@ -170,7 +171,7 @@ const CustomOptimizationsSummaryCard = ({ clusterSummary, accountId, loading = f
           </Box>
         )}
       </Box>
-      <Divider sx={{ backgroundColor: 'var(--ds-gray-200)', marginTop: 'calc(var(--ds-space-1) * 5)' }} />
+      <Divider sx={{ marginTop: 'calc(var(--ds-space-1) * 5)', marginBottom: 0 }} />
       <Box mt='calc(var(--ds-space-1) * 5)'>
         {loading ? (
           <Skeleton shape='rect' height={40} />

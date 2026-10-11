@@ -230,6 +230,17 @@ type appConfig struct {
 	LlmServerCacheFlashTTLMinutes int `mapstructure:"llm_server_cache_flash_ttl_minutes"`
 	// LlmServerCacheProTTLMinutes defines TTL for Pro models under Conversation scope (default 10m).
 	LlmServerCacheProTTLMinutes int `mapstructure:"llm_server_cache_pro_ttl_minutes"`
+	// LlmServerGeminiCacheStrategy selects how Global/Account-scope Gemini caches are used (#39633):
+	//   "explicit"           - reference the CachedContent whenever it applies (rollback value).
+	//   "hybrid" (default)   - in a tool loop, reference it only while it covers at least
+	//                          LlmServerGeminiCacheHybridMinCoverage of the prompt (first calls, short
+	//                          loops); otherwise send the full prompt so Gemini's implicit prefix caching
+	//                          can cover the growing tool history. A request that references a
+	//                          CachedContent gets no implicit caching on the rest of the prompt.
+	LlmServerGeminiCacheStrategy string `mapstructure:"llm_server_gemini_cache_strategy"`
+	// LlmServerGeminiCacheHybridMinCoverage is the share of the prompt's tokens the CachedContent must
+	// cover for "hybrid" to reference it. Default 0.65.
+	LlmServerGeminiCacheHybridMinCoverage float64 `mapstructure:"llm_server_gemini_cache_hybrid_min_coverage"`
 
 	// Observability log provider override escape hatch
 	LLMServerLogProviderOverride string `mapstructure:"llm_server_log_provider_override"`
@@ -633,17 +644,17 @@ type appConfig struct {
 	// orchestrators: establish the subject/scope/symptom from existing context,
 	// clarify genuinely ambiguous requests, prefer bounded discovery, and treat an
 	// asserted symptom as a claim rather than a fact. Each orchestrator keeps its
-	// own provider-specific evidence recipe. Dark/default-off global deploy flag.
+	// own provider-specific evidence recipe. Enabled by default; deployments may opt out.
 	OrchestratorGroundingEnabled bool `mapstructure:"llm_orchestrator_grounding_enabled"`
-	// ClaimCritiqueShadowEnabled compares a claim audit with existing critique; never enforces it.
-	ClaimCritiqueShadowEnabled bool `mapstructure:"llm_claim_critique_shadow_enabled"`
+	// ClaimCritiqueFeedbackEnabled lets captured claim gaps use the existing refinement budget.
+	ClaimCritiqueFeedbackEnabled bool `mapstructure:"llm_claim_critique_feedback_enabled"`
 	// PremiseVerificationEnabled gates the "confirm the symptom before diagnosing it"
 	// discipline in the answer critiquer. When on, the top-level investigation must
 	// treat a user-asserted symptom ("X is down",
 	// "there's a surge") as a claim to VERIFY; if behavioural evidence disproves it, the
 	// honest "not occurring" answer is accepted (not forced into a root cause), and if the
 	// confirming tool FAILS/returns nothing the agent must say "cannot confirm" rather than
-	// fabricate an RCA on an unconfirmed symptom. Dark/default-off flag for A/B.
+	// fabricate an RCA on an unconfirmed symptom. Enabled by default; deployments may opt out.
 
 	PremiseVerificationEnabled bool `mapstructure:"llm_premise_verification_enabled"`
 	// TraceAgentV2Enabled gates the canonical, provider-independent traces agent
@@ -888,15 +899,17 @@ type appConfig struct {
 	DailyDefaultCountLimitTenant int `mapstructure:"llm_default_daily_count_limit_tenant"`
 
 	// Budget max caps - admins cannot exceed these values
-	MaxMonthlyCostLimitTenant     float64 `mapstructure:"llm_max_monthly_cost_limit_tenant"`
-	MaxMonthlyCostLimitAccount    float64 `mapstructure:"llm_max_monthly_cost_limit_account"`
-	MaxDailyCostLimitTenant       float64 `mapstructure:"llm_max_daily_cost_limit_tenant"`
-	MaxDailyCostLimitAccount      float64 `mapstructure:"llm_max_daily_cost_limit_account"`
-	MaxMonthlyCountLimit          int     `mapstructure:"llm_max_monthly_count_limit"`
-	MaxDailyCountLimit            int     `mapstructure:"llm_max_daily_count_limit"`
-	MaxMemoryFactsPerConversation int     `mapstructure:"max_memory_facts_per_conversation"`
-	ProductivityMetricsEnabled    bool    `mapstructure:"llm_server_productivity_metrics_enabled"`
-	TicketV2Enabled               bool    `mapstructure:"llm_server_ticket_v2_enabled"`
+	MaxMonthlyCostLimitTenant        float64 `mapstructure:"llm_max_monthly_cost_limit_tenant"`
+	MaxMonthlyCostLimitAccount       float64 `mapstructure:"llm_max_monthly_cost_limit_account"`
+	MaxDailyCostLimitTenant          float64 `mapstructure:"llm_max_daily_cost_limit_tenant"`
+	MaxDailyCostLimitAccount         float64 `mapstructure:"llm_max_daily_cost_limit_account"`
+	MaxMonthlyCountLimit             int     `mapstructure:"llm_max_monthly_count_limit"`
+	MaxDailyCountLimit               int     `mapstructure:"llm_max_daily_count_limit"`
+	MaxMemoryFactsPerConversation    int     `mapstructure:"max_memory_facts_per_conversation"`
+	QueuedMessagesEnabled            bool    `mapstructure:"llm_server_queued_messages_enabled"`
+	MaxQueuedMessagesPerConversation int     `mapstructure:"llm_server_max_queued_messages_per_conversation"`
+	ProductivityMetricsEnabled       bool    `mapstructure:"llm_server_productivity_metrics_enabled"`
+	TicketV2Enabled                  bool    `mapstructure:"llm_server_ticket_v2_enabled"`
 	// EventsV2Enabled gates the events_v2 agent (deterministic structured
 	// tools fronting raw SQL — see docs/architecture-decisions.md). Unlike
 	// TicketV2Enabled, this does not redirect any existing alias to v2 —
@@ -944,11 +957,14 @@ type appConfig struct {
 	// LLM Trace - logs full prompt messages and LLM responses for debugging
 	LlmTraceEnabled bool `mapstructure:"llm_trace_enabled"`
 
-	// LogsStandardGrepEnabled exposes the standard_diagnostic_grep primitive
-	// to the logs agent — a server-side pattern-bundle grep tool that avoids
-	// one-LLM-turn-per-pattern latency. Default off; flip on after validating
-	// the bundle set matches production log shapes. When off, the logs agent
-	// falls back to LLM-emitted shell_execute greps as today.
+	// LogsStandardGrepEnabled gates the auto-bundle: fetch_logs/fetch_logs_v3 run
+	// standard_diagnostic_grep's crash-pattern sweep server-side after an
+	// investigation/enumeration-intent (or explicitly error-worded) fetch, riding the
+	// result back as bundle_signal so the LLM can skip its own manual grep turns. When
+	// off, the logs agent falls back to LLM-emitted shell_execute greps as today.
+	// Validated against 30 days of production log content before e34714nabling by default
+	// (nb-35875): the crash bundle's fixed patterns matched 98.9% of real
+	// error/fatal/critical-severity log entries sampled.
 	LogsStandardGrepEnabled bool `mapstructure:"llm_logs_standard_grep_enabled"`
 
 	// Memory Module — layered memory architecture (Phase 1+)
@@ -1214,7 +1230,7 @@ func init() {
 	viper.SetDefault("llm_server_agent_max_tracesrows", 10)
 	viper.SetDefault("llm_server_agent_max_scratchpad_chars", 200000)
 	viper.SetDefault("llm_server_max_skill_content_length", 5000)
-	viper.SetDefault("llm_server_kb_prestep_timeout_seconds", 3)
+	viper.SetDefault("llm_server_kb_prestep_timeout_seconds", 5)
 	// Bootstrap: only `think` gets schema-authoritative treatment (renderer +
 	// validator). Other tools stay text-description-only until their schema
 	// is reconciled with their Call() acceptance shape. See
@@ -1254,6 +1270,8 @@ func init() {
 	viper.SetDefault("llm_cache_ttl_minutes", 10)
 	viper.SetDefault("llm_enable_caching", true)
 	viper.SetDefault("llm_server_async_cache_creation", true)
+	viper.SetDefault("llm_server_gemini_cache_strategy", "hybrid")
+	viper.SetDefault("llm_server_gemini_cache_hybrid_min_coverage", 0.65)
 	viper.SetDefault("llm_server_cache_flash_ttl_minutes", 30)
 	viper.SetDefault("llm_server_cache_pro_ttl_minutes", 10)
 
@@ -1393,9 +1411,9 @@ func init() {
 	// k8s_orchestrator mode: lean (default) | native. Cloud orchestrators are
 	// lean-only after the #32503 Phase 1 collapse — no per-cloud mode setting.
 	viper.SetDefault("llm_server_k8s_orchestrator_mode", "lean")
-	viper.SetDefault("llm_orchestrator_grounding_enabled", false)
-	viper.SetDefault("llm_premise_verification_enabled", false)
-	viper.SetDefault("llm_claim_critique_shadow_enabled", false)
+	viper.SetDefault("llm_orchestrator_grounding_enabled", true)
+	viper.SetDefault("llm_premise_verification_enabled", true)
+	viper.SetDefault("llm_claim_critique_feedback_enabled", true)
 	viper.SetDefault("llm_server_workspace_port", 8080)
 	viper.SetDefault("llm_server_workspace_local_url", "")   // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_local_token", "") // must match NB_WORKSPACE_TOKEN on the local code-analysis process
@@ -1494,6 +1512,8 @@ func init() {
 	viper.SetDefault("llm_max_monthly_count_limit", 5000)
 	viper.SetDefault("llm_max_daily_count_limit", 500)
 	viper.SetDefault("max_memory_facts_per_conversation", 30)
+	viper.SetDefault("llm_server_queued_messages_enabled", false)
+	viper.SetDefault("llm_server_max_queued_messages_per_conversation", 5)
 	viper.SetDefault("llm_memory_ttl_never_used_days", 90)
 	viper.SetDefault("llm_memory_ttl_stale_days", 180)
 	viper.SetDefault("llm_memory_ttl_cleanup_interval_hours", 24)
@@ -1531,9 +1551,9 @@ func init() {
 	// required its own opt-in.
 	viper.SetDefault("llm_memory_module_enabled", true)
 	viper.SetDefault("llm_memory_compose_enabled", true)
-	// Logs agent latency improvement (#34712). Defaults OFF so the change is
-	// inert on merge; flip via env per-tenant to validate.
-	viper.SetDefault("llm_logs_standard_grep_enabled", false)
+	// Logs agent latency improvement (#34712) — see LogsStandardGrepEnabled's
+	// doc comment for the validation this default is based on.
+	viper.SetDefault("llm_logs_standard_grep_enabled", true)
 	// RAG projection defaults — flag OFF preserves pre-flag behaviour. The
 	// timeout is per Compose read (Slice 2); the overfetch multiplier is how
 	// many candidates the RAG query asks for relative to the target per-kind

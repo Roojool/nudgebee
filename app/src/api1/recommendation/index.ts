@@ -88,6 +88,7 @@ query list_k8_recommendation($limit:Int, $offset:Int) {
       resource_meta
       resource_name
       resource_type
+      resource_region
       resource_id
       resource_cloud_service
       severity
@@ -193,6 +194,7 @@ query list_k8_recommendation($limit:Int, $offset:Int) {
       id
       namespace
       workload_name
+      workload_type
       package_id
     }
   }

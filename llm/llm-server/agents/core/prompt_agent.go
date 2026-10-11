@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 
@@ -138,7 +139,10 @@ func UpdatePromptForMultiCommandTool(query NBAgentRequest, tools []toolcore.NBTo
 
 					// Add one optional arg example if no required args shown
 					if len(exampleArgs) == 0 && len(schema.Properties) > 0 {
-						for argName, prop := range schema.Properties {
+						// Sorted so the chosen example is the same on every build: the
+						// system prompt must be byte-stable for prompt caching (#39633).
+						for _, argName := range slices.Sorted(maps.Keys(schema.Properties)) {
+							prop := schema.Properties[argName]
 							// Ensure it's not already added if it was somehow required but not listed
 							isAlreadyAdded := false
 							for _, req := range schema.Required {
@@ -329,6 +333,72 @@ Exception: when citing an external resource that has its own real URL (e.g. a Gi
 **FOR ALL OTHER QUERIES** (generation, listing, explanation, how-to, etc.):
 Answer the user's question directly in clear markdown. Do NOT use the investigation format above. Use code blocks, tables, or bullet points as appropriate for the content.`
 
+// renderRAGExamples retrieves the agent's RAG examples for this query and
+// renders them. They depend on the query, so ReAct-style planners carry them in
+// the human message (NBAgentRequest.RAGExamples) to keep the system prompt a
+// stable cacheable prefix; other planner types still get them in the system
+// prompt.
+func renderRAGExamples(p NBAgentPrompt, query NBAgentRequest, plannerType AgentPlannerType) string {
+	var sb strings.Builder
+	if p.Rag.Module != "" && AutomaticKnowledgeAllowed(query) {
+		numberOfResults := p.Rag.Records
+		if numberOfResults <= 1 {
+			// Single-result path (existing behavior)
+			document := toolcore.GetRAG(query.UserId, query.AccountId, query.Query, p.Rag.Module, query.ConversationId, query.MessageId, query.ParentAgentId, true)
+			if document.Document != "" {
+				matchingDocString := formatRAGDocument(p.Rag, document.Document)
+				if isReActStylePlanner(plannerType) {
+					sb.WriteString("<rag_examples>\n")
+				} else {
+					sb.WriteString("Examples from RAG:\n")
+				}
+				sb.WriteString(matchingDocString)
+				if isReActStylePlanner(plannerType) {
+					sb.WriteString("</rag_examples>\n\n")
+				} else {
+					sb.WriteString("\n\n")
+				}
+			}
+		} else {
+			// Multi-result path: fetch N results from RAG
+			documents := toolcore.QueryRAG(query.UserId, query.AccountId, query.Query,
+				p.Rag.Module, numberOfResults, query.ConversationId,
+				query.MessageId, query.ParentAgentId, true)
+
+			if len(documents) > 0 {
+				if isReActStylePlanner(plannerType) {
+					sb.WriteString("<rag_examples>\n")
+				} else {
+					sb.WriteString("Examples from RAG:\n")
+				}
+				for i, doc := range documents {
+					if doc.Document == "" {
+						continue
+					}
+					if isReActStylePlanner(plannerType) {
+						fmt.Fprintf(&sb, "<rag_example id=\"%d\">\n", i+1)
+					} else {
+						fmt.Fprintf(&sb, "--- Example %d ---\n", i+1)
+					}
+					matchingDocString := formatRAGDocument(p.Rag, doc.Document)
+					sb.WriteString(matchingDocString)
+					if isReActStylePlanner(plannerType) {
+						sb.WriteString("</rag_example>\n")
+					} else {
+						sb.WriteString("\n")
+					}
+				}
+				if isReActStylePlanner(plannerType) {
+					sb.WriteString("</rag_examples>\n\n")
+				} else {
+					sb.WriteString("\n")
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
 func isReActStylePlanner(plannerType AgentPlannerType) bool {
 	return plannerType == AgentPlannerTypeReAct || plannerType == AgentPlannerTypeReAct3
 }
@@ -399,7 +469,11 @@ func GetPromptTemplate(p NBAgentPrompt, query NBAgentRequest, plannerType AgentP
 		} else {
 			sb.WriteString("Instructions on tool usage:\n")
 		}
-		for toolName, usage := range p.ToolUsage {
+		// Sorted: ranging the map directly gave a different tool order on every
+		// build, so the system prompt changed between executions and defeated
+		// both explicit and implicit prompt caching (#39633).
+		for _, toolName := range slices.Sorted(maps.Keys(p.ToolUsage)) {
+			usage := p.ToolUsage[toolName]
 			fmt.Fprintf(&sb, "**%s**\n", toolName)
 			for _, usage := range usage {
 				fmt.Fprintf(&sb, "- %s\n", usage)
@@ -511,63 +585,7 @@ func GetPromptTemplate(p NBAgentPrompt, query NBAgentRequest, plannerType AgentP
 		}
 	}
 
-	// if RAG is defined then populate that
-	if p.Rag.Module != "" && AutomaticKnowledgeAllowed(query) {
-		numberOfResults := p.Rag.Records
-		if numberOfResults <= 1 {
-			// Single-result path (existing behavior)
-			document := toolcore.GetRAG(query.UserId, query.AccountId, query.Query, p.Rag.Module, query.ConversationId, query.MessageId, query.ParentAgentId, true)
-			if document.Document != "" {
-				matchingDocString := formatRAGDocument(p.Rag, document.Document)
-				if isReActStylePlanner(plannerType) {
-					sb.WriteString("<rag_examples>\n")
-				} else {
-					sb.WriteString("Examples from RAG:\n")
-				}
-				sb.WriteString(matchingDocString)
-				if isReActStylePlanner(plannerType) {
-					sb.WriteString("</rag_examples>\n\n")
-				} else {
-					sb.WriteString("\n\n")
-				}
-			}
-		} else {
-			// Multi-result path: fetch N results from RAG
-			documents := toolcore.QueryRAG(query.UserId, query.AccountId, query.Query,
-				p.Rag.Module, numberOfResults, query.ConversationId,
-				query.MessageId, query.ParentAgentId, true)
-
-			if len(documents) > 0 {
-				if isReActStylePlanner(plannerType) {
-					sb.WriteString("<rag_examples>\n")
-				} else {
-					sb.WriteString("Examples from RAG:\n")
-				}
-				for i, doc := range documents {
-					if doc.Document == "" {
-						continue
-					}
-					if isReActStylePlanner(plannerType) {
-						fmt.Fprintf(&sb, "<rag_example id=\"%d\">\n", i+1)
-					} else {
-						fmt.Fprintf(&sb, "--- Example %d ---\n", i+1)
-					}
-					matchingDocString := formatRAGDocument(p.Rag, doc.Document)
-					sb.WriteString(matchingDocString)
-					if isReActStylePlanner(plannerType) {
-						sb.WriteString("</rag_example>\n")
-					} else {
-						sb.WriteString("\n")
-					}
-				}
-				if isReActStylePlanner(plannerType) {
-					sb.WriteString("</rag_examples>\n\n")
-				} else {
-					sb.WriteString("\n")
-				}
-			}
-		}
-	}
+	sb.WriteString(renderRAGExamples(p, query, plannerType))
 
 	// Inject image analysis instructions when the current turn has images
 	if len(query.Images) > 0 {

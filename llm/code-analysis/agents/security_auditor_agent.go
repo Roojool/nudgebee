@@ -40,6 +40,8 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 	// Restrict PR/MR creation — only the orchestrator creates PRs with proper formatting
 	cliTool := tools.NewCLITool(workspaceDir)
 	cliTool.SetRestrictPROperations(true)
+	bgTool := tools.NewBackgroundExecTool(workspaceDir)
+	bgTool.SetRestrictPROperations(true)
 	ghTool := tools.NewGHTool(workspaceDir)
 	ghTool.SetRestrictPROperations(true)
 	glabTool := tools.NewGLabTool(workspaceDir)
@@ -47,6 +49,7 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 
 	var rawTools []core.NBTool
 	rawTools = append(rawTools, cliTool)
+	rawTools = append(rawTools, bgTool)
 	rawTools = append(rawTools, tools.NewFileFindTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewFileViewTool(workspaceDir))
 	rawTools = append(rawTools, tools.NewGrepTool(workspaceDir))
@@ -80,7 +83,7 @@ func NewSecurityAuditorAgentWithTracker(cfg *config.Config, llmClient *llm.Clien
 		tools:         trackedTools,
 		promptLoader:  common.NewPromptLoader(),
 		repoCloneTool: repoCloneTool,
-		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool},
+		providerTools: specialistProviderTools{gh: ghTool, glab: glabTool, cli: cliTool, bg: bgTool},
 	}
 }
 
@@ -141,16 +144,14 @@ func (a *SecurityAuditorAgent) buildEnhancedQuery(ctx context.Context, sessionCt
 }
 
 func (a *SecurityAuditorAgent) buildSecurityAuditorPrompt(sessionCtx *session.SessionContext) (string, error) {
-	contextInfo := ""
-	if sessionCtx.RepoContext != nil {
-		contextInfo = sessionCtx.RepoContext.GetRepositoryGuidance()
-	}
+	contextInfo, repoSkills := repoScopedPromptContext(sessionCtx, a.logger)
 
 	// Prepare template data (tools are now passed via native function calling, not prompt text)
 	templateData := map[string]any{
 		"ContextInfo":   contextInfo,
 		"OriginalQuery": sessionCtx.OriginalQuery,
 		"Skills":        sessionCtx.SkillsContext,
+		"RepoSkills":    repoSkills,
 	}
 
 	// Load and execute template

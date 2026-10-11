@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,10 @@ func CheckAndFollowupOpenPRs(ctx *security.RequestContext) error {
 	// could finalize (rolling deploy / OOM / eviction). This runs first so a
 	// reclaimed row is a normal needs_followup candidate for the query below.
 	reclaimStuckAddressing(ctx, dbms)
+
+	// Resume runs whose poller died after submitting: they are still going in
+	// llm-server, so they are re-attached to, not restarted (#38860).
+	reattachStaleRuns(ctx, dbms)
 
 	// Retire stale auto-PRs before dispatching so they drop out of this sweep
 	// and stop churning no-op followups.
@@ -373,15 +378,18 @@ func groupCandidatesByPRURL(candidates []prResolutionCandidate) (groups map[stri
 	return groups, orphans
 }
 
-// reclaimStuckAddressing returns pr_followup rows stranded in 'addressing'
-// past followupAddressingLease back to 'needs_followup' so the normal
-// claim/dispatch path picks them up. It is the recovery for a followup
-// goroutine that died mid-run without finalizing (rolling deploy / OOM /
-// eviction) — otherwise the row sits in 'addressing' forever. The iteration
-// counter is preserved (the dead attempt is not charged, matching a no-op)
-// and pr_followup_pending is cleared so the reclaimed run starts from a clean
-// slate. Best-effort — a failure here must not stop the sweep, so the error
-// is logged, not returned.
+// reclaimStuckAddressing returns pr_followup rows stranded in 'addressing' by a
+// run that died before it submitted a conversation back to 'needs_followup', so
+// the normal claim/dispatch path picks them up. A run that had submitted one is
+// still going in llm-server and is resumed by reattachStaleRuns instead. It is
+// the recovery for a followup goroutine that died mid-run without finalizing
+// (rolling deploy / OOM / eviction) — otherwise the row sits in 'addressing'
+// forever. A run is dead when its heartbeat is stale (followupRunLease), or, for
+// a row with no heartbeat, when last_pr_check_at is older than
+// followupAddressingLease. The iteration counter is preserved (the dead attempt
+// is not charged, matching a no-op) and pr_followup_pending is cleared so the
+// reclaimed run starts from a clean slate. Best-effort — a failure here must not
+// stop the sweep, so the error is logged, not returned.
 func reclaimStuckAddressing(ctx *security.RequestContext, dbms *database.DatabaseManager) {
 	reclaimStuckAddressingInTable(ctx, dbms, prFollowupTable)
 }
@@ -397,10 +405,12 @@ func reclaimStuckAddressingInTable(ctx *security.RequestContext, dbms *database.
 		fmt.Sprintf(`UPDATE %s SET
 			pr_lifecycle_state = 'needs_followup',
 			pr_followup_pending = false,
-			last_pr_check_at = now()
-			WHERE pr_lifecycle_state = 'addressing'
-			  AND last_pr_check_at < now() - $1::interval`, table),
-		followupAddressingLease)
+			last_pr_check_at = now(),
+			run_token = NULL,
+			run_conversation_id = NULL,
+			run_heartbeat_at = NULL
+			WHERE run_conversation_id IS NULL AND %s`, table, staleRunPredicateSQL(1, 2)),
+		followupRunLease, followupAddressingLease)
 	if err != nil {
 		ctx.GetLogger().Error("pr_lifecycle: failed to reclaim stuck addressing rows", "table", table, "error", err)
 		return 0
@@ -703,6 +713,23 @@ func dispatchPRFollowup(ctx *security.RequestContext, dbms *database.DatabaseMan
 		return fmt.Errorf("failed to claim pr_followup row: %w", err)
 	}
 
+	// A signal that finds the row 'addressing' has only marked it pending, which
+	// waits on a run that may no longer exist (its pod was replaced). Check now
+	// instead of waiting for the cron: a dead run with a conversation is resumed,
+	// one that never submitted is released and claimed straight away for this
+	// signal (#38860).
+	if !claimed && oldState == "addressing" {
+		switch recoverStaleRun(ctx, dbms, followupID) {
+		case staleRunReattach:
+			return nil
+		case staleRunReleased:
+			claimed, oldState, oldIters, err = claimOrMarkResolution(dbms, prFollowupTable, followupID, true)
+			if err != nil {
+				return fmt.Errorf("failed to claim pr_followup row after releasing a dead run: %w", err)
+			}
+		}
+	}
+
 	if !claimed {
 		switch oldState {
 		case "addressing":
@@ -735,42 +762,59 @@ func dispatchPRFollowup(ctx *security.RequestContext, dbms *database.DatabaseMan
 		fmt.Sprintf("Follow up on PR %s — address CI failures and review comments", meta.PRURL),
 		addressedComments)
 
-	runPRFollowupAgent(ctx, tenantID, chatRequest, "pr_url", prURL, func(tenantCtx *security.RequestContext, response *llm.ChatCompletionResponse, err error) {
-		var outcome followupOutcome
-		if err != nil {
-			tenantCtx.GetLogger().Error("pr_lifecycle: followup failed", "pr_url", prURL, "error", err)
-			outcome = followupOutcomeFailed
-		} else {
-			outcome = classifyFollowupOutcome(response.Response)
-			tenantCtx.GetLogger().Info("pr_lifecycle: followup completed",
-				"pr_url", prURL,
-				"response_status", response.Status,
-				"outcome", outcome.name,
-				"unresolved", outcome.unresolved,
-				"base_synced", outcome.baseSynced,
-				"new_state", outcome.newState)
-		}
-		common.MetricsPRFollowupOutcome(tenantCtx.GetContext(), outcome.name, outcome.unresolved, outcome.baseSynced)
-
-		// Finalize atomically and learn whether a new actionable signal arrived
-		// while this run was in flight (pr_followup_pending). If so, re-dispatch
-		// once for it rather than waiting up to a full cron cooldown. Bounded by
-		// redispatchBudget so a continuous-signal source can't loop forever.
-		wasPending := applyFollowupOutcome(tenantCtx, dbms, prFollowupTable, followupID, outcome)
-		if wasPending && redispatchBudget > 0 {
-			tenantCtx.GetLogger().Info("pr_lifecycle: signal arrived during run, re-dispatching",
-				"pr_url", prURL, "remaining_budget", redispatchBudget-1)
-			// bypassDebounce: this fires for a real signal that arrived mid-run;
-			// finalize just stamped last_pr_check_at=now(), which would otherwise
-			// debounce the re-dispatch away. Bounded by redispatchBudget. The
-			// candidates/metadata don't change mid-run, so no re-fetch is needed.
-			if perr := dispatchPRFollowup(tenantCtx, dbms, prURL, candidates, redispatchBudget-1, true, "redispatch"); perr != nil {
-				tenantCtx.GetLogger().Error("pr_lifecycle: re-dispatch failed", "pr_url", prURL, "error", perr)
-			}
-		}
-	})
+	runPRFollowupAgent(ctx, tenantID, chatRequest,
+		followupRunSpec{dbms: dbms, followupID: followupID, reattachable: true, logKey: "pr_url", logID: prURL},
+		func(tenantCtx *security.RequestContext, runToken string, response *llm.ChatCompletionResponse, err error) {
+			finishFollowupRun(tenantCtx, dbms, prURL, followupID, runToken, candidates, redispatchBudget, response, err)
+		})
 
 	return nil
+}
+
+// finishFollowupRun records a run's outcome and, if a signal arrived while it
+// ran, re-dispatches once for it. It is the tail of every followup run, whether
+// the poller that reached it submitted the conversation or re-attached to one a
+// dead pod left behind. A run that no longer owns the row (see
+// applyFollowupOutcomeForRun) records nothing and re-dispatches nothing.
+func finishFollowupRun(tenantCtx *security.RequestContext, dbms *database.DatabaseManager, prURL, followupID, runToken string,
+	candidates []prResolutionCandidate, redispatchBudget int, response *llm.ChatCompletionResponse, err error) {
+	var outcome followupOutcome
+	if err != nil {
+		tenantCtx.GetLogger().Error("pr_lifecycle: followup failed", "pr_url", prURL, "error", err)
+		outcome = followupOutcomeFailed
+	} else {
+		outcome = classifyFollowupOutcome(response.Response)
+		tenantCtx.GetLogger().Info("pr_lifecycle: followup completed",
+			"pr_url", prURL,
+			"response_status", response.Status,
+			"outcome", outcome.name,
+			"unresolved", outcome.unresolved,
+			"base_synced", outcome.baseSynced,
+			"new_state", outcome.newState)
+	}
+	common.MetricsPRFollowupOutcome(tenantCtx.GetContext(), outcome.name, outcome.unresolved, outcome.baseSynced)
+
+	// Finalize atomically and learn whether a new actionable signal arrived
+	// while this run was in flight (pr_followup_pending). If so, re-dispatch
+	// once for it rather than waiting up to a full cron cooldown. Bounded by
+	// redispatchBudget so a continuous-signal source can't loop forever.
+	wasPending, applied := applyFollowupOutcomeForRun(tenantCtx, dbms, prFollowupTable, followupID, runToken, outcome)
+	if !applied {
+		tenantCtx.GetLogger().Info("pr_lifecycle: outcome not recorded (the run no longer owns the followup row, or the write failed)",
+			"pr_url", prURL, "outcome", outcome.name)
+		return
+	}
+	if wasPending && redispatchBudget > 0 {
+		tenantCtx.GetLogger().Info("pr_lifecycle: signal arrived during run, re-dispatching",
+			"pr_url", prURL, "remaining_budget", redispatchBudget-1)
+		// bypassDebounce: this fires for a real signal that arrived mid-run;
+		// finalize just stamped last_pr_check_at=now(), which would otherwise
+		// debounce the re-dispatch away. Bounded by redispatchBudget. The
+		// candidates/metadata don't change mid-run, so no re-fetch is needed.
+		if perr := dispatchPRFollowup(tenantCtx, dbms, prURL, candidates, redispatchBudget-1, true, "redispatch"); perr != nil {
+			tenantCtx.GetLogger().Error("pr_lifecycle: re-dispatch failed", "pr_url", prURL, "error", perr)
+		}
+	}
 }
 
 // resolveFollowupMetadata tries each candidate in order until one yields a
@@ -818,6 +862,19 @@ func resolveFollowupMetadata(candidates []prResolutionCandidate) (meta prMetadat
 // stops a PR-close that landed mid-run from being overwritten back to an open
 // state.
 func applyFollowupOutcome(ctx *security.RequestContext, dbms *database.DatabaseManager, tableName, id string, outcome followupOutcome) (wasPending bool) {
+	wasPending, _ = applyFollowupOutcomeForRun(ctx, dbms, tableName, id, "", outcome)
+	return wasPending
+}
+
+// applyFollowupOutcomeForRun is applyFollowupOutcome for a run that holds a
+// token. It applies only while the row's run_token still equals runToken, and it
+// clears the run columns as it finalizes — so of two pollers on one run (the
+// original that lost a heartbeat and the pod that re-attached), only the first
+// to finalize records anything: counters and addressed comments are not applied
+// twice and pending is not re-dispatched twice. applied is false when the token
+// no longer matches, and also when the write failed; either way nothing was
+// recorded. An empty runToken skips the check (a run that never got a token).
+func applyFollowupOutcomeForRun(ctx *security.RequestContext, dbms *database.DatabaseManager, tableName, id, runToken string, outcome followupOutcome) (wasPending, applied bool) {
 	// counterExpr is built from our own constant outcome (delta 0/1), never user
 	// input — no injection surface.
 	counterExpr := fmt.Sprintf("pr_iteration_count + %d", outcome.counterDelta)
@@ -839,7 +896,7 @@ func applyFollowupOutcome(ctx *security.RequestContext, dbms *database.DatabaseM
 	)`
 	query := fmt.Sprintf(`
 		WITH cur AS (
-			SELECT pr_followup_pending AS was_pending, pr_lifecycle_state AS st
+			SELECT pr_followup_pending AS was_pending, pr_lifecycle_state AS st, run_token::text AS tok
 			FROM %s WHERE id = $1 FOR UPDATE
 		),
 		upd AS (
@@ -851,20 +908,26 @@ func applyFollowupOutcome(ctx *security.RequestContext, dbms *database.DatabaseM
 				addressed_comments = CASE WHEN cur.st IN ('closed', 'merged', 'unresolvable')
 					THEN t.addressed_comments ELSE %s END,
 				last_pr_check_at = now(),
-				pr_followup_pending = false
-			FROM cur WHERE t.id = $1
+				pr_followup_pending = false,
+				run_token = NULL,
+				run_conversation_id = NULL,
+				run_heartbeat_at = NULL
+			FROM cur WHERE t.id = $1 AND ($4::text = '' OR cur.tok = $4::text)
 			RETURNING cur.was_pending
 		)
 		SELECT was_pending FROM upd`, tableName, tableName, counterExpr, addressedExpr)
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), prDBOpTimeout)
 	defer cancel()
-	if err := dbms.Db.QueryRowContext(dbCtx, query, id, outcome.newState, outcome.addressedCommentsJSON()).
+	if err := dbms.Db.QueryRowContext(dbCtx, query, id, outcome.newState, outcome.addressedCommentsJSON(), runToken).
 		Scan(&wasPending); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false
+		}
 		ctx.GetLogger().Error("pr_lifecycle: failed to apply outcome",
 			"id", id, "outcome", outcome.name, "error", err)
-		return false
+		return false, false
 	}
-	return wasPending
+	return wasPending, true
 }
 
 // ProcessOpenPRFollowup dispatches a followup for a single PR, identified by
@@ -1202,34 +1265,71 @@ func buildPRFollowupChatRequest(meta prMetadata, gitToken, prompt string, addres
 	}
 }
 
+// followupRunSpec says which pr_followup row a run belongs to and how it may be
+// recovered if the process running it dies.
+type followupRunSpec struct {
+	dbms       *database.DatabaseManager
+	followupID string
+	// reattachable lets another pod resume the run's conversation if this one
+	// dies, finishing it through finishFollowupRun. Only the review-followup loop
+	// qualifies: a value refresh finalizes through its own caller, which a
+	// different pod cannot reconstruct, so a dead value-refresh run is released
+	// for a fresh dispatch instead.
+	reattachable bool
+	logKey       string
+	logID        any
+}
+
 // runPRFollowupAgent runs a pull-request followup conversation in the background
-// and hands the result to onDone.
+// and hands the result to onDone, along with the run token onDone must finalize
+// under (empty when the row could not be tokenized).
 //
 // It owns the parts every caller needs identically: a tenant-scoped context
 // (llm-server requires x-tenant-id, and the cron's own context has no tenant), a
 // 35-minute bound so a stuck llm-server cannot leak the goroutine — slightly
 // above executeFollowup's 30-minute poll so a legitimate run is never preempted —
-// and panic recovery, because many of these are in flight at once and one bad
-// followup must not take the process down.
-func runPRFollowupAgent(ctx *security.RequestContext, tenantID string, chatRequest llm.ConversationApiRequest, logKey string, logID any, onDone func(*security.RequestContext, *llm.ChatCompletionResponse, error)) {
+// panic recovery, because many of these are in flight at once and one bad
+// followup must not take the process down, and the run's liveness record: the
+// token, the heartbeat, and (for a reattachable run) the conversation id, so a
+// pod replaced mid-run does not strand the row (#38860).
+func runPRFollowupAgent(ctx *security.RequestContext, tenantID string, chatRequest llm.ConversationApiRequest, spec followupRunSpec, onDone func(tenantCtx *security.RequestContext, runToken string, response *llm.ChatCompletionResponse, err error)) {
 	tenantCtx := security.NewRequestContextForTenantAdmin(tenantID, ctx.GetLogger(), ctx.GetTracer(), ctx.GetMeter())
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				tenantCtx.GetLogger().Error("pr_lifecycle: panic in followup goroutine", logKey, logID, "recover", r)
+				tenantCtx.GetLogger().Error("pr_lifecycle: panic in followup goroutine", spec.logKey, spec.logID, "recover", r)
 			}
 		}()
 
 		// Built on context.Background() because the caller's ctx may be a request
 		// context — this background work must not die when the handler returns.
-		bgCtx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+		bgCtx, cancel := context.WithTimeout(context.Background(), followupRunBound)
 		defer cancel()
 		boundedCtx := security.NewRequestContext(bgCtx, tenantCtx.GetSecurityContext(),
 			tenantCtx.GetLogger(), tenantCtx.GetTracer(), tenantCtx.GetMeter())
 
-		response, err := llm.ChatCompletion(boundedCtx, chatRequest)
-		onDone(tenantCtx, response, err)
+		runToken, err := startFollowupRunInTable(spec.dbms, prFollowupTable, spec.followupID)
+		if err != nil {
+			// The run proceeds unguarded, as it did before tokens existed: it still
+			// finalizes, but cannot be recovered or fenced if its pod dies.
+			tenantCtx.GetLogger().Warn("pr_lifecycle: could not start run liveness tracking", spec.logKey, spec.logID, "error", err)
+			runToken = ""
+		}
+		startFollowupHeartbeat(bgCtx, tenantCtx, spec.dbms, spec.followupID, runToken)
+
+		var opts []llm.ChatOption
+		if spec.reattachable && runToken != "" {
+			opts = append(opts, llm.WithOnSubmitted(func(conversationID string) {
+				if serr := saveRunConversationInTable(spec.dbms, prFollowupTable, spec.followupID, runToken, conversationID); serr != nil {
+					tenantCtx.GetLogger().Warn("pr_lifecycle: could not save run conversation; a pod restart cannot re-attach to it",
+						spec.logKey, spec.logID, "conversation_id", conversationID, "error", serr)
+				}
+			}))
+		}
+
+		response, err := llm.ChatCompletion(boundedCtx, chatRequest, opts...)
+		onDone(tenantCtx, runToken, response, err)
 	}()
 }
 

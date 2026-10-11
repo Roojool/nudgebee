@@ -117,6 +117,12 @@ func TestK8sNativeAgent_GetSystemPrompt_NoDroppedSubAgentRefs(t *testing.T) {
 	// own description name the mechanic.
 	mustHave := []string{
 		"kubectl_execute",
+		"shell_execute",
+		"combining related reads",
+		"via `shell_execute` as your FIRST action",
+		"Primary form via `shell_execute`",
+		"Use `kubectl_execute` for every mutation and every command whose effects are uncertain",
+		"Never hide a mutation inside a shell command",
 		"metrics",
 		"traces",
 	}

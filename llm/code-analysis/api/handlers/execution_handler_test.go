@@ -269,6 +269,16 @@ func TestHandleExecute_IsolatedEnv(t *testing.T) {
 		assert.Contains(t, resp.Response, "LC_ALL=C.UTF-8")
 	})
 
+	t.Run("PATH excludes writable home directories", func(t *testing.T) {
+		resp := exec(ExecutionRequest{Command: `echo "PATH=$PATH"`, ConversationID: convID})
+		assert.Equal(t, "success", resp.CommandStatus, "response: %+v", resp)
+		assert.NotContains(t, resp.Response, "/home/appuser",
+			"writable HOME paths must not shadow image-owned binaries or relay shims")
+		assert.Contains(t, resp.Response, "/usr/local/go/bin")
+		assert.Contains(t, resp.Response, "/usr/local/bin")
+		assert.Contains(t, resp.Response, "/app/google-cloud-sdk/bin")
+	})
+
 	t.Run("req.Env cannot override the isolation contract", func(t *testing.T) {
 		// The caller asks for TMPDIR=/etc and HOME=/etc — both should be
 		// ignored and the server's per-conversation values should win.

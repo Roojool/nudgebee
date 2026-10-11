@@ -42,6 +42,7 @@ import RecommendationDetailPanel from './RecommendationDetailPanel';
 import ConfigRuleRollup from './ConfigRuleRollup';
 import RowActions from './RowActions';
 import { type SeverityLevel } from './SeverityBadge';
+import { splitSavings } from './rightSizingData';
 import {
   RECOMMENDATION_CATEGORIES,
   UPGRADE_PLANNER_RULES,
@@ -1065,6 +1066,7 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
           accountName: accountInfo?.name || '',
           accountCloudProvider: accountInfo?.cloud_provider || '',
           savings: rec.estimated_savings || 0,
+          split: rec.rule_name === 'pod_right_sizing' ? splitSavings(rec.recommendation) : null,
           safetyBand: rec.safety_band || '',
           safety: presentRecommendation(rec),
           updatedAt: rec.updated_at || rec.created_at || '',
@@ -1486,7 +1488,35 @@ const OptimizeNewPage = ({ lockedCategory }: OptimizeNewPageProps = {}) => {
           // Savings
           {
             component:
-              row.savings !== 0 ? (
+              row.split && Math.round(row.split.gross) >= 1 && Math.round(row.split.cost) >= 1 ? (
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                  <Currency
+                    value={Math.abs(row.savings)}
+                    precison={0}
+                    withTooltip={false}
+                    prefix={row.savings < 0 ? '-$' : '$'}
+                    suffix='/mo'
+                    sx={{
+                      fontSize: ds.text.body,
+                      fontWeight: ds.weight.medium,
+                      color: Math.round(Math.abs(row.savings)) < 1 ? ds.gray[700] : row.savings > 0 ? ds.green[600] : ds.red[600],
+                    }}
+                    sxSuffix={{ fontSize: ds.text.caption, fontWeight: ds.weight.regular, color: ds.gray[500] }}
+                  />
+                  <Box component='span' sx={{ fontSize: ds.text.caption, whiteSpace: 'nowrap' }}>
+                    <Box component='span' sx={{ color: ds.green[600] }}>
+                      +${Math.round(row.split.gross)}
+                    </Box>
+                    <Box component='span' sx={{ color: ds.gray[400] }}>
+                      {' '}
+                      /{' '}
+                    </Box>
+                    <Box component='span' sx={{ color: ds.red[600] }}>
+                      −${Math.round(row.split.cost)}
+                    </Box>
+                  </Box>
+                </Box>
+              ) : row.savings !== 0 ? (
                 <Currency
                   value={Math.abs(row.savings)}
                   precison={0}

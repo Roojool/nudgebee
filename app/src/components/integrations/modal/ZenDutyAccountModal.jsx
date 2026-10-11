@@ -11,6 +11,7 @@ import PropTypes from 'prop-types';
 import { Button } from '@ui/Button';
 import { toast as snackbar } from '@ui/Toast';
 import { ds } from 'src/utils/colors';
+import { getIntegrationDescription } from '@lib/integrationDescriptions';
 
 // Pure display placeholder shown in edit mode to indicate a token is stored.
 // The real token is never sent to the client. A field still equal to this on
@@ -176,6 +177,7 @@ const ZenDutyAccountModal = ({ openModal, handleClose, editConfig = null }) => {
       open={openModal}
       handleClose={handleCloseZenDutyModal}
       title={isEdit ? 'Edit ZenDuty Account' : 'Add ZenDuty Account'}
+      subtitle={getIntegrationDescription('ZENDUTY')}
       loader={isSubmitting}
     >
       <Box sx={{ minHeight: ds.space.mul(0, 100), pt: ds.space[5], pb: ds.space[2] }}>

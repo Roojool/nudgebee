@@ -710,7 +710,14 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// Compute the effective planner type for prompt rendering. Orchestrating and
 	// ReAct agents always run as react_3 at runtime, so their prompt uses react-style formatting.
 	effectivePlannerType := resolveEffectivePlannerType(agent.GetPlannerType())
-	systemMessage, sysFmtErr := GetPromptTemplate(basePrompt, request, effectivePlannerType).Format(map[string]any{"history": messageFormatterToString(messageHistoryFomatter)})
+	// The ReAct planners render RAG examples into the human message; they vary
+	// per query and would otherwise end the system prompt with a per-query block.
+	systemPrompt := basePrompt
+	if effectivePlannerType == AgentPlannerTypeReAct3 {
+		request.RAGExamples = strings.TrimSpace(renderRAGExamples(basePrompt, request, effectivePlannerType))
+		systemPrompt.Rag = NBAgentPromptRag{}
+	}
+	systemMessage, sysFmtErr := GetPromptTemplate(systemPrompt, request, effectivePlannerType).Format(map[string]any{"history": messageFormatterToString(messageHistoryFomatter)})
 	// Surface template-render failures: a Format error here yields an empty system prompt, which Bedrock Converse rejects with a 400 (issue #30120).
 	if sysFmtErr != nil {
 		ctx.GetLogger().Warn("agentexecutor: system prompt template render failed; system message will be empty", "error", sysFmtErr, "agent", agent.GetName())

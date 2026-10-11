@@ -285,15 +285,19 @@ func TestReAct4_RenderStepsToMessages_NotebookReplayedInsideBatch(t *testing.T) 
 	assert.Equal(t, "c1", msgs[0].Parts[2].(llms.ToolCall).ID)
 }
 
-// A notebook-ONLY turn is still skipped entirely — its state rides on the human
-// message rather than bloating the replayed history.
-func TestReAct4_RenderStepsToMessages_SoloNotebookTurnStillSkipped(t *testing.T) {
+// A notebook-ONLY turn is replayed like any other call (#39633): the human
+// message only carries the turn-start notebook, so dropping the step would hide
+// the update from the model.
+func TestReAct4_RenderStepsToMessages_SoloNotebookTurnReplayed(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
-		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"nb"}`, ToolID: "c0", TurnID: "t1"}, Observation: "ok"},
+		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"nb"}`, ToolID: "c0", TurnID: "t1"}, Observation: "nb", Status: ToolStatusSuccess},
 		{Action: NBAgentPlannerToolAction{Tool: "kubectl", ToolID: "c1", TurnID: "t2"}, Observation: "pods"},
 	}
 	msgs := o.renderStepsToMessages(steps)
-	assert.Len(t, msgs, 2, "solo notebook turn contributes nothing; only the kubectl turn renders")
-	assert.Equal(t, "c1", msgs[0].Parts[0].(llms.ToolCall).ID)
+	assert.Len(t, msgs, 4, "notebook turn and kubectl turn both render")
+	assert.Equal(t, "c0", msgs[0].Parts[0].(llms.ToolCall).ID)
+	assert.Equal(t, notebookReplacedReplay, msgs[1].Parts[0].(llms.ToolCallResponse).Content,
+		"the content is in the call arguments; the result is a short acknowledgement")
+	assert.Equal(t, "c1", msgs[2].Parts[0].(llms.ToolCall).ID)
 }

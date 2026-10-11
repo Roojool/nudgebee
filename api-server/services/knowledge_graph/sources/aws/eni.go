@@ -263,7 +263,7 @@ func (s *AWSSource) createENINodeFromAWSData(eniInfo *ENINetworkInterface, req *
 	properties["type"] = "network-interface"
 	properties["status"] = eniInfo.Status
 	properties["cloud_provider"] = "AWS"
-	properties["region"] = req.Region
+	properties["region"] = eniInfo.Region
 	properties["resource_id"] = eniInfo.NetworkInterfaceId
 	properties["service_name"] = "AmazonVPC"
 	properties["is_active"] = true
@@ -356,6 +356,12 @@ func (s *AWSSource) fetchENIDataFromAWS(_ *security.RequestContext, _ *core.Sour
 		if err := unmarshalMetaInto(row, &eni); err != nil {
 			s.logger.Warn("Failed to parse ENI meta, skipping", "resource_id", row.ResourceID, "error", err)
 			continue
+		}
+		// Carry the row's region across: the parsed CLI shape has only an AZ, and
+		// nodes built from it would otherwise land with an empty region (#36573).
+		eni.Region = row.Region
+		if eni.Region == "" {
+			eni.Region = regionFromAZ(eni.AvailabilityZone)
 		}
 		enis = append(enis, &eni)
 	}

@@ -336,6 +336,18 @@ func TierAttributionForRecord(ctx *security.RequestContext) (modelTier *string, 
 // key suffix. Kept short because it is appended to the Google AI cache key.
 const promptVariantLean = "lean"
 
+// cacheModeOf reports how a call's cached tokens were obtained: "explicit" when
+// the request referenced a provider cache entry (Gemini CachedContent), otherwise
+// "implicit" (provider-side prefix caching, or Anthropic inline markers). Cached
+// tokens and is_cache_hit look the same for both, so this is the only per-call
+// signal that separates them (#39633).
+func cacheModeOf(metadata *LLMCallMetadata) string {
+	if metadata != nil && metadata.CacheInfo != nil && len(metadata.CacheInfo.Options) > 0 {
+		return "explicit"
+	}
+	return "implicit"
+}
+
 // promptVariantFromCtx returns the ContextKeyPromptVariant value on ctx, or ""
 // when unset (the full/default prompt).
 func promptVariantFromCtx(ctx *security.RequestContext) string {
@@ -813,6 +825,8 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 			"provider", provider,
 			"model", model,
 			"conversationId", conversationId,
+			"agent", agentName,
+			"cacheMode", cacheModeOf(callMetadata),
 			"cacheReadTokens", totalTokenInfo.CacheReadTokens,
 			"cacheCreationTokens", totalTokenInfo.CacheCreationTokens,
 			"nonCachedTokens", totalTokenInfo.InputTokens-totalTokenInfo.CacheReadTokens,
@@ -1651,6 +1665,7 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 						"cacheName", cacheResp.CacheInfo.CacheName,
 						"conversationId", rc.conversationId)
 					messagesToSend = rc.promptMessages // restore full messages
+					rc.lastCacheInfo = nil             // no cache was referenced; keeps cacheMode accurate
 				} else {
 					optionsToSend = append(optionsToSend, cacheResp.Options...)
 					rc.ctx.GetLogger().Info("Cache applied successfully",
@@ -1708,7 +1723,8 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 	armTTFTWatchdog()
 	armSustainedGenWatchdog()
 
-	rc.ctx.GetLogger().Info("LLM GenerateContent call starting", "model", rc.currentModel, "provider", rc.currentProvider, "conversationId", rc.conversationId, "messages", len(messagesToSend), "ttft_watchdog_seconds", watchdogSeconds, "sustained_gen_watchdog_seconds", sustainedGenSeconds)
+	fingerprint := fingerprintPrompt(messagesToSend, optionsToSend)
+	rc.ctx.GetLogger().Info("LLM GenerateContent call starting", "model", rc.currentModel, "provider", rc.currentProvider, "conversationId", rc.conversationId, "agent", rc.agentName, "agentId", rc.agentId, "messages", len(messagesToSend), "cacheMode", cacheModeOf(&LLMCallMetadata{CacheInfo: rc.lastCacheInfo}), "toolsHash", fingerprint.Tools, "messageHashes", fingerprint.Messages, "ttft_watchdog_seconds", watchdogSeconds, "sustained_gen_watchdog_seconds", sustainedGenSeconds)
 	completion, err := rc.llm.GenerateContent(ctx, messagesToSend, optionsToSend...)
 	// done must be set before Stop(), which doesn't wait for an in-flight callback.
 	done.Store(true)

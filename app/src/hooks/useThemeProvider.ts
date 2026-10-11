@@ -183,6 +183,15 @@ export function getCriticalCssTokens(host?: string | null): string {
 
   const declarations = criticalKeys
     .filter((key) => tokens[key])
+    // The result is injected via dangerouslySetInnerHTML in _document.tsx, so a
+    // token value is in an HTML context, not merely a CSS one: a value carrying
+    // `</style><script>…` would close the element and execute as script on every
+    // page of that host, the pre-auth signin page included. No legitimate CSS
+    // value contains an angle bracket, so drop any that does. services-server
+    // already rejects these on write (branding.ValidateOverrides); this is the
+    // guard at the sink, which also covers values arriving from a mounted
+    // theme.json that no write path validated.
+    .filter((key) => !/[<>]/.test(String(tokens[key])))
     .map((key) => `${key}:${tokens[key]}`)
     .join(';');
 
