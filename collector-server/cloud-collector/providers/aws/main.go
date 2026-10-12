@@ -1017,6 +1017,10 @@ func (a *awsProvider) GetUsageReport(ctx providers.CloudProviderContext, account
 	return getAwsUsageReport(ctx, account, month, year)
 }
 
+func (a *awsProvider) StreamUsageReport(ctx providers.CloudProviderContext, account providers.Account, month time.Month, year int, emit func([]providers.UsageReportItem) error) error {
+	return streamAwsUsageReport(ctx, account, month, year, emit)
+}
+
 // GetAvailableUsageReportPeriods implements providers.UsageReportPeriodDiscoverer
 // by enumerating the CUR billing-period folders present in the account's S3 bucket.
 func (a *awsProvider) GetAvailableUsageReportPeriods(ctx providers.CloudProviderContext, account providers.Account, maxMonths int) ([]providers.UsageReportPeriod, error) {

@@ -124,6 +124,18 @@ type GetUsageReportResponse struct {
 	Dates []time.Time       `json:"dates"`
 }
 
+// UsageReportBatchSize is how many line items a streaming provider hands over
+// per call to the emit callback.
+const UsageReportBatchSize = 5000
+
+// UsageReportStreamer is implemented by providers that can hand over a month's
+// cost report in batches instead of returning it whole, so a large bill never
+// sits in memory at once. emit is called with batches in report order and must
+// not retain the slice; an error from emit stops the stream and is returned.
+type UsageReportStreamer interface {
+	StreamUsageReport(ctx CloudProviderContext, account Account, month time.Month, year int, emit func([]UsageReportItem) error) error
+}
+
 type UsageReportCostCategory string
 
 type UsageReportItem struct {

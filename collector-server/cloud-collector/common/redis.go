@@ -25,10 +25,14 @@ var (
 var ErrLockTimeout = errors.New("sync lock acquisition timed out")
 
 const (
-	syncLockPrefix    = "cloud-collector:sync-lock:"
-	syncLockTTL       = 10 * time.Minute
-	redisInitRetries  = 3
-	redisInitInterval = 2 * time.Second
+	syncLockPrefix = "cloud-collector:sync-lock:"
+	// The holder renews the lock every syncLockRenewInterval for as long as it
+	// runs (see TryAcquireSyncLock), so the TTL only bounds how long a holder
+	// that died without releasing (pod killed) blocks the account.
+	syncLockTTL           = 2 * time.Minute
+	syncLockRenewInterval = 30 * time.Second
+	redisInitRetries      = 3
+	redisInitInterval     = 2 * time.Second
 )
 
 // releaseLockScript atomically deletes the key only if the stored value matches
@@ -36,6 +40,15 @@ const (
 var releaseLockScript = redis.NewScript(`
 if redis.call("get", KEYS[1]) == ARGV[1] then
 	return redis.call("del", KEYS[1])
+end
+return 0
+`)
+
+// renewLockScript extends the TTL only if the stored value still matches the
+// token, so a holder never revives a lock that expired and was taken by another.
+var renewLockScript = redis.NewScript(`
+if redis.call("get", KEYS[1]) == ARGV[1] then
+	return redis.call("pexpire", KEYS[1], ARGV[2])
 end
 return 0
 `)
@@ -116,7 +129,11 @@ func TryAcquireSyncLock(ctx context.Context, accountId string) (acquired bool, r
 	if res != "OK" {
 		return false, nil, nil
 	}
+	stopRenew := make(chan struct{})
+	go renewSyncLock(key, token, accountId, stopRenew)
+	var releaseOnce sync.Once
 	return true, func(ctx context.Context) {
+		releaseOnce.Do(func() { close(stopRenew) })
 		// Reacquire a live client for release — the original client may have been
 		// reset by another goroutine's transient error handling.
 		releaseClient := GetRedisClient()
@@ -130,6 +147,39 @@ func TryAcquireSyncLock(ctx context.Context, accountId string) (acquired bool, r
 			slog.Warn("redis: failed to release sync lock", "accountId", accountId, "error", err)
 		}
 	}, nil
+}
+
+// renewSyncLock keeps a held sync lock alive until stop is closed. A cost sync
+// of a large bill runs longer than any fixed TTL; without renewal the lock
+// expired mid-run and a second sync or the post-report job could run
+// concurrently on the same account. It stops early if the lock is no longer
+// ours (expired during a Redis outage and taken by another holder).
+func renewSyncLock(key, token, accountId string, stop <-chan struct{}) {
+	ticker := time.NewTicker(syncLockRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+		client := GetRedisClient()
+		if client == nil {
+			slog.Warn("redis: unavailable while renewing sync lock, retrying", "accountId", accountId)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		renewed, err := renewLockScript.Run(ctx, client, []string{key}, token, syncLockTTL.Milliseconds()).Int()
+		cancel()
+		if err != nil {
+			slog.Warn("redis: failed to renew sync lock, retrying", "accountId", accountId, "error", err)
+			continue
+		}
+		if renewed == 0 {
+			slog.Warn("redis: sync lock lost before release, no longer renewing", "accountId", accountId)
+			return
+		}
+	}
 }
 
 // AcquireSyncLockBlocking polls TryAcquireSyncLock until the lock is acquired,
