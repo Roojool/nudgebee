@@ -321,6 +321,33 @@ func signozLeaf(field string, op query.BinaryWhereClauseType, value any) (Flatte
 	if field == signozSeverityKey {
 		op, value = signozSeverityFilter(op, value)
 	}
+	// SigNoz's `!=` is a SUBSTRING match on resource attributes, not an exact
+	// one, while `=` is exact. Measured on v0.145 against a 15-row set:
+	// `service.name != "e2e"` returned 0 of 15 (it excluded all three e2e-*
+	// services) and `k8s.pod.name != "checkout"` returned 10 of 15 (it excluded
+	// the checkout-* pod), so a user filtering `namespace != prod` silently also
+	// loses `prod-east` and `production`.
+	//
+	// `nin` with a single element is exact on every field class measured — resource
+	// attribute, top-level column (severity_text) and log attribute — and keeps the
+	// rest of `!=`'s semantics, including matching rows that lack the attribute
+	// entirely (`user.tier != gold` and `user.tier nin [gold]` both returned the
+	// same 9 rows). So never emit `!=`.
+	//
+	// This covers NOT as well: signozNegatedOperators pushes a NOT down to the
+	// leaves as Eq -> Nq, which lands here. signozSeverityFilter already does the
+	// same rewrite for the severity key, for its own case-folding reasons.
+	//
+	// The rewrite is unconditional: a caller may write `_neq` with a list value
+	// ({"ns": {"_neq": ["a", "b"]}}), and only the wrapping is conditional. Making
+	// the whole rewrite conditional on a non-list value left `!=` reachable for
+	// exactly that input.
+	if op == Nq {
+		op = NotIn
+		if _, isList := value.([]any); !isList {
+			value = []any{value}
+		}
+	}
 	if op == ILike {
 		pattern, isString := value.(string)
 		if !isString {

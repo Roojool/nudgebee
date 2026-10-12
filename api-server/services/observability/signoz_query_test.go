@@ -50,20 +50,20 @@ func TestSignozDNF(t *testing.T) {
 	t.Run("NOT is pushed onto the leaves", func(t *testing.T) {
 		terms, err := signozDNF(query.QueryWhereClause{Not: &ns})
 		require.NoError(t, err)
-		assert.Equal(t, [][]string{{`k8s.namespace.name != "x"`}}, termOps(terms))
+		assert.Equal(t, [][]string{{`k8s.namespace.name nin ["x"]`}}, termOps(terms))
 
 		// NOT (a OR b) = NOT a AND NOT b: one query.
 		or := query.QueryWhereClause{Or: []query.QueryWhereClause{svcA, svcB}}
 		terms, err = signozDNF(query.QueryWhereClause{Not: &or})
 		require.NoError(t, err)
 		require.Len(t, terms, 1)
-		assert.ElementsMatch(t, []string{`service.name != "a"`, `service.name != "b"`}, termOps(terms)[0])
+		assert.ElementsMatch(t, []string{`service.name nin ["a"]`, `service.name nin ["b"]`}, termOps(terms)[0])
 
 		// NOT (a AND x) = NOT a OR NOT x: two queries.
 		and := query.QueryWhereClause{And: []query.QueryWhereClause{svcA, ns}}
 		terms, err = signozDNF(query.QueryWhereClause{Not: &and})
 		require.NoError(t, err)
-		assert.ElementsMatch(t, [][]string{{`service.name != "a"`}, {`k8s.namespace.name != "x"`}}, termOps(terms))
+		assert.ElementsMatch(t, [][]string{{`service.name nin ["a"]`}, {`k8s.namespace.name nin ["x"]`}}, termOps(terms))
 
 		// _is_null flips its value; double negation cancels.
 		null := bin("user.tier", IsNull, true)

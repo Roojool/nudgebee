@@ -84,11 +84,13 @@ func TestFlattenSignozQuery(t *testing.T) {
 					"environment": {Nq: "staging"},
 				},
 			},
+			// nin, not "!=": SigNoz's "!=" is a substring match on resource
+			// attributes. See the Nq rewrite in signozLeaf.
 			expectedClauses: []FlattenedClause{
 				{
 					Key:   map[string]string{"key": "environment"},
-					Value: "staging",
-					Op:    "!=",
+					Value: []any{"staging"},
+					Op:    "nin",
 				},
 			},
 			expectError: false,
@@ -410,8 +412,9 @@ func TestFlattenSignozQuery(t *testing.T) {
 					},
 				},
 			},
+			// A pushed-down NOT becomes Nq, which signozLeaf emits as nin.
 			expectedClauses: []FlattenedClause{
-				{Key: map[string]string{"key": "service"}, Value: "api", Op: "!="},
+				{Key: map[string]string{"key": "service"}, Value: []any{"api"}, Op: "nin"},
 			},
 			expectError: false,
 		},
