@@ -73,6 +73,8 @@ The App is a frontend application built with **Next.js** (v16) and **React** (v1
 
 The app supports per-hostname white-labeling — logo, favicon, app title, AI assistant name, signin imagery/carousel, MUI palette, fonts, and the full `--nb-*` CSS variable token set. **Branding is configured in one place: the `tenant_branding_override` table**, one row per hostname. No rebuild, and no deploy once the image files are mounted.
 
+**Enterprise only.** Everything that reads or writes the table — the frontend provider (`src/ee/branding/`), the `branding_*` actions (`src/ee/actions.yaml`), and services-server's `ee/branding` package with `GET /v1/branding/overrides` — is stripped from the OSS build. OSS renders the house brand everywhere, and its notifications-server keeps the bundled `theme.json` branding.
+
 ### How it works
 
 1. Every host starts from the bundled house brand, [`public/branding/default/theme.json`](public/branding/default/theme.json).
