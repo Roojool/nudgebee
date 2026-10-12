@@ -648,6 +648,18 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 			defer wg.Done()
 			defer sem.Release(1)
 
+			// A region this account could not reach for the services listed just
+			// before is set aside instead of timing out again. It counts as
+			// unreachable, so it is reported in SkippedRegions and never archived.
+			if resourceListBackoff.shouldSkip(account.AccountNumber, regionName) {
+				ctx.GetLogger().Debug("skipping resource listing in recently unreachable region", "service", query.ServiceName, "region", regionName)
+				mu.Lock()
+				unreachableCount++
+				skippedRegions = append(skippedRegions, regionName)
+				mu.Unlock()
+				return
+			}
+
 			var serviceResources []providers.Resource
 			var err error
 
@@ -671,35 +683,21 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 			}
 
 			if err != nil {
-				if isRegionEndpointMissing(err) {
-					ctx.GetLogger().Debug("skipping region without service endpoint", "service", query.ServiceName, "region", regionName)
-					return
-				}
-				if isServiceUnavailableInRegion(err) {
-					ctx.GetLogger().Info("skipping region where service rejects the request as unavailable", "service", query.ServiceName, "region", regionName, "error", err)
-					return
-				}
-				if isRegionUnreachable(err) {
-					ctx.GetLogger().Warn("skipping unreachable region endpoint", "error", err, "service", query.ServiceName, "region", regionName)
+				if kind := classifyRegionSkip(err); kind != regionSkipNone {
+					logRegionSkip(ctx.GetLogger(), kind, err, regionName, "service", query.ServiceName)
 					mu.Lock()
-					unreachableCount++
-					skippedRegions = append(skippedRegions, regionName)
-					mu.Unlock()
-					return
-				}
-				if isRegionDisabled(err) {
-					ctx.GetLogger().Info("skipping region not enabled for this account", "error", err, "service", query.ServiceName, "region", regionName)
-					mu.Lock()
-					disabledCount++
-					skippedRegions = append(skippedRegions, regionName)
-					mu.Unlock()
-					return
-				}
-				if isThrottleError(err) {
-					ctx.GetLogger().Warn("skipping rate-limited region; will retry next sync", "error", err, "service", query.ServiceName, "region", regionName)
-					mu.Lock()
-					throttledCount++
-					skippedRegions = append(skippedRegions, regionName)
+					switch kind {
+					case regionSkipUnreachable:
+						resourceListBackoff.recordUnreachable(account.AccountNumber, regionName)
+						unreachableCount++
+						skippedRegions = append(skippedRegions, regionName)
+					case regionSkipDisabled:
+						disabledCount++
+						skippedRegions = append(skippedRegions, regionName)
+					case regionSkipThrottled:
+						throttledCount++
+						skippedRegions = append(skippedRegions, regionName)
+					}
 					mu.Unlock()
 					return
 				}
@@ -707,6 +705,7 @@ func (a *awsProvider) ListResources(ctx providers.CloudProviderContext, account 
 				errChan <- fmt.Errorf("failed to fetch %s resources in %s: %w", query.ServiceName, regionName, err)
 				return
 			}
+			resourceListBackoff.recordSuccess(account.AccountNumber, regionName)
 			mu.Lock()
 			resources = append(resources, serviceResources...)
 			successCount++
@@ -1218,14 +1217,30 @@ func (a *awsProvider) ListEvents(ctx providers.CloudProviderContext, account pro
 					}
 					defer alarmsSem.Release(1)
 
+					// A region this account could not reach on recent polls is set
+					// aside for a while instead of timing out again every cycle.
+					if alarmPollBackoff.shouldSkip(account.AccountNumber, region) {
+						ctx.GetLogger().Debug("skipping cloudwatch alarm poll for recently unreachable region", "accountNumber", account.AccountNumber, "region", region)
+						return
+					}
 					alarms, err := getAwsCloudwatchAlarms(ctx, account, AlarmsFilter{
 						Status: AlarmStatusAlarm,
 						Region: region,
 					})
 					if err != nil {
+						// A skipped region stays out of the snapshot below, so the
+						// firings stored for it are kept rather than ended.
+						if kind := classifyRegionSkip(err); kind != regionSkipNone {
+							if kind == regionSkipUnreachable {
+								alarmPollBackoff.recordUnreachable(account.AccountNumber, region)
+							}
+							logRegionSkip(ctx.GetLogger(), kind, err, region, "service", "cloudwatch alarms", "accountNumber", account.AccountNumber)
+							return
+						}
 						ctx.GetLogger().Error("failed to fetch cloudwatch alarms", "error", err, "accountNumber", account.AccountNumber, "region", region)
 						return
 					}
+					alarmPollBackoff.recordSuccess(account.AccountNumber, region)
 					if len(alarms.Items) > 0 {
 						alarmsMu.Lock()
 						eventList = append(eventList, alarms.Items...)

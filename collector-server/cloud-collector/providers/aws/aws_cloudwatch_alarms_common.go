@@ -369,6 +369,11 @@ func getAwsCloudwatchAlarms(ctx providers.CloudProviderContext, account provider
 	for paginator.HasMorePages() {
 		alarms, err := paginator.NextPage(ctx.GetContext())
 		if err != nil {
+			// A region the caller should skip (unreachable, disabled, throttled, …)
+			// is returned unlogged: the caller logs it once at the right level.
+			if classifyRegionSkip(err) != regionSkipNone {
+				return providers.ListEventResponse{}, err
+			}
 			// Downgrade permission errors to WARN — these are customer IAM misconfigs,
 			// not collector bugs. The audit middleware already records them.
 			if _, errCode, errMsg, isPermErr := IsAWSPermissionError(err); isPermErr {
