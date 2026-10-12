@@ -108,10 +108,23 @@ const getApplicationLink = (rule, workloadFqdn) => {
   return `${url.pathname}?${url.searchParams.toString()}${url.hash}`;
 };
 
-// The backend (Go computeRedirectURL) is the single source of truth for insight
-// deep-links: it emits a complete, filter-applied relative URL, recomputed live
-// on the insight-list endpoint. Consume it verbatim.
-const buildInsightLink = (item) => item?.rule?.redirect_url || null;
+// VM insights (insight_rules.json unique_id 131/132) are CVE rows for a self-hosted
+// fleet, not k8s workload rows.
+const isSelfHostedVmRule = (rule) =>
+  Array.isArray(rule?.cloud_providers) && rule.cloud_providers.some((p) => String(p).toLowerCase() === 'selfhosted');
+
+// The backend (Go computeRedirectURL) emits a complete, filter-applied relative URL
+// and stores it on the insight row, so consume it verbatim — except for a VM fleet's
+// "N <severity> CVEs" rows, which open the Vulnerabilities tab narrowed to that
+// severity. Built here rather than from the stored URL, which for rows generated
+// earlier still points at the unfiltered Instances tab.
+const buildInsightLink = (item) => {
+  const rule = item?.rule;
+  if (isSelfHostedVmRule(rule) && rule?.severity && item?.account_id) {
+    return `/vm?accountId=${item.account_id}&severity=${encodeURIComponent(rule.severity)}#vulnerabilities`;
+  }
+  return rule?.redirect_url || null;
+};
 
 const getInsightSeverity = (item) => {
   const cat = item?.rule?.category || item?.type;
@@ -355,7 +368,7 @@ const ServiceChipRow = ({ applications, rule, accountId, maxShown = 4 }) => {
   // VM insights (insight_rules.json unique_id 131/132) carry a CVE id as `name` rather
   // than a k8s workload — route those to the Instances tab scoped to that CVE instead of
   // the workload-chip link, which assumes a name:namespace pair.
-  const isVmVulnChip = Array.isArray(rule?.cloud_providers) && rule.cloud_providers.some((p) => String(p).toLowerCase() === 'selfhosted');
+  const isVmVulnChip = isSelfHostedVmRule(rule);
   return (
     // Stop chip clicks from bubbling to the parent insight row, whose onClick
     // window.opens the rule's redirect_url (the events page for Event-source
