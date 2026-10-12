@@ -1,6 +1,7 @@
 package scan_orchestrator
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -143,4 +144,40 @@ func TestPersistImageScan_UpsertsVulnerabilityAndLinksID(t *testing.T) {
 	require.NoError(t, err)
 	assert.NoError(t, mock.ExpectationsWereMet(),
 		"the vulnerabilities upsert must run before the recommendation upsert, and its id must land in vulnerability_id")
+}
+
+// TestPersistImageScan_SplitsLargeUpsertUnderParamLimit pins that an image with
+// more findings than one statement's bind parameters can carry (16 per row,
+// 65535 max) is upserted in several statements inside the same transaction,
+// rather than failing the whole scan.
+func TestPersistImageScan_SplitsLargeUpsertUnderParamLimit(t *testing.T) {
+	const findings = 4346 // 69536 parameters in a single statement
+	mock := mockMetastore(t)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`category = 'Security'[\s\S]*AND status = 'Open'`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO recommendation`).WillReturnResult(sqlmock.NewResult(0, 4095))
+	mock.ExpectExec(`INSERT INTO recommendation`).WillReturnResult(sqlmock.NewResult(0, findings-4095))
+	mock.ExpectCommit()
+
+	account := ScanAccount{AccountID: "acct-1", TenantID: "tenant-1", TargetImage: "registry.example.com/app:1.2.3"}
+	recs := make([]Recommendation, findings)
+	for i := range recs {
+		recs[i] = Recommendation{
+			CloudAccountID:  "acct-1",
+			TenantID:        "tenant-1",
+			Category:        "Security",
+			RuleName:        ImageScanRuleName,
+			Recommendation:  `{"image_name":"registry.example.com/app:1.2.3"}`,
+			Severity:        "High",
+			Status:          "Open",
+			AccountObjectID: fmt.Sprintf("registry.example.com/app:1.2.3-pkg-CVE-2024-%05d", i),
+		}
+	}
+
+	err := Persist(persistTestCtx(), account, "image_scanner", recs)
+
+	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
 }

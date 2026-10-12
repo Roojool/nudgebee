@@ -11,6 +11,7 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
+	"nudgebee/services/internal/database/pgbatch"
 	"nudgebee/services/ml"
 	"nudgebee/services/observability"
 	"nudgebee/services/scan_orchestrator"
@@ -112,7 +113,7 @@ func upsertRecommendationData(ctx *security.RequestContext, dbms *database.Datab
 	for _, d := range data {
 		ComputeAndSetFinOpsScoreFields(d)
 	}
-	_, err := dbms.Db.NamedExec(` INSERT INTO recommendation
+	err := pgbatch.NamedExec(dbms.Db, ` INSERT INTO recommendation
 		(status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name, estimated_savings, recommendation_action, resource_id, account_object_id, updated_at, finops_score, finops_band, finops_score_breakdown)
 		values (:status, :tenant_id, :cloud_account_id, :recommendation, :severity, :category, :rule_name, :estimated_savings, :recommendation_action, :resource_id, :account_object_id, :updated_at, :finops_score, :finops_band, :finops_score_breakdown)
 		ON CONFLICT (rule_name, cloud_account_id, resource_id, category, account_object_id)

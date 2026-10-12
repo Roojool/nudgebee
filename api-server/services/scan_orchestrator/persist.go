@@ -6,6 +6,7 @@ import (
 
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
+	"nudgebee/services/internal/database/pgbatch"
 	"nudgebee/services/security"
 
 	"github.com/jmoiron/sqlx"
@@ -192,7 +193,8 @@ func collectVulnerabilityRows(recs []Recommendation) []models.Vulnerability {
 	return vulnRows
 }
 
-// persistUpsertRecommendations UPSERTs recs in a single batch. Shares its shape
+// persistUpsertRecommendations UPSERTs recs, batched under Postgres's
+// bind-parameter limit (a single image can carry thousands of CVEs). Shares its shape
 // with recommendation.upsertRecommendationData; the on-conflict tuple is the
 // recommendation table's unique index on
 // (rule_name, cloud_account_id, resource_id, category, account_object_id).
@@ -244,7 +246,7 @@ func persistUpsertRecommendations(tx *sqlx.Tx, recs []Recommendation, vulnIDs ma
 		rows = append(rows, row)
 	}
 
-	_, err := tx.NamedExec(
+	return pgbatch.NamedExec(tx,
 		`INSERT INTO recommendation
 		   (status, tenant_id, cloud_account_id, recommendation, severity, category, rule_name,
 		    estimated_savings, recommendation_action, resource_id, account_object_id, updated_at,
@@ -264,7 +266,6 @@ func persistUpsertRecommendations(tx *sqlx.Tx, recs []Recommendation, vulnIDs ma
 		               vulnerability_id = EXCLUDED.vulnerability_id`,
 		rows,
 	)
-	return err
 }
 
 func nullIfEmpty(s string) any {
