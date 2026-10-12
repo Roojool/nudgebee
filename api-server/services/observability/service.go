@@ -745,6 +745,25 @@ func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) (F
 	if err != nil {
 		return FetchLogsResult{}, err
 	}
+
+	// SigNoz is the one provider whose GetQuery has nothing to preview, so the
+	// log-query generator falls back to handing the UI its canonical JSON
+	// (llm/llm-server/agents/agent_log_query.go:158) and it arrives here in
+	// Query, which the SigNoz source forwards to the backend as filter items.
+	// Move it into QueryRequest instead — before the label expansion and mapping
+	// below, which only act on QueryRequest.Where, so the generator's canonical
+	// names reach the backend resolved.
+	//
+	// Gated on the resolved provider rather than fetchLogRequest.LogProvider,
+	// which the UI leaves empty whenever the account default is in use. Widening
+	// this to another provider needs a guard for query shapes that are also JSON
+	// objects (an ES `dsl` body is one).
+	if source.ProviderRef().Provider == "signoz" {
+		if err := shiftCanonicalQueryToWhere(&fetchLogRequest); err != nil {
+			return FetchLogsResult{}, err
+		}
+	}
+
 	filteringMap := getMergedLabelMapping(ctx, fetchLogRequest.AccountId, source)
 	fetchLogRequest.SortFields = convertOrderByWithMapping(fetchLogRequest.SortFields, filteringMap)
 	var expandedKeys map[string]bool
