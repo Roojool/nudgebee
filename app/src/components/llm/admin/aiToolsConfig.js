@@ -133,6 +133,8 @@ export const AI_TOOLS_SUB_TABS = [
     icon: MemoryPolicyIcon,
     Body: MemoryPolicyAdminTab,
     module: 'ai',
+    // EE-only body (PrivacyTab, app/src/ee/), stripped on OSS — callers drop the tab there, as for Egress Filter.
+    eeOnly: true,
   },
   {
     id: 'rca-format',
