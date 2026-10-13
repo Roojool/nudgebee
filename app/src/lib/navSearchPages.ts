@@ -3,6 +3,8 @@
 // tabs (see each page's `filterOptions`/`tabOptions`), not real Next.js
 // routes, so they're enumerated here by hand rather than derived from the
 // router.
+import { isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
+
 export interface NavSearchPage {
   group: string;
   label: string;
@@ -176,9 +178,11 @@ export const navSearchPages: NavSearchPage[] = [
   { group: 'Admin', label: 'Functions', path: '/user-management#ai-tools/functions' },
   { group: 'Admin', label: 'Providers', path: '/user-management#ai-tools/providers' },
   { group: 'Admin', label: 'Gateway', path: '/user-management#ai-tools/gateway' },
-  { group: 'Admin', label: 'Egress Filter', path: '/user-management#ai-tools/egress-filter' },
+  // EE-only sub-tabs (`eeOnly` in aiToolsConfig.js) are dropped from the Admin
+  // page on OSS, so their search rows go too: a hit would land on an empty tab.
+  ...(isOSSDeploymentMode() ? [] : [{ group: 'Admin', label: 'Egress Filter', path: '/user-management#ai-tools/egress-filter' }]),
   { group: 'Admin', label: 'Budgets & Limits', path: '/user-management#ai-tools/budgets-limits' },
-  { group: 'Admin', label: 'Memory Policy', path: '/user-management#ai-tools/memory-policy' },
+  ...(isOSSDeploymentMode() ? [] : [{ group: 'Admin', label: 'Memory Policy', path: '/user-management#ai-tools/memory-policy' }]),
   { group: 'Admin', label: 'RCA Format', path: '/user-management#ai-tools/rca-format' },
   // Relocated from an avatar-menu modal (see docs/ia-consolidation-plan.md) —
   // now a plain top-level Admin tab, gated the same way (tenants:Read).
