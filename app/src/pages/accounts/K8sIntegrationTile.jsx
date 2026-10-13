@@ -329,13 +329,14 @@ const K8sIntegrationTile = () => {
   }, [cloudAccountAttributes]);
 
   const fetchFeatureFlags = async (accountId) => {
+    // Clear first, so neither a load in flight nor a failed load shows (or saves against) the previous account's flags.
+    setSelectedFeatures([]);
+    setInitialFeatures([]);
     try {
       const accountFeatureFlags = await fetchFeatureFlagsForAccount(accountId);
-      if (accountFeatureFlags?.length > 0) {
-        const enabled = accountFeatureFlags.filter((g) => g.status === 'enabled').map((g) => g.feature_id);
-        setSelectedFeatures(enabled);
-        setInitialFeatures(enabled); // <-- save original state
-      }
+      const enabled = (accountFeatureFlags || []).filter((g) => g.status === 'enabled').map((g) => g.feature_id);
+      setSelectedFeatures(enabled);
+      setInitialFeatures(enabled); // <-- save original state
     } catch (error) {
       console.log('Failed to fetch Account Feature Flags', error);
       snackbar.error('Failed to fetch Account Feature Flags');
@@ -920,7 +921,8 @@ const K8sIntegrationTile = () => {
               <Checkbox
                 key={f.value}
                 size='sm'
-                checked={selectedFeatures.includes(f.value)}
+                // selectedFeatures holds stored status='enabled'; a few flags store the opposite of their label (stored_value_inverted).
+                checked={f.stored_value_inverted ? !selectedFeatures.includes(f.value) : selectedFeatures.includes(f.value)}
                 label={f.description || f.value}
                 onChange={() => handleCheckBoxChange(f.value)}
               />
