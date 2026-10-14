@@ -194,25 +194,8 @@ const ClusterSummary = ({ accountId = '', cloudProvider = '' }: any) => {
         const services = res.data || [];
         if (!cancelled) setDynamicServices(services);
       } catch (error) {
+        // No unfiltered fallback: it counted every billing line item as a resource.
         console.error('Error fetching filtered resource counts:', error);
-        // Fallback to old method if new one fails
-        try {
-          const fallbackRes: any = await apiResources.getResourceGroupings(
-            100,
-            0,
-            { account_id: accountId },
-            ['resource_service_name'],
-            ['resource_service_name', 'count_resource'],
-            { name: 'count_resource', order: 'desc' }
-          );
-          const services = (fallbackRes.data?.resource_groupings || []).map((item: any) => ({
-            service_name: item.resource_service_name,
-            count: item.count_resource || 0,
-          }));
-          if (!cancelled) setDynamicServices(services);
-        } catch (fallbackError) {
-          console.error('Fallback also failed:', fallbackError);
-        }
       } finally {
         if (!cancelled) setLoadingServices(false);
       }
