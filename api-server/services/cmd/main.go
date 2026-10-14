@@ -19,7 +19,6 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
-	"nudgebee/services/localagent"
 
 	"github.com/Cyprinus12138/otelgin"
 	"github.com/gin-contrib/pprof"
@@ -221,31 +220,17 @@ func main() {
 
 	api.RunEEBootstrapHooks(logger)
 
-	// Adopt the credential the chart generated for the bundled in-cluster agent.
-	// Inert unless LOCAL_AGENT_ACCESS_KEY/SECRET are set. Logged, not fatal: a
-	// server that cannot register its own agent must still serve.
+	// Provision the first admin and tenant, and adopt the credential the chart
+	// generated for the bundled in-cluster agent, so a fresh install is complete
+	// before anyone signs in. Inert unless an admin address and LOCAL_AGENT_* are
+	// configured. Logged, not fatal: a server that cannot do this must still serve.
 	//
-	// Synchronous, matching RunEEBootstrapHooks above and its documented "must
-	// complete before requests arrive" contract, but bounded — the liveness and
-	// readiness probes declare no initialDelaySeconds, so an unbounded query
-	// against an unresponsive database would burn the probe budget and get the
-	// pod killed before it ever served. 10s mirrors the license feature-flag
-	// reconcile's own bound.
-	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 10*time.Second)
-
-	// Provision the first admin and tenant, so a fresh install is complete
-	// before anyone signs in. Inert unless an admin address is configured or
-	// carried by the licence; those installs provision at first login instead.
-	// This runs first because it registers the bundled cluster as part of the
-	// same call, which makes the reconcile below a no-op on a fresh install.
-	if err := bootstrap.Provision(bootCtx, logger); err != nil {
-		logger.Error("first-run provisioning failed; the deployment will fall back to provisioning at first login", "error", err)
-	}
-
-	if err := localagent.Reconcile(bootCtx, logger); err != nil {
-		logger.Error("local agent registration failed; the bundled cluster will not appear until this is resolved", "error", err)
-	}
-	cancelBoot()
+	// One bounded attempt happens here, before requests arrive, matching
+	// RunEEBootstrapHooks above. On a fresh install the migration Job is still
+	// running at this point, so a failure is retried in the background until the
+	// schema catches up; firstRunCtx stops those retries on shutdown.
+	firstRunCtx, stopFirstRun := context.WithCancel(context.Background())
+	bootstrap.RunFirstRun(firstRunCtx, logger)
 
 	api.ConfigureRoutes(r, &tracer, &meter, logger)
 
@@ -260,7 +245,10 @@ func main() {
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	if err := serve(srv, c, shutdownTimeout, cleanup); err != nil {
+	if err := serve(srv, c, shutdownTimeout, func() {
+		stopFirstRun()
+		cleanup()
+	}); err != nil {
 		slog.Error("Server listen failed:", "error", err)
 	}
 }
