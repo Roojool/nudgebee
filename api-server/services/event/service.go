@@ -4393,6 +4393,44 @@ func pagerdutyCommentIfNotInvestigated(ctx *security.RequestContext, newEvent ma
 	return processPagerDutyComment(ctx, newEvent)
 }
 
+// recordOnlyLabel marks an event the producer wants stored and counted but not
+// acted on. The cloud collector sets it (providers/aws RecordOnlyLabel).
+const recordOnlyLabel = "nb_record_only"
+
+// recordOnlySources are the sources whose labels are written by our own cloud
+// collector. Other sources carry labels the customer's tooling sets (a
+// Prometheus rule, a webhook payload), and for them the label must not work as
+// a way to stop notifications.
+var recordOnlySources = map[string]bool{
+	"AWS_CloudWatch_Alarm": true,
+	"AWS_EventBridge":      true,
+	"Azure_Monitor_Alert":  true,
+	"GCP_Metric_Alert":     true,
+}
+
+// isRecordOnly reads recordOnlyLabel from the event's labels, in any of the
+// shapes the post-process map carries them in, for an event from one of
+// recordOnlySources.
+func isRecordOnly(event map[string]any) bool {
+	if source, _ := event["source"].(string); !recordOnlySources[source] {
+		return false
+	}
+	switch labels := event["labels"].(type) {
+	case map[string]any:
+		v, _ := labels[recordOnlyLabel].(string)
+		return v == "true"
+	case map[string]string:
+		return labels[recordOnlyLabel] == "true"
+	case string:
+		var m map[string]any
+		if json.Unmarshal([]byte(labels), &m) == nil {
+			v, _ := m[recordOnlyLabel].(string)
+			return v == "true"
+		}
+	}
+	return false
+}
+
 // Pipeline-step / emit seams. PostProcessEvent calls these indirectly so the
 // orchestration (triage → llm → event.created) is unit-testable without a live
 // DB / MQ. Overridden in tests.
@@ -4423,6 +4461,17 @@ func PostProcessEvent(ctx *security.RequestContext, newEvent map[string]any) {
 	// notification's priority/suppressed check and llm's suppressed-skip depend
 	// on it. triage produces the classification carried by event.created.
 	runStep(ctx, "triage", triageStep, newEvent)
+
+	// A record-only event is history, not an alert: the cloud collector sends an
+	// alarm firing that started and cleared between two of its polls this way.
+	// Triage above has counted it (repeats, grouping, alert tuning); nothing
+	// after this point acts on it — no investigation, no notification, no
+	// workflow — since event.created below is the one place those fan out from.
+	if isRecordOnly(newEvent) {
+		ctx.GetLogger().Info("event: record-only, not investigated or notified",
+			"event_id", newEvent["id"], "source", newEvent["source"], recordOnlyLabel, "true")
+		return
+	}
 
 	// llm runs next: it decides eligibility and, when it enqueues an
 	// investigation, sets llm.EventInvestigationEnqueuedKey. event.created

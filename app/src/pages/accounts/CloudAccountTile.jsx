@@ -13,6 +13,8 @@ import CustomTable from '@shared/tables/CustomTable';
 import Datetime from '@shared/format/Datetime';
 import Text from '@shared/format/Text';
 import { Label } from '@ui/Label';
+import Tooltip from '@ui/Tooltip';
+import { eventBridgeStatus, newestTimestamp } from '@lib/eventBridgeStatus';
 import { hasWriteAccess, canManage } from '@lib/auth';
 import { ListingLayout } from '@ui/ListingLayout';
 import FilterDropdown from '@ui/FilterDropdown';
@@ -280,9 +282,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
           for (const agent of agents) {
             const cs = typeof agent.connection_status === 'string' ? safeJSONParse(agent.connection_status) : agent.connection_status;
             // connected_at is stamped when the user clicks "Connect EventBridge";
-            // last_event_at is stamped on every received event. Either one
-            // means the integration is in place — without connected_at the
-            // indicator stays inactive for hours until the first event arrives.
+            // last_event_at is stamped on every received event. Either one makes
+            // the menu offer "Manage EventBridge". What the Real-Time Events
+            // column says is decided by eventBridgeStatus, which treats only a
+            // received event as proof the feed works.
             if (cs?.eventbridge?.last_event_at || cs?.eventbridge?.connected_at) {
               ids.add(account.id);
             }
@@ -292,6 +295,51 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
     }
     return ids;
   }, [allWebhookAccountIds, rawAccounts, cloudProvider]);
+
+  const eventBridgeStatusByAccount = useMemo(() => {
+    const byAccount = new Map();
+    if (cloudProvider !== 'AWS') {
+      return byAccount;
+    }
+    const now = Date.now();
+    for (const account of rawAccounts) {
+      const agents = typeof account.agents === 'string' ? safeJSONParse(account.agents) : account.agents;
+      if (!Array.isArray(agents)) continue;
+      // An account can have more than one agent row; the feed is as alive as
+      // its most recent event on any of them.
+      const merged = {};
+      for (const agent of agents) {
+        const cs = typeof agent.connection_status === 'string' ? safeJSONParse(agent.connection_status) : agent.connection_status;
+        merged.last_event_at = newestTimestamp(merged.last_event_at, cs?.eventbridge?.last_event_at);
+        merged.connected_at = newestTimestamp(merged.connected_at, cs?.eventbridge?.connected_at);
+      }
+      const status = eventBridgeStatus(merged, now);
+      if (status) {
+        byAccount.set(account.id, status);
+      }
+    }
+    return byAccount;
+  }, [rawAccounts, cloudProvider]);
+
+  const renderRealtimeEvents = useCallback(
+    (item) => {
+      if (cloudProvider === 'AWS') {
+        const status = eventBridgeStatusByAccount.get(item.id);
+        if (!status) {
+          return <Text value='-' />;
+        }
+        return (
+          <Tooltip title={status.tooltip}>
+            <span>
+              <Label text={status.text} tone={status.tone} />
+            </span>
+          </Tooltip>
+        );
+      }
+      return realtimeEventAccountIds.has(item.id) ? <Label text='active' /> : <Text value='-' />;
+    },
+    [cloudProvider, eventBridgeStatusByAccount, realtimeEventAccountIds]
+  );
 
   const getMenuItems = (item) => {
     if (!hasWriteAccess()) {
@@ -417,10 +465,10 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         { component: <Text value={item.account_number || '-'} /> },
         { component: <Label text={item.status || '-'} /> },
         { component: <AccountEnvText accountName={item.account_name} accountEnv={item.account_env} /> },
-        { component: realtimeEventAccountIds.has(item.id) ? <Label text='active' /> : <Text value='-' /> },
+        { component: renderRealtimeEvents(item) },
         { component: <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} /> },
       ]),
-    [rawAccounts, realtimeEventAccountIds, getMenuItems, onMenuClick]
+    [rawAccounts, renderRealtimeEvents, getMenuItems, onMenuClick]
   );
 
   const handleUpdatePermissions = (account) => {

@@ -1199,11 +1199,17 @@ func (a *awsProvider) ListEvents(ctx providers.CloudProviderContext, account pro
 	}
 
 	// check for alarm events across all active regions
+	var ongoing *providers.OngoingSnapshot
 	if config.Config.CloudCollectorServerEventCloudWatchAlarmEnabled {
 		regions, err := a.getRegions(ctx, account)
 		if err != nil {
 			ctx.GetLogger().Error("failed to fetch regions for cloudwatch alarms", "error", err, "accountNumber", account.AccountNumber)
 		} else {
+			// A region joins the snapshot only when its whole listing succeeded:
+			// the store ends stored firings that the snapshot no longer shows, and a
+			// region it could not read must not look like a region with no alarms.
+			ongoing = newAlarmSnapshot(time.Now().UTC())
+			historySince := clearedFiringWindowStart(query.StartDate, time.Now().UTC())
 			var alarmsMu sync.Mutex
 			var alarmsWg sync.WaitGroup
 			alarmsSem := semaphore.NewWeighted(5)
@@ -1224,8 +1230,9 @@ func (a *awsProvider) ListEvents(ctx providers.CloudProviderContext, account pro
 						return
 					}
 					alarms, err := getAwsCloudwatchAlarms(ctx, account, AlarmsFilter{
-						Status: AlarmStatusAlarm,
-						Region: region,
+						Status:       AlarmStatusAlarm,
+						Region:       region,
+						HistorySince: historySince,
 					})
 					if err != nil {
 						// A skipped region stays out of the snapshot below, so the
@@ -1241,11 +1248,10 @@ func (a *awsProvider) ListEvents(ctx providers.CloudProviderContext, account pro
 						return
 					}
 					alarmPollBackoff.recordSuccess(account.AccountNumber, region)
-					if len(alarms.Items) > 0 {
-						alarmsMu.Lock()
-						eventList = append(eventList, alarms.Items...)
-						alarmsMu.Unlock()
-					}
+					alarmsMu.Lock()
+					eventList = append(eventList, alarms.Items...)
+					mergeAlarmRegion(ongoing, alarms.Ongoing)
+					alarmsMu.Unlock()
 				}(region)
 			}
 			alarmsWg.Wait()
@@ -1255,6 +1261,7 @@ func (a *awsProvider) ListEvents(ctx providers.CloudProviderContext, account pro
 	return providers.ListEventResponse{
 		Items:   eventList,
 		Summary: eventSummary,
+		Ongoing: ongoing,
 	}, nil
 }
 

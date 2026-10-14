@@ -324,6 +324,7 @@ const (
 	ServiceNameBackup           = "AWSBackup"
 	ServiceNameBedrock          = "AmazonBedrock"
 	ServiceNameEFS              = "AmazonEFS"
+	ServiceNameFSx              = "AmazonFSx"
 	ServiceNameES               = "AmazonES"
 	ServiceNameSageMaker        = "AmazonSageMaker"
 	ServiceNameCloudFront       = "AmazonCloudFront"

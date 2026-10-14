@@ -154,7 +154,7 @@ func TestInsertEvent_StoresAnEventThatArrivesAlreadyEndedClosed(t *testing.T) {
 		name, source string
 		status       EventStatus
 	}{
-		{name: "cloud alarm relayed as an instant", source: "AWS_CloudWatch_Alarm", status: EventStatusFiring},
+		{name: "cloud alarm sent as an instant, because no poll can end it", source: "AWS_CloudWatch_Alarm", status: EventStatusFiring},
 		{name: "Datadog one-shot notification", source: "datadog_webhook", status: EventStatusFiring},
 		{name: "resolve that names no stored event", source: "automation", status: EventStatusResolved},
 		{name: "record born closed", source: "AWS_EventBridge", status: EventStatusClosed},
@@ -173,18 +173,24 @@ func TestInsertEvent_StoresAnEventThatArrivesAlreadyEndedClosed(t *testing.T) {
 	}
 }
 
-// An alert that is firing now has no end, and stays open.
+// An alert that is firing now has no end, and stays open. That holds for a cloud
+// alarm too: the cloud collector sends one with no end time when a poll of the
+// account can end it, by either delivery path.
 func TestInsertEvent_StoresAFiringAlertOpen(t *testing.T) {
 	at := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
-	out := runInsertEvent(t, Event{
-		Tenant: resolveTestTenant, AccountId: resolveTestAccount, FindingId: "firing-1",
-		Source: "datadog_webhook", FindingType: "issue", Status: EventStatusFiring, StartsAt: &at,
-	}, true)
+	for _, source := range []string{"datadog_webhook", "AWS_CloudWatch_Alarm", "AWS_EventBridge"} {
+		t.Run(source, func(t *testing.T) {
+			out := runInsertEvent(t, Event{
+				Tenant: resolveTestTenant, AccountId: resolveTestAccount, FindingId: "firing-1",
+				Source: source, FindingType: "issue", Status: EventStatusFiring, StartsAt: &at,
+			}, true)
 
-	assert.Equal(t, "FIRING", out.status)
-	assert.Equal(t, "OPEN", out.nbStatus)
-	assert.True(t, out.postProcessed)
-	assert.Empty(t, out.resolvedNotified)
+			assert.Equal(t, "FIRING", out.status)
+			assert.Equal(t, "OPEN", out.nbStatus)
+			assert.True(t, out.postProcessed)
+			assert.Empty(t, out.resolvedNotified)
+		})
+	}
 }
 
 // A RESOLVED update of a stored event whose interval is real -- ends_at after

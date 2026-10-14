@@ -2754,7 +2754,36 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 		// This overrides template-rendered resource identification and labels
 		// with authoritative values from cloudwatchNamespaceServiceMap.
 		if ebEvent.DetailType == "CloudWatch Alarm State Change" {
-			if alarmInfo, ok := extractCloudWatchAlarmInfoFromEB(ebEvent); ok {
+			// The per-firing id of an alarm is never the delivery's own id. The
+			// poll reports the same firing and knows nothing of deliveries, so a
+			// delivery id here would store the firing twice.
+			provEvent.FindingId = ""
+			alarmInfo, ok := extractCloudWatchAlarmInfoFromEB(ebEvent)
+			if !ok {
+				logger.Warn("eventprocessor: alarm identity falls back to the rule's fingerprint and the delivery time",
+					"ruleName", rule.Name, "reason", "detail unreadable or without an alarm name", "fingerprint", provEvent.EventId)
+			} else {
+				// Identity comes from the alarm's own facts in the event, the same
+				// two the poll reads: its ARN, not the rule's template of one, and
+				// the time it changed state, not the time the event was sent. The
+				// envelope time is the sending time rounded to the second, and for
+				// about one push in five that is the second after the state change,
+				// which gave the two paths different ids for one firing. Each
+				// fallback keeps the value this branch used before and says so,
+				// because a silent one stores the firing twice again.
+				alarmArn, stateChangedAt := alarmInfo.AlarmArn, alarmInfo.StateChangedAt
+				if _, _, isAlarmArn := AlarmIdentity(alarmArn); !isAlarmArn {
+					logger.Warn("eventprocessor: alarm identity falls back to the rule's fingerprint",
+						"ruleName", rule.Name, "reason", "no alarm ARN in the event", "alarmName", alarmInfo.AlarmName, "fingerprint", provEvent.EventId)
+					alarmArn = provEvent.EventId
+				}
+				if stateChangedAt.IsZero() {
+					logger.Warn("eventprocessor: alarm identity falls back to the delivery time",
+						"ruleName", rule.Name, "reason", "no readable state time in the event", "alarmArn", alarmArn)
+					stateChangedAt = provEvent.Date
+				}
+				setAlarmFiring(&provEvent, alarmArn, stateChangedAt)
+
 				var awsCfg *aws.Config
 				cfg, cfgErr := getAwsConfigFromAccount(ctx.GetContext(), account)
 				if cfgErr == nil {
@@ -2765,8 +2794,17 @@ func (p *TemplatedEventBridgeProcessor) Process(ctx providers.CloudProviderConte
 				provEvent.ResourceId = enrichment.ResourceId
 				provEvent.ResourceType = enrichment.ResourceType
 				provEvent.ResourceServiceName = enrichment.ResourceServiceName
+				provEvent.ResourceLookupIds = enrichment.ResourceLookupIds
 				for k, v := range enrichment.Labels {
 					provEvent.Labels[k] = v
+				}
+				// An alarm entering ALARM is a condition that lasts, not a moment.
+				// Whether it is stored open is decided where it is stored, by
+				// whether a poll can end it.
+				if alarmInfo.StateValue == string(AlarmStatusAlarm) && provEvent.EventStatus == providers.EventStatusFiring {
+					if scope, _, ok := AlarmIdentity(provEvent.EventId); ok {
+						provEvent.OngoingScope = scope
+					}
 				}
 			}
 		}
