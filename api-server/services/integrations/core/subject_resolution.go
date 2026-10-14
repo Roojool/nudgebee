@@ -251,6 +251,23 @@ const SkipWorkloadMatchLabel = "nb_skip_workload_match"
 // (e.g. dynatrace's impacted-entity list). The label is consumed during matching.
 const WorkloadCandidatesLabel = "nb_workload_candidates"
 
+// podTemplateHashSuffix matches the pod-template-hash a Deployment appends to its
+// ReplicaSet names. Kubernetes renders that hash with rand.SafeEncodeString, whose
+// alphabet has no vowels and no 0/1/3, so a real workload-name segment such as
+// "-backend" or "-v2" does not match.
+var podTemplateHashSuffix = regexp.MustCompile(`^(.+)-[bcdfghjklmnpqrstvwxz2456789]{8,10}$`)
+
+// TrimPodTemplateHash returns the Deployment name behind a ReplicaSet name
+// ("checkout-6f665f49dd" -> "checkout"), or the name unchanged when it carries no
+// pod-template-hash. It is a naming heuristic: callers that act on the result
+// should still let MatchWorkloadAndEnrich confirm it against the inventory.
+func TrimPodTemplateHash(name string) string {
+	if m := podTemplateHashSuffix.FindStringSubmatch(name); len(m) == 2 {
+		return m[1]
+	}
+	return name
+}
+
 const (
 	// webhookSubjectAgentMention pins the dedicated single-shot classifier agent in
 	// llm-server, bypassing the LLM router.

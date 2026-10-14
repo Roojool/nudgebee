@@ -158,6 +158,7 @@ var (
 	zenDutyReNamespace   = regexp.MustCompile(`namespace=\"([^\"]+)\"`)
 	zenDutyRePod         = regexp.MustCompile(`pod=\"([^\"]+)\"`)
 	zenDutyReServiceName = regexp.MustCompile(`service_name=\"([^\"]+)\"`)
+	zendutyMD5EntityID   = regexp.MustCompile(`(?i)^[0-9a-f]{32}$`)
 )
 
 func (z ZenDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settings []core.IntegrationConfigValue, accountId, webhookPayloadString string) ([]core.EventIncomingWebhook, error) {
@@ -349,13 +350,16 @@ func (z ZenDutyWebhook) ProcessEventWebook(sc *security.RequestContext, settings
 	}
 
 	// Title rewrite: prefer the human-readable annotation summary or rule name
-	// over the noisy alertmanager-concatenated incident.Title.
+	// over the noisy alertmanager-concatenated incident.Title. An alertname that
+	// is only an md5 entity_id (Zenduty's Azure integration, when the payload
+	// could not be recovered) is less readable than the incident title, so it
+	// never replaces it.
 	switch {
 	case annSummary != "":
 		parsedPayload.EventTitle = annSummary
 	case rulename != "":
 		parsedPayload.EventTitle = rulename
-	case alertname != "":
+	case alertname != "" && !zendutyMD5EntityID.MatchString(alertname):
 		parsedPayload.EventTitle = alertname
 	}
 
