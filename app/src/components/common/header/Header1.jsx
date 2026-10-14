@@ -1000,6 +1000,8 @@ const Header1 = ({ showBorder = false }) => {
                       href={
                         selectedCluster?.cloud_provider === 'K8s'
                           ? `/kubernetes/details/${selectedCluster?.value}#summary`
+                          : selectedCluster?.cloud_provider === 'SelfHosted'
+                          ? `/vm?accountId=${selectedCluster?.value}#summary`
                           : `/cloud-account/details/${selectedCluster?.value}#summary`
                       }
                       target='_blank'
