@@ -60,6 +60,7 @@ export const METRICS_PROVIDERS: OnboardingProviderDef[] = [
   { route: 'ES', label: 'Elasticsearch', types: ['es'], cloudCapable: true },
   { route: 'SOLARWINDS', label: 'SolarWinds', types: ['solarwinds'], cloudCapable: true },
   { route: 'CUBEAPM', label: 'CubeAPM', types: ['cubeapm'] },
+  { route: 'SIGNOZ', label: 'SigNoz', types: ['signoz'] },
   { route: 'SPLUNK_ENTERPRISE', label: 'Splunk Enterprise', types: ['splunk_enterprise'] },
 ];
 

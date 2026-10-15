@@ -223,6 +223,21 @@ func stripClusterPlaceholder(expr string) string {
 // inside. If it contains a range selector [Xm], a new {} is inserted before
 // it. Otherwise selectors are appended at the end.
 func injectPromQLMatchers(expr string, matchers []LabelMatcher, legacyLabels map[string]string) (string, error) {
+	return injectPromQLMatchersWith(expr, matchers, legacyLabels, legacyPromQLLabelName)
+}
+
+// legacyPromQLLabelName accepts only classic Prometheus label names and writes
+// them bare.
+func legacyPromQLLabelName(name string) (string, error) {
+	if !promqlLabelNameRe.MatchString(name) {
+		return "", fmt.Errorf("invalid label name %q", name)
+	}
+	return name, nil
+}
+
+// injectPromQLMatchersWith is injectPromQLMatchers with the label-name rule
+// supplied by the caller, for engines that accept more than classic names.
+func injectPromQLMatchersWith(expr string, matchers []LabelMatcher, legacyLabels map[string]string, labelName func(string) (string, error)) (string, error) {
 	if len(matchers) == 0 && len(legacyLabels) == 0 {
 		return expr, nil
 	}
@@ -241,20 +256,22 @@ func injectPromQLMatchers(expr string, matchers []LabelMatcher, legacyLabels map
 
 	parts := make([]string, 0, len(sorted)+len(legacyLabels))
 	for _, m := range sorted {
-		if !promqlLabelNameRe.MatchString(m.Label) {
-			return "", fmt.Errorf("invalid label name %q", m.Label)
+		name, err := labelName(m.Label)
+		if err != nil {
+			return "", err
 		}
 		op, err := promqlMatcherOp(m.Operator)
 		if err != nil {
 			return "", err
 		}
-		parts = append(parts, fmt.Sprintf(`%s%s"%s"`, m.Label, op, escapePromQLString(m.Value)))
+		parts = append(parts, fmt.Sprintf(`%s%s"%s"`, name, op, escapePromQLString(m.Value)))
 	}
 	for _, k := range sortedKeys(legacyLabels) {
-		if !promqlLabelNameRe.MatchString(k) {
-			return "", fmt.Errorf("invalid label name %q", k)
+		name, err := labelName(k)
+		if err != nil {
+			return "", err
 		}
-		parts = append(parts, fmt.Sprintf(`%s="%s"`, k, escapePromQLString(legacyLabels[k])))
+		parts = append(parts, fmt.Sprintf(`%s="%s"`, name, escapePromQLString(legacyLabels[k])))
 	}
 	newSelector := strings.Join(parts, ",")
 
@@ -512,12 +529,30 @@ func getMetricsSource(provider, integrationSource string) (MetricSource, error) 
 		return &SolarWindsMetricSource{}, nil
 	case provider == "openobserve" && integrationSource == "user":
 		return &OpenObserveMetricSource{}, nil
+	case provider == "signoz" && integrationSource == "user":
+		return &SignozMetricSource{}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported metric provider/source combination: provider=%s, integrationSource=%s",
 			provider, integrationSource,
 		)
 	}
+}
+
+// explicitDefaultOnly lists, per telemetry kind, providers that serve it only when
+// their integration is marked as the account's default for it. SigNoz was
+// connected for logs alone until it could serve metrics, so a SigNoz row says
+// nothing about where an account's metrics live: picking it by elimination would
+// move charts and new alert rules onto it for every account whose own Prometheus
+// is down or absent.
+var explicitDefaultOnly = map[string]map[string]bool{
+	"metrics": {"signoz": true},
+}
+
+// servesOnlyAsExplicitDefault reports whether provider must be the marked default
+// to serve providerType.
+func servesOnlyAsExplicitDefault(provider, providerType string) bool {
+	return explicitDefaultOnly[providerType][provider]
 }
 
 // isSupportedTelemetryProvider checks if a provider and source pair is valid for the given telemetry kind.
@@ -765,7 +800,8 @@ func getLogsMetricsTracesProviderWithIntegration(ctx *security.RequestContext, a
 				if activeIntegrations, aErr := core.ListActiveIntegrationsForAccount(ctx, accountId); aErr == nil {
 					for i := range activeIntegrations {
 						dto := &activeIntegrations[i]
-						if !isAgentOwnProvider(dto) && isSupportedTelemetryProvider(dto.Type, dto.Source, providerType) {
+						if !isAgentOwnProvider(dto) && isSupportedTelemetryProvider(dto.Type, dto.Source, providerType) &&
+							!servesOnlyAsExplicitDefault(dto.Type, providerType) {
 							candidates = append(candidates, dto)
 						}
 					}
@@ -3680,6 +3716,14 @@ func FetchMetricUtilisation(ctx *security.RequestContext, req GetUtilisationTren
 
 	case "ES":
 		out, err := fetchESMetricUtilisation(ctx, req, meta)
+		canonicaliseUtilisationLabels(out.Results, metricsProvider)
+		return out, err
+
+	// SigNoz's Kubernetes collector publishes OTel names (container.cpu.usage, gauges in
+	// cores and bytes), so none of the Prometheus builders apply.
+	case "signoz":
+		out, rendered, err := fetchSignozUtilisation(ctx, req, meta, integrationSource, instant)
+		queries = rendered
 		canonicaliseUtilisationLabels(out.Results, metricsProvider)
 		return out, err
 
