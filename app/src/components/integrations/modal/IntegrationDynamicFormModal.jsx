@@ -2358,27 +2358,10 @@ const IntegrationDynamicFormModal = ({
           </Box>
         }
         subtitle={subtitle}
-        open={
-          showModal &&
-          [
-            'pagerduty_webhook',
-            'zenduty_webhook',
-            'prometheus_alertmanager_webhook',
-            'datadog_webhook',
-            'azure_monitor_webhook',
-            'gcp_monitoring_webhook',
-            'servicenow_webhook',
-            'newrelic_webhook',
-            'dynatrace_webhook',
-            'splunk_webhook',
-            'grafana_webhook',
-            'solarwinds_webhook',
-            'elasticsearch_webhook',
-            'openobserve_webhook',
-            'workflow_webhook',
-            'event_webhook',
-          ].includes(integrationName)
-        }
+        // Every webhook with a URL entry in webhookConfig shows its URL here. A separate
+        // allowlist drifted: CubeAPM and SigNoz were missing, so saving one closed the
+        // form and opened nothing, and the one-time URL was never shown.
+        open={showModal && Boolean(webhookConfig[integrationName])}
         width='md'
         isConfirmRequired={false}
       >
