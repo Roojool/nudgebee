@@ -499,6 +499,7 @@ const apiAccount = {
         'splunk_webhook',
         'cubeapm',
         'cubeapm_webhook',
+        'signoz_webhook',
         'dynatrace',
         'dynatrace_webhook',
         'gcp_monitoring_webhook',

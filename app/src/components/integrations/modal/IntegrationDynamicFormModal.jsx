@@ -2074,6 +2074,11 @@ const IntegrationDynamicFormModal = ({
       message:
         'Add the following URL as a Webhook notification channel in CubeAPM. Leave the payload template unset — CubeAPM’s default body is already Alertmanager-compatible, which is the expected format',
     },
+    signoz_webhook: {
+      endpoint: 'signoz',
+      message:
+        'Add the following URL as a Webhook notification channel in SigNoz (Settings → Alert Channels → New Channel → Webhook). Alert rules Nudgebee creates in SigNoz notify the channels that use this URL',
+    },
   };
 
   // List rows carry integrations_cloud_accounts / integration_config_values as

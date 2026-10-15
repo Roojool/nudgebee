@@ -210,6 +210,8 @@ export default function AddAccountForm() {
             return <ListIntegrations integrationName={'cubeapm'} />;
           case 'cubeapm_webhook':
             return <ListIntegrations integrationName={'cubeapm_webhook'} />;
+          case 'signoz_webhook':
+            return <ListIntegrations integrationName={'signoz_webhook'} />;
           case 'azure_monitor_webhook':
             return <ListIntegrations integrationName={'azure_monitor_webhook'} />;
           case 'ssh':

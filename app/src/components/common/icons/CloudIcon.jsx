@@ -140,7 +140,7 @@ const CloudProviderIcon = ({ cloud_provider, width, height, sx = {} }) => {
     Icon = LoggleIcon;
   } else if (cloud_provider.toUpperCase() === 'LOKI') {
     Icon = LokiIcon;
-  } else if (cloud_provider.toUpperCase() === 'SIGNOZ') {
+  } else if (cloud_provider.toUpperCase() === 'SIGNOZ' || cloud_provider.toUpperCase() === 'SIGNOZ_WEBHOOK') {
     Icon = SignozIcon;
   } else if (cloud_provider.toUpperCase() === 'OBSERVE') {
     Icon = ObserveIcon;

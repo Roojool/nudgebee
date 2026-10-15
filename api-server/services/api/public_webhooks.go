@@ -533,6 +533,7 @@ func handlePublicWebhooksApis(r *gin.Engine, tracer *trace.Tracer, meter *metric
 	webhookGroup.POST("/elasticsearch", genericWebhookHandler("elasticsearch_webhook", tracer, meter, logger))
 	webhookGroup.POST("/openobserve", genericWebhookHandler("openobserve_webhook", tracer, meter, logger))
 	webhookGroup.POST("/cubeapm", genericWebhookHandler("cubeapm_webhook", tracer, meter, logger))
+	webhookGroup.POST("/signoz", genericWebhookHandler("signoz_webhook", tracer, meter, logger))
 	webhookGroup.POST("/workflow", genericWebhookHandler("workflow_webhook", tracer, meter, logger))
 	webhookGroup.POST("/event", genericWebhookHandler("event_webhook", tracer, meter, logger))
 

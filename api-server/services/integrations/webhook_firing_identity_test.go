@@ -43,6 +43,7 @@ var webhookFiringIdentity = map[string]firingIdentity{
 	IntegrationGrafanaWebhook:                {firingKeyMode, "startsAt"},
 	// Alertmanager-compatible body: same stable fingerprint, same per-firing startsAt.
 	IntegrationCubeAPMWebhook: {firingKeyMode, "startsAt"},
+	IntegrationSigNozWebhook:  {firingKeyMode, "startsAt"},
 
 	IntegrationZendutyWebhook:       {perFiringEventId, "incident unique_id"},
 	IntegrationPagerdutyWebhook:     {perFiringEventId, "incident id"},
@@ -122,6 +123,10 @@ var firingKeyParsers = map[string]firingKeySequence{
 	IntegrationCubeAPMWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
 		sc := security.NewRequestContextForSuperAdmin(nil, nil, nil)
 		return singleEvent(CubeAPMWebhook{}.ProcessEventWebook(sc, nil, "acct-1", alertmanagerStyleBody(status, startsAt, fingerprint)))
+	},
+	IntegrationSigNozWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
+		sc := security.NewRequestContextForSuperAdmin(nil, nil, nil)
+		return singleEvent(SigNozWebhook{}.ProcessEventWebook(sc, nil, "acct-1", alertmanagerStyleBody(status, startsAt, fingerprint)))
 	},
 	IntegrationGrafanaWebhook: func(status, startsAt, fingerprint string) (core.EventIncomingWebhook, error) {
 		event, err := mapGrafanaAlertToEvent("acct-1", map[string]any{

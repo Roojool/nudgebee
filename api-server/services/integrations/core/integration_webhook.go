@@ -117,6 +117,7 @@ var eventAnalysisSources = map[string]bool{
 	"prometheus_alertmanager_webhook": true,
 	"workflow_webhook":                true,
 	"cubeapm_webhook":                 true,
+	"signoz_webhook":                  true,
 	"event_webhook":                   true,
 }
 

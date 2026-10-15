@@ -267,6 +267,9 @@ export const getCloudProviderLabel = (cloudProvider: string) => {
     case 'CUBEAPM_WEBHOOK':
       label = 'CubeAPM Webhook';
       break;
+    case 'SIGNOZ_WEBHOOK':
+      label = 'SigNoz Webhook';
+      break;
     case 'OBSERVE':
       label = 'Observe';
       break;

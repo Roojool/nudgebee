@@ -285,6 +285,7 @@ export const integrationProviders: string[] = [
   'OPENOBSERVE_WEBHOOK',
   'WORKFLOW_WEBHOOK',
   'CUBEAPM_WEBHOOK',
+  'SIGNOZ_WEBHOOK',
   'EVENT_WEBHOOK',
   // database
   'POSTGRES',
