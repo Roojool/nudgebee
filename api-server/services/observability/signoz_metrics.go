@@ -7,6 +7,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -254,13 +255,28 @@ func (s *SignozMetricSource) FetchMetricsQuery(ctx *security.RequestContext, req
 	g.SetLimit(signozQueryConcurrency)
 	for queryKey, rawQuery := range req.Queries {
 		g.Go(func() error {
-			add(s.runQuery(ctx, req, queryKey, rawQuery, start, end, step))
+			add(signozRunKeySafely(ctx, queryKey, func() QueryResult {
+				return s.runQuery(ctx, req, queryKey, rawQuery, start, end, step)
+			}))
 			return nil
 		})
 	}
 	_ = g.Wait()
 	sort.Slice(results.Results, func(i, j int) bool { return results.Results[i].QueryKey < results.Results[j].QueryKey })
 	return results, nil
+}
+
+// signozRunKeySafely runs one key's query on its own goroutine. A panic there would
+// otherwise take the whole process down; instead it is logged with its stack and
+// fails that key alone, so the other keys of the request still answer.
+func signozRunKeySafely(ctx *security.RequestContext, queryKey string, run func() QueryResult) (result QueryResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			ctx.GetLogger().Error("signoz: metrics query panicked", "query_key", queryKey, "panic", r, "stack", string(debug.Stack()))
+			result = signozQueryError(queryKey, fmt.Sprintf("internal error while running this query: %v", r))
+		}
+	}()
+	return run()
 }
 
 // signozQueryConcurrency bounds how many queries one request runs at once.

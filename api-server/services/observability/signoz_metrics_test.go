@@ -3,6 +3,8 @@ package observability
 import (
 	"testing"
 
+	"nudgebee/services/security"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,6 +95,17 @@ func TestSignozPromResults_NoSeriesAndErrors(t *testing.T) {
 
 	_, err = signozPromResults([]byte(`{"status":"error","error":"bad"}`))
 	assert.EqualError(t, err, "SigNoz rejected the query: bad")
+}
+
+func TestSignozRunKeySafely_PanicFailsOnlyThatKey(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
+	got := signozRunKeySafely(ctx, "cpu_usage", func() QueryResult { panic("boom") })
+	assert.Equal(t, "cpu_usage", got.QueryKey)
+	require.NotNil(t, got.Error)
+	assert.Contains(t, *got.Error, "boom")
+
+	ok := signozRunKeySafely(ctx, "memory_usage", func() QueryResult { return QueryResult{QueryKey: "memory_usage"} })
+	assert.Nil(t, ok.Error)
 }
 
 func TestSignozLatestSamples(t *testing.T) {
