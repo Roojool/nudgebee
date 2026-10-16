@@ -1,6 +1,7 @@
 package safehttp
 
 import (
+	"fmt"
 	"net"
 	"testing"
 )
@@ -158,5 +159,29 @@ func TestSetAllowedCIDRs_IPv6CannotReopenNAT64(t *testing.T) {
 	}
 	if IsRestrictedIP(net.ParseIP("fd00::1")) {
 		t.Error("fd00::1 (ULA) should be allowed by ::/0")
+	}
+}
+
+func TestSetAllowedCIDRs_BareIP(t *testing.T) {
+	t.Cleanup(func() { _, _ = SetAllowedCIDRs("") })
+	applied, err := SetAllowedCIDRs("10.28.92.7, fd00::5, ::ffff:10.40.1.5")
+	if err != nil {
+		t.Fatalf("SetAllowedCIDRs: %v", err)
+	}
+	want := []string{"10.28.92.7/32", "fd00::5/128", "10.40.1.5/32"}
+	if fmt.Sprint(applied) != fmt.Sprint(want) {
+		t.Fatalf("applied = %v, want %v", applied, want)
+	}
+	if IsRestrictedIP(net.ParseIP("10.28.92.7")) || IsRestrictedIP(net.ParseIP("fd00::5")) {
+		t.Error("listed bare IPs should be allowed")
+	}
+	if !IsRestrictedIP(net.ParseIP("10.28.92.8")) || !IsRestrictedIP(net.ParseIP("fd00::6")) {
+		t.Error("neighbouring IPs must stay blocked")
+	}
+	if _, err := SetAllowedCIDRs("169.254.169.254"); err != nil {
+		t.Fatalf("SetAllowedCIDRs: %v", err)
+	}
+	if !IsRestrictedIP(net.ParseIP("169.254.169.254")) {
+		t.Error("metadata must stay blocked even when listed as a bare IP")
 	}
 }

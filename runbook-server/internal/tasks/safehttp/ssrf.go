@@ -83,7 +83,7 @@ func IsRestrictedIP(ip net.IP) bool {
 var operatorAllowedNets atomic.Pointer[[]*net.IPNet]
 
 // SetAllowedCIDRs lets an install reach its own private ranges (e.g. on-prem
-// hosts on 10.x). Loopback, link-local (incl. cloud metadata), multicast and
+// hosts on 10.x); entries are CIDRs or bare IPs. Loopback, link-local (incl. cloud metadata), multicast and
 // unspecified addresses stay blocked even when a listed CIDR covers them.
 func SetAllowedCIDRs(raw string) ([]string, error) {
 	var nets []*net.IPNet
@@ -91,6 +91,17 @@ func SetAllowedCIDRs(raw string) ([]string, error) {
 	for _, entry := range strings.Split(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
+			continue
+		}
+		if ip := net.ParseIP(entry); ip != nil {
+			// A bare IP means exactly that host (/32 IPv4, /128 IPv6).
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				ip, bits = ip4, 32
+			}
+			ipNet := &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+			nets = append(nets, ipNet)
+			applied = append(applied, ipNet.String())
 			continue
 		}
 		_, ipNet, err := net.ParseCIDR(entry)
