@@ -25,6 +25,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -73,7 +75,54 @@ func IsRestrictedIP(ip net.IP) bool {
 	if testing.Testing() && ip.IsLoopback() {
 		return false
 	}
-	return isRestricted(ip)
+	return isRestricted(ip) && !isOperatorAllowed(ip)
+}
+
+// operatorAllowedNets holds the CIDRs an install's operator trusts (set once
+// at startup by SetAllowedCIDRs); empty means the default blocklist applies.
+var operatorAllowedNets atomic.Pointer[[]*net.IPNet]
+
+// SetAllowedCIDRs lets an install reach its own private ranges (e.g. on-prem
+// hosts on 10.x). Loopback, link-local (incl. cloud metadata), multicast and
+// unspecified addresses stay blocked even when a listed CIDR covers them.
+func SetAllowedCIDRs(raw string) ([]string, error) {
+	var nets []*net.IPNet
+	var applied []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed CIDR %q: %w", entry, err)
+		}
+		nets = append(nets, ipNet)
+		applied = append(applied, ipNet.String())
+	}
+	operatorAllowedNets.Store(&nets)
+	return applied, nil
+}
+
+func isOperatorAllowed(ip net.IP) bool {
+	nets := operatorAllowedNets.Load()
+	if nets == nil || len(*nets) == 0 {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	// NAT64 can wrap metadata/loopback; never allowlist it, whatever IPv6 CIDR is listed.
+	if ip16 := ip.To16(); ip16 != nil && ip.To4() == nil && (nat64WellKnown.Contains(ip16) || nat64LocalUse.Contains(ip16)) {
+		return false
+	}
+	for _, n := range *nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRestricted(ip net.IP) bool {

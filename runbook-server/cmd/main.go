@@ -16,6 +16,7 @@ import (
 	"nudgebee/runbook/internal/storage"
 	"nudgebee/runbook/internal/system"
 	"nudgebee/runbook/internal/tasks"
+	"nudgebee/runbook/internal/tasks/safehttp"
 	"nudgebee/runbook/internal/templatesource"
 	"nudgebee/runbook/internal/tracing"
 	"nudgebee/runbook/internal/workflow"
@@ -93,6 +94,15 @@ func main() {
 	logger := newLogger()
 	slog.SetDefault(logger)
 	config.LogSecurityWarnings()
+
+	allowedCIDRs, err := safehttp.SetAllowedCIDRs(config.Config.TaskAllowedCIDRs)
+	if err != nil {
+		slog.Error("main: invalid runbook_server_task_allowed_cidrs", "error", err)
+		return
+	}
+	if len(allowedCIDRs) > 0 {
+		slog.Warn("main: network tasks may reach operator-allowed private ranges", "cidrs", allowedCIDRs)
+	}
 
 	tp, mp, err := initOtel()
 	if err != nil {
