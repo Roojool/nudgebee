@@ -31,7 +31,7 @@ func (t *SslTask) Execute(taskCtx types.TaskContext, params map[string]any) (any
 	}
 
 	port := "443"
-	if p, ok := params["port"]; ok {
+	if p, ok := params["port"]; ok && p != nil && fmt.Sprintf("%v", p) != "" {
 		port = fmt.Sprintf("%v", p)
 	}
 

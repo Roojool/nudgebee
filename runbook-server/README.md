@@ -347,6 +347,7 @@ All config is read by Viper from environment variables (and an optional `.env` f
 | `llm_server_token_header` | `X-ACTION-TOKEN` | |
 | `nudgebee_encryption_key` | — | Symmetric key used to encrypt secret configs. |
 | `approval_signing_key` | — | Signs approval URLs sent for human-in-the-loop tasks. |
+| `runbook_server_task_allowed_cidrs` | — (none) | Comma-separated private CIDRs or bare IPs (e.g. `10.28.0.0/16,10.40.1.5`) that network, HTTP and MCP tasks may reach despite the SSRF guard — for on-prem installs checking their own internal hosts. Loopback, link-local (incl. cloud metadata `169.254.169.254`), multicast and unspecified addresses stay blocked. An invalid entry stops startup. Set it in Helm via `env.RUNBOOK_SERVER_TASK_ALLOWED_CIDRS`. |
 
 ### Optimization
 
