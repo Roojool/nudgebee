@@ -487,12 +487,14 @@ export class GroupLocators extends CommonLocators {
   // The members table pages at 10 rows, so on a fixture with more members a row a test adds lands on page 2 and every row locator misses it.
   // The pagination of the open modal is the last one in the DOM, because the modal is portalled after the page behind it.
   async showAllMemberRows(): Promise<void> {
-    // The members arrive after the modal opens, so wait for the table's own result line before looking for its page-size control.
-    // A group with no members renders no pagination, which is why a miss here is not an error.
     // Scoped to the modal: the Groups list behind it prints the same "Showing x-y of n results" line.
     const modal = this.page.locator(".MuiModal-root").last();
+    // The members load after the modal opens, so wait until the table shows a member (its username is an email) or its empty state.
+    const memberRow = this.selectedUsersTable.locator("tbody tr").filter({ hasText: "@" }).first();
+    await memberRow.or(modal.getByText("No Data Available")).first().waitFor({ state: "visible", timeout: 15000 });
+    // Pagination renders with the rows and only above 10 of them, so its absence now means there is a single page.
     const resultLine = modal.getByText(/Showing \d+-\d+ of \d+ results/).last();
-    if (!(await resultLine.waitFor({ state: "visible", timeout: 10000 }).then(() => true).catch(() => false))) return;
+    if (!(await resultLine.isVisible())) return;
     const rowsPerPage = modal.getByRole("button", { name: /^\d+$/ }).last();
     await rowsPerPage.click();
     await this.dropdownOption.filter({ hasText: /^100$/ }).first().click();
