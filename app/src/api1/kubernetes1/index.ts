@@ -1149,6 +1149,12 @@ const apiKubernetes1 = {
     if (data?.status) {
       query['status'] = { _eq: data['status'] };
     }
+    if (data?.start_date || data?.end_date) {
+      const and: any[] = query['_and'] || [];
+      if (data?.start_date) and.push({ starts_at: { _gte: data['start_date'] } });
+      if (data?.end_date) and.push({ starts_at: { _lte: data['end_date'] } });
+      query['_and'] = and;
+    }
 
     const response = await queryGraphQL(
       GET_INIDIVIDUAL_AGGREGATION_KEY_COUNT.replace('__WHERE__', gqlStringify(query)),
@@ -1968,6 +1974,9 @@ const apiKubernetes1 = {
     if (data?.nodeTypes?.length > 0) {
       request['node_types'] = data.nodeTypes;
     }
+    if (data?.specificTypes?.length > 0) {
+      request['specific_types'] = data.specificTypes;
+    }
     if (data?.attributes) {
       request['attributes'] = data?.attributes;
     }
@@ -1983,7 +1992,7 @@ const apiKubernetes1 = {
       throw err;
     }
   },
-  knowledgeGraphFilterOptions: async function (data?: { accountIds?: string[]; nodeTypes?: string[] }) {
+  knowledgeGraphFilterOptions: async function (data?: { accountIds?: string[]; nodeTypes?: string[]; specificTypes?: string[] }) {
     const KNOWLEDGE_GRAPH_FILTER_OPTIONS = `
     query KgFilterOptions {
       kg_get_filter_options(request: __WHERE__) {
@@ -2009,9 +2018,10 @@ const apiKubernetes1 = {
       }
     }
     `;
-    const request: { account_ids?: string[]; node_types?: string[] } = {};
+    const request: { account_ids?: string[]; node_types?: string[]; specific_types?: string[] } = {};
     if (data?.accountIds?.length) request.account_ids = data.accountIds;
     if (data?.nodeTypes?.length) request.node_types = data.nodeTypes;
+    if (data?.specificTypes?.length) request.specific_types = data.specificTypes;
     try {
       return await queryGraphQL(KNOWLEDGE_GRAPH_FILTER_OPTIONS.replace('__WHERE__', gqlStringify(request)), 'KgFilterOptions', {});
     } catch (err) {
