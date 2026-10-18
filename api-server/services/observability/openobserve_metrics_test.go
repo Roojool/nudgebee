@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"nudgebee/services/integrations"
+	"nudgebee/services/security"
 )
 
 func TestOpenObserveMetricSource_FetchMetricsQuery(t *testing.T) {
@@ -47,13 +50,18 @@ func TestOpenObserveMetricSource_FetchMetricsQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// In a real environment, configs are sourced from core.ListIntegrationConfigs.
-	// For testing, assuming network mock handles it without failure if we mock out the fetch.
-	// Since GetOpenObserveConfigs calls core.ListIntegrationConfigs which hits the DB,
-	// this test as-is would fail trying to query the real DB unless we provide a security context
-	// that mocks the DB, or if core supports an in-memory test store.
-	// For simplicity, we can just assert that the integration compiles, but we'll include this for completeness.
-	_ = server
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	patches.ApplyFunc(integrations.GetOpenObserveConfigs, func(_ *security.RequestContext, _ string) (integrations.OpenObserveConfig, error) {
+		return integrations.OpenObserveConfig{URL: server.URL, OrgID: "test-org", Username: "user", Password: "pass"}, nil
+	})
+	out, err := (&OpenObserveMetricSource{}).FetchMetricsQuery(mockRequestContext(), FetchMetricsRequest{AccountId: "test", Queries: map[string]string{"up": `up{job="prometheus"}`}})
+	require.NoError(t, err)
+	require.Len(t, out.Results, 1)
+	require.Nil(t, out.Results[0].Error)
+	require.Len(t, out.Results[0].Payload, 1)
+	// OSS metric responses use epoch milliseconds (#733); EE moved them to seconds.
+	assert.Equal(t, []int64{1699999999000}, out.Results[0].Payload[0].Timestamps)
 }
 
 func TestOpenObserveMetricSource_GetSupportedOperators(t *testing.T) {

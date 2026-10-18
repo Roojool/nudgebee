@@ -135,6 +135,14 @@ var traceSourceCanonicalCases = []struct {
 			"span_name", "status_code", "trace_id", "workload_name", "workload_namespace"},
 	},
 	{
+		name: "cubeapm advertises mapped fields", provider: "cubeapm", source: "user", declared: true,
+		expected: []string{"destination_workload_name", "http_status_code", "service_name", "span_name", "status_code", "trace_id", "workload_name", "workload_namespace"},
+	},
+	{
+		name: "splunk enterprise advertises mapped fields", provider: "splunk_enterprise", source: "user", declared: true,
+		expected: []string{"destination_workload_name", "http_status_code", "resource", "span_name", "status_code", "trace_id", "workload_name", "workload_namespace"},
+	},
+	{
 		name: "splunk advertises what its mapping declares", provider: "splunk_observability_platform", source: "user",
 		declared: true, expected: []string{"trace_id"},
 	},
@@ -180,7 +188,7 @@ func TestTraceSources_EveryRegisteredSourceIsPinned(t *testing.T) {
 		"datadog/user", "azure_app_insights/user", "chronosphere/user", "chronosphere/agent",
 		"otel_clickhouse/agent", "jaeger/agent", "jaeger/user", "newrelic/user",
 		"splunk_observability_platform/user", "ES/user", "dynatrace/user", "solarwinds/user",
-		"gcp/agent", "openobserve/user",
+		"gcp/agent", "openobserve/user", "cubeapm/user", "splunk_enterprise/user",
 	}
 	pinned := make(map[string]struct{}, len(traceSourceCanonicalCases))
 	for _, tc := range traceSourceCanonicalCases {

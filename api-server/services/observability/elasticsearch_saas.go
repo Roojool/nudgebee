@@ -631,6 +631,30 @@ func parseESSearchLogs(rawJSON string) ([]OutputLog, error) {
 			output = append(output, log)
 		}
 	}
+
+	// An empty log result carries no error, so the two very different causes —
+	// "the query matched nothing" and "the query matched but every hit was an
+	// unrecognised shape" — look identical at the UI. Separate them here:
+	// matched is the cluster's own hit count, returned is what came back under
+	// `size`, and parsed is what survived ParseSourceMap.
+	matched := esHitsTotal(rawJSON)
+	returned := len(searchResp.Hits.Hits)
+	switch {
+	case returned == 0:
+		slog.Info("ES log query: matched no documents",
+			"matched", matched, "returned", 0,
+			"hint", "index pattern or @timestamp window excludes everything; labels/label-values do not apply a time bound, which is why they still return data")
+	case len(output) == 0:
+		slog.Warn("ES log query: all hits dropped as unparseable",
+			"matched", matched, "returned", returned, "parsed", 0,
+			"sample_source_fields", esSourceFieldNames(searchResp.Hits.Hits[0].Source),
+			"hint", "ParseSourceMap needs a message at log|body|body.text|message and an @timestamp")
+	default:
+		slog.Info("ES log query: parsed hits",
+			"matched", matched, "returned", returned, "parsed", len(output),
+			"dropped", returned-len(output))
+	}
+
 	return output, nil
 }
 
@@ -764,7 +788,6 @@ func (e *ElasticSaasSource) QueryLogs(ctx *security.RequestContext, fetchLogRequ
 	default:
 		return nil, fmt.Errorf("unsupported query_type: %v", queryType)
 	}
-
 }
 
 // esHitsTotal best-effort reads hits.total from a raw _search response for

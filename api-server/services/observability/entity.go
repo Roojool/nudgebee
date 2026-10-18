@@ -90,8 +90,15 @@ type FetchLogLabelRequest struct {
 	// queryable fields. See FetchLogLabelsOrIndexFields — it used to mean the
 	// opposite.
 	FetchIndex bool `json:"fetch_index"`
-	// IntegrationConfigValues asks for fields from an unsaved integration
-	// configuration. The API handler authorizes and scopes this override.
+	// IntegrationConfigValues asks for the fields of the configuration DESCRIBED HERE
+	// rather than the one saved for this account, so the integration form can list a
+	// backend's fields before the integration exists. Optional: absent (the normal
+	// case, and every in-process caller) behaves exactly as before.
+	//
+	// PRIVILEGED. Honouring it makes the server connect to a caller-supplied endpoint,
+	// so handle_actions_logs accepts it only from a tenant admin — the same tier that
+	// may create an integration — and rejects it otherwise. It is transport only: the
+	// handler turns it into a scoped config override and never passes it further down.
 	IntegrationConfigValues []core.IntegrationConfigValue `json:"integration_config_values,omitempty"`
 	// IntegrationId names the saved integration being edited. Required when any of
 	// IntegrationConfigValues is flagged is_encrypted (a secret the user left masked):
@@ -436,25 +443,44 @@ type GetLabelMappingRequest struct {
 	// mirror becomes an additive change rather than a contract break.
 	ProviderType string `json:"provider_type" mapstructure:"provider_type"`
 	// Provider / ProviderSource pin the resolution to one integration. Empty means
-	// "the account's default log provider".
+	// "the account's default log provider" — the Advanced Settings form always sends
+	// them, so the panel describes the integration being edited rather than whichever
+	// one happens to be the default.
 	ProviderSource string `json:"provider_source" mapstructure:"provider_source"`
 	Provider       string `json:"provider" mapstructure:"provider"`
-	// DraftSet distinguishes an intentionally empty draft from no draft.
+	// DraftMappings carries the rows the operator has typed but not yet saved, and
+	// DraftSet says whether to use them at all. They are resolved server-side, on
+	// purpose: overlaying them in the browser would put a second copy of the merge in
+	// the frontend, which no Go test can see and which would drift from execution.
+	//
+	// DraftSet with no rows means "every row was deleted, so the integration tier
+	// contributes nothing" — different from omitting DraftSet, which reads what is
+	// saved.
 	DraftMappings map[string]string `json:"draft_mappings" mapstructure:"draft_mappings"`
 	DraftSet      bool              `json:"draft_set" mapstructure:"draft_set"`
 }
 
-// LabelMappingResponse describes the canonical-to-provider mapping currently in effect.
+// LabelMappingResponse is the response for observability_get_label_mapping: the
+// canonical → provider field mapping in effect for one account on one provider,
+// with the tier each value came from.
 type LabelMappingResponse struct {
-	AccountId        string              `json:"account_id"`
-	Provider         string              `json:"provider"`
-	ProviderSource   string              `json:"provider_source"`
-	ProviderType     string              `json:"provider_type"`
-	IntegrationSaved bool                `json:"integration_saved"`
-	DraftApplied     bool                `json:"draft_applied"`
-	TierOrder        []LabelMappingTier  `json:"tier_order"`
-	Fields           []LabelMappingField `json:"fields"`
-	Effective        map[string]string   `json:"effective"`
+	AccountId      string `json:"account_id"`
+	Provider       string `json:"provider"`
+	ProviderSource string `json:"provider_source"`
+	ProviderType   string `json:"provider_type"`
+	// IntegrationSaved is false while the integration is still being created. The
+	// lower tiers are resolved and returned anyway — "what am I inheriting?" is the
+	// useful answer at that point.
+	IntegrationSaved bool `json:"integration_saved"`
+	// DraftApplied reports whether the integration tier came from DraftMappings, so
+	// the UI can label those rows as not yet live.
+	DraftApplied bool `json:"draft_applied"`
+	// TierOrder is the precedence, lowest → highest. Shipped so the UI derives its
+	// column order instead of re-declaring it.
+	TierOrder []LabelMappingTier  `json:"tier_order"`
+	Fields    []LabelMappingField `json:"fields"`
+	// Effective is the same map queries are rewritten with.
+	Effective map[string]string `json:"effective"`
 }
 
 // ProviderCapabilityEntry is one flat entry in the list_provider_capabilities response.
@@ -517,8 +543,15 @@ type TracesQueryResult struct {
 	Result *RawTraceResult `json:"result,omitempty"`
 }
 
-// TracesResult is the internal result of a trace query. Suggestion explains an
-// empty result when ValidateRequest is enabled.
+// TracesResult is the internal result of a trace query: the spans, plus the actionable
+// diagnosis produced when ValidateRequest is set and the query came back empty. Mirrors
+// FetchLogsResult.
+//
+// Suggestion is populated alongside an EMPTY Traces and a nil error — a 200, not a 400 — so
+// the diagnosis reads as "successfully determined what to fix" rather than a request failure.
+// The HTTP layer only serializes the envelope when the caller asked for validation; every
+// other caller (the traces UI) keeps receiving the bare span array, exactly as the
+// IncludeRawResult path already varies its shape by request flag.
 type TracesResult struct {
 	Traces     []common.OpenTelemetryTrace `json:"traces"`
 	Suggestion string                      `json:"suggestion,omitempty"`
