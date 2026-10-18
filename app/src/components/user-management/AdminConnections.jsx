@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/router';
+import { ds } from '@utils/colors';
 import { Box, Typography } from '@mui/material';
 import { Skeleton } from '@ui/Skeleton';
 import { Button as DsButton } from '@ui/Button';
@@ -163,7 +164,7 @@ const SignalCell = ({ signal, agentActive, onAdd }) => {
           sx={{
             display: 'inline-flex',
             alignItems: 'center',
-            gap: '2px',
+            gap: ds.space[0],
             cursor: 'pointer',
             fontSize: 'var(--ds-text-small)',
             fontWeight: 'var(--ds-font-weight-medium)',
@@ -441,7 +442,7 @@ const AdminConnections = () => {
             role='tablist'
             sx={{
               display: 'inline-flex',
-              gap: '2px',
+              gap: ds.space[0],
               p: '3px',
               backgroundColor: 'var(--ds-background-200)',
               border: '1px solid var(--ds-gray-200)',

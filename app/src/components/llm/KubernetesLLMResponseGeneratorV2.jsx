@@ -1722,7 +1722,7 @@ const KubernetesLLMResponseGenerator = ({
                     />
                   </Box>
                 </Box>
-                <Divider orientation='vertical' sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5), my: 1 }} />
+                <Divider orientation='vertical' sx={{ height: ds.space.mul(1, 7), mx: ds.space.mul(0, 5), my: ds.space[2] }} />
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
                   {selectedConversation?.id && (
                     <Button

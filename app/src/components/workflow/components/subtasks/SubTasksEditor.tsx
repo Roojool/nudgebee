@@ -346,7 +346,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
                         display: 'flex',
                         alignItems: 'center',
                         gap: 1,
-                        px: 1.5,
+                        px: ds.space[3],
                         py: 0.75,
                         position: 'sticky',
                         top: 0,
@@ -389,8 +389,8 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
                 );
               }}
               renderOption={(props, option) => (
-                <li {...props} key={option.name} style={{ ...(props as any).style, paddingTop: 4, paddingBottom: 4 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
+                <li {...props} key={option.name} style={{ ...(props as any).style, paddingTop: ds.space[1], paddingBottom: ds.space[1] }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[3], minWidth: 0 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, flexShrink: 0 }}>
                       {option.icon && renderCategoryOrTaskIcon(option.icon, option.label, 20)}
                     </Box>
@@ -426,7 +426,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
                     InputProps={{
                       ...params.InputProps,
                       startAdornment: selectedIcon ? (
-                        <InputAdornment position='start' sx={{ ml: 0.5, mr: 0 }}>
+                        <InputAdornment position='start' sx={{ ml: ds.space[1], mr: 0 }}>
                           <Box
                             data-testid={`${testIdPrefix}-subtask-${index}-selected-action-icon`}
                             sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20, flexShrink: 0 }}
@@ -488,7 +488,7 @@ const SubTasksEditor: React.FC<SubTasksEditorProps> = ({
               </span>
             ),
             meta: (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }} onClick={(e) => e.stopPropagation()}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: ds.space[1] }} onClick={(e) => e.stopPropagation()}>
                 {errorCount > 0 && <Label tone='critical'>{`${errorCount} ${errorCount === 1 ? 'issue' : 'issues'}`}</Label>}
                 {!viewOnlyMode && (
                   <IconButton

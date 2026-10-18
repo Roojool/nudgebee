@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import PropTypes from 'prop-types';
+import { ds } from '@utils/colors';
 import { Box, Typography, IconButton } from '@mui/material';
 import { ProgressLinear } from '@ui/ProgressLinear';
 import Label from '@ui/Label';
@@ -376,7 +377,7 @@ export default function WatchesTab({ conversationId }) {
   }
 
   return (
-    <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }} data-testid='watches-tab'>
+    <Box sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: ds.space[2] }} data-testid='watches-tab'>
       {/* header strip with active-poll progress hint */}
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <Typography className='nb-text-h3-widget'>Watches ({watches.length})</Typography>
