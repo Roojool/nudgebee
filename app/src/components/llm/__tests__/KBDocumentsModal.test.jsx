@@ -5,7 +5,7 @@ import apiKnowledgeBase from '@api1/knowledge-base';
 
 jest.mock('@api1/knowledge-base', () => ({
   __esModule: true,
-  default: { getKBDocuments: jest.fn(), getKBDocument: jest.fn(), setKBDocumentCategory: jest.fn(), retriggerKB: jest.fn() },
+  default: { getKBDocuments: jest.fn(), getKBDocument: jest.fn(), retriggerKB: jest.fn(), setKBDocumentCategory: jest.fn() },
 }));
 
 const renderModal = (props = {}) =>
@@ -22,22 +22,8 @@ beforeEach(() => {
   apiKnowledgeBase.getKBDocuments.mockResolvedValue({
     data: {
       items: [
-        {
-          id: 'p1',
-          title: 'Runbook: restart auth-svc',
-          url: 'https://wiki.example.com/p1',
-          document_key: 'integration-a_knowledge_base|101',
-          note_category: '',
-        },
-        {
-          id: 'p2',
-          title: 'Plain note',
-          url: 'https://wiki.example.com/p2',
-          document_key: 'integration-a_knowledge_base|102',
-          note_category: 'fact',
-        },
-        // Neither a source id nor a URL: nothing stable to key a mark on.
-        { id: 'p4', title: 'Loose page', url: null, document_key: '', note_category: '' },
+        { id: 'p1', title: 'Runbook: restart auth-svc', url: 'https://wiki.example.com/p1' },
+        { id: 'p2', title: 'Plain note', url: null },
       ],
       nextOffset: 'p3',
     },
@@ -49,7 +35,7 @@ describe('KBDocumentsModal', () => {
   it('lists document titles, linking only those with a url', async () => {
     renderModal();
     expect(await screen.findByRole('link', { name: /Runbook: restart auth-svc/ })).toHaveAttribute('href', 'https://wiki.example.com/p1');
-    expect(screen.getByText('Loose page').closest('a')).toBeNull();
+    expect(screen.getByText('Plain note').closest('a')).toBeNull();
     expect(apiKnowledgeBase.getKBDocuments).toHaveBeenCalledWith('acct-1', 'kb-1');
   });
 
@@ -336,7 +322,7 @@ describe('KBDocumentsModal', () => {
     renderModal();
     await screen.findByText('Plain note');
     apiKnowledgeBase.getKBDocuments.mockResolvedValueOnce({
-      data: { items: [{ id: 'p3', title: 'Third page', url: null, document_key: 'Third page', note_category: '' }], nextOffset: null },
+      data: { items: [{ id: 'p3', title: 'Third page', url: null }], nextOffset: null },
       errors: [],
     });
 
@@ -359,13 +345,45 @@ describe('KBDocumentsModal', () => {
     expect(screen.getByTestId('kb-documents-load-more-btn')).not.toHaveAttribute('aria-busy');
   });
 
+  it('shows the backend error when listing fails', async () => {
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({ data: null, errors: [{ message: 'kb: search index service not configured' }] });
+    renderModal();
+    expect(await screen.findByText('kb: search index service not configured')).toBeInTheDocument();
+  });
+});
+
+describe('KBDocumentsModal Fact/SOP marks', () => {
+  const RUNBOOK_KEY = 'integration-a_knowledge_base|101';
+  const GUIDE_KEY = 'integration-a_knowledge_base|102';
+
+  beforeEach(() => {
+    apiKnowledgeBase.getKBDocuments.mockResolvedValue({
+      data: {
+        items: [
+          { id: 'p1', title: 'Runbook: restart auth-svc', url: 'https://wiki.example.com/p1', document_key: RUNBOOK_KEY, note_category: '' },
+          { id: 'p2', title: 'Escalation guide', url: 'https://wiki.example.com/p2', document_key: GUIDE_KEY, note_category: 'fact' },
+          // Neither a source id nor a URL: nothing stable to key a mark on.
+          { id: 'p3', title: 'Loose page', url: null, document_key: '', note_category: '' },
+        ],
+        nextOffset: null,
+      },
+      errors: [],
+    });
+  });
+
   it('shows each document its stored mark, and none when it has no mark', async () => {
     renderModal({ canEdit: true });
-    const marked = await screen.findByRole('group', { name: 'Mark Plain note as a fact or an SOP' });
+    const marked = await screen.findByRole('group', { name: 'Mark Escalation guide as a fact or an SOP' });
     expect(within(marked).getByRole('radio', { name: 'Fact' })).toHaveAttribute('aria-checked', 'true');
 
     const unmarked = screen.getByRole('group', { name: 'Mark Runbook: restart auth-svc as a fact or an SOP' });
     expect(within(unmarked).getByRole('radio', { name: 'Default' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('offers no control on a document that cannot be marked', async () => {
+    renderModal({ canEdit: true });
+    await screen.findByText('Loose page');
+    expect(screen.queryByRole('group', { name: 'Mark Loose page as a fact or an SOP' })).not.toBeInTheDocument();
   });
 
   it('marks a document as an SOP, keyed on document_key rather than the point id', async () => {
@@ -376,7 +394,7 @@ describe('KBDocumentsModal', () => {
     const group = await screen.findByRole('group', { name: 'Mark Runbook: restart auth-svc as a fact or an SOP' });
     await user.click(within(group).getByRole('radio', { name: 'SOP' }));
 
-    expect(apiKnowledgeBase.setKBDocumentCategory).toHaveBeenCalledWith('acct-1', 'kb-1', 'integration-a_knowledge_base|101', 'sop');
+    expect(apiKnowledgeBase.setKBDocumentCategory).toHaveBeenCalledWith('acct-1', 'kb-1', RUNBOOK_KEY, 'sop');
     await waitFor(() => expect(within(group).getByRole('radio', { name: 'SOP' })).toHaveAttribute('aria-checked', 'true'));
   });
 
@@ -385,10 +403,10 @@ describe('KBDocumentsModal', () => {
     apiKnowledgeBase.setKBDocumentCategory.mockResolvedValue({ data: { status: 'ok' }, errors: [] });
     renderModal({ canEdit: true });
 
-    const group = await screen.findByRole('group', { name: 'Mark Plain note as a fact or an SOP' });
+    const group = await screen.findByRole('group', { name: 'Mark Escalation guide as a fact or an SOP' });
     await user.click(within(group).getByRole('radio', { name: 'Default' }));
 
-    expect(apiKnowledgeBase.setKBDocumentCategory).toHaveBeenCalledWith('acct-1', 'kb-1', 'integration-a_knowledge_base|102', '');
+    expect(apiKnowledgeBase.setKBDocumentCategory).toHaveBeenCalledWith('acct-1', 'kb-1', GUIDE_KEY, '');
   });
 
   it('puts the control back and reports the error when the write fails', async () => {
@@ -396,7 +414,7 @@ describe('KBDocumentsModal', () => {
     apiKnowledgeBase.setKBDocumentCategory.mockResolvedValue({ data: null, errors: [{ message: 'kb: permission denied' }] });
     renderModal({ canEdit: true });
 
-    const group = await screen.findByRole('group', { name: 'Mark Plain note as a fact or an SOP' });
+    const group = await screen.findByRole('group', { name: 'Mark Escalation guide as a fact or an SOP' });
     await user.click(within(group).getByRole('radio', { name: 'SOP' }));
 
     expect(await screen.findByText('kb: permission denied')).toBeInTheDocument();
@@ -405,22 +423,10 @@ describe('KBDocumentsModal', () => {
 
   it('shows a read-only viewer the mark without a way to change it', async () => {
     renderModal();
-    const row = (await screen.findByText('Plain note')).closest('[data-testid="kb-document-row"]');
+    const row = (await screen.findByText('Escalation guide')).closest('[data-testid="kb-document-row"]');
     expect(within(row).getByText('Fact')).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: /as a fact or an SOP/ })).not.toBeInTheDocument();
     // The label alone says nothing about what it does, so the legend is shown too.
     expect(screen.getByTestId('kb-document-category-legend')).toHaveTextContent('Select an account to change');
-  });
-
-  it('offers no control on a document that cannot be marked', async () => {
-    renderModal({ canEdit: true });
-    await screen.findByText('Loose page');
-    expect(screen.queryByRole('group', { name: 'Mark Loose page as a fact or an SOP' })).not.toBeInTheDocument();
-  });
-
-  it('shows the backend error when listing fails', async () => {
-    apiKnowledgeBase.getKBDocuments.mockResolvedValue({ data: null, errors: [{ message: 'kb: search index service not configured' }] });
-    renderModal();
-    expect(await screen.findByText('kb: search index service not configured')).toBeInTheDocument();
   });
 });

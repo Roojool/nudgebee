@@ -770,8 +770,6 @@ const apiKnowledgeBase = {
             id
             title
             url
-            document_key
-            note_category
             content
             content_source
             content_type

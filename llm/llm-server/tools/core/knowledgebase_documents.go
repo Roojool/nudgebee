@@ -47,7 +47,7 @@ type KBDocument struct {
 	// DocumentKey). Empty when the document cannot be marked individually.
 	DocumentKey string `json:"document_key"`
 	// NoteCategory is the mark a user put on this document: "sop", "fact", or
-	// empty when it carries none.
+	// "" when it carries none and keeps its knowledge base's treatment.
 	NoteCategory string `json:"note_category"`
 }
 
@@ -70,15 +70,6 @@ type ragKBDocument struct {
 	ContentSource *string `json:"content_source"`
 	ContentType   *string `json:"content_type"`
 	SourceId      *string `json:"source_id"`
-}
-
-// ragDocumentKey is DocumentKey for a document rag-server listed or served.
-func ragDocumentKey(collection string, doc ragKBDocument) string {
-	var sourceID string
-	if doc.SourceId != nil {
-		sourceID = *doc.SourceId
-	}
-	return DocumentKey(collection, sourceID, doc.Url)
 }
 
 // kbDocumentsCollection authorizes read access and resolves the KB's name and
@@ -285,8 +276,8 @@ func ListKBDocuments(sc *security.RequestContext, accountId, kbId string, limit 
 			keys = append(keys, key)
 		}
 	}
-	// One lookup for the page, not one per document. A failure costs the marks,
-	// not the listing: the documents are still worth showing without them.
+	// A failed read shows the page unmarked rather than failing the list: the
+	// documents are still worth seeing, and the marks still apply at retrieval.
 	categories, err := kbDocumentCategories(sc.GetContext(), accountId, keys)
 	if err != nil {
 		sc.GetLogger().Warn("kb: unable to read document categories", "error", err, "kb_id", kbId)
@@ -513,4 +504,13 @@ func GetKBDocument(sc *security.RequestContext, accountId, kbId, documentId stri
 		DocumentKey:   key,
 		NoteCategory:  category,
 	}, nil
+}
+
+// ragDocumentKey is DocumentKey for a document rag-server listed or served.
+func ragDocumentKey(collection string, doc ragKBDocument) string {
+	var sourceID string
+	if doc.SourceId != nil {
+		sourceID = *doc.SourceId
+	}
+	return DocumentKey(collection, sourceID, doc.Url)
 }

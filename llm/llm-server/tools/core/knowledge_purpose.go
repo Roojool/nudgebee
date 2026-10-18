@@ -33,11 +33,10 @@ func KnowledgePurposeGuidance(purpose KnowledgeContentPurpose) string {
 }
 
 func KnowledgeDocumentPurpose(doc RAGSearchResult) KnowledgeContentPurpose {
-	// A category a user put on this exact document wins over its knowledge
-	// base's default, whatever kind of knowledge base that is: it is an
-	// explicit per-document statement, and only ResolveDocumentCategories
-	// writes this key, from the marks table. That is what makes a marked
-	// Confluence or ServiceNow page a procedure when a scraped one is not.
+	// A category a user put on this exact document decides its treatment. Only
+	// ResolveDocumentCategories writes this key, from the marks table, and only
+	// on integration documents: that is what makes a marked Confluence or
+	// ServiceNow page a procedure when a scraped one is not.
 	switch category, _ := doc.Metadata[DocumentNoteCategoryKey].(string); category {
 	case KBNoteCategorySOP:
 		return KnowledgePurposeProcedure

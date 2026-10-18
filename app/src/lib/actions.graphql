@@ -5365,6 +5365,7 @@ input kg_get_edge_input {
 input kg_get_filter_options_input {
   account_ids: [String]
   node_types: [String]
+  specific_types: [String]
   labels: jsonb
   label_keys: [String]
   attributes: jsonb
@@ -5377,6 +5378,7 @@ input kg_get_complete_graph_input {
   sources: [String]
   account_ids: [String]
   node_types: [String]
+  specific_types: [String]
   labels: jsonb
   attributes: jsonb
   node_ids: [String]
@@ -9803,11 +9805,11 @@ type KBDocument {
   id: String!
   title: String!
   url: String
-  document_key: String!
-  note_category: String
   content: String
   content_source: String
   content_type: String
+  document_key: String
+  note_category: String
 }
 
 input UpsertKBDocumentCategoryRequest {

@@ -454,24 +454,6 @@ def _document_content(payload: dict) -> str:
     return content if isinstance(content, str) else ""
 
 
-# The metadata key each scrape stamps its document id on. A new scrape adds its key
-# here. Public because search results must carry the same keys
-# (controllers/knowledge_document.py): llm-server keys a document's Fact/SOP mark on them.
-SOURCE_ID_KEYS = ("source_id", "page_id", "sys_id")
-
-
-def _source_identifier(metadata: dict) -> str | None:
-    """The id the scrape stamped on this document, or None when it stamped none."""
-    for key in SOURCE_ID_KEYS:
-        value = metadata.get(key)
-        # 0 is a legitimate id; "" and None are not. Truthiness alone would drop the
-        # first, and `is not None` alone would keep the second as a blank id.
-        if value is None or value == "":
-            continue
-        return str(value)
-    return None
-
-
 # Chunks read from Qdrant per scroll call, and the most chunks one listing
 # request reads before handing back a cursor (bounds request time on
 # collections with many chunks per document).

@@ -63,7 +63,7 @@ PdfDocument.propTypes = { base64: PropTypes.string.isRequired, title: PropTypes.
 
 const errorMessage = (response, fallback) => response?.errors?.[0]?.message || fallback;
 
-// Fold a freshly loaded page's marks into what is already held. A key the user
+// Records each document's mark from a freshly loaded page. A mark the user
 // has just changed is kept: the page may have been fetched before that write
 // landed, and the server's older value would flip the control back.
 const seedCategories = (current, items) => {
@@ -77,13 +77,13 @@ const seedCategories = (current, items) => {
 };
 
 // 'none' is the absence of a mark, not a stored value: ToggleGroup in single
-// mode needs a chosen option, and the API takes '' to clear.
-// It is labelled "Default" because that is what it does — the document gets its
-// knowledge base's treatment — and "None" read as "agents ignore it".
+// mode needs a chosen option, and the API takes '' to clear. It is labelled
+// "Default" because that is what it does — the document gets its knowledge
+// base's treatment — and "None" read as "agents ignore it".
 //
-// No per-option tooltips: MUI's Tooltip labels its child with the tooltip text,
-// which would replace "SOP" with a sentence as the button's accessible name.
-// The explanation is given once above the list instead.
+// No per-option tooltips: ToggleGroup renders a tooltip as the button's
+// aria-label, which would replace "SOP" with a sentence as the button's
+// accessible name. The explanation is given once above the list instead.
 const CATEGORY_OPTIONS = [
   { value: 'none', label: 'Default' },
   { value: 'fact', label: 'Fact' },
@@ -453,6 +453,7 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
                 {!canEdit && <li>Select an account to change how a document is marked.</li>}
               </Box>
             )}
+            {categoryError && <Banner tone='critical' message={categoryError} />}
             {documents.map((doc) => {
               const expanded = expandedId === doc.id;
               const documentKey = doc.document_key || '';
@@ -504,7 +505,6 @@ const KBDocumentsModal = ({ open, onClose, accountId, kbId, kbName, canEdit }) =
                 </Box>
               );
             })}
-            {categoryError && <Banner tone='critical' message={categoryError} />}
             {error && <Banner tone='critical' message={error} />}
             {nextOffset && (
               <Box sx={{ display: 'flex', justifyContent: 'center', mt: ds.space[3] }}>
@@ -526,8 +526,8 @@ KBDocumentsModal.propTypes = {
   accountId: PropTypes.string,
   kbId: PropTypes.string,
   kbName: PropTypes.string,
-  // Marks change how agents treat a document, so they follow the tab's write
-  // access; a read-only viewer sees the mark but cannot set one.
+  // Whether the viewer may change a document's Fact/SOP mark. Read-only
+  // viewers see the mark as a label instead of a control.
   canEdit: PropTypes.bool,
 };
 
