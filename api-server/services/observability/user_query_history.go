@@ -19,11 +19,11 @@ const (
 	metricsQueryModulePrefix = "metrics_query_"
 )
 
-// userHistoryModules mirrors the module_check CHECK constraint (migration V875).
+// userHistoryModules mirrors the module_check CHECK constraint (migration V1878).
 //
 // The constraint is an allowlist and the history write is fire-and-forget, so a
 // provider that ships without a migration would fail its INSERT silently.
-// Checking here first turns that into a logged skip. Keep in sync with V875 —
+// Checking here first turns that into a logged skip. Keep in sync with V1878 —
 // TestUserHistoryModulesCoverAllProviders walks the provider switches and fails
 // if one has no entry here.
 var userHistoryModules = map[string]struct{}{
@@ -53,6 +53,10 @@ var userHistoryModules = map[string]struct{}{
 	"metrics_query_es":                            {},
 	"metrics_query_dynatrace":                     {},
 	"metrics_query_solarwinds":                    {},
+	"log_query_cubeapm":                           {},
+	"log_query_splunk_enterprise":                 {},
+	"metrics_query_cubeapm":                       {},
+	"metrics_query_splunk_enterprise":             {},
 	// Frontend-only labels sniffed from the Prometheus URL (QueryMetrics.tsx),
 	// listed in both spellings by KubernetesCreateAlert.tsx. Neither resolves in
 	// getMetricsSource, so these rows are FAILED-only by construction.
