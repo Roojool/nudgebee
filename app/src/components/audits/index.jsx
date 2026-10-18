@@ -98,7 +98,7 @@ const DiffTab = (option, query, _row) => {
   const prevStateString = formatStateForDiff(query.data.event_prev_state);
 
   return (
-    <WidgetCard sx={{ mt: 0 }}>
+    <Card sx={{ padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       <CodeMirrorDiffViewer
         originalCode={prevStateString}
         newCode={currentStateString}
@@ -115,7 +115,7 @@ const DiffTab = (option, query, _row) => {
           </>
         }
       />
-    </WidgetCard>
+    </Card>
   );
 };
 

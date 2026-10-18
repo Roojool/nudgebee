@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import CustomTable2 from '@shared/tables/CustomTable2';
 import { Box, Typography, Grid } from '@mui/material';
 import { Card } from '@ui/Card';
-import WidgetCard from '@ui/WidgetCard';
 import KubernetesPodsTable from '@components/k8s/details/KubernetesPods';
 import { useRouter } from 'next/router';
 import LineChart from '@shared/charts/LineCharts';
@@ -1043,7 +1042,7 @@ const KubernetesLogDetails = ({ query }) => {
     });
 
   return (
-    <WidgetCard>
+    <Card sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       {labelEntries.length > 0 ? (
         <Grid container sx={{ backgroundColor: 'white' }}>
           {labelEntries.map((entry) => renderLabelRow(entry.key, entry.value, entry.index))}
@@ -1060,7 +1059,7 @@ const KubernetesLogDetails = ({ query }) => {
       ) : (
         <Typography>No Data</Typography>
       )}
-    </WidgetCard>
+    </Card>
   );
 };
 KubernetesLogDetails.propTypes = {
@@ -1107,7 +1106,7 @@ const KubernetesLogPatternDetails = ({ query }) => {
   }
 
   return (
-    <WidgetCard>
+    <Card sx={{ mt: 'var(--ds-space-5)', padding: 'var(--ds-space-4) var(--ds-space-5)' }}>
       {sampleCard}
       <Box sx={{ mt: 'var(--ds-space-3)' }}>
         <BarChart
@@ -1117,7 +1116,7 @@ const KubernetesLogPatternDetails = ({ query }) => {
           style={{ width: '100%' }}
         />
       </Box>
-    </WidgetCard>
+    </Card>
   );
 };
 KubernetesLogPatternDetails.propTypes = {
