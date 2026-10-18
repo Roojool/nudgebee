@@ -1,4 +1,4 @@
-h1:vy0SdaJbG7KUgdKbSrp+yixRKo4hfELh2YH3fpFSp8Y=
+h1:eA9NLqEE/If1P8M9/091zgBIZT71c+A6t8e7hojU7gk=
 1665080411172_V0.up.sql h1:u69osJjPb3FctiXmgk+fpiFMTDQTnGpqDRH45K0pUdc=
 1665211266851_V1.up.sql h1:AGUExFXk9BDw9lpD7Cu1Bu5wn3mQA/Ul+5/jny32xYc=
 1665218608952_V2.up.sql h1:dWrFXuJESbVByq7iXDF7tFbOc1bgbwgCc0Fd8QETHwo=
@@ -1175,4 +1175,6 @@ h1:vy0SdaJbG7KUgdKbSrp+yixRKo4hfELh2YH3fpFSp8Y=
 1790242307490_V963_create_llm_kb_document_categories.up.sql h1:lPzoXJq6Di3+O0H7vG8nSQlU7jveG8x2qbRU0cXAhx8=
 1790260843691_V1865_add_egressfilter_entropy_enabled.up.sql h1:8GBOJyCkTvH8XXm9VNfOSVPMSmihGDC04QtgivQtqQ4=
 1790312833401_V1866_add_notification_rule_event_types.up.sql h1:XObbhfe+/9om9L84vSzaMoxAOglFE6eBREnzIE8vj0I=
-1791007368015_V1830_allow_null_ids_in_llm_conversation_token_usage.up.sql h1:S2O+YECc+W/ORVB2ORpgnqdEsaExpK1ICY02FymrXxU=
+1790320717083_V1867_add_user_auths_scopes.up.sql h1:oz0F09cEw/+NDIFYpmv6nA47OQ6IJyufhfKQEIOndis=
+1790324857584_V1868_add_notification_rule_accounts.up.sql h1:EaUdTO90DBxI9IVPOaqubk39ozxbOLdAWGcT5adS8lE=
+1791007368015_V1830_allow_null_ids_in_llm_conversation_token_usage.up.sql h1:Vv7GCl8IVv5/6i4dLK6BYyFiLNGFXPh1CeUH231rpXQ=
