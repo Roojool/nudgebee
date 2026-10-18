@@ -1449,12 +1449,16 @@ class MessageService:
         if len(bindings) == 1:
             return bindings[0].name
         by_id = {binding.id: binding.name for binding in bindings}
+        # Deterministic pick if the single-default invariant is ever violated
+        # (e.g. a partial set-default write left two rows flagged).
         cfg = await session.execute(
-            select(IntegrationConfigValue).where(
+            select(IntegrationConfigValue)
+            .where(
                 IntegrationConfigValue.integration_id.in_(list(by_id.keys())),
                 IntegrationConfigValue.name == "is_default",
                 IntegrationConfigValue.value == "true",
             )
+            .order_by(IntegrationConfigValue.integration_id)
         )
         row = cfg.scalars().first()
         return by_id.get(row.integration_id) if row else None
