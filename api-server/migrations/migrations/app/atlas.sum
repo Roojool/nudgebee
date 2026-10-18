@@ -1,4 +1,4 @@
-h1:k9cThLKyhjiVCW4Abukx/c5PojXzgmHl8JMd71ndpSc=
+h1:HjUJHHAF3YW8/OW7bbROy5GDBBD+Z7nIaCz5GC5GQOA=
 1665080411172_V0.up.sql h1:u69osJjPb3FctiXmgk+fpiFMTDQTnGpqDRH45K0pUdc=
 1665211266851_V1.up.sql h1:AGUExFXk9BDw9lpD7Cu1Bu5wn3mQA/Ul+5/jny32xYc=
 1665218608952_V2.up.sql h1:dWrFXuJESbVByq7iXDF7tFbOc1bgbwgCc0Fd8QETHwo=
@@ -1185,3 +1185,4 @@ h1:k9cThLKyhjiVCW4Abukx/c5PojXzgmHl8JMd71ndpSc=
 1790410144402_V1874_add_notification_rule_sources.up.sql h1:n1284qJShG/0Ztouw3RqtLLVxZw/JV0WYFGusbSTTws=
 1791007368015_V1830_allow_null_ids_in_llm_conversation_token_usage.up.sql h1:Vn2ggPPg/9J56gj4MaVcVeIVUHmFAIitoni09pB/V2Y=
 1791380953570_V1875_rekey_elasticsearch_webhook_events_to_rule_name.up.sql h1:iDeeX0xuw29oI4HTMw8mCpYnzzYbBQNWiZu3RjRuoaU=
+1791454776046_V1876_backfill_es_trace_schema.up.sql h1:OfitjkzlckHhHsG4DzAUIE2Say4nKkFKjnrWMWOV2WI=
