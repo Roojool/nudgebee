@@ -849,7 +849,7 @@ export default function KubernetesEventsSummary({ accountId }) {
             <Box display={'grid'} gridTemplateColumns={'1fr 1fr'} gap={ds.space[3]} mt={ds.space[3]}>
               <Box>
                 <TextWithBorder
-                  value='API Errors - By Count'
+                  value='By Count'
                   borderColor={ds.yellow[500]}
                   borderWidth='2px'
                   sx={{
@@ -877,7 +877,7 @@ export default function KubernetesEventsSummary({ accountId }) {
               </Box>
               <Box>
                 <TextWithBorder
-                  value='API Errors - Most Recent'
+                  value='Most Recent'
                   borderColor={ds.yellow[500]}
                   borderWidth='2px'
                   sx={{

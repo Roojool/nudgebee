@@ -1127,7 +1127,7 @@ const PanelEditorModal: React.FC<Props> = ({ open, panel, isEdit, accountOptions
                                   tone='ghost'
                                   composition='icon-only'
                                   aria-label={`Remove threshold ${i + 1}`}
-                                  icon={<DeleteOutlineIcon sx={{ fontSize: 18 }} />}
+                                  icon={<SafeIcon src={DeleteIconRed} alt='delete' width={16} height={16} />}
                                   onClick={() => patchThresholds(thresholds.filter((_, j) => j !== i))}
                                   id={`remove-threshold-${i}`}
                                 />

@@ -2049,7 +2049,7 @@ const IntegrationDynamicFormModal = ({
     cubeapm_webhook: {
       endpoint: 'cubeapm',
       message:
-        'Add the following URL as a Webhook notification channel in CubeAPM. Leave the payload template unset — CubeAPM’s default body is already Alertmanager-compatible, which is what NudgeBee parses',
+        'Add the following URL as a Webhook notification channel in CubeAPM. Leave the payload template unset — CubeAPM’s default body is already Alertmanager-compatible, which is the expected format',
     },
   };
 

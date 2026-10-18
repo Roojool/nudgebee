@@ -782,7 +782,7 @@ const ListIntegrations = ({ integrationName }) => {
     </DsButton>
   ) : undefined;
 
-  // The providers whose header carries a "how do I get these values" guide.
+  // Providers whose header carries a "how do I get these values" guide.
   const setupGuideIntegration =
     integrationName === 'splunk_observability_platform'
       ? 'Splunk Observability Cloud'
@@ -965,7 +965,7 @@ const ListIntegrations = ({ integrationName }) => {
               Step 1: Find your management endpoint
             </Typography>
             <Typography variant='body2' component='div'>
-              Nudgebee talks to the management port, not the web UI.
+              {getBrandTitle()} talks to the management port, not the web UI.
               <ul style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
                   Use <code>https://&lt;host&gt;:8089</code> — port <code>8089</code>, not <code>8000</code>
@@ -979,7 +979,7 @@ const ListIntegrations = ({ integrationName }) => {
               Step 2: Create a least-privilege role and user
             </Typography>
             <Typography variant='body2' component='div'>
-              Nudgebee only ever reads, so give it a role that can only read.
+              {getBrandTitle()} only ever reads, so give it a role that can only read.
               <ol style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
                   Go to <strong>Settings → Roles</strong> and create a role with the <code>search</code> capability only
@@ -1010,8 +1010,8 @@ const ListIntegrations = ({ integrationName }) => {
               Step 4: Name the indexes
             </Typography>
             <Typography variant='body2' component='div'>
-              Every search Nudgebee runs is pinned to one of these indexes. If you ingest with the Splunk Distribution of the OpenTelemetry Collector,
-              they are the indexes set as <code>splunkPlatform.index</code>, <code>splunkPlatform.metricsIndex</code> and{' '}
+              Every search {getBrandTitle()} runs is pinned to one of these indexes. If you ingest with the Splunk Distribution of the OpenTelemetry
+              Collector, they are the indexes set as <code>splunkPlatform.index</code>, <code>splunkPlatform.metricsIndex</code> and{' '}
               <code>splunkPlatform.tracesIndex</code> in that chart.
               <ul style={{ paddingLeft: ds.space[4], marginTop: ds.space[1] }}>
                 <li>
@@ -1030,7 +1030,7 @@ const ListIntegrations = ({ integrationName }) => {
               index with nothing in it. Whichever indexes you name must also be in the role&apos;s allowed list from Step 2.
             </Typography>
             <Typography variant='body2' sx={{ color: 'text.secondary' }}>
-              The Splunk Operator for Kubernetes issues a self-signed certificate by default. If Nudgebee cannot verify it, enable{' '}
+              The Splunk Operator for Kubernetes issues a self-signed certificate by default. If {getBrandTitle()} cannot verify it, enable{' '}
               <strong>Skip TLS certificate verification</strong> in the form above.
             </Typography>
           </Stack>
