@@ -763,20 +763,6 @@ func TestBuildLogIntentMessages_AccountPromptPropagation_DuplicateGuard(t *testi
 	})
 }
 
-// TestDefaultProviderLogFields pins the fallback field vocabulary advertised
-// to the query-generator when backend label discovery fails: Signoz stores
-// logs under OTel attribute names — the generic `_body`/`namespace`/`pod` set
-// matches no Signoz attribute and every query silently returns zero rows.
-func TestDefaultProviderLogFields_DuplicateGuard(t *testing.T) {
-	signozFields := defaultProviderLogFields("signoz")
-	assert.ElementsMatch(t,
-		[]string{"body", "service.name", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "trace_id"},
-		signozFields)
-	assert.Equal(t, signozFields, defaultProviderLogFields("SigNoz"), "provider match must be case-insensitive")
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields("loki"))
-	assert.Equal(t, []string{"_body", "namespace", "pod"}, defaultProviderLogFields(""))
-}
-
 // TestEffectiveProvider guards the per-request log_provider_override: it must
 // outrank whatever provider the agent resolved at construction, "k8s" must mean
 // "no services-server backend" (empty provider → kubectl path), and — critically
