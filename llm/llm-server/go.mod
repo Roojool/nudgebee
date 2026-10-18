@@ -17,7 +17,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.5
 	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.63.0
 	github.com/aws/aws-sdk-go-v2/service/sagemakerruntime v1.49.0
-	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0
 	github.com/aws/smithy-go v1.28.2
 	github.com/eko/gocache/lib/v4 v4.4.0
 	github.com/eko/gocache/store/bigcache/v4 v4.2.10
@@ -81,6 +80,8 @@ require (
 	k8s.io/apimachinery v0.37.0
 	k8s.io/client-go v0.37.0
 )
+
+require github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
