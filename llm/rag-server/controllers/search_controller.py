@@ -193,8 +193,17 @@ def _fetch_prometheus_metadata(documents: list, account_id: str, total_token_usa
 
 
 @router.post("/get_matching_doc")
-async def get_matching_doc(request: GetMatchingDocRequest):
-    """Get matching documents based on query with optional metadata filtering."""
+def get_matching_doc(request: GetMatchingDocRequest):
+    """Get matching documents based on query with optional metadata filtering.
+
+    Declared as ``def`` (not ``async def``) intentionally: the underlying
+    ``get_matching_documents`` path makes blocking sync calls (Gemini
+    embed, Qdrant query). An ``async def`` handler would monopolise the
+    single event loop for the full ~700ms embed+query, serialising every
+    concurrent request. ``def`` lets FastAPI dispatch to the threadpool
+    (default 40 workers) so N concurrent RAG calls truly run in parallel —
+    Python releases the GIL during I/O, so wall-clock ~= single-call.
+    """
     doc_response = []
 
     # Extract token tracking parameters and validate
@@ -264,8 +273,15 @@ async def get_matching_doc(request: GetMatchingDocRequest):
 
 
 @router.post("/get_prometheus_matching_doc")
-async def get_prometheus_doc(request: GetMatchingDocRequest):
-    """Get matching prometheus documents with metadata."""
+def get_prometheus_doc(request: GetMatchingDocRequest):
+    """Get matching prometheus documents with metadata.
+
+    Same rationale as ``get_matching_doc`` above: this handler's inner
+    ``_fetch_prometheus_metadata`` loop makes sync Gemini + Qdrant calls
+    per metric, and an ``async def`` wrapper would monopolise the single
+    event loop for the whole batch. ``def`` lets FastAPI dispatch to the
+    threadpool so concurrent prometheus queries actually parallelise.
+    """
     # Extract token tracking parameters and validate
     _validate_token_tracking(request.track_token_usage, request.conversation_id, request.message_id)
 

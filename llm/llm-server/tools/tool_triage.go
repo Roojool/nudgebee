@@ -199,7 +199,10 @@ func stringArg(input core.NBToolCallRequest, key string) string {
 // relatedness questions belong there.
 type TriageExplanationTool struct{}
 
-func (t TriageExplanationTool) Name() string             { return ToolEventTriageExplanation }
+func (t TriageExplanationTool) Name() string { return ToolEventTriageExplanation }
+func (t TriageExplanationTool) GetNameAliases() []string {
+	return []string{legacyToolTriageExplanation}
+}
 func (t TriageExplanationTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 
 func (t TriageExplanationTool) Description() string {
@@ -659,7 +662,10 @@ const assemblyEmptyCaveat = "No other alerts were recorded around this event in 
 // (#34659), not in any stored verdict.
 type IncidentAssemblyTool struct{}
 
-func (t IncidentAssemblyTool) Name() string             { return ToolEventIncidentAssembly }
+func (t IncidentAssemblyTool) Name() string { return ToolEventIncidentAssembly }
+func (t IncidentAssemblyTool) GetNameAliases() []string {
+	return []string{legacyToolIncidentAssembly}
+}
 func (t IncidentAssemblyTool) GetType() core.NBToolType { return core.NBToolTypeTool }
 
 func (t IncidentAssemblyTool) Description() string {

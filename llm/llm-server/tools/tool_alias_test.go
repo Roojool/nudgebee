@@ -77,16 +77,23 @@ func TestToolAlias_LegacyEventNamesAreNotEnumerated(t *testing.T) {
 }
 
 func TestToolAlias_ResolveAndGetNBToolAliases(t *testing.T) {
+	assert.Equal(t, ToolEventTriageExplanation, core.ResolveNBToolAlias("get_triage_explanation"))
+	assert.Equal(t, ToolEventTriageExplanation, core.ResolveNBToolAlias("GET_TRIAGE_EXPLANATION"))
+	assert.Equal(t, ToolEventIncidentAssembly, core.ResolveNBToolAlias("get_incident_assembly"))
 	assert.Equal(t, ToolExecuteAwsCliCommand, core.ResolveNBToolAlias("aws"))
 	assert.Equal(t, ToolExecuteGcpCliCommand, core.ResolveNBToolAlias("gcp"))
 	assert.Equal(t, ToolExecuteAzureCliCommand, core.ResolveNBToolAlias("azure"))
 	assert.Equal(t, ToolExecuteKubectlCommand, core.ResolveNBToolAlias("kubectl"))
 	assert.Equal(t, "unaliased_tool", core.ResolveNBToolAlias("unaliased_tool"))
 
+	assert.Contains(t, core.GetNBToolAliases(ToolEventTriageExplanation), "get_triage_explanation")
+	assert.Contains(t, core.GetNBToolAliases(ToolEventIncidentAssembly), "get_incident_assembly")
 	assert.Contains(t, core.GetNBToolAliases(ToolExecuteAwsCliCommand), "aws")
 }
 
 func TestToolAlias_ToolStructsImplementGetNameAliases(t *testing.T) {
+	assert.Contains(t, TriageExplanationTool{}.GetNameAliases(), "get_triage_explanation")
+	assert.Contains(t, IncidentAssemblyTool{}.GetNameAliases(), "get_incident_assembly")
 	assert.Contains(t, AwsCliTool{}.GetNameAliases(), "aws")
 	assert.Contains(t, GcpCliTool{}.GetNameAliases(), "gcp")
 	assert.Contains(t, AzureCliTool{}.GetNameAliases(), "azure")
