@@ -10,7 +10,7 @@
 ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-llm-server-base:ubuntu-noble
 
 # --- Build Stage ---
-FROM public.ecr.aws/docker/library/golang:1.26.6 AS build-stage
+FROM golang:1.26.6 AS build-stage
 
 ARG TARGETPLATFORM
 ARG TARGETOS

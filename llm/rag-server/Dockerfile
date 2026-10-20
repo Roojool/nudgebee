@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Base image. OSS installs use the public GHCR mirror of our internal
 # ML base (conda + conda `myenv` Python 3.11 + ML deps preinstalled). EE deploys
 # override PYTHON_BASE to their internal registry via --build-arg.

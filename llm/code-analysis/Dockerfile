@@ -1,4 +1,5 @@
-FROM public.ecr.aws/docker/library/golang:1.26.6-alpine AS builder
+# syntax=docker/dockerfile:1.7
+FROM golang:1.26.6-alpine AS builder
 
 WORKDIR /app
 
@@ -54,7 +55,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go install gitlab.com/gitlab-org/cli/cmd/glab@v1.112.0
 
 # Final stage
-FROM public.ecr.aws/docker/library/alpine:3.22
+FROM alpine:3.22
 
 
 WORKDIR /app

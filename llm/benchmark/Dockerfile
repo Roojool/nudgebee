@@ -1,4 +1,5 @@
-FROM public.ecr.aws/docker/library/debian:trixie-slim AS python-base
+# syntax=docker/dockerfile:1.7
+FROM debian:trixie-slim AS python-base
 LABEL org.nudgebee.image.authors="dev@nudgebee.com"
 
 ARG TARGETARCH

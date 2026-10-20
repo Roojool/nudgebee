@@ -7,7 +7,7 @@
 # internal registry via --build-arg.
 ARG RUNTIME_BASE=ghcr.io/nudgebee/nudgebee-cloud-collector-base:alpine3.22
 
-FROM public.ecr.aws/docker/library/golang:1.26.6-alpine AS build-stage
+FROM golang:1.26.6-alpine AS build-stage
 
 # Use the builder image's bundled Go toolchain, never an auto-downloaded one.
 # GOTOOLCHAIN=local guarantees the compile uses whatever go the base image ships
