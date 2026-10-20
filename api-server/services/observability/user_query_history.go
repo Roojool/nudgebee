@@ -19,11 +19,11 @@ const (
 	metricsQueryModulePrefix = "metrics_query_"
 )
 
-// userHistoryModules mirrors the module_check CHECK constraint (migration V1878).
+// userHistoryModules mirrors the module_check CHECK constraint (migration V935).
 //
 // The constraint is an allowlist and the history write is fire-and-forget, so a
 // provider that ships without a migration would fail its INSERT silently.
-// Checking here first turns that into a logged skip. Keep in sync with V1878 —
+// Checking here first turns that into a logged skip. Keep in sync with V935 —
 // TestUserHistoryModulesCoverAllProviders walks the provider switches and fails
 // if one has no entry here.
 var userHistoryModules = map[string]struct{}{
