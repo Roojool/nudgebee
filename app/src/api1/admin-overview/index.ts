@@ -1,4 +1,5 @@
 import { queryGraphQL } from '@lib/HttpService';
+import { isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
 
 // One batched document for the admin Overview cards' counts. The gateway parses
 // every root field, dispatches each to its own action in parallel, and merges
@@ -22,6 +23,11 @@ import { queryGraphQL } from '@lib/HttpService';
 // apiNotifications.getInstalledTools does — a raw messagingplatforms_list count
 // misses integration-based channels) and `roles` count when the custom-roles
 // feature is off (returns null, dropped by the card).
+// customroles_list is an Enterprise action. The gateway refuses a whole batched
+// document when any field has no route, so on OSS the field is left out rather
+// than failing every count; roles then comes back null and its stat is dropped.
+const ROLES_FIELD = isOSSDeploymentMode() ? '' : '  roles: customroles_list { roles { id } }\n';
+
 export const ADMIN_OVERVIEW_COUNTS = `
 query AdminOverviewCounts {
   users: users_aggregate_by_tenant(where: { status: { _eq: "active" } }) { rows { count } }
@@ -32,8 +38,7 @@ query AdminOverviewCounts {
   mcps: integrations_aggregate(where: { type: { _eq: "mcp" }, status: { _eq: "enabled" } }) { rows { count } }
   connected: integrations_aggregate(where: { status: { _eq: "enabled" } }) { rows { count } }
   flags: featureflags_list(where: { account_id: { _is_null: true } }) { rows { status } }
-  roles: customroles_list { roles { id } }
-}
+${ROLES_FIELD}}
 `;
 
 export interface AdminOverviewCounts {

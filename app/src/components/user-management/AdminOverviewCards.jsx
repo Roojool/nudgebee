@@ -9,6 +9,7 @@ import ErrorBoundary from '@shared/ErrorBoundary';
 import { User1, NotificationIcon1, IntegrationsIcon, AgentIcon, SettingsIcon } from '@assets';
 import apiNotifications from '@api1/notification';
 import { getAdminOverviewCounts } from '@api1/admin-overview';
+import { isOSSDeploymentMode } from '@hooks/useBCortexEnabled';
 
 // The "Overview" sub-view of the admin landing tab — one card per existing admin
 // tab. Each card carries a short description, an at-a-glance count line, and
@@ -65,7 +66,8 @@ const CARDS = [
     links: [
       { label: 'Invite new users', hash: 'access-users', action: 'invite-user' },
       { label: 'Create a group', hash: 'access-users/groups', action: 'create-group' },
-      { label: 'Configure roles and permissions', hash: 'access-users/roles' },
+      // eeOnly links go to Enterprise screens (custom roles, b-Cortex) that OSS does not have.
+      { label: 'Configure roles and permissions', hash: 'access-users/roles', eeOnly: true },
       { label: 'Assign resource ownership', hash: 'access-users/ownership' },
       { label: 'Review the audit log', hash: 'access-users/audit-log' },
     ],
@@ -130,7 +132,7 @@ const CARDS = [
       { label: 'Add providers and models', path: '/accounts/account-form?cloudProvider=llm' },
       { label: 'Add tools and MCPs', hash: 'ai-tools/tools-mcp' },
       { label: 'Create a new agent', hash: 'ai-tools' },
-      { label: 'Create skills', query: { bcortex: 'knowledge-base' } },
+      { label: 'Create skills', query: { bcortex: 'knowledge-base' }, eeOnly: true },
       { label: 'Set budgets and limits', hash: 'ai-tools/budgets-limits' },
     ],
   },
@@ -202,6 +204,7 @@ const OverviewCards = () => {
     >
       {CARDS.map((card) => {
         const visibleStats = card.stats.filter((s) => !(s.omitOnNull && counts[s.key] === null));
+        const visibleLinks = card.links.filter((l) => !(l.eeOnly && isOSSDeploymentMode()));
         return (
           <ErrorBoundary key={card.fragment}>
             <Card id={`admin-overview-card-${card.fragment}`} data-testid={`admin-overview-card-${card.fragment}`}>
@@ -311,9 +314,9 @@ const OverviewCards = () => {
                   </Box>
                 )}
 
-                {card.links.length > 0 && (
+                {visibleLinks.length > 0 && (
                   <Box sx={{ display: 'flex', flexDirection: 'column', mt: 'var(--ds-space-1)', mx: 'calc(-1 * var(--ds-space-2))' }}>
-                    {card.links.map((link) => (
+                    {visibleLinks.map((link) => (
                       <Box
                         key={link.label}
                         role='button'
