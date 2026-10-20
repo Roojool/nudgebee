@@ -125,7 +125,7 @@ jobs:
           # the script is committed 100644, so `./run-migrations.sh` would EACCES.
           bash ./run-migrations.sh
 
-      # Replay the reported upgrade shape: historical migrations created 15
+      # Replay the reported upgrade shape: historical migrations created 13
       # application tables in the role schema, with revisions already recorded.
       - name: Existing-DB role-schema reconciliation smoke test
         env:
@@ -134,11 +134,14 @@ jobs:
           MIGRATE_SKIP_RABBITMQ: "1"
         run: |
           before_oid=$(psql "$APP_DATABASE_URL" -tAq -c "SELECT 'public.llm_gateway_usage'::regclass::oid")
+          # The two memory tables on Enterprise's list (llm_memory_user_consent,
+          # llm_session_working_memory) come from its memory-module migration,
+          # which OSS does not ship, so they are not created here.
           for table in \
             llm_conversation_attachment_refs llm_conversation_attachments \
             llm_gateway_rate_limits llm_gateway_request_log llm_gateway_routing_rules \
-            llm_gateway_tenant_settings llm_gateway_usage llm_memory_user_consent \
-            llm_session_working_memory messaging_channel_message messaging_channel_watch \
+            llm_gateway_tenant_settings llm_gateway_usage \
+            messaging_channel_message messaging_channel_watch \
             triage_correction_log triage_signal_class webhook_subject_mappings workflow_versions
           do
             psql "$APP_DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
